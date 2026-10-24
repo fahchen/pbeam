@@ -470,6 +470,46 @@ pub(super) fn count(
     resume: Option<(&Term, &Term)>,
     got: i64,
 ) -> Result<CountTurn, BeamError> {
+    let (count, (_, reductions, trap)) = range_turn(atoms, table, spec, resume, got, true)?;
+    Ok((count, reductions.unwrap_or(0), trap))
+}
+
+/// The matches, the last match first, the reductions or `None` for an
+/// impossible or bound key, and the trap position and end key of one turn
+/// of `ets:select_replace/2` on an `ordered_set` table.
+pub(super) type ReplaceTurn = (Term, Option<i64>, Option<(Term, Term)>);
+
+/// Read one turn of `ets:select_replace/2` on the `ordered_set` table
+/// `table` in the order of `db_select_replace_tree_common` and
+/// `db_select_replace_continue_tree_common` (`erl_db_tree.c:2226-2450`):
+/// an impossible key matches nothing, a bound key reads only its object,
+/// and another key walks down from the greatest key of the range, or from
+/// the key below `resume.0`, until the end key `resume.1` or 1000 objects.
+/// The caller stores the matches.
+///
+/// # Errors
+///
+/// Return a runtime error when a comparison meets two alias references.
+pub(super) fn replace(
+    atoms: &AtomTable,
+    table: &Table,
+    spec: &MatchSpec,
+    resume: Option<(&Term, &Term)>,
+) -> Result<ReplaceTurn, BeamError> {
+    let (_, turn) = range_turn(atoms, table, spec, resume, 0, false)?;
+    Ok(turn)
+}
+
+/// Run one backward turn of a count (`counting`) or of a replace. Return
+/// the count of a count and the matches of a replace.
+fn range_turn(
+    atoms: &AtomTable,
+    table: &Table,
+    spec: &MatchSpec,
+    resume: Option<(&Term, &Term)>,
+    got: i64,
+    counting: bool,
+) -> Result<(i64, ReplaceTurn), BeamError> {
     let mut walk = Walk {
         atoms,
         spec,
@@ -480,7 +520,7 @@ pub(super) fn count(
         accum: Term::nil(),
         max: TREE_ITERATIONS,
         last: None,
-        counting: true,
+        counting,
     };
     let after = match resume {
         Some((last, end)) => {
@@ -494,12 +534,12 @@ pub(super) fn count(
                 .unwrap_or(usize::MAX);
             let range = key_range(atoms, spec, keypos)?;
             match &range {
-                KeyRange::Impossible => return Ok((0, 0, None)),
+                KeyRange::Impossible => return Ok((0, (Term::nil(), None, None))),
                 KeyRange::Bound(key) => {
                     if let Some(object) = table.ordered_get(atoms, key)? {
                         walk.visit(object, false)?;
                     }
-                    return Ok((walk.got, 0, None));
+                    return Ok((walk.got, (walk.accum, None, None)));
                 }
                 KeyRange::Partial { .. } | KeyRange::Unbound => {
                     let (after, end) = bounds(atoms, table, &range, false)?;
@@ -517,7 +557,7 @@ pub(super) fn count(
             walk.end.clone().unwrap_or(Term::Nil),
         )
     });
-    Ok((walk.got, reductions, trap))
+    Ok((walk.got, (walk.accum, Some(reductions), trap)))
 }
 
 /// The end of a turn of a select delete.

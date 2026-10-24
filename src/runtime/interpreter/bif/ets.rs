@@ -3454,6 +3454,304 @@ fn count_arguments(
     ]
 }
 
+/// The most objects that one turn of `ets:select_replace/2` reads
+/// (`MAX_SELECT_REPLACE_ITERATIONS`, `erl_db_hash.c:2810`; `sc.max`,
+/// `erl_db_tree.c:2368`).
+const REPLACE_ITERATIONS: i64 = 1000;
+
+/// Run `ets:select_replace(Table, Spec)`, as `ets_select_replace_2`
+/// (`erl_db.c:4185-4235`) does: a table that the caller cannot write raises
+/// `badarg`, and a `bag` table raises `badarg` with the
+/// cause `table_type` (`erl_db.c:4197-4203`). A specification that is not a
+/// proper list of 3-tuples, or with a clause that can change the key
+/// ([`keeps_key`]), raises `badarg` (`analyze_pattern`,
+/// `erl_db_hash.c:3198-3244`). Each object with a result takes the result in
+/// its place, and the count of replaced objects comes back. After 1000
+/// objects the call traps to `ets:select_replace_trap/6`
+/// ([`select_replace_trap`]).
+///
+/// # Errors
+///
+/// Return a runtime error for a guard function that PBeam does not run yet.
+pub(super) fn select_replace(
+    context: &mut BifContext<'_>,
+    table: &Term,
+    spec: &Term,
+) -> Result<BifResult, BeamError> {
+    select_replace_trap(context, table, spec, None)
+}
+
+/// Run one turn of a replace. `resume` is `None` for the first turn, else
+/// the state of the trap export `ets:select_replace_trap/6`, as for
+/// [`select_count_trap`]. ERTS fixes the table while the replace traps;
+/// PBeam returns a runtime error for a table that another call changed
+/// (row "ETS tables" in `docs/erts-differences.md`).
+///
+/// # Errors
+///
+/// Return a runtime error for a guard function that PBeam does not run
+/// yet, and for a table that changed while the replace trapped.
+pub(super) fn select_replace_trap(
+    context: &mut BifContext<'_>,
+    table: &Term,
+    spec: &Term,
+    resume: Option<(&Term, &Term, i64, i64)>,
+) -> Result<BifResult, BeamError> {
+    let caller = context.scheduler.current_process_mut().id;
+    let reds = context
+        .scheduler
+        .current_process_mut()
+        .bif_reductions_signed();
+    let store = Arc::clone(&context.scheduler.ets);
+    let ets = store.shared();
+    let atoms = &context.scheduler.atoms;
+    let mut taken = match ets.write(atoms, table, caller, reds) {
+        Ok(taken) => taken,
+        Err(lacking) => {
+            let (function, arguments) = match resume {
+                None => ("select_replace", vec![table.clone(), spec.clone()]),
+                Some(state) => ("select_replace_trap", count_arguments(table, spec, state)),
+            };
+            return Ok(retry(context, lacking, function, arguments));
+        }
+    };
+    if taken.table_type() == TableType::Bag {
+        return Ok(denied("table_type"));
+    }
+    let keypos = usize::try_from(taken.keypos())
+        .ok()
+        .filter(|&keypos| keypos > 0)
+        .unwrap_or(usize::MAX);
+    if !replace_keeps_keys(atoms, keypos, spec) {
+        return Ok(BifResult::badarg());
+    }
+    let Some(compiled) = compile_spec(atoms, spec)? else {
+        return Ok(BifResult::badarg());
+    };
+    if resume.is_some_and(|(_, _, _, before)| before != taken.writes() as i64) {
+        // ponytail: ERTS fixes the table; see "ETS tables" in docs/erts-differences.md.
+        return Err(error(
+            "unsupported ets:select_replace/2 on a table that changed while the replace trapped",
+        ));
+    }
+    let id = ets
+        .id(atoms, table)
+        .map_or_else(|| table.clone(), Term::Reference);
+    let mut got = resume.map_or(0, |(_, _, got, _)| got);
+    let tree = taken.table_type() == TableType::OrderedSet;
+    let (reductions, trap) = if tree {
+        let resume = resume.map(|(last, end, _, _)| (last, end));
+        let (matches, reductions, trap) = tree::replace(atoms, &taken, &compiled, resume)?;
+        // A clause that keeps the key gives a tuple.
+        let objects = matches.proper_list().into_iter().flatten();
+        for elements in objects.filter_map(Term::tuple_elements) {
+            taken.insert(atoms, elements.to_vec());
+            got += 1;
+        }
+        (reductions, trap)
+    } else {
+        let table = &mut *taken;
+        let mut iterations = REPLACE_ITERATIONS;
+        let mut read = |table: &mut Table, bucket: usize, iterations: &mut i64| {
+            let (read, replaced) = table.replace_chain(bucket, |object| {
+                let found = compiled.run(atoms, object)?;
+                found.tuple_elements().map(<[Term]>::to_vec)
+            });
+            *iterations -= read;
+            got += replaced;
+        };
+        let mut walk = None;
+        match (resume, compiled.bound_key(keypos)) {
+            (Some((Term::Integer(bucket), ..)), _) => walk = Some(*bucket as usize),
+            _ if compiled.matches_nothing(keypos) => {}
+            (_, Some(key)) => {
+                if let Some(bucket) = table.key_bucket(atoms, key) {
+                    read(table, bucket, &mut iterations);
+                }
+            }
+            _ => walk = Some(0),
+        }
+        // The walk traps at a bucket boundary once it read 1000 objects
+        // (`match_traverse`, `erl_db_hash.c:1895-1960`).
+        let mut trap = None;
+        while let Some(bucket) = walk.take() {
+            read(table, bucket, &mut iterations);
+            match table.next_bucket(bucket) {
+                Some(next) if iterations <= 0 => {
+                    trap = Some((Term::Integer(next as i64), Term::Nil))
+                }
+                next => walk = next,
+            }
+        }
+        // A trap uses all reductions (`on_simple_trap`).
+        (
+            trap.is_none().then_some(REPLACE_ITERATIONS - iterations),
+            trap,
+        )
+    };
+    let writes = taken.writes() as i64;
+    drop(taken);
+    drop(ets);
+    let process = context.scheduler.current_process_mut();
+    // ERTS charges the objects read and replaced, at most 2000
+    // (`erl_db_hash.c:2853-2856`, `erl_db_tree.c:2418-2419`). A hash trap
+    // uses all reductions, and a bound or impossible key of an
+    // `ordered_set` table charges nothing (`erl_db_tree.c:2377-2397`).
+    // A tree turn charges only its own replaced objects
+    // (`erl_db_tree.c:2290`); a hash turn charges the total.
+    let charged = if tree {
+        got - resume.map_or(0, |(_, _, before, _)| before)
+    } else {
+        got
+    };
+    match reductions {
+        Some(reductions) => process.bump_reductions(
+            i32::try_from((reductions + charged).min(2 * REPLACE_ITERATIONS)).unwrap_or(i32::MAX),
+        ),
+        None if !tree => process.bump_all_reductions(),
+        None => {}
+    }
+    let Some((position, end)) = trap else {
+        return Ok(Value(Term::Integer(got)));
+    };
+    Ok(BifResult::TrapBif {
+        module: "ets",
+        function: "select_replace_trap",
+        arguments: count_arguments(&id, spec, (&position, &end, got, writes)),
+    })
+}
+
+/// Return whether each clause of `spec` is a 3-tuple whose body keeps the
+/// key at the 1-based position `keypos`, as `analyze_pattern` checks with
+/// `db_match_keeps_key` (`erl_db_hash.c:3198-3244`,
+/// `erl_db_util.c:1422-1507`). The check reads the terms of the clause; it
+/// does not run them.
+fn replace_keeps_keys(atoms: &AtomTable, keypos: usize, spec: &Term) -> bool {
+    spec.proper_list().is_some_and(|mut clauses| {
+        clauses.all(|clause| {
+            matches!(clause, Term::Tuple(clause) if matches!(&clause[..],
+                [pattern, _, body] if keeps_key(atoms, keypos, pattern, body)))
+        })
+    })
+}
+
+/// Return whether the body `body` of a clause with the pattern `pattern`
+/// gives an object with the key of the matched object, as
+/// `db_match_keeps_key` (`erl_db_util.c:1422-1507`) does: the body is
+/// `['$_']`, or one tuple construction `{{...}}` or `{const, {...}}` whose
+/// key is the key of the pattern ([`match_eq_body`]) or
+/// `{element, KeyPos, '$_'}`.
+fn keeps_key(atoms: &AtomTable, keypos: usize, pattern: &Term, body: &Term) -> bool {
+    let atom =
+        |term: &Term, name: &str| matches!(term, Term::Atom(atom) if atoms.name_of(atom) == name);
+    let Some((single, Term::Nil)) = body.cons_cell() else {
+        return false;
+    };
+    if atom(single, "$_") {
+        return true;
+    }
+    let Term::Tuple(construction) = single else {
+        return false;
+    };
+    let Some(key) = tuple_key(keypos, pattern) else {
+        return false;
+    };
+    let (object, const_mode) = match &construction[..] {
+        [tag, object] if atom(tag, "const") => (object, true),
+        [object] => (object, false),
+        _ => return false,
+    };
+    let Some(body_key) = tuple_key(keypos, object) else {
+        return false;
+    };
+    if match_eq_body(atoms, key, body_key, const_mode) {
+        return true;
+    }
+    if const_mode {
+        return false;
+    }
+    matches!(body_key, Term::Tuple(call) if matches!(&call[..],
+        [element, Term::Integer(position), object]
+            if atom(element, "element") && atom(object, "$_") && usize::try_from(*position) == Ok(keypos)))
+}
+
+/// Return the element at the 1-based position `keypos` of the tuple `term`
+/// (`db_getkey`, `erl_db_util.c:1700-1708`).
+fn tuple_key(keypos: usize, term: &Term) -> Option<&Term> {
+    match term {
+        Term::Tuple(elements) => elements.get(keypos.checked_sub(1)?),
+        _ => None,
+    }
+}
+
+/// Return whether the body term `body` always builds the term that the
+/// pattern term `pattern` matched, as `db_match_eq_body`
+/// (`erl_db_util.c:1333-1419`) does. Outside a `{const, _}` part, a tuple
+/// of the body is `{{...}}`; a variable, `'_'`, `'$$'`, `'$_'`, or a map
+/// never gives a match.
+fn match_eq_body(atoms: &AtomTable, pattern: &Term, body: &Term, const_mode: bool) -> bool {
+    let mut stack = vec![(pattern, body, const_mode)];
+    while let Some((a, b, const_mode)) = stack.pop() {
+        match b {
+            Term::Cons(_) => {
+                let (Some((a_head, a_tail)), Some((b_head, b_tail))) =
+                    (a.cons_cell(), b.cons_cell())
+                else {
+                    return false;
+                };
+                stack.push((a_tail, b_tail, const_mode));
+                stack.push((a_head, b_head, const_mode));
+            }
+            Term::Tuple(b_elements) => {
+                let b_elements = if const_mode {
+                    b_elements
+                } else {
+                    match &b_elements[..] {
+                        [Term::Tuple(inner)] => inner,
+                        [Term::Atom(tag), object] if atoms.name_of(tag) == "const" => {
+                            stack.push((a, object, true));
+                            continue;
+                        }
+                        _ => return false,
+                    }
+                };
+                let Term::Tuple(a_elements) = a else {
+                    return false;
+                };
+                if a_elements.len() != b_elements.len() {
+                    return false;
+                }
+                for pair in a_elements.iter().zip(b_elements.iter()).rev() {
+                    stack.push((pair.0, pair.1, const_mode));
+                }
+            }
+            Term::Map(_) => return false,
+            Term::Atom(atom) => {
+                let name = atoms.name_of(atom);
+                if a != b
+                    || matches!(name, "_" | "$$" | "$_")
+                    || (const_mode && is_match_variable(name))
+                {
+                    return false;
+                }
+            }
+            _ if a != b => return false,
+            _ => {}
+        }
+    }
+    true
+}
+
+/// Return whether the atom name `name` is a match variable `'$N'`
+/// (`db_is_variable`, `erl_db_util.c:3893-3927`): `'$0'`, or decimal
+/// numbers without a leading zero.
+fn is_match_variable(name: &str) -> bool {
+    name.strip_prefix('$').is_some_and(|number| {
+        number.bytes().all(|byte| byte.is_ascii_digit())
+            && (number == "0" || number.bytes().next().is_some_and(|byte| byte != b'0'))
+    })
+}
+
 /// Run `ets:slot(Table, Slot)`, as `ets_slot_2` (`erl_db.c:3739-3760`)
 /// does. On a hash table, a slot below the bucket count gives the objects
 /// of that bucket, the last object of the chain first (`build_term_list`,
