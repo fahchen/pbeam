@@ -67,8 +67,13 @@ pub(crate) fn host_name() -> Vec<u8> {
 /// `atoi` value of the text before the next dot, and a part that does not
 /// start with a digit gives 0 and does not move past its text.
 pub(crate) fn os_version() -> [i32; 3] {
-    let release = name_bytes(&uname().release);
-    let mut rest = release.as_slice();
+    release_numbers(&name_bytes(&uname().release))
+}
+
+/// Return the three numbers of the `uname` release text `release`, as
+/// `get_number` of `sys/unix/sys.c:860-885` reads them.
+fn release_numbers(release: &[u8]) -> [i32; 3] {
+    let mut rest = release;
     [(); 3].map(|()| {
         if !rest.first().is_some_and(u8::is_ascii_digit) {
             return 0;
@@ -203,3 +208,7 @@ fn read_filename_encoding() -> FilenameEncoding {
         FilenameEncoding::Latin1
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/runtime/host.rs"]
+mod tests;
