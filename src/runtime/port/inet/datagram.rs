@@ -210,7 +210,7 @@ impl Inet {
         };
         let to = match bytes {
             [] => return reply(Err("einval")),
-            _ => match self.address(bytes, "output")? {
+            _ => match self.address(bytes) {
                 Ok(to) => to,
                 Err(failure) => {
                     return reply(Err(
