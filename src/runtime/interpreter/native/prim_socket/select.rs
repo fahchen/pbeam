@@ -19,7 +19,7 @@ use crate::runtime::resources::lock;
 use crate::runtime::scheduler::poll::{Direction, NodePoll};
 use crate::runtime::signal::Signal;
 use crate::runtime::sockets::{
-    ACCEPTING, CLOSED, CLOSING, CONNECTED, CONNECTING, IoCounters, LISTENING, SELECTED,
+    ACCEPTING, CLOSED, CLOSING, CONNECTED, CONNECTING, IoCounters, LISTENING, OtpOptions, SELECTED,
     SocketState, Sockets,
 };
 use crate::term::{ProcessId, Reference};
@@ -281,7 +281,13 @@ pub(super) fn accept(
                 state.acceptor = None;
                 state.read &= !ACCEPTING;
             }
-            let inherited = (state.domain, state.kind, state.protocol, state.registered);
+            let inherited = (
+                state.domain,
+                state.kind,
+                state.protocol,
+                state.registered,
+                state.options,
+            );
             drop(state);
             return accepted_socket(scheduler, accepted, inherited, caller);
         }
@@ -326,16 +332,16 @@ pub(super) fn accept(
 }
 
 /// Keep the socket `accepted` of a listen socket with the domain, type,
-/// protocol, and registry flag `inherited`, owned by `owner`, as
+/// protocol, registry flag, and `otp` options `inherited`, owned by `owner`, as
 /// `essio_accept_accepted` does (`unix_socket_syncio.c:2818-2878`), and
 /// give `{ok, Socket}`.
 fn accepted_socket(
     scheduler: &mut Scheduler,
     accepted: socket2::Socket,
-    inherited: (i32, i32, i32, bool),
+    inherited: (i32, i32, i32, bool, OtpOptions),
     owner: ProcessId,
 ) -> Result<BifResult, BeamError> {
-    let (domain, kind, protocol, registered) = inherited;
+    let (domain, kind, protocol, registered, options) = inherited;
     accepted
         .set_nonblocking(true)
         .map_err(|failure| error(format!("prim_socket:nif_accept/2: {failure}")))?;
@@ -363,6 +369,7 @@ fn accepted_socket(
                 reader: None,
                 writer: None,
                 counters: IoCounters::default(),
+                options,
             },
         );
         sockets.registry

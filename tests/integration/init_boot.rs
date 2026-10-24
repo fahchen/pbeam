@@ -423,6 +423,34 @@ fn sets_and_gets_socket_options_at_the_kernel_boot_as_pinned_erts() {
 }
 
 #[test]
+fn sets_and_gets_the_otp_socket_options_and_linger_as_pinned_erts() {
+    // `kernel_boot_probe:sockopt_otp/0` runs the handlers of
+    // `esock_setopt_otp` and `esock_getopt_otp`
+    // (prim_socket_nif.c:7873-8405, 11593-12010), the raise of an `otp`
+    // option without a setter (prim_socket_nif.c:7942-7957), the
+    // inheritance of an accepted socket (unix_socket_syncio.c:2843-2849),
+    // the buffer size of a receive with length 0
+    // (unix_socket_syncio.c:3900), and `esock_setopt_linger` and
+    // `esock_getopt_linger` (prim_socket_nif.c:8551-8597, 12482-12530).
+    let (reference, status, node) = run_kernel_boot("sockopt_otp", false, &["{sockopt_otp,"]);
+    assert_eq!(status, Some(0), "ERTS");
+    // ERTS writes a warning with a time stamp for a controlling process
+    // that is not a local pid (prim_socket_nif.c:8082-8086). PBeam does not
+    // write it (row "NIF stubs" of docs/erts-differences.md).
+    let start = reference.find("{sockopt_otp,").unwrap();
+    assert!(
+        reference[..start].contains("Failed get pid of new controlling process"),
+        "{reference}"
+    );
+    let reference = &reference[start..];
+    assert!(
+        reference.contains(r#"[{ok,<<"0123">>},{ok,<<"4567">>},{ok,<<"89">>}]"#),
+        "{reference}"
+    );
+    assert_eq!(node, reference, "PBeam");
+}
+
+#[test]
 fn connects_listens_accepts_and_cancels_sockets_with_select_messages_as_pinned_erts() {
     // `kernel_boot_probe:socket_select/0` runs `socket:connect/2,3`,
     // `socket:listen/1,2`, `socket:accept/1,2`, and `socket:cancel/2` with
@@ -533,17 +561,38 @@ fn receives_with_the_flag_errqueue_as_pinned_erts() {
 }
 
 #[test]
+fn sends_and_receives_with_gen_tcp_and_gen_udp_on_the_socket_backend_as_pinned_erts() {
+    // `gen_tcp` and `gen_udp` with `{inet_backend, socket}` set the options
+    // `{otp, iow}` and `{otp, meta}` (gen_tcp_socket.erl:1637-1642,
+    // gen_udp_socket.erl:1311-1312) on `esock_setopt_otp`
+    // (prim_socket_nif.c:7873-7961).
+    for (probe, expected) in [
+        (
+            "socket_backend_tcp",
+            "{socket_backend_tcp,[ok,{ok,<<\"ping\">>},ok,{ok,<<\"pong\">>},{error,timeout},ok,{error,closed},ok,ok,ok]}\r\n",
+        ),
+        (
+            "socket_backend_udp",
+            "{socket_backend_udp,[ok,true,ok,<<\"pong\">>,{error,timeout},ok,ok]}\r\n",
+        ),
+    ] {
+        let prefix = format!("{{{probe},");
+        let (reference, status, node) = run_kernel_boot(probe, false, &[&prefix]);
+        assert_eq!(status, Some(0), "ERTS {probe}");
+        assert_eq!(reference, expected);
+        assert_eq!(node, reference, "PBeam {probe}");
+    }
+}
+
+#[test]
 fn stops_the_run_at_the_socket_calls_that_pbeam_does_not_support() {
     // PBeam has no acceptor queue (`essio_accept_accepting_other`,
     // unix_socket_syncio.c:2746-2757). ERTS connects with an
     // address that it did not decode (prim_socket_nif.c:6122-6143), and it
     // passes the flags of a recvfrom to `recvfrom(2)`
     // (unix_socket_syncio.c:3925-3927), which PBeam does only on inet and
-    // inet6 sockets without `MSG_ERRQUEUE`. `gen_tcp` and `gen_udp` with
-    // `{inet_backend, socket}` set the option `{otp, iow}`
-    // (gen_tcp_socket.erl, gen_udp_socket.erl), which PBeam does not
-    // support yet (#1209). These calls stop the run with a runtime error
-    // (row "NIF stubs").
+    // inet6 sockets without `MSG_ERRQUEUE`. These calls stop the run with a
+    // runtime error (row "NIF stubs").
     let mut probes = vec![
         (
             "socket_acceptors",
@@ -556,14 +605,6 @@ fn stops_the_run_at_the_socket_calls_that_pbeam_does_not_support() {
         (
             "socket_recvfrom_local_flags",
             "prim_socket:nif_recvfrom/4: the flags 2 on a socket of the domain 1 are not supported",
-        ),
-        (
-            "socket_backend_tcp",
-            "unsupported prim_socket option {otp, 1002}",
-        ),
-        (
-            "socket_backend_udp",
-            "unsupported prim_socket option {otp, 1002}",
         ),
     ];
     if cfg!(target_os = "linux") {

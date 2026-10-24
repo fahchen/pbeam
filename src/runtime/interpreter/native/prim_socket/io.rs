@@ -25,12 +25,6 @@ use crate::runtime::scheduler::poll::Direction;
 use crate::runtime::sockets::{CLOSED, CLOSING, SELECTED, SocketState};
 use crate::term::{ProcessId, Reference};
 
-/// The default buffer size of a receive with length 0,
-/// `ESOCK_RECV_BUFFER_SIZE_DEFAULT` (`prim_socket_nif.c:505-510`). The
-/// option `{otp, rcvbuf}` that changes it is not supported yet, and the
-/// buffer count `rNum` keeps its default 0 (`prim_socket_nif.c:17061-17064`).
-const RECV_BUFFER_SIZE: usize = 8 * 1024;
-
 /// The most elements of the I/O vector of one `nif_sendv/3` call,
 /// `iov_max`, which is `sysconf(_SC_IOV_MAX)` (`prim_socket_nif.c:18981-18990`):
 /// 1024 on Linux and macOS.
@@ -483,11 +477,13 @@ fn read_entry(
     Ok(None)
 }
 
-/// Return the buffer size of a read of `size` bytes: the default
-/// `rBufSz` for 0 (`unix_socket_syncio.c:3900`).
-fn buffer_size(size: u64) -> usize {
+/// Return the buffer size of a read of `size` bytes from `state`: `rBufSz`
+/// of the option `{otp, rcvbuf}` for 0 (`unix_socket_syncio.c:3900`). The
+/// buffer count `rNum` stays 0: PBeam does not set it
+/// (`prim_socket_nif.c:17061-17064`).
+fn buffer_size(state: &SocketState, size: u64) -> usize {
     if size == 0 {
-        RECV_BUFFER_SIZE
+        state.options.recv_buffer
     } else {
         usize::try_from(size).expect("a length in the ssize_t range")
     }
@@ -535,7 +531,7 @@ pub(super) fn recv(
     if let Some(result) = read_entry(scheduler, &state, "nif_recv/4", caller)? {
         return Ok(result);
     }
-    let buffer_size = buffer_size(size);
+    let buffer_size = buffer_size(&state, size);
     let mut buffer = vec![0; buffer_size];
     state.counters.read_tries += 1;
     let stream = state.kind == libc::SOCK_STREAM;
@@ -630,7 +626,7 @@ pub(super) fn recvfrom(
     if let Some(result) = read_entry(scheduler, &state, name, caller)? {
         return Ok(result);
     }
-    let mut buffer = vec![0; buffer_size(size)];
+    let mut buffer = vec![0; buffer_size(&state, size)];
     let received = if flags == 0 {
         state.counters.read_tries += 1;
         let host = state

@@ -4,7 +4,7 @@
 -behaviour(supervisor).
 -export([main/0, main/1, lookup/0, gethost/0, supports/0, socket/0, sockopt/0, socket_select/0, socket_io/0,
          socket_dgram/0,         socket_acceptors/0, socket_connect_invalid/0, socket_recvfrom_flags/0, socket_recvfrom_local_flags/0,
-         socket_recvfrom_errqueue/0, socket_sendv/0, socket_backend_tcp/0, socket_backend_udp/0, start/2, stop/1, init/1]).
+         socket_recvfrom_errqueue/0, socket_sendv/0, socket_backend_tcp/0, socket_backend_udp/0, sockopt_otp/0, start/2, stop/1, init/1]).
 
 %% `erl -noshell -boot start_clean -pa fixtures/boot -s kernel_boot_probe
 %% main -kernel logger_level warning` runs main/0 in the boot process of init after the boot script
@@ -709,6 +709,74 @@ socket_backend_udp() ->
               gen_udp:recv(U1, 0, 0), gen_udp:close(U1), gen_udp:close(U2)],
     erlang:display({socket_backend_udp, Result}),
     init:stop().
+
+%% `-s kernel_boot_probe sockopt_otp` runs socket:setopt/3 and
+%% socket:getopt/2 with the options of the level otp and with
+%% {socket, linger}: the values, the invalid values, the inheritance of an
+%% accepted socket, the receive buffer of a receive with length 0, a new
+%% controlling process, and a closed socket.
+sockopt_otp() ->
+    process_flag(trap_exit, true),
+    {ok, L} = socket:open(inet, stream, tcp),
+    Flags = [[socket:getopt(L, {otp, O}), socket:setopt(L, {otp, O}, true), socket:getopt(L, {otp, O}),
+              socket:setopt(L, {otp, O}, false), socket:setopt(L, {otp, O}, 1)]
+             || O <- [iow]]
+        ++ [[socket:getopt(L, {otp, O}), socket:setopt(L, {otp, O}, false), socket:setopt(L, {otp, O}, 1)]
+            || O <- [debug, select_read]],
+    Sizes = [[socket:getopt(L, {otp, O}), socket:setopt(L, {otp, O}, 100), socket:getopt(L, {otp, O}),
+              socket:setopt(L, {otp, O}, default), socket:getopt(L, {otp, O}), socket:setopt(L, {otp, O}, 0),
+              socket:setopt(L, {otp, O}, -1), socket:setopt(L, {otp, O}, foo),
+              socket:setopt(L, {otp, O}, {0, 50}), socket:setopt(L, {otp, O}, 1 bsl 64),
+              socket:setopt(L, {otp, O}, 1 bsl 63), socket:getopt(L, {otp, O}), socket:setopt(L, {otp, O}, default)]
+             || O <- [rcvbuf, rcvctrlbuf, sndctrlbuf]],
+    Linger = [socket:getopt(L, {socket, linger}), socket:setopt(L, {socket, linger}, #{onoff => true, linger => 7}),
+              socket:getopt(L, {socket, linger}), socket:setopt(L, {socket, linger}, abort),
+              socket:getopt(L, {socket, linger}), socket:setopt(L, {socket, linger}, #{onoff => false, linger => 0}),
+              socket:setopt(L, {socket, linger}, #{onoff => true, linger => -1}),
+              socket:setopt(L, {socket, linger}, #{onoff => 1, linger => 1}),
+              socket:setopt(L, {socket, linger}, #{onoff => true}), socket:setopt(L, {socket, linger}, foo)],
+    Raise = [strip(catch socket:setopt(L, {otp, fd}, 1)), strip(catch socket:setopt(L, {otp, domain}, inet)),
+             is_integer(element(2, socket:getopt(L, {otp, fd})))],
+    ok = socket:setopt(L, {otp, iow}, true),
+    ok = socket:setopt(L, {otp, rcvbuf}, 4),
+    ok = socket:setopt(L, {otp, rcvctrlbuf}, 200),
+    ok = socket:setopt(L, {otp, sndctrlbuf}, 300),
+    ok = socket:bind(L, #{family => inet, addr => loopback, port => 0}),
+    ok = socket:listen(L),
+    {ok, #{port := Port}} = socket:sockname(L),
+    {ok, C} = socket:open(inet, stream, tcp),
+    ok = socket:connect(C, #{family => inet, addr => loopback, port => Port}),
+    {ok, A} = socket:accept(L, 1000),
+    Inherit = [socket:getopt(A, {otp, O}) || O <- [iow, rcvbuf, rcvctrlbuf, sndctrlbuf]],
+    ok = socket:send(C, <<"0123456789">>),
+    timer:sleep(100),
+    Recv = [socket:recv(A, 0, 1000), socket:recv(A, 0, 1000), socket:recv(A, 0, 1000)],
+    Self = self(),
+    P = spawn(fun() -> receive stop -> ok end end),
+    MRef = erlang:monitor(process, P),
+    Owner = [socket:getopt(A, {otp, controlling_process}) =:= {ok, Self},
+             socket:setopt(A, {otp, controlling_process}, foo), socket:setopt(A, {otp, controlling_process}, P),
+             socket:getopt(A, {otp, controlling_process}) =:= {ok, P},
+             socket:setopt(A, {otp, controlling_process}, Self), socket:setopt(A, {otp, meta}, x)],
+    P ! stop,
+    receive {'DOWN', MRef, process, P, _} -> ok end,
+    timer:sleep(100),
+    Down = socket:getopt(A, {otp, iow}),
+    ok = socket:close(C),
+    ok = socket:close(L),
+    Closed = [socket:getopt(L, {otp, O}) || O <- [iow, debug, select_read, rcvbuf, rcvctrlbuf, sndctrlbuf, fd,
+                                               controlling_process]]
+        ++ [socket:setopt(L, {otp, O}, V) || {O, V} <- [{iow, true}, {debug, false}, {select_read, false},
+                                                        {rcvbuf, 1}, {rcvctrlbuf, 1}, {sndctrlbuf, 1},
+                                                        {controlling_process, Self}]],
+    erlang:display(unmap({sockopt_otp, Flags, Sizes, Linger, Raise, Inherit, Recv, Owner, Down, Closed})),
+    init:stop().
+
+%% unmap/1 replaces each map with its sorted list of pairs.
+unmap(M) when is_map(M) -> {map, lists:sort(maps:to_list(M))};
+unmap(T) when is_tuple(T) -> list_to_tuple(unmap(tuple_to_list(T)));
+unmap(L) when is_list(L) -> [unmap(E) || E <- L];
+unmap(Other) -> Other.
 
 flush_recv(S) ->
     case socket:recv(S, 0, 100) of
