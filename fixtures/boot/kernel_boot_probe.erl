@@ -147,7 +147,25 @@ socket() ->
                                              #{family => local, path => binary:copy(<<"a">>, 200)},
                                              #{family => inet, addr => {1, 2, 3, 4}},
                                              #{family => foo}, #{}, foo]],
+    BindMore = [socket:bind(B, A) || A <- [#{family => inet, addr => broadcast},
+                                           #{family => inet, addr => foo},
+                                           #{family => inet, port => foo}]],
+    TypeB = maps:get(type, socket:info(B)),
     ok = socket:close(B),
+    {ok, B6} = socket:open(inet6, dgram),
+    BindMore6 = [socket:bind(B6, A) || A <- [#{family => inet6, addr => foo},
+                                             #{family => inet6, addr => {0, 0, 0, 0, 0, 0, 0, 1}},
+                                             #{family => inet6, addr => any}]],
+    ok = socket:close(B6),
+    Native = [native_socket(socket:open(2, 2)), native_socket(socket:open(inet, 2)),
+              socket:open(inet, stream, 17),
+              native_socket(socket:open(local, seqpacket)),
+              native_socket(socket:open(16, raw, 0)),
+              native_socket(socket:open(16, dgram, 0))],
+    {ok, A} = socket:open(local, dgram),
+    Abstract = [socket:bind(A, #{family => local, path => <<0, "pbeam_socket_probe">>}),
+                socket:sockname(A)],
+    ok = socket:close(A),
     OpenErrors = [socket:open(foo, stream), socket:open(inet, foo),
                   socket:open(inet, stream, foo),
                   catch socket:open(inet, stream, 1 bsl 40),
@@ -171,10 +189,16 @@ socket() ->
                  lists:member(Down, socket:which_sockets()), socket:close(Down)],
     erlang:display({socket, OwnerDown, Info0, Opened, Bound, Port > 0, Listed, During, BoundInfo,
                     element(1, element(2, Early)), Closed, After, Again, Wrap, Port6 > 0,
-                    Unlisted, Local, BindErrors,
+                    Unlisted, Local, BindErrors, BindMore, TypeB, BindMore6, Native, Abstract,
                     [strip(E) || E <- OpenErrors], [strip(E) || E <- Badargs],
                     maps:get(counters, socket:info())}),
     init:stop().
+
+native_socket({ok, S}) ->
+    Info = maps:with([domain, type, protocol], socket:info(S)),
+    ok = socket:close(S),
+    Info;
+native_socket(Error) -> Error.
 
 strip({'EXIT', {Reason, _}}) -> {'EXIT', Reason};
 strip(Other) -> Other.

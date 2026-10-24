@@ -21,7 +21,7 @@ use crate::runtime::port::inet::errno_name;
 use crate::runtime::resources::lock;
 use crate::runtime::signal::Signal;
 use crate::runtime::sockets::{BOUND, CLOSED, CLOSING, SocketState, Sockets};
-use crate::term::{ProcessId, Reference};
+use crate::term::{AtomTable, ProcessId, Reference};
 
 /// The size of `sun_path` of `struct sockaddr_un` on the host.
 #[cfg(target_vendor = "apple")]
@@ -91,43 +91,37 @@ fn count(value: u64) -> Term {
 /// A new atom in a full atom table gives the error of `AtomTable::put`.
 pub(super) fn info_0(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
     let counters = lock(&scheduler.node().resources.kind::<Sockets>()).counters;
-    let counters = pairs(
-        scheduler,
-        &[
-            ("num_cnt_bits", Term::Integer(64)),
-            ("num_sockets", count(counters.sockets)),
-            ("num_tdgrams", count(counters.dgrams)),
-            ("num_tstreams", count(counters.streams)),
-            ("num_tseqpkgs", count(counters.seqpackets)),
-            ("num_dlocal", Term::Integer(0)),
-            ("num_dinet", count(counters.inet)),
-            ("num_dinet6", count(counters.inet6)),
-            ("num_pip", count(counters.ip)),
-            ("num_ptcp", count(counters.tcp)),
-            ("num_pudp", count(counters.udp)),
-            ("num_psctp", count(counters.sctp)),
-        ],
-    )?;
+    let counters = [
+        ("num_cnt_bits", Term::Integer(64)),
+        ("num_sockets", count(counters.sockets)),
+        ("num_tdgrams", count(counters.dgrams)),
+        ("num_tstreams", count(counters.streams)),
+        ("num_tseqpkgs", count(counters.seqpackets)),
+        ("num_dlocal", Term::Integer(0)),
+        ("num_dinet", count(counters.inet)),
+        ("num_dinet6", count(counters.inet6)),
+        ("num_pip", count(counters.ip)),
+        ("num_ptcp", count(counters.tcp)),
+        ("num_pudp", count(counters.udp)),
+        ("num_psctp", count(counters.sctp)),
+    ];
+    let counters = pairs(scheduler, &counters)?;
     let counters = map(scheduler, counters);
     let name = atom(scheduler, "unix_essio")?;
-    let backend = pairs(
-        scheduler,
-        &[("name", name), ("sctp", Term::static_atom("undefined"))],
-    )?;
+    let backend = [("name", name), ("sctp", Term::static_atom("undefined"))];
+    let backend = pairs(scheduler, &backend)?;
     let backend = map(scheduler, backend);
-    let info = pairs(
-        scheduler,
-        &[
-            ("debug", boolean(false)),
-            ("socket_debug", boolean(false)),
-            ("eei", boolean(true)),
-            ("use_registry", boolean(true)),
-            ("iow", boolean(false)),
-            ("counters", counters),
-            ("iov_max", Term::Integer(1024)),
-            ("io_backend", backend),
-        ],
-    )?;
+    let info = [
+        ("debug", boolean(false)),
+        ("socket_debug", boolean(false)),
+        ("eei", boolean(true)),
+        ("use_registry", boolean(true)),
+        ("iow", boolean(false)),
+        ("counters", counters),
+        ("iov_max", Term::Integer(1024)),
+        ("io_backend", backend),
+    ];
+    let info = pairs(scheduler, &info)?;
     Ok(BifResult::Value(map(scheduler, info)))
 }
 
@@ -159,12 +153,34 @@ fn states(scheduler: &mut Scheduler, state: u32) -> Result<Term, BeamError> {
 /// Return the domain term of `domain`, as `esock_encode_domain` does
 /// (`socket_util.c:2229-2259`).
 fn domain_term(scheduler: &mut Scheduler, domain: i32) -> Result<Term, BeamError> {
-    match domain {
-        libc::AF_INET => atom(scheduler, "inet"),
-        libc::AF_INET6 => atom(scheduler, "inet6"),
-        libc::AF_UNIX => atom(scheduler, "local"),
-        libc::AF_UNSPEC => atom(scheduler, "unspec"),
-        other => Ok(Term::Integer(other.into())),
+    let names = [
+        (libc::AF_INET, "inet"),
+        (libc::AF_INET6, "inet6"),
+        (libc::AF_UNIX, "local"),
+        (libc::AF_UNSPEC, "unspec"),
+    ];
+    named(scheduler, &names, domain)
+}
+
+/// Return the type term of `kind`, as `esock_encode_type` does
+/// (`socket_util.c:2420-2452`).
+fn type_term(scheduler: &mut Scheduler, kind: i32) -> Result<Term, BeamError> {
+    let names = [
+        (libc::SOCK_STREAM, "stream"),
+        (libc::SOCK_DGRAM, "dgram"),
+        (libc::SOCK_RAW, "raw"),
+        (libc::SOCK_SEQPACKET, "seqpacket"),
+        (libc::SOCK_RDM, "rdm"),
+    ];
+    named(scheduler, &names, kind)
+}
+
+/// Return the atom of the name of `value` in `names`, or the integer
+/// `value` for a value without a name.
+fn named(scheduler: &mut Scheduler, names: &[(i32, &str)], value: i32) -> Result<Term, BeamError> {
+    match names.iter().find(|(number, _)| *number == value) {
+        Some((_, name)) => atom(scheduler, name),
+        None => Ok(Term::Integer(value.into())),
     }
 }
 
@@ -181,14 +197,7 @@ pub(super) fn info_1(scheduler: &mut Scheduler, socket: &Term) -> Result<BifResu
     };
     let socket = lock(&socket);
     let domain = domain_term(scheduler, socket.domain)?;
-    let kind = match socket.kind {
-        libc::SOCK_STREAM => atom(scheduler, "stream")?,
-        libc::SOCK_DGRAM => atom(scheduler, "dgram")?,
-        libc::SOCK_RAW => atom(scheduler, "raw")?,
-        libc::SOCK_SEQPACKET => atom(scheduler, "seqpacket")?,
-        libc::SOCK_RDM => atom(scheduler, "rdm")?,
-        other => Term::Integer(other.into()),
-    };
+    let kind = type_term(scheduler, socket.kind)?;
     let owner = socket
         .owner
         .map_or(Term::static_atom("undefined"), Term::Pid);
@@ -201,22 +210,20 @@ pub(super) fn info_1(scheduler: &mut Scheduler, socket: &Term) -> Result<BifResu
     let counters = pairs(scheduler, &counters)?;
     let counters = map(scheduler, counters);
     let normal = atom(scheduler, "normal")?;
-    let info = pairs(
-        scheduler,
-        &[
-            ("domain", domain),
-            ("type", kind),
-            ("protocol", Term::Integer(socket.protocol.into())),
-            ("owner", owner),
-            ("rstates", read),
-            ("wstates", write),
-            ("ctype", normal),
-            ("counters", counters),
-            ("num_readers", Term::Integer(0)),
-            ("num_writers", Term::Integer(0)),
-            ("num_acceptors", Term::Integer(0)),
-        ],
-    )?;
+    let info = [
+        ("domain", domain),
+        ("type", kind),
+        ("protocol", Term::Integer(socket.protocol.into())),
+        ("owner", owner),
+        ("rstates", read),
+        ("wstates", write),
+        ("ctype", normal),
+        ("counters", counters),
+        ("num_readers", Term::Integer(0)),
+        ("num_writers", Term::Integer(0)),
+        ("num_acceptors", Term::Integer(0)),
+    ];
+    let info = pairs(scheduler, &info)?;
     Ok(BifResult::Value(map(scheduler, info)))
 }
 
@@ -292,11 +299,11 @@ fn closed() -> BifResult {
 /// in a full atom table gives the error of `AtomTable::put`.
 pub(super) fn open_4(
     scheduler: &mut Scheduler,
-    arguments: &[Term],
+    domain: &Term,
+    kind: &Term,
+    protocol: &Term,
+    options: &Term,
 ) -> Result<BifResult, BeamError> {
-    let [domain, kind, protocol, options] = arguments else {
-        unreachable!("nif_open/4 has four arguments")
-    };
     let Some(protocol) = int(protocol) else {
         let range = Term::tuple(vec![atom(scheduler, "integer_range")?, protocol.clone()]);
         return Ok(invalid(range));
@@ -330,7 +337,7 @@ pub(super) fn open_4(
     // before `socket(2)` (`unix_socket_syncio.c:1729-1745`); PBeam does not
     // implement it. The macOS build has no `HAVE_SETNS` and ignores it.
     #[cfg(target_os = "linux")]
-    if field(scheduler, options, "netns").is_some() {
+    if field(&scheduler.atoms, options, "netns").is_some() {
         return Err(error(
             "prim_socket:nif_open/4 option netns is not supported: see \"NIF stubs\" in docs/erts-differences.md",
         ));
@@ -347,7 +354,7 @@ pub(super) fn open_4(
     socket
         .set_nonblocking(true)
         .map_err(|failure| error(format!("prim_socket:nif_open/4: {failure}")))?;
-    let registered = field(scheduler, options, "use_registry")
+    let registered = field(&scheduler.atoms, options, "use_registry")
         .is_none_or(|value| *value != Term::static_atom("false"));
     let owner = scheduler.current_process().id;
     let reference = scheduler.make_magic_ref()?;
@@ -371,7 +378,7 @@ pub(super) fn open_4(
         );
         sockets.registry
     };
-    if registered {
+    if let (true, Some(registry)) = (registered, registry) {
         send_registry(scheduler, registry, "add", reference)?;
     }
     // The socket monitors its owner (`unix_socket_syncio.c:1785-1788`).
@@ -408,13 +415,10 @@ fn which_protocol(_socket: &Socket, protocol: i32) -> i32 {
 /// (`prim_socket_nif.c:17300-17338`, `17551-17558`).
 fn send_registry(
     scheduler: &mut Scheduler,
-    registry: Option<ProcessId>,
+    registry: ProcessId,
     tag: &str,
     reference: Reference,
 ) -> Result<(), BeamError> {
-    let Some(registry) = registry else {
-        return Ok(());
-    };
     let socket_tag = atom(scheduler, "$socket")?;
     let socket = Term::tuple(vec![socket_tag.clone(), Term::Reference(reference)]);
     let tag = atom(scheduler, tag)?;
@@ -437,7 +441,7 @@ fn send_registry(
 /// The family `unspec` or a native family number stops the run: PBeam does
 /// not decode a native `sockaddr` yet.
 fn sockaddr(scheduler: &Scheduler, address: &Term) -> Result<Option<SockAddr>, BeamError> {
-    let get = |name: &str| field(scheduler, address, name);
+    let get = |name: &str| field(&scheduler.atoms, address, name);
     let family = get("family");
     let port = || get("port").and_then(int).map(|port| port as u16);
     match family.and_then(|family| atom_name(scheduler, family)) {
@@ -474,8 +478,8 @@ fn sockaddr(scheduler: &Scheduler, address: &Term) -> Result<Option<SockAddr>, B
 
 /// Return the value of the atom key `name` of the map `map`, or `None`
 /// for a map without the key or a term that is not a map.
-fn field<'a>(scheduler: &Scheduler, map: &'a Term, name: &str) -> Option<&'a Term> {
-    let key = Term::Atom(scheduler.atoms.get(name)?);
+fn field<'a>(atoms: &AtomTable, map: &'a Term, name: &str) -> Option<&'a Term> {
+    let key = Term::Atom(atoms.get(name)?);
     match map {
         Term::Map(map) => map.get(&key),
         _ => None,
@@ -632,16 +636,16 @@ pub(super) fn sockname(scheduler: &mut Scheduler, socket: &Term) -> Result<BifRe
         .socket
         .as_ref()
         .expect("an open socket has a host socket");
-    match host.local_addr() {
-        Ok(address) => {
-            let address = sockaddr_term(scheduler, &address)?;
-            Ok(BifResult::Value(Term::tuple(vec![
-                Term::static_atom("ok"),
-                address,
-            ])))
-        }
-        Err(failure) => errno_error(scheduler, &failure),
-    }
+    // `getsockname(2)` of an open socket fails only for `ENOBUFS`; PBeam
+    // stops the run there, where ERTS gives `{error, enobufs}`.
+    let address = host
+        .local_addr()
+        .map_err(|failure| error(format!("prim_socket:nif_sockname/1: {failure}")))?;
+    let address = sockaddr_term(scheduler, &address)?;
+    Ok(BifResult::Value(Term::tuple(vec![
+        Term::static_atom("ok"),
+        address,
+    ])))
 }
 
 /// Run `prim_socket:nif_close(Socket)`, as `essio_close` does
@@ -725,8 +729,12 @@ pub(super) fn finalize_close(
         sockets.counters.count(domain, kind, protocol, -1);
         sockets.registry
     };
-    if registered {
+    if let (true, Some(registry)) = (registered, registry) {
         send_registry(scheduler, registry, "del", reference)?;
     }
     Ok(BifResult::Value(Term::static_atom("ok")))
 }
+
+#[cfg(test)]
+#[path = "../../../../../tests/runtime/interpreter/native/prim_socket/socket.rs"]
+mod tests;

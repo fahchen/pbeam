@@ -59,7 +59,15 @@ pub(super) const BINDINGS: &[Binding] = &[
         name: "nif_open",
         arity: 4,
         job: Job::Normal,
-        run: |scheduler, arguments| socket::open_4(scheduler, arguments),
+        run: |scheduler, arguments| {
+            socket::open_4(
+                scheduler,
+                &arguments[0],
+                &arguments[1],
+                &arguments[2],
+                &arguments[3],
+            )
+        },
     },
     Binding {
         name: "nif_sockname",

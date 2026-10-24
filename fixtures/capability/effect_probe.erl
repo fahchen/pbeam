@@ -5,6 +5,8 @@
 -export([
     socket_open/0,
     socket_open_netns/0,
+    socket_bind_unspec/0,
+    socket_bind_family_number/0,
     spawn/0,
     spawn_system_process/0,
     spawn_link/0,
@@ -1097,6 +1099,14 @@ socket_open() ->
 
 %% prim_socket:open/4 with the option netns. ERTS on Linux enters the
 %% network namespace first, and the macOS build ignores the option.
+socket_bind_unspec() ->
+    {ok, Socket} = prim_socket:open(inet, dgram, 0, #{}),
+    prim_socket:bind(Socket, #{family => unspec}).
+
+socket_bind_family_number() ->
+    {ok, Socket} = prim_socket:open(inet, dgram, 0, #{}),
+    prim_socket:bind(Socket, #{family => 2}).
+
 socket_open_netns() ->
     {ok, Socket} = prim_socket:open(inet, stream, 0, #{netns => "/var/run/netns/pbeam"}),
     prim_socket:close(Socket).

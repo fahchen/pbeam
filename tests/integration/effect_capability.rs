@@ -1317,6 +1317,25 @@ fn stops_the_run_for_a_socket_open_by_a_runtime_process_in_a_run_with_a_policy()
 }
 
 #[test]
+fn stops_the_run_for_a_socket_bind_to_a_native_family() {
+    // ERTS decodes a `sockaddr` of the family `unspec` or of a family number
+    // as a native `sockaddr` (socket_util.c:484-548) and gives
+    // `{error, einval}` for these maps. PBeam does not decode a native
+    // `sockaddr` and stops the run (row "NIF stubs" of
+    // docs/erts-differences.md).
+    for function in ["socket_bind_unspec", "socket_bind_family_number"] {
+        let error = program()
+            .execute("effect_probe", function, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("unsupported prim_socket sockaddr of the family unspec"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
 fn stops_the_run_for_a_socket_open_with_netns_on_linux_and_ignores_it_on_macos() {
     // ERTS on Linux enters the network namespace of `netns` before
     // `socket(2)` (unix_socket_syncio.c:1729-1745), and PBeam stops the run.
