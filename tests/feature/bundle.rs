@@ -101,8 +101,8 @@ fn rejects_a_release_directory_for_a_build() {
 
 #[test]
 fn writes_the_bundle_from_a_mix_task() {
-    // The task builds the tool, resolves the start set with
-    // `scripts/example.sh --no-build --write-start`, and writes one bundle.
+    // The task of the `pbeam` dependency writes the start list in Elixir and
+    // writes one bundle with the tool.
     let directory = directory("mix-task");
     let output = directory.join("plug_hello.pbeamb");
     let start = directory.join("start.list");
@@ -187,6 +187,101 @@ fn writes_the_bundle_from_a_mix_task() {
     assert_eq!(
         bundle.resource(&name).expect("bandit is a resource"),
         fs::read(&application).unwrap()
+    );
+    // The start list of the task has the same bytes as the list of
+    // `scripts/example.sh --write-start`.
+    let script_start = directory.join("script.list");
+    let script = Command::new("bash")
+        .arg("scripts/example.sh")
+        .args(["plug_hello", "--no-build", "--write-start"])
+        .arg(&script_start)
+        .arg("--release")
+        .arg(&release)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("scripts/example.sh runs");
+    assert!(script.status.success(), "{script:?}");
+    assert_eq!(fs::read(&start).unwrap(), fs::read(&script_start).unwrap());
+    fs::remove_dir_all(&directory).unwrap();
+}
+
+#[test]
+fn builds_and_runs_the_executable_of_a_project_outside_the_repository() {
+    // A Mix project in a temporary directory has `pbeam` as a path
+    // dependency. `mix pbeam.build` runs from that dependency, so it finds
+    // the PBeam source without the directory of the command line. The test
+    // gives the built binaries, so Cargo does not build them a second time.
+    let directory = directory("outside");
+    let project = directory.join("outside");
+    fs::create_dir_all(project.join("lib")).unwrap();
+    fs::write(
+        project.join("mix.exs"),
+        format!(
+            "defmodule Outside.MixProject do\n  use Mix.Project\n\n  def project do\n    \
+             [app: :outside, version: \"0.1.0\", \
+             deps: [{{:pbeam, path: {:?}, runtime: false}}], \
+             releases: [outside: [path: \"rel\"]]]\n  end\n\n  \
+             def application, do: [mod: {{Outside, []}}]\nend\n",
+            env!("CARGO_MANIFEST_DIR")
+        ),
+    )
+    .unwrap();
+    fs::write(
+        project.join("lib/outside.ex"),
+        "defmodule Outside do\n  use Application\n\n  def start(_type, _arguments) do\n    \
+         IO.puts(\"outside runs on pbeam\")\n    System.halt(0)\n  end\nend\n",
+    )
+    .unwrap();
+    let mut mix_release = Command::new("mix");
+    mix_release
+        .args(["release", "--overwrite"])
+        .current_dir(&project)
+        .env("MIX_ENV", "prod");
+    let (status, mix_output) = run(&mut mix_release);
+    assert_eq!(status, Some(0), "{mix_output}");
+    let mut build = Command::new("mix");
+    build
+        .args([
+            "pbeam.build",
+            "--runtime",
+            env!("CARGO_BIN_EXE_pbeam"),
+            "--tool",
+            env!("CARGO_BIN_EXE_pbeam_bundle"),
+        ])
+        .current_dir(&project)
+        .env("MIX_ENV", "prod");
+    let (status, stderr) = run(&mut build);
+    assert_eq!(status, Some(0), "{stderr}");
+    // The default output is `<app>.bundle` next to the release directory.
+    // The run starts in another directory. It removes the `erlexec` flag
+    // variables that `pbeam erl` rejects, so that a shell setting does not
+    // change the run.
+    let clean = directory.join("clean");
+    fs::create_dir(&clean).unwrap();
+    let executable = clean.join("outside");
+    fs::copy(project.join("outside.bundle"), &executable).unwrap();
+    let mut command = Command::new(&executable);
+    for name in [
+        "ERL_OTP29_FLAGS",
+        "ERL_AFLAGS",
+        "ERL_FLAGS",
+        "ERL_ZFLAGS",
+        "ERL_EPMD_PORT",
+    ] {
+        command.env_remove(name);
+    }
+    let output = command
+        .current_dir(&clean)
+        .output()
+        .expect("the executable runs");
+    assert_eq!(
+        (
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout)
+        ),
+        (Some(0), "outside runs on pbeam\n".into()),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
     fs::remove_dir_all(&directory).unwrap();
 }

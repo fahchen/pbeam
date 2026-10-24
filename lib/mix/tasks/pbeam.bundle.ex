@@ -2,9 +2,10 @@ defmodule Mix.Tasks.Pbeam.Bundle do
   @moduledoc """
   Writes the PBeam application bundle of the release.
 
-  The task builds the `pbeam_bundle` tool, resolves the start set (the
-  preloaded modules) with `scripts/example.sh --no-build --write-start`, and
-  writes one bundle. The entry `elixir:start_cli` is the `-s` call of
+  A project that has `pbeam` as a dependency runs this task. The task builds
+  the `pbeam_bundle` tool with Cargo in the PBeam source of the dependency,
+  writes the start list (the BEAM files of the preloaded modules), and writes
+  one bundle. The entry `elixir:start_cli` is the `-s` call of
   `bin/<app> start`, which the launcher gives to the boot of the release. The
   NIF manifest gate of the tool reports each NIF function that PBeam does not
   bind and stops the task on a module that PBeam has no NIF library for. Run
@@ -20,6 +21,11 @@ defmodule Mix.Tasks.Pbeam.Bundle do
 
   @shortdoc "Writes the PBeam application bundle of the release"
 
+  # This file is in lib/mix/tasks/ of the PBeam source. A path or a git
+  # dependency compiles the file from that source, so the Cargo project is
+  # three directories up, whatever the directory of the command line is.
+  @source Path.expand("../../..", __DIR__)
+
   @impl Mix.Task
   def run(arguments) do
     {options, positional, invalid} =
@@ -32,9 +38,8 @@ defmodule Mix.Tasks.Pbeam.Bundle do
     end
 
     cwd = File.cwd!()
-    root = Path.expand("../..", cwd)
     app = Mix.Project.config()[:app]
-    release = release_directory(app, options, cwd)
+    release = release_directory!(app, options)
     output = Path.expand(Keyword.get(options, :output) || default_output(release, app), cwd)
     File.mkdir_p!(Path.dirname(output))
 
@@ -46,35 +51,25 @@ defmodule Mix.Tasks.Pbeam.Bundle do
 
     tool =
       case Keyword.get(options, :tool) do
-        nil ->
-          build_tool!(root)
-
-        tool ->
-          Path.expand(tool, cwd)
+        nil -> cargo_bin!("pbeam_bundle")
+        tool -> Path.expand(tool, cwd)
       end
 
-    run!(
-      "bash",
-      [
-        "scripts/example.sh",
-        Atom.to_string(app),
-        "--no-build",
-        "--write-start",
-        start,
-        "--release",
-        release
-      ],
-      root
-    )
+    # ERTS builds the preloaded modules into the emulator; their BEAM files
+    # are in the ebin directory of erts. The list has one path on each line.
+    ebin = Path.join(:code.lib_dir(:erts), "ebin")
+    File.write!(start, Enum.map(:erlang.pre_loaded(), &[Path.join(ebin, "#{&1}.beam"), ?\n]))
 
     # The NIF manifest gate of the tool prints each NIF function that PBeam
     # does not bind.
-    gate = run!(tool, ["bundle", release, output, "elixir", "start_cli", start], root)
+    gate = run!(tool, ["bundle", release, output, "elixir", "start_cli", start])
     Mix.shell().info(gate)
     Mix.shell().info("Wrote #{output}")
   end
 
-  defp release_directory(app, options, cwd) do
+  # Return the release directory of `--release` or of the project config.
+  @doc false
+  def release_directory!(app, options) do
     path =
       Keyword.get(options, :release) || Mix.Project.config()[:releases][app][:path]
 
@@ -82,25 +77,27 @@ defmodule Mix.Tasks.Pbeam.Bundle do
       Mix.raise("pbeam.bundle: the project config names no directory for the release #{app}")
     end
 
-    Path.expand(path, cwd)
+    Path.expand(path)
   end
 
   defp default_output(release, app) do
     Path.join(Path.dirname(release), "#{app}.pbeamb")
   end
 
-  # Cargo reports the path of each artifact, so a configured target
-  # directory or build target cannot move or hide the tool.
-  defp build_tool!(root) do
+  # Build one binary of the PBeam source and return its path. Cargo reports
+  # the path of each artifact, so a configured target directory or build
+  # target cannot move or hide the binary.
+  @doc false
+  def cargo_bin!(name) do
     {output, status} =
       System.cmd(
         "cargo",
-        ["build", "--locked", "--release", "--bin", "pbeam_bundle", "--message-format=json"],
-        cd: root
+        ["build", "--locked", "--release", "--bin", name, "--message-format=json"],
+        cd: @source
       )
 
     if status != 0 do
-      Mix.raise("pbeam.bundle: cargo failed with status #{status}")
+      Mix.raise("pbeam: cargo failed with status #{status}")
     end
 
     output
@@ -110,7 +107,7 @@ defmodule Mix.Tasks.Pbeam.Bundle do
         {:ok,
          %{
            "reason" => "compiler-artifact",
-           "target" => %{"name" => "pbeam_bundle"},
+           "target" => %{"name" => ^name},
            "executable" => executable
          }}
         when is_binary(executable) ->
@@ -121,16 +118,18 @@ defmodule Mix.Tasks.Pbeam.Bundle do
       end
     end)
     |> case do
-      nil -> Mix.raise("pbeam.bundle: cargo reported no pbeam_bundle artifact")
+      nil -> Mix.raise("pbeam: cargo reported no #{name} artifact")
       executable -> executable
     end
   end
 
-  defp run!(command, arguments, root) do
-    {output, status} = System.cmd(command, arguments, cd: root, stderr_to_stdout: true)
+  # Run a command and return its output, or stop the task on a failure.
+  @doc false
+  def run!(command, arguments) do
+    {output, status} = System.cmd(command, arguments, stderr_to_stdout: true)
 
     if status != 0 do
-      Mix.raise("pbeam.bundle: #{command} failed with status #{status}:\n#{output}")
+      Mix.raise("pbeam: #{command} failed with status #{status}:\n#{output}")
     end
 
     output

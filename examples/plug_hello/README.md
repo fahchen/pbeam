@@ -10,7 +10,7 @@ From this directory, after `mix release`, this command writes `plug_hello.bundle
 mix pbeam.build
 ```
 
-The task builds the `pbeam` runtime and the `pbeam_bundle` tool with Cargo, writes the bundle with `mix pbeam.bundle`, and appends the bundle to the runtime. The executable runs in a directory that holds no other file, and the run needs no installed OTP. `--output <path>` names another output path, and `--runtime <path>` and `--tool <path>` use built binaries instead of the Cargo build.
+The task comes from the `pbeam` path dependency of `mix.exs`. It builds the `pbeam` runtime and the `pbeam_bundle` tool with Cargo in the repository, writes the bundle with `mix pbeam.bundle`, and appends the bundle to the runtime. The executable runs in a directory that holds no other file, and the run needs no installed OTP. `--output <path>` names another output path, and `--runtime <path>` and `--tool <path>` use built binaries instead of the Cargo build.
 
 From the repository root, this task writes the same executable for each example:
 
