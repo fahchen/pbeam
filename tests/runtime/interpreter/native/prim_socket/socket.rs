@@ -8,3 +8,13 @@ fn finds_no_field_in_a_term_that_is_not_a_map() {
     let key = Term::Atom(atoms.put("family").unwrap());
     assert_eq!(field(&atoms, &key, "family"), None);
 }
+
+#[test]
+fn reads_no_unsigned_int_from_a_term_that_is_not_an_integer() {
+    // `enif_get_uint` fails for a term that is not an integer. `socket:bind/2`
+    // rejects a non-integer `flowinfo` before the NIF runs (the pinned ERTS
+    // gives `{error, {invalid, {sockaddr, ...}}}`), so no fixture reaches it.
+    assert_eq!(uint(&Term::Nil), None);
+    assert_eq!(uint(&Term::Integer(-1)), None);
+    assert_eq!(uint(&Term::Integer(7)), Some(7));
+}
