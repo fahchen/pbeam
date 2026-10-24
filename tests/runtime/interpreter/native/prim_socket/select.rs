@@ -33,6 +33,7 @@ fn resource(scheduler: &mut Scheduler, socket: Socket, read: u32, acceptor: Opti
             read,
             write: 0,
             registered: false,
+            meta: Term::static_atom("undefined"),
             connector: None,
             acceptor: acceptor.map(|reference| (owner, reference)),
         },
