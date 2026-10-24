@@ -17,3 +17,7 @@
 /docs/tmp/
 /portable_beam_runtime_handoff.md
 /.claude/worktrees/
+
+# Serena: commit only the shared project config; cache, memories and local overrides stay local.
+.serena/*
+!.serena/project.yml

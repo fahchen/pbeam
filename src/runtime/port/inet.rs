@@ -8,7 +8,7 @@
 //! reply is `[1 | Data]` for OK and `[0 | Name]` for an error, where `Name`
 //! is the bytes of the error name, for example `[0 | "eaddrinuse"]`
 //! (`ctl_reply` and `ctl_error`, inet_drv.c:2240-2283). PBeam runs these
-//! requests of `INET_REQ_*` (inet_int.hrl:76-105) for an IPv4 TCP socket
+//! requests of `INET_REQ_*` (inet_int.hrl:76-105) for an IPv4 or IPv6 TCP socket
 //! of a `tcp_inet` port, and the requests but `ACCEPT` for an
 //! IPv4 UDP socket of a `udp_inet` port:
 //!
@@ -83,6 +83,9 @@ const ERROR: u8 = 0;
 /// The family code of IPv4 (`INET_AF_INET`, inet_int.hrl:31).
 const AF_INET: u8 = 1;
 
+/// The family code of IPv6 (`INET_AF_INET6`, inet_int.hrl:32).
+const AF_INET6: u8 = 2;
+
 /// The state of the socket of a port (`INET_STATE_*`, inet_drv.c).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
@@ -150,6 +153,10 @@ impl SocketType {
 pub(in crate::runtime) struct Inet {
     /// The socket type of the driver.
     socket_type: SocketType,
+    /// The family code of the socket that `OPEN` makes, [`AF_INET`] or
+    /// [`AF_INET6`] (`sfamily`), which the address tags `any` and
+    /// `loopback` read.
+    family: u8,
     /// The non-blocking host socket that `OPEN` makes, or `None` before it.
     /// The port owns it; dropping the port closes it.
     socket: Option<Socket>,
@@ -245,6 +252,7 @@ impl Inet {
     pub(in crate::runtime) fn new(socket_type: SocketType) -> Inet {
         Inet {
             socket_type,
+            family: AF_INET,
             socket: None,
             state: State::Closed,
             mode: 0,
@@ -275,6 +283,7 @@ impl Inet {
         let _ = socket.set_nonblocking(true);
         Inet {
             socket: Some(socket),
+            family: self.family,
             state: State::Connected,
             mode: self.mode,
             send_timeout: self.send_timeout,
@@ -427,11 +436,13 @@ impl Inet {
         let &[family, kind, protocol] = request else {
             return Ok(error_reply("einval"));
         };
-        match family {
-            AF_INET => {}
+        // A `tcp_inet` port takes IPv6 (inet_drv.c:11969-11984).
+        let domain = match family {
+            AF_INET => Domain::IPV4,
+            AF_INET6 if self.socket_type == SocketType::Stream => Domain::IPV6,
             2 | 5 => return Err(self.unsupported("family", family)),
             _ => return Ok(error_reply("eafnosupport")),
-        }
+        };
         let (socket_type, protocol) = match self.socket_type {
             SocketType::Stream => {
                 if kind != 1 {
@@ -464,16 +475,27 @@ impl Inet {
         if self.state != State::Closed {
             return Ok(error_reply("exbadseq"));
         }
-        Ok(reply(self.open_socket(socket_type, protocol), |()| {
-            vec![OK]
-        }))
+        Ok(reply(
+            self.open_socket(domain, socket_type, protocol),
+            |()| vec![OK],
+        ))
     }
 
-    /// Make the non-blocking IPv4 socket of `socket_type` and `protocol`.
-    /// `SET_NONBLOCKING` ignores its result (inet_drv.c:5212).
-    fn open_socket(&mut self, socket_type: Type, protocol: Option<Protocol>) -> io::Result<()> {
-        let socket = Socket::new(Domain::IPV4, socket_type, protocol)?;
+    /// Make the non-blocking socket of `domain`, `socket_type`, and
+    /// `protocol`. `SET_NONBLOCKING` ignores its result (inet_drv.c:5212).
+    fn open_socket(
+        &mut self,
+        domain: Domain,
+        socket_type: Type,
+        protocol: Option<Protocol>,
+    ) -> io::Result<()> {
+        let socket = Socket::new(domain, socket_type, protocol)?;
         let _ = socket.set_nonblocking(true);
+        self.family = if domain == Domain::IPV6 {
+            AF_INET6
+        } else {
+            AF_INET
+        };
         self.socket = Some(socket);
         self.state = State::Open;
         self.stream.ended = false;
@@ -531,14 +553,14 @@ impl Inet {
             Ok(local) => local,
             Err(reply) => return Ok(reply),
         };
-        let port = local.port();
+        let port = local.as_socket().map_or(0, |address| address.port());
         let socket = self.socket.as_ref().expect("an open port has a socket");
-        Ok(reply(socket.bind(&local.into()), |()| {
+        Ok(reply(socket.bind(&local), |()| {
             let port = match port {
                 0 => socket
                     .local_addr()
                     .ok()
-                    .and_then(|address| address.as_socket_ipv4())
+                    .and_then(|address| address.as_socket())
                     .map_or(0, |address| address.port()),
                 port => port,
             };
@@ -546,9 +568,13 @@ impl Inet {
         }))
     }
 
-    /// Read the address `[1, P1, P0, A, B, C, D]` of a request of at least 2
-    /// bytes, as `inet_set_faddress` does (inet_drv.c:4795-4880), for the
-    /// request `what`: another family code of `inet_int.hrl` is not
+    /// Read the address of a request of at least 2 bytes, as
+    /// `inet_set_faddress` and `inet_set_address` do
+    /// (inet_drv.c:4706-4880), for the request `what`: `[1, P1, P0, A, B,
+    /// C, D]` for IPv4, `[2, P1, P0, A1, ..., A16, F3, ..., F0, S3, ...,
+    /// S0]` for IPv6 with the flow info and the scope id, and `[3, P1, P0]`
+    /// (`any`) and `[4, P1, P0]` (`loopback`) for the address of the
+    /// family of the socket. The family code `local` (5) is not
     /// implemented, an unknown code gives `eafnosupport`, and a short
     /// address `einval`.
     ///
@@ -556,29 +582,43 @@ impl Inet {
     ///
     /// ```rust,ignore
     /// let address = port.address(&[1, 0, 80, 127, 0, 0, 1], "bind")?;
-    /// assert_eq!(address, Ok("127.0.0.1:80".parse().unwrap()));
+    /// assert_eq!(address.map(|a| a.as_socket()), Ok(Some("127.0.0.1:80".parse().unwrap())));
     /// assert_eq!(port.address(&[9, 0], "bind")?, Err(b"\0eafnosupport".to_vec()));
     /// ```
     ///
     /// # Errors
     ///
-    /// The family codes 2 to 5, which PBeam does not run.
-    fn address(
-        &self,
-        request: &[u8],
-        what: &str,
-    ) -> Result<Result<std::net::SocketAddrV4, Vec<u8>>, BeamError> {
+    /// The family code 5, which PBeam does not run.
+    fn address(&self, request: &[u8], what: &str) -> Result<Result<SockAddr, Vec<u8>>, BeamError> {
+        use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
         let (&tag, address) = request.split_first().expect("a request of 2 bytes");
-        match tag {
-            AF_INET => {}
-            2..=5 => return Err(self.unsupported(&format!("{what} address family"), tag)),
+        let address: SockAddr = match (tag, address) {
+            (AF_INET, &[p1, p0, a, b, c, d, ..]) => {
+                SocketAddrV4::new([a, b, c, d].into(), u16::from_be_bytes([p1, p0])).into()
+            }
+            // ERTS checks 18 bytes and reads 26 (inet_drv.c:4728-4742);
+            // `prim_inet` always gives the 26.
+            (AF_INET6, &[p1, p0, ref rest @ ..]) if rest.len() >= 16 + 8 => {
+                let word =
+                    |at: usize| u32::from_be_bytes(rest[at..at + 4].try_into().expect("4 bytes"));
+                let ip = <[u8; 16]>::try_from(&rest[..16]).expect("16 bytes");
+                let port = u16::from_be_bytes([p1, p0]);
+                SocketAddrV6::new(ip.into(), port, word(16), word(20)).into()
+            }
+            (3 | 4, &[p1, p0, ..]) => {
+                let port = u16::from_be_bytes([p1, p0]);
+                match (self.family, tag) {
+                    (AF_INET6, 3) => SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0).into(),
+                    (AF_INET6, _) => SocketAddrV6::new(Ipv6Addr::LOCALHOST, port, 0, 0).into(),
+                    (_, 3) => SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port).into(),
+                    _ => SocketAddrV4::new(Ipv4Addr::LOCALHOST, port).into(),
+                }
+            }
+            (AF_INET | AF_INET6 | 3 | 4, _) => return Ok(Err(error_reply("einval"))),
+            (5, _) => return Err(self.unsupported(&format!("{what} address family"), tag)),
             _ => return Ok(Err(error_reply("eafnosupport"))),
-        }
-        let &[p1, p0, a, b, c, d, ..] = address else {
-            return Ok(Err(error_reply("einval")));
         };
-        let port = u16::from_be_bytes([p1, p0]);
-        Ok(Ok(std::net::SocketAddrV4::new([a, b, c, d].into(), port)))
+        Ok(Ok(address))
     }
 
     /// Run `INET_REQ_SETOPTS` (inet_set_opts, inet_drv.c:6871-7530): set
@@ -679,6 +719,15 @@ impl Inet {
                 }
                 43 => self.set_socket(libc::IP_RECVTOS, true, |socket| {
                     socket.set_recv_tos_v4(value != 0)
+                }),
+                16 => self.set_socket(libc::IPV6_V6ONLY, true, |socket| {
+                    socket.set_only_v6(value != 0)
+                }),
+                41 => self.set_socket(libc::IPV6_TCLASS, true, |socket| {
+                    socket.set_tclass_v6(value as u32)
+                }),
+                44 => self.set_socket(libc::IPV6_RECVTCLASS, true, |socket| {
+                    socket.set_recv_tclass_v6(value != 0)
                 }),
                 47 if value != 0 => return Err(error(RECVTTL_ON)),
                 // PBeam never sets `IP_RECVTTL`, so a socket has it off.
@@ -798,6 +847,9 @@ impl Inet {
                 1 => flag(Socket::keepalive, APPLE_SO_KEEPALIVE),
                 10 => flag(Socket::tcp_nodelay, APPLE_TF_NODELAY),
                 43 => flag(Socket::recv_tos_v4, 1),
+                16 => flag(Socket::only_v6, 1),
+                44 => flag(Socket::recv_tclass_v6, 1),
+                41 => integer(Socket::tclass_v6),
                 8 => priority(socket),
                 9 => integer(Socket::tos_v4),
                 46 => integer(Socket::ttl_v4),
@@ -1085,16 +1137,16 @@ impl Inet {
     }
 }
 
-/// Return `[Family, P1, P0, A, B, C, D]` of an IPv4 address, as
-/// `inet_get_address` gives it (inet_drv.c).
+/// Return `[1, P1, P0, A, B, C, D]` of an IPv4 address and `[2, P1, P0,
+/// A1, ..., A16]` of an IPv6 address, as `inet_get_address` gives them
+/// (inet_drv.c:4890-4913).
 fn address_bytes(address: &SockAddr) -> Vec<u8> {
-    let address = address.as_socket_ipv4().expect("an IPv4 socket");
-    [
-        &[AF_INET][..],
-        &address.port().to_be_bytes(),
-        &address.ip().octets(),
-    ]
-    .concat()
+    let address = address.as_socket().expect("an IP socket");
+    let (family, ip) = match address {
+        std::net::SocketAddr::V4(address) => (AF_INET, address.ip().octets().to_vec()),
+        std::net::SocketAddr::V6(address) => (AF_INET6, address.ip().octets().to_vec()),
+    };
+    [&[family][..], &address.port().to_be_bytes(), &ip].concat()
 }
 
 /// Return `ok` of the value of `result`, or the error reply of its errno,

@@ -1600,7 +1600,8 @@ ordered_select() ->
         || S <- [[{{{1, '_'}, '_'}, [], [true]}], [{{a, '_'}, [], [true]}],
                  [{{'$1', '_'}, [{is_number, '$1'}], [true]}], [{foo, [], [true]}], [{{nokey, '_'}, [], [true]}],
                  [{{a, '_'}, [], [false]}]]]
-    ++ [named_select(), forged_select(), select_delete_yield()].
+    ++ [named_select(), forged_select(), select_delete_yield()]
+    ++ [select_recreated(Type) || Type <- [set, bag, duplicate_bag, ordered_set]].
 
 %% The continuation of a named ordered_set table holds the name
 %% (erl_db_tree.c:1937, 1960).
@@ -1614,6 +1615,27 @@ named_select() ->
     {Last, _} = ets:select(C2),
     true = ets:delete(N),
     {First, element(1, C), Next, element(1, C2), Last}.
+
+%% A continuation keeps its match program after its table is deleted, as
+%% the magic binary of the program lives with the reference
+%% (erl_db_util.h:617-619). The continuation of a named ordered_set table
+%% holds the name, so it runs on a new table of the name
+%% (erl_db_tree.c:1937, 1960). The continuation of a hash table holds the
+%% table identifier, so it raises badarg (erl_db_hash.c:2229).
+select_recreated(Type) ->
+    N = ets_probe_recreated,
+    N = ets:new(N, [Type, named_table]),
+    true = ets:insert(N, [{K, K} || K <- seq(6)]),
+    {_, C} = ets:select(N, [{{'$1', '_'}, [], ['$1']}], 2),
+    true = ets:delete(N),
+    N = ets:new(N, [Type, named_table]),
+    true = ets:insert(N, [{K, K * 10} || K <- seq(8)]),
+    Result = try ets:select(C) of
+                 {Keys, C2} -> {Keys, element(2, C2)}
+             catch Class:Reason -> {Class, Reason}
+             end,
+    true = ets:delete(N),
+    {Type, Result}.
 
 %% A continuation with a known program and a bad Got or Matches raises
 %% badarg (erl_db_tree.c:1287-1302).

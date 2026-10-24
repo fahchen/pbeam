@@ -47,6 +47,7 @@
     exit_other3/0,
     send_instruction/0,
     send2/0,
+    bang/0,
     send3/0,
     start_timer/0,
     start_timer_4/0,
@@ -246,6 +247,9 @@ exit_other3() ->
 send_instruction() -> attempt(fun() -> self() ! ping end).
 
 send2() -> attempt(fun() -> erlang:send(self(), ping) end).
+
+%% A module atom that the compiler cannot see keeps the call of erlang:'!'/2.
+bang() -> attempt(fun() -> apply(binary_to_atom(id(<<"erlang">>)), '!', [self(), ping]) end).
 
 send3() -> attempt(fun() -> erlang:send(self(), ping, []) end).
 
@@ -472,6 +476,7 @@ ambient() ->
         integer(erlang:system_time()),
         integer(erlang:system_time(second)),
         date_time(erlang:universaltime_to_localtime({{2026, 10, 11}, {12, 0, 0}})),
+        date_time(erlang:localtime_to_universaltime({{2026, 10, 11}, {12, 0, 0}}, undefined)),
         element(1, erlang:system_info(os_type)),
         erlang:node(),
         erlang:node(Self),
@@ -632,7 +637,11 @@ ambient() ->
         prim_socket:supports(other),
         element(1, prim_net:gethostname()),
         maps:get(netns, prim_net:info()),
-        prim_net:debug(false)
+        prim_net:debug(false),
+        element(1, prim_net:getnameinfo(#{family => inet, addr => loopback, port => 80}, [numerichost])),
+        element(1, prim_net:getaddrinfo("127.0.0.1", "pbeam-no-such-service")),
+        prim_net:getservbyname("http", "tcp"),
+        prim_net:getservbyport(80, "tcp")
     ].
 
 %% Each metadata probe makes a temporary file, so `write_file_info/3`

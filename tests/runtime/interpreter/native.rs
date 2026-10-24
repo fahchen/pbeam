@@ -241,6 +241,8 @@ const DIRTY_FUNCTIONS: &[(&str, &str, u32, Job)] = &[
     ("zstd", "load_decompress_dictionary_nif", 2, Job::CpuBound),
     ("zstd", "create_cdict_nif", 2, Job::CpuBound),
     ("zstd", "create_ddict_nif", 1, Job::CpuBound),
+    ("prim_net", "nif_getservbyname", 2, Job::IoBound),
+    ("prim_net", "nif_getservbyport", 2, Job::IoBound),
 ];
 
 /// Each static binding has the job of the flag of its pinned-OTP

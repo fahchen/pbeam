@@ -2007,7 +2007,7 @@ fn select_objects(
         let turn = tree::first_turn(atoms, &table, &compiled, chunk, reverse)?;
         drop(table);
         drop(ets);
-        return tree::finish(context, (name, id), &compiled, chunk, reverse, turn);
+        return tree::finish(context, name, &compiled, chunk, reverse, turn);
     }
     // A key position below 1 compares as a large unsigned number with the
     // arity of the pattern (`db_getkey`, `erl_db_util.c:3940-3960`).
@@ -2234,7 +2234,7 @@ pub(super) fn select_continue(
         let turn = tree::next_turn(atoms, &found, &compiled, state)?;
         drop(found);
         drop(ets);
-        return tree::finish(context, (table, id), &compiled, chunk, reverse, turn);
+        return tree::finish(context, table, &compiled, chunk, reverse, turn);
     }
     let [_, next, chunk, program, rest, size] = elements.as_ref() else {
         return Ok(BifResult::badarg());
@@ -2323,7 +2323,6 @@ pub(super) fn select_delete_trap(
             return Ok(retry(context, lacking, "select_delete_trap", arguments));
         }
     };
-    let id = ets.id(atoms, table).expect("the table exists");
     let compiled = ets
         .program(program)
         .cloned()
@@ -2332,7 +2331,7 @@ pub(super) fn select_delete_trap(
     let turn = tree::select_delete_next(atoms, &mut taken, &compiled, last, least, count)?;
     drop(taken);
     drop(ets);
-    tree::delete_finish(context, (table, id), &compiled, Some(program), turn)
+    tree::delete_finish(context, table, &compiled, Some(program), turn)
 }
 
 /// Run the trap export `ets:reverse/3` of a select with a limit on an
@@ -2552,7 +2551,7 @@ fn match_end(
     if !rest.is_empty() || next >= 0 {
         let program = context.scheduler.make_magic_ref()?;
         let size = rest.len() as i64;
-        (context.scheduler.ets.exclusive()).remember_program(id, program, compiled.clone());
+        (context.scheduler.ets.exclusive()).remember_program(program, compiled.clone());
         let continuation = Term::tuple(vec![
             Term::Reference(id),
             Term::Integer(next),
@@ -3259,11 +3258,10 @@ pub(super) fn internal_select_delete(
         .filter(|&keypos| keypos > 0)
         .unwrap_or(usize::MAX);
     if taken.table_type() == TableType::OrderedSet {
-        let id = ets.id(atoms, table).expect("the table exists");
         let turn = tree::select_delete(atoms, &mut taken, &compiled)?;
         drop(taken);
         drop(ets);
-        return tree::delete_finish(context, (table, id), &compiled, None, turn);
+        return tree::delete_finish(context, table, &compiled, None, turn);
     }
     if compiled.matches_nothing(keypos) {
         return Ok(Value(Term::Integer(0)));
