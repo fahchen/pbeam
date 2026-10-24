@@ -397,9 +397,12 @@ pub(super) fn call(
         // schedules it (`static_schedule_dirty_nif`, `erl_nif.c:3437-3477`).
         let job = function.job();
         let result = match job {
-            Job::Normal => function.call(arguments).map(to_bif_result),
+            Job::Normal => function
+                .call(&scheduler.atoms, arguments)
+                .map(to_bif_result),
             Job::CpuBound | Job::IoBound => Ok(BifResult::Dirty(Work::Shared {
                 library: Arc::clone(&library),
+                atoms: Arc::clone(&scheduler.atoms),
                 index,
                 arguments: arguments.to_vec(),
             })),
@@ -799,7 +802,7 @@ fn load_shared(
         let text = "Upgrade not supported by this NIF library.";
         return load_nif_error(&scheduler.atoms, "upgrade", text);
     }
-    let veto = library.load(&arguments[1]);
+    let veto = library.load(&scheduler.atoms, &arguments[1]);
     if veto != 0 {
         let text = format!("Library load-call unsuccessful ({veto}).");
         return load_nif_error(&scheduler.atoms, "load", &text);

@@ -184,6 +184,10 @@ name = "nif_library"
 path = "tests/integration/nif_library.rs"
 
 [[test]]
+name = "nif_terms"
+path = "tests/integration/nif_terms.rs"
+
+[[test]]
 name = "extension_library"
 path = "tests/integration/extension_library.rs"
 
