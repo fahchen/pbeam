@@ -21,7 +21,7 @@ use std::{
     os::{fd::AsRawFd, unix::net::UnixStream},
     sync::{
         Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     thread,
     time::Duration,
@@ -51,6 +51,10 @@ pub(in crate::runtime) enum Direction {
 
 /// An fd and its direction.
 pub(in crate::runtime) type Ready = (c_int, Direction);
+
+/// A socket select: the process that gets the message, the message, and
+/// the serial number that tells a select from the select that replaced it.
+type Select = (ProcessId, Term, u64);
 
 /// The I/O state of one scheduler.
 #[derive(Debug, Default)]
@@ -90,9 +94,10 @@ pub(in crate::runtime) struct NodePoll {
     released: Box<[Condvar]>,
     /// The scheduler that has the read select of fd 0, or [`NO_SCHEDULER`].
     stdin: AtomicUsize,
-    /// The one-shot socket selects: each fd and direction with the process
-    /// that gets the select message, and the message.
-    selects: Mutex<HashMap<Ready, (ProcessId, Term)>>,
+    /// The one-shot socket selects of each fd and direction.
+    selects: Mutex<HashMap<Ready, Select>>,
+    /// The serial number of the last select.
+    serial: AtomicU64,
 }
 
 impl NodePoll {
@@ -109,6 +114,7 @@ impl NodePoll {
             released: (0..count).map(|_| Condvar::new()).collect(),
             stdin: AtomicUsize::new(NO_SCHEDULER),
             selects: Mutex::default(),
+            serial: AtomicU64::new(0),
         })
     }
 
@@ -206,7 +212,9 @@ impl NodePoll {
         pid: ProcessId,
         message: Term,
     ) {
-        self.selects().insert((fd, direction), (pid, message));
+        let serial = self.serial.fetch_add(1, Ordering::Relaxed);
+        self.selects()
+            .insert((fd, direction), (pid, message, serial));
         self.changed();
     }
 
@@ -218,7 +226,7 @@ impl NodePoll {
         self.selects().remove(&(fd, direction)).is_some()
     }
 
-    fn selects(&self) -> MutexGuard<'_, HashMap<Ready, (ProcessId, Term)>> {
+    fn selects(&self) -> MutexGuard<'_, HashMap<Ready, Select>> {
         self.selects
             .lock()
             .expect("the poll select table is not poisoned")
@@ -334,7 +342,7 @@ fn run(node: &Weak<Node>, mut reader: UnixStream) {
         let Some(strong) = node.upgrade() else { return };
         let poll = &strong.poll;
         poll.changed.store(false, Ordering::SeqCst);
-        let owned = collect(poll);
+        let (owned, serials) = collect(poll);
         poll.sleeping.store(true, Ordering::SeqCst);
         if poll.changed.load(Ordering::SeqCst) {
             poll.sleeping.store(false, Ordering::SeqCst);
@@ -364,8 +372,13 @@ fn run(node: &Weak<Node>, mut reader: UnixStream) {
         let mut woken = Vec::new();
         for (entry, index) in found {
             if index == SELECT {
-                // A cancel after the wait removed the select: no message.
-                if let Some((pid, message)) = strong.poll.selects().remove(&entry) {
+                // A cancel after the collect removed the select, or a new
+                // select replaced it: the thread waits on the new one next.
+                let mut selects = strong.poll.selects();
+                if selects.get(&entry).map(|select| select.2) == serials.get(&entry).copied()
+                    && let Some((pid, message, _)) = selects.remove(&entry)
+                {
+                    drop(selects);
                     strong.send_message(0, None, message, pid, None);
                 }
                 continue;
@@ -418,8 +431,9 @@ pub(in crate::runtime) fn wait(
 }
 
 /// Return the registered fds and fd 0, each with its scheduler, without
-/// the fds that a scheduler did not serve yet.
-fn collect(poll: &NodePoll) -> Vec<Owned> {
+/// the fds that a scheduler did not serve yet, and the fds of the socket
+/// selects with the serial number of each select.
+fn collect(poll: &NodePoll) -> (Vec<Owned>, HashMap<Ready, u64>) {
     let disarmed: Vec<Option<Vec<Ready>>> = (0..poll.served.len())
         .map(|index| {
             let mut served = poll.served(index);
@@ -447,8 +461,13 @@ fn collect(poll: &NodePoll) -> Vec<Owned> {
     if stdin != NO_SCHEDULER && armed(&entry, stdin) {
         owned.push((entry, stdin));
     }
-    owned.extend(poll.selects().keys().map(|&entry| (entry, SELECT)));
-    owned
+    let serials: HashMap<Ready, u64> = poll
+        .selects()
+        .iter()
+        .map(|(&entry, select)| (entry, select.2))
+        .collect();
+    owned.extend(serials.keys().map(|&entry| (entry, SELECT)));
+    (owned, serials)
 }
 
 /// Read the wake bytes. The end of file comes only after the node ended,

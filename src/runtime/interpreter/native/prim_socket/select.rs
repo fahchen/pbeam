@@ -48,7 +48,9 @@ fn value(scheduler: &mut Scheduler, name: &str) -> Result<BifResult, BeamError> 
 
 /// Make the select of `fd` in `direction` for `pid`, with the message
 /// `{'$socket', Socket, select, Ref}`, as `esock_select_read` and
-/// `esock_select_write` do (`prim_socket_nif.c:17360-17420`).
+/// `esock_select_write` do (`prim_socket_nif.c:17707-17760`). The caller
+/// holds the lock of the socket, so that a close cannot run between its
+/// check and the select and leave a closed fd in the poll table.
 fn select(
     scheduler: &mut Scheduler,
     socket: Reference,
@@ -169,8 +171,8 @@ pub(super) fn connect(
             let fd = fd(&state);
             state.connector = Some((caller, reference.clone()));
             state.write |= CONNECTING | SELECTED;
-            drop(state);
             select(scheduler, key, fd, Direction::Write, caller, reference)?;
+            drop(state);
             monitor(scheduler, caller, key);
             value(scheduler, "select")
         }
@@ -294,22 +296,14 @@ pub(super) fn accept(
         return errno_error(scheduler, &failure);
     }
     let fd = fd(&state);
-    if let Some(old) = current {
+    if current.is_some() {
         if !scheduler.node().poll.cancel_select(fd, Direction::Read) {
             return value(scheduler, "select_sent");
         }
-        state.acceptor = Some((caller, reference.clone()));
-        drop(state);
-        let cancelled = atom(scheduler, "cancelled")?;
-        let info = Term::tuple(vec![old, cancelled]);
-        let abort = socket_message(scheduler, key, "abort", info)?;
-        scheduler.send_message(caller, caller, abort);
     } else {
-        state.acceptor = Some((caller, reference.clone()));
         state.read |= ACCEPTING | SELECTED;
-        drop(state);
-        monitor(scheduler, caller, key);
     }
+    state.acceptor = Some((caller, reference.clone()));
     select(
         scheduler,
         key,
@@ -318,6 +312,15 @@ pub(super) fn accept(
         caller,
         reference.clone(),
     )?;
+    drop(state);
+    if let Some(old) = current {
+        let cancelled = atom(scheduler, "cancelled")?;
+        let info = Term::tuple(vec![old, cancelled]);
+        let abort = socket_message(scheduler, key, "abort", info)?;
+        scheduler.send_message(caller, caller, abort);
+    } else {
+        monitor(scheduler, caller, key);
+    }
     value(scheduler, "select")
 }
 
