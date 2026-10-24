@@ -47,6 +47,7 @@
     exit_other3/0,
     send_instruction/0,
     send2/0,
+    bang/0,
     send3/0,
     start_timer/0,
     start_timer_4/0,
@@ -246,6 +247,9 @@ exit_other3() ->
 send_instruction() -> attempt(fun() -> self() ! ping end).
 
 send2() -> attempt(fun() -> erlang:send(self(), ping) end).
+
+%% A module atom that the compiler cannot see keeps the call of erlang:'!'/2.
+bang() -> attempt(fun() -> apply(binary_to_atom(id(<<"erlang">>)), '!', [self(), ping]) end).
 
 send3() -> attempt(fun() -> erlang:send(self(), ping, []) end).
 
@@ -634,6 +638,10 @@ ambient() ->
         element(1, prim_net:gethostname()),
         maps:get(netns, prim_net:info()),
         prim_net:debug(false),
+        element(1, prim_net:getnameinfo(#{family => inet, addr => loopback, port => 80}, [numerichost])),
+        element(1, prim_net:getaddrinfo("127.0.0.1", "pbeam-no-such-service")),
+        prim_net:getservbyname("http", "tcp"),
+        prim_net:getservbyport(80, "tcp"),
         erts_internal:term_type(id(a))
     ].
 

@@ -31,3 +31,128 @@ fn gives_minus_one_for_a_failed_gethostname() {
         Term::tuple(vec![Term::static_atom("error"), Term::Integer(-1)])
     );
 }
+
+#[test]
+fn gives_the_reason_of_each_lookup_error_as_prim_net_nif() {
+    // The host files of a test host give none of these errors, so the
+    // probe of `tests/integration/net.rs` does not reach them
+    // (`prim_net_nif.c:1108-1174`, `1280-1359`).
+    let codes = [
+        (eai::ADDRFAMILY, "eaddrfamily", "einval"),
+        (eai::AGAIN, "eagain", "eagain"),
+        (eai::BADFLAGS, "ebadflags", "ebadflags"),
+        (eai::FAIL, "efail", "efail"),
+        (eai::FAMILY, "efamily", "efamily"),
+        (eai::MEMORY, "emem", "emem"),
+        (eai::NODATA, "enodata", "einval"),
+        (eai::NONAME, "enoname", "enoname"),
+        (eai::SERVICE, "eservice", "einval"),
+        (eai::SOCKTYPE, "esocktype", "einval"),
+        (eai::SYSTEM, "esystem", "eperm"),
+        (eai::OVERFLOW, "einval", "eoverflow"),
+        (1000, "einval", "einval"),
+    ];
+    for (code, addrinfo, nameinfo) in codes {
+        assert_eq!(addrinfo_error(code), addrinfo, "{code}");
+        assert_eq!(nameinfo_error(code, libc::EPERM), nameinfo, "{code}");
+    }
+}
+
+#[test]
+fn encodes_each_family_and_socket_type_as_socket_util() {
+    // `getaddrinfo` with NULL hints gives only `inet` and `inet6` entries
+    // (`socket_util.c:2229-2259`, `2420-2452`).
+    let atoms = AtomTable::new();
+    let atom = |name| Term::Atom(atoms.put(name).unwrap());
+    let families = [
+        (libc::AF_INET, atom("inet")),
+        (libc::AF_INET6, atom("inet6")),
+        (libc::AF_LOCAL, atom("local")),
+        (libc::AF_UNSPEC, atom("unspec")),
+        (200, Term::Integer(200)),
+    ];
+    for (family, term) in families {
+        assert_eq!(domain(&atoms, family).unwrap(), term);
+    }
+    let types = [
+        (0, atom("any")),
+        (libc::SOCK_STREAM, atom("stream")),
+        (libc::SOCK_DGRAM, atom("dgram")),
+        (libc::SOCK_RAW, atom("raw")),
+        (libc::SOCK_SEQPACKET, atom("seqpacket")),
+        (libc::SOCK_RDM, atom("rdm")),
+        (200, Term::Integer(200)),
+    ];
+    for (value, term) in types {
+        assert_eq!(socktype(&atoms, value).unwrap(), term);
+    }
+}
+
+#[test]
+fn stops_the_run_at_a_socket_address_of_another_family() {
+    let atoms = AtomTable::new();
+    let mut local = header(4, libc::AF_LOCAL);
+    local.extend_from_slice(b"/x");
+    for bytes in [vec![0], local, header(8, libc::AF_INET6)] {
+        assert_eq!(
+            encode_sockaddr(&atoms, &bytes).unwrap_err().to_string(),
+            "prim_net:nif_getaddrinfo/3 socket address of this family is not supported"
+        );
+    }
+}
+
+#[test]
+fn checks_the_names_of_nif_getaddrinfo() {
+    // `prim_net:getaddrinfo/2` passes only lists and `undefined`, and not
+    // two `undefined` names (`prim_net.erl:448-452`), so only a direct call
+    // reaches these checks (`prim_net_nif.c:1221-1233`).
+    let atoms = AtomTable::new();
+    let atom = |name| Term::Atom(atoms.put(name).unwrap());
+    let badarg = format!("{:?}", BifResult::badarg());
+    let run =
+        |host: &Term, service: &Term| format!("{:?}", getaddrinfo(&atoms, host, service).unwrap());
+    let host = Term::list_from(b"127.0.0.1".map(|byte| Term::Integer(byte.into())));
+    assert_eq!(run(&atom("x"), &host), badarg);
+    assert_eq!(run(&host, &atom("x")), badarg);
+    assert_eq!(run(&atom("undefined"), &atom("undefined")), badarg);
+}
+
+#[test]
+fn decodes_no_socket_address_without_its_fields() {
+    // `prim_socket:enc_sockaddr/1` adds each missing field of an `inet` or
+    // an `inet6` address and checks the path of a `local` address, so only
+    // a direct call reaches these checks (`socket_util.c:495-499`,
+    // `1139-1152`, `1259-1310`, `1404-1409`).
+    let atoms = AtomTable::new();
+    let atom = |name| Term::Atom(atoms.put(name).unwrap());
+    let map = |pairs: Vec<(Term, Term)>| Term::Map(Map::from_pairs(pairs, &atoms).unwrap());
+    let family = |name| (atom("family"), atom(name));
+    let port = (atom("port"), Term::Integer(80));
+    let cases = [
+        Term::Integer(1),
+        map(vec![]),
+        map(vec![family("inet")]),
+        map(vec![family("inet"), port.clone()]),
+        map(vec![family("inet6"), port]),
+        map(vec![family("local"), (atom("path"), Term::Integer(1))]),
+    ];
+    for case in cases {
+        assert_eq!(sockaddr(&atoms, &case).unwrap(), None, "{case:?}");
+    }
+}
+
+#[test]
+fn runs_the_service_lookups_on_a_dirty_io_thread() {
+    // `nif_getservbyname/2` and `nif_getservbyport/2` have the flag
+    // `ERL_NIF_DIRTY_JOB_IO_BOUND` (`prim_net_nif.c:5014-5015`).
+    for name in ["nif_getservbyname", "nif_getservbyport"] {
+        let binding = BINDINGS
+            .iter()
+            .find(|binding| binding.name == name)
+            .unwrap();
+        assert!(matches!(binding.job, Job::IoBound), "{name}");
+    }
+    let protocol = Term::list_from(b"tcp".map(|byte| Term::Integer(byte.into())));
+    let result = getservbyport(&Term::Integer(80), &protocol);
+    assert!(matches!(result, Ok(BifResult::Dirty(_))));
+}
