@@ -323,7 +323,7 @@ fn read_request(
 }
 
 /// Check the socket state before a read, as `recv_check_entry` does
-/// (`unix_socket_syncio.c:9869-9935`): `{error, closed}`, and
+/// (`unix_socket_syncio.c:9869-9931`): `{error, closed}`, and
 /// `{error, {invalid, state}}` with a current acceptor.
 ///
 /// # Errors
