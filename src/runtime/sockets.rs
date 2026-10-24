@@ -256,6 +256,8 @@ pub(super) struct SocketState {
     pub(super) write: u32,
     /// Whether the socket registry knows the socket.
     pub(super) registered: bool,
+    /// The value of the option `{otp, meta}`, as `meta.ref`.
+    pub(super) meta: Term,
     /// The process of the connect in progress and its reference, as
     /// `descP->connectorP`.
     pub(super) connector: Option<(ProcessId, Term)>,

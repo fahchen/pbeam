@@ -286,6 +286,20 @@ const OPTION_LEVELS: [(&str, [i32; 2], &Options); 5] = [
     ("tcp", [6, 6], &TCP_OPTIONS),
 ];
 
+/// Return the names `(Level, Option)` of the option `option` of the level
+/// number `level` on the host, as `lookupOpt` finds its entry
+/// (`prim_socket_nif.c:4424-4441`), or `None` for an option that the
+/// host does not have.
+pub(super) fn option_name(level: i32, option: i32) -> Option<(&'static str, &'static str)> {
+    let (name, _, table) = OPTION_LEVELS
+        .iter()
+        .find(|(_, numbers, _)| numbers[HOST] == level)?;
+    let (option, _) = table
+        .iter()
+        .find(|(_, numbers)| numbers[HOST] == Some(option))?;
+    Some((name, option))
+}
+
 /// The default protocols of `esock_supports_protocols`
 /// (`prim_socket_nif.c:5451-5503`), in source order: `SOL_IP` or
 /// `IPPROTO_IP`, `SOL_IPV6` or `IPPROTO_IPV6`, `IPPROTO_TCP`,

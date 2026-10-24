@@ -30,6 +30,7 @@ fn resource(scheduler: &mut Scheduler, change: impl FnOnce(&mut SocketState)) ->
         read: 0,
         write: 0,
         registered: false,
+        meta: Term::static_atom("undefined"),
         connector: None,
         acceptor: None,
         reader: None,

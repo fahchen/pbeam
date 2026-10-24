@@ -45,8 +45,22 @@ ifaddrs_text() ->
              call(fun() -> prim_net:getifaddrs(#{debug => false}) end),
              call(fun() -> prim_net:getifaddrs(#{debug => 1}) end),
              call(fun() -> prim_net:getifaddrs(#{netns => 1}) end)],
-    iolist_to_binary([[binary:encode_hex(term_to_binary(canonical(Case))), $\n]
+    iolist_to_binary([[binary:encode_hex(term_to_binary(canonical(unread(Case)))), $\n]
                       || Case <- Cases]).
+
+%% Give zero for the address of an `inet` `dstaddr` of an `inet6` entry:
+%% the `AF_UNSPEC` `ifa_dstaddr` of a macOS `utun` interface, of which ERTS
+%% reads the bytes past `sa_len` and PBeam gives zero (row "NIF stubs" of
+%% `docs/erts-differences.md`).
+unread({value, {ok, Entries}}) ->
+    {value, {ok, [unread_entry(Entry) || Entry <- Entries]}};
+unread(Case) ->
+    Case.
+
+unread_entry(#{addr := #{family := inet6}, dstaddr := #{family := inet} = Dst} = Entry) ->
+    Entry#{dstaddr := Dst#{addr := {0, 0, 0, 0}}};
+unread_entry(Entry) ->
+    Entry.
 
 %% Ask `nif_getifaddrs/1` for its debug trace.
 ifaddrs_debug() ->
