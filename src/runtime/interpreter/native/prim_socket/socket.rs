@@ -10,10 +10,11 @@
 //! sibling module `select`.
 
 use std::io;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
+use std::net::{Ipv4Addr, Ipv6Addr, Shutdown, SocketAddrV4, SocketAddrV6};
 use std::os::unix::ffi::OsStrExt;
 use std::sync::{Arc, Mutex};
 
+use nix::sys::socket::{SockaddrStorage, UnixAddr};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 mod options;
@@ -644,6 +645,58 @@ fn sockaddr_term(scheduler: &mut Scheduler, address: &SockAddr) -> Result<Term, 
     Ok(map(scheduler, entries))
 }
 
+/// Return the `sockaddr` map of the source address `from` of a received
+/// message, as `esock_encode_sockaddr` does (`socket_util.c:726-800`).
+/// `None`, the address of length 0 that `recvfrom(2)` gives on a stream
+/// socket, has the family `AF_UNSPEC` of the zeroed address and gives
+/// `#{family => unspec, addr => <<>>}` (`socket_util.c:777-787`,
+/// `2830-2859`).
+pub(super) fn source_term(
+    scheduler: &mut Scheduler,
+    from: Option<&SockaddrStorage>,
+) -> Result<Term, BeamError> {
+    let Some(from) = from else {
+        let family = domain_term(scheduler, libc::AF_UNSPEC)?;
+        let addr = Term::binary(Vec::new());
+        let entries = pairs(scheduler, &[("family", family), ("addr", addr)])?;
+        return Ok(map(scheduler, entries));
+    };
+    if let Some(address) = from.as_unix_addr() {
+        let family = domain_term(scheduler, libc::AF_UNIX)?;
+        let path = Term::binary(unix_path(address));
+        let entries = pairs(scheduler, &[("family", family), ("path", path)])?;
+        return Ok(map(scheduler, entries));
+    }
+    let address = from
+        .as_sockaddr_in()
+        .map(|address| SockAddr::from(SocketAddrV4::from(*address)))
+        .or_else(|| {
+            from.as_sockaddr_in6()
+                .map(|address| SockAddr::from(SocketAddrV6::from(*address)))
+        })
+        .expect("a socket of the family inet, inet6, or local");
+    sockaddr_term(scheduler, &address)
+}
+
+/// Return the path bytes of the received local address `address`, as
+/// `esock_encode_sockaddr_un` gives them (`socket_util.c:1458-1510`): the
+/// bytes before the first NUL, and on Linux each byte of an abstract name
+/// with its leading NUL.
+pub(super) fn unix_path(address: &UnixAddr) -> Vec<u8> {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    if let Some(name) = address.as_abstract() {
+        return [&[0], name].concat();
+    }
+    let path = address
+        .path()
+        .map(|path| path.as_os_str().as_bytes())
+        .unwrap_or_default();
+    path.split(|byte| *byte == 0)
+        .next()
+        .unwrap_or_default()
+        .to_vec()
+}
+
 /// Return the path bytes of a local address, as
 /// `esock_encode_sockaddr_un` gives them (`socket_util.c:1458-1510`): the
 /// bytes before the first NUL, and on Linux each byte of an abstract name
@@ -689,6 +742,82 @@ pub(super) fn sockname(scheduler: &mut Scheduler, socket: &Term) -> Result<BifRe
         Term::static_atom("ok"),
         address,
     ])))
+}
+
+/// Run `prim_socket:nif_peername(Socket)`, as `nif_peername` and
+/// `esock_peername` do (`prim_socket_nif.c:13626-13704`): `badarg` for a
+/// term that is not a socket, `{error, closed}` for a closing socket,
+/// `{error, Errno}` of `getpeername(2)`, and `{ok, SockAddr}`.
+///
+/// # Errors
+///
+/// A new atom in a full atom table gives the error of `AtomTable::put`.
+pub(super) fn peername(scheduler: &mut Scheduler, socket: &Term) -> Result<BifResult, BeamError> {
+    let Some((_, socket)) = socket_argument(scheduler, socket) else {
+        return Ok(BifResult::badarg());
+    };
+    let socket = lock(&socket);
+    if socket.read & (CLOSING | CLOSED) != 0 {
+        return Ok(closed());
+    }
+    let host = socket
+        .socket
+        .as_ref()
+        .expect("an open socket has a host socket");
+    let address = match host.peer_addr() {
+        Ok(address) => address,
+        Err(failure) => return errno_error(scheduler, &failure),
+    };
+    let address = sockaddr_term(scheduler, &address)?;
+    Ok(BifResult::Value(Term::tuple(vec![
+        Term::static_atom("ok"),
+        address,
+    ])))
+}
+
+/// Run `prim_socket:nif_shutdown(Socket, How)`, as `nif_shutdown`
+/// (`prim_socket_nif.c:7722-7761`), `ehow2how`
+/// (`prim_socket_nif.c:17232-17265`), and `esock_shutdown`
+/// (`prim_socket_nif.c:7767-7779`) do: `badarg` for a term that is not a
+/// socket, the exception `{invalid, {how, How}}` for a `How` other than
+/// `read`, `write`, and `read_write`, `{error, closed}` for a closing
+/// socket, `{error, Errno}` of `shutdown(2)`, and `ok`.
+///
+/// # Errors
+///
+/// A new atom in a full atom table gives the error of `AtomTable::put`.
+pub(super) fn shutdown(
+    scheduler: &mut Scheduler,
+    socket: &Term,
+    how: &Term,
+) -> Result<BifResult, BeamError> {
+    let Some((_, socket)) = socket_argument(scheduler, socket) else {
+        return Ok(BifResult::badarg());
+    };
+    let direction = match atom_name(scheduler, how) {
+        Some("read") => Shutdown::Read,
+        Some("write") => Shutdown::Write,
+        Some("read_write") => Shutdown::Both,
+        _ => {
+            let reason = Term::tuple(vec![atom(scheduler, "how")?, how.clone()]);
+            return Ok(BifResult::Raise {
+                class: ExceptionClass::Error,
+                reason: Term::tuple(vec![Term::static_atom("invalid"), reason]),
+            });
+        }
+    };
+    let socket = lock(&socket);
+    if socket.read & (CLOSING | CLOSED) != 0 {
+        return Ok(closed());
+    }
+    let host = socket
+        .socket
+        .as_ref()
+        .expect("an open socket has a host socket");
+    match host.shutdown(direction) {
+        Ok(()) => Ok(BifResult::Value(Term::static_atom("ok"))),
+        Err(failure) => errno_error(scheduler, &failure),
+    }
 }
 
 /// Run `prim_socket:nif_close(Socket)`, as `essio_close` does

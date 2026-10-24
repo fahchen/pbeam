@@ -1,7 +1,7 @@
-//! The bindings of `prim_socket:nif_send/4` and `nif_recv/4`
-//! (`prim_socket_nif.c:6440-6509`, `7056-7124`), with the Unix I/O backend
-//! `unix_essio` (`unix_socket_syncio.c:2996-3036`, `3796-3878`,
-//! `6809-7196`, `9869-10520`).
+//! The bindings of `prim_socket:nif_send/4`, `nif_sendto/5`, `nif_recv/4`,
+//! and `nif_recvfrom/4` (`prim_socket_nif.c:6440-6600`, `7056-7231`), with
+//! the Unix I/O backend `unix_essio` (`unix_socket_syncio.c:2996-3091`,
+//! `3796-3977`, `6809-7196`, `9869-10520`).
 //!
 //! A send or a receive that would block makes a one-shot select on the
 //! node poll thread, as `esock_select_write` and `esock_select_read` do, and
@@ -11,10 +11,12 @@
 
 use std::io;
 use std::os::fd::AsRawFd;
-use std::sync::MutexGuard;
+use std::sync::{Arc, Mutex, MutexGuard};
+
+use nix::sys::socket::SockaddrStorage;
 
 use super::select::{fd, monitor, select};
-use super::socket::{closed, errno_error, invalid, socket_argument};
+use super::socket::{closed, errno_error, invalid, sockaddr, socket_argument, source_term};
 use super::supports::atom;
 use super::*;
 use crate::runtime::resources::lock;
@@ -94,6 +96,58 @@ pub(super) fn send(
     flags: &Term,
     reference: &Term,
 ) -> Result<BifResult, BeamError> {
+    write(
+        scheduler,
+        "nif_send/4",
+        socket,
+        data,
+        None,
+        flags,
+        reference,
+    )
+}
+
+/// Run `prim_socket:nif_sendto(Socket, Data, Dest, Flags, Ref)`, as
+/// `nif_sendto` (`prim_socket_nif.c:6527-6600`) and `essio_sendto`
+/// (`unix_socket_syncio.c:3042-3091`) do: the results of [`send`], and
+/// `{invalid, sockaddr}` for a `Dest` that does not decode, which comes
+/// after the check of `Flags` and before the check of the socket state.
+///
+/// # Errors
+///
+/// The errors of [`send`], and a native `sockaddr` stops the run (see
+/// `socket::sockaddr`).
+pub(super) fn sendto(
+    scheduler: &mut Scheduler,
+    socket: &Term,
+    data: &Term,
+    destination: &Term,
+    flags: &Term,
+    reference: &Term,
+) -> Result<BifResult, BeamError> {
+    let destination = Some(destination);
+    write(
+        scheduler,
+        "nif_sendto/5",
+        socket,
+        data,
+        destination,
+        flags,
+        reference,
+    )
+}
+
+/// Run the send of `nif_send/4` or, with a `destination`, of
+/// `nif_sendto/5`, which calls `sendto(2)` (`unix_socket_syncio.c:3079-3087`).
+fn write(
+    scheduler: &mut Scheduler,
+    name: &str,
+    socket: &Term,
+    data: &Term,
+    destination: Option<&Term>,
+    flags: &Term,
+    reference: &Term,
+) -> Result<BifResult, BeamError> {
     let Some((key, socket)) = socket_argument(scheduler, socket) else {
         return Ok(BifResult::badarg());
     };
@@ -105,6 +159,13 @@ pub(super) fn send(
         Err(true) => return integer_range(scheduler, flags),
         Err(false) => return Ok(BifResult::badarg()),
     };
+    let destination = match destination {
+        Some(address) => match sockaddr(scheduler, address)? {
+            Some(address) => Some(address),
+            None => return Ok(invalid(atom(scheduler, "sockaddr")?)),
+        },
+        None => None,
+    };
     let caller = scheduler.current_process().id;
     let mut state = lock(&socket);
     if state.write & (CLOSING | CLOSED) != 0 {
@@ -115,16 +176,20 @@ pub(super) fn send(
         return invalid_state(scheduler);
     }
     if state.writer.as_ref().is_some_and(|(pid, _)| *pid != caller) {
-        return Err(error(
-            "prim_socket:nif_send/4: a second writer process is not supported".to_owned(),
-        ));
+        return Err(error(format!(
+            "prim_socket:{name}: a second writer process is not supported"
+        )));
     }
     state.counters.write_tries += 1;
     let host = state
         .socket
         .as_ref()
         .expect("an open socket has a host socket");
-    match host.send_with_flags(bytes, flags) {
+    let sent = match &destination {
+        Some(address) => host.send_to_with_flags(bytes, address, flags),
+        None => host.send_with_flags(bytes, flags),
+    };
+    match sent {
         Ok(written) if written < bytes.len() => Ok(send_retry(
             scheduler,
             state,
@@ -194,6 +259,107 @@ fn send_retry(
     })
 }
 
+/// The checked arguments of `nif_recv/4` and `nif_recvfrom/4`.
+struct ReadRequest {
+    key: Reference,
+    socket: Arc<Mutex<SocketState>>,
+    zero: bool,
+    size: u64,
+    flags: i32,
+    caller: ProcessId,
+}
+
+/// Check the arguments of `nif_recv/4` or `nif_recvfrom/4`, as `nif_recv`
+/// (`prim_socket_nif.c:7056-7124`) and `nif_recvfrom`
+/// (`prim_socket_nif.c:7153-7195`) do, and return the request or the
+/// result of a failed check.
+///
+/// # Errors
+///
+/// A `Length` above the `ssize_t` range stops the run: ERTS then gives a
+/// term made of the integer itself (`prim_socket_nif.c:7092-7094`,
+/// `7193-7195`).
+fn read_request(
+    scheduler: &mut Scheduler,
+    name: &str,
+    socket: &Term,
+    length: &Term,
+    flags: &Term,
+    reference: &Term,
+) -> Result<Result<ReadRequest, BifResult>, BeamError> {
+    let Some((key, socket)) = socket_argument(scheduler, socket) else {
+        return Ok(Err(BifResult::badarg()));
+    };
+    let zero = match reference {
+        Term::Reference(_) => false,
+        Term::Atom(name) if scheduler.atoms.name_of(name) == "zero" => true,
+        _ => return Ok(Err(BifResult::badarg())),
+    };
+    let size = match length {
+        Term::Integer(value) => Some(u64::try_from(*value).ok()),
+        Term::BigInt(value) => Some(u64::try_from(value.as_ref()).ok()),
+        _ => None,
+    };
+    let (size, flags) = match (size, int(flags)) {
+        (None, _) | (_, Err(false)) => return Ok(Err(BifResult::badarg())),
+        (Some(None), _) => return integer_range(scheduler, length).map(Err),
+        (_, Err(true)) => return integer_range(scheduler, flags).map(Err),
+        (Some(Some(size)), Ok(flags)) => (size, flags),
+    };
+    if i64::try_from(size).is_err() {
+        return Err(error(format!(
+            "prim_socket:{name}: the length {size} above the ssize_t range is not supported"
+        )));
+    }
+    let caller = scheduler.current_process().id;
+    Ok(Ok(ReadRequest {
+        key,
+        socket,
+        zero,
+        size,
+        flags,
+        caller,
+    }))
+}
+
+/// Check the socket state before a read, as `recv_check_entry` does
+/// (`unix_socket_syncio.c:9869-9931`): `{error, closed}`, and
+/// `{error, {invalid, state}}` with a current acceptor.
+///
+/// # Errors
+///
+/// A call of another process while a reader waits stops the run: PBeam
+/// has no reader queue.
+fn read_entry(
+    scheduler: &mut Scheduler,
+    state: &SocketState,
+    name: &str,
+    caller: ProcessId,
+) -> Result<Option<BifResult>, BeamError> {
+    if state.read & (CLOSING | CLOSED) != 0 {
+        return Ok(Some(closed()));
+    }
+    if state.acceptor.is_some() {
+        return invalid_state(scheduler).map(Some);
+    }
+    if state.reader.as_ref().is_some_and(|(pid, _)| *pid != caller) {
+        return Err(error(format!(
+            "prim_socket:{name}: a second reader process is not supported"
+        )));
+    }
+    Ok(None)
+}
+
+/// Return the buffer size of a read of `size` bytes: the default
+/// `rBufSz` for 0 (`unix_socket_syncio.c:3900`).
+fn buffer_size(size: u64) -> usize {
+    if size == 0 {
+        RECV_BUFFER_SIZE
+    } else {
+        usize::try_from(size).expect("a length in the ssize_t range")
+    }
+}
+
 /// Run `prim_socket:nif_recv(Socket, Length, Flags, Ref)`, as `nif_recv`
 /// (`prim_socket_nif.c:7056-7124`) and `essio_recv`
 /// (`unix_socket_syncio.c:3796-3878`, `9869-10410`) do: `badarg` for a term
@@ -220,49 +386,23 @@ pub(super) fn recv(
     flags: &Term,
     reference: &Term,
 ) -> Result<BifResult, BeamError> {
-    let Some((key, socket)) = socket_argument(scheduler, socket) else {
-        return Ok(BifResult::badarg());
+    let request = match read_request(scheduler, "nif_recv/4", socket, length, flags, reference)? {
+        Ok(request) => request,
+        Err(result) => return Ok(result),
     };
-    let zero = match reference {
-        Term::Reference(_) => false,
-        Term::Atom(name) if scheduler.atoms.name_of(name) == "zero" => true,
-        _ => return Ok(BifResult::badarg()),
-    };
-    let size = match length {
-        Term::Integer(value) => Some(u64::try_from(*value).ok()),
-        Term::BigInt(value) => Some(u64::try_from(value.as_ref()).ok()),
-        _ => None,
-    };
-    let (size, flags) = match (size, int(flags)) {
-        (None, _) | (_, Err(false)) => return Ok(BifResult::badarg()),
-        (Some(None), _) => return integer_range(scheduler, length),
-        (_, Err(true)) => return integer_range(scheduler, flags),
-        (Some(Some(size)), Ok(flags)) => (size, flags),
-    };
-    if i64::try_from(size).is_err() {
-        return Err(error(format!(
-            "prim_socket:nif_recv/4: the length {size} above the ssize_t range is not supported"
-        )));
-    }
-    let caller = scheduler.current_process().id;
+    let ReadRequest {
+        key,
+        socket,
+        zero,
+        size,
+        flags,
+        caller,
+    } = request;
     let mut state = lock(&socket);
-    if state.read & (CLOSING | CLOSED) != 0 {
-        return Ok(closed());
+    if let Some(result) = read_entry(scheduler, &state, "nif_recv/4", caller)? {
+        return Ok(result);
     }
-    if state.acceptor.is_some() {
-        drop(state);
-        return invalid_state(scheduler);
-    }
-    if state.reader.as_ref().is_some_and(|(pid, _)| *pid != caller) {
-        return Err(error(
-            "prim_socket:nif_recv/4: a second reader process is not supported".to_owned(),
-        ));
-    }
-    let buffer_size = if size == 0 {
-        RECV_BUFFER_SIZE
-    } else {
-        usize::try_from(size).expect("a length in the ssize_t range")
-    };
+    let buffer_size = buffer_size(size);
     let mut buffer = vec![0; buffer_size];
     state.counters.read_tries += 1;
     let stream = state.kind == libc::SOCK_STREAM;
@@ -277,11 +417,7 @@ pub(super) fn recv(
         nix::sys::socket::MsgFlags::from_bits_retain(flags),
     );
     let read = match received.map_err(io::Error::from) {
-        Ok(0) if stream => {
-            state.counters.read_fails += 1;
-            state.reader = None;
-            return Ok(closed());
-        }
+        Ok(0) if stream => return Ok(end_of_stream(state)),
         Ok(read) => read,
         Err(failure) => return recv_fail(scheduler, state, &failure, zero, key, caller, reference),
     };
@@ -319,6 +455,89 @@ pub(super) fn recv(
         Term::static_atom("ok"),
         data,
     ])))
+}
+
+/// Run `prim_socket:nif_recvfrom(Socket, Length, Flags, Ref)`, as
+/// `nif_recvfrom` (`prim_socket_nif.c:7153-7231`) and `essio_recvfrom`
+/// (`unix_socket_syncio.c:3888-3977`) do: the argument errors and the state
+/// checks of [`recv`]; `{ok, {SockAddr, Data}}` with one message, which
+/// the buffer of `Length` bytes truncates; `{error, closed}` at the end of
+/// a stream; `select` with the read select, or `timeout` for the `Ref`
+/// `zero`, after `EAGAIN`; and `{error, Errno}`. The option `select_read`
+/// that gives `{select_read, ...}` is not supported, so it keeps its
+/// default `false` (`prim_socket_nif.c:17070`).
+///
+/// # Errors
+///
+/// The errors of [`recv`], and `Flags` other than 0 stop the run.
+pub(super) fn recvfrom(
+    scheduler: &mut Scheduler,
+    socket: &Term,
+    length: &Term,
+    flags: &Term,
+    reference: &Term,
+) -> Result<BifResult, BeamError> {
+    let name = "nif_recvfrom/4";
+    let request = match read_request(scheduler, name, socket, length, flags, reference)? {
+        Ok(request) => request,
+        Err(result) => return Ok(result),
+    };
+    let ReadRequest {
+        key,
+        socket,
+        zero,
+        size,
+        flags,
+        caller,
+    } = request;
+    let mut state = lock(&socket);
+    if let Some(result) = read_entry(scheduler, &state, name, caller)? {
+        return Ok(result);
+    }
+    // `essio_recvfrom` calls `recvfrom(2)` with the flags
+    // (unix_socket_syncio.c:3925-3927). The safe `recvfrom` of nix has no
+    // flags, and the safe `recvmsg` of nix gives an address that it does not
+    // initialize when the kernel gives none, as on a TCP socket.
+    if flags != 0 {
+        return Err(error(format!(
+            "prim_socket:{name}: the flags {flags} are not supported: see \"NIF stubs\" in docs/erts-differences.md"
+        )));
+    }
+    let mut buffer = vec![0; buffer_size(size)];
+    state.counters.read_tries += 1;
+    let stream = state.kind == libc::SOCK_STREAM;
+    let host = state
+        .socket
+        .as_ref()
+        .expect("an open socket has a host socket");
+    let received = nix::sys::socket::recvfrom::<SockaddrStorage>(host.as_raw_fd(), &mut buffer);
+    let (read, from) = match received.map_err(io::Error::from) {
+        Ok((0, _)) if stream => return Ok(end_of_stream(state)),
+        Ok(received) => received,
+        Err(failure) => return recv_fail(scheduler, state, &failure, zero, key, caller, reference),
+    };
+    buffer.truncate(read);
+    let length = read as u64;
+    let counters = &mut state.counters;
+    counters.read_pkg += 1;
+    counters.read_byte += length;
+    counters.read_pkg_max = counters.read_pkg_max.max(length);
+    state.reader = None;
+    drop(state);
+    let from = source_term(scheduler, from.as_ref())?;
+    Ok(BifResult::Value(Term::tuple(vec![
+        Term::static_atom("ok"),
+        Term::tuple(vec![from, Term::binary(buffer)]),
+    ])))
+}
+
+/// Count the failed read at the end of a stream, release the current
+/// reader, and return `{error, closed}`, as `recv_check_result` does
+/// (`unix_socket_syncio.c:9949-9969`).
+fn end_of_stream(mut state: MutexGuard<'_, SocketState>) -> BifResult {
+    state.counters.read_fails += 1;
+    state.reader = None;
+    closed()
 }
 
 /// Handle the failed read `failure`, as `recv_check_fail`
