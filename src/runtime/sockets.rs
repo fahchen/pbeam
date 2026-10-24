@@ -12,7 +12,8 @@ use std::sync::{Arc, Mutex};
 
 use socket2::Socket;
 
-use crate::term::{ProcessId, Reference};
+use crate::runtime::scheduler::poll::{Direction, NodePoll};
+use crate::term::{ProcessId, Reference, Term};
 
 /// The state `ESOCK_STATE_BOUND` of a read or write state (`prim_socket_nif.c:4829-4890`).
 pub(super) const BOUND: u32 = 1 << 0;
@@ -20,6 +21,17 @@ pub(super) const BOUND: u32 = 1 << 0;
 pub(super) const CLOSING: u32 = 1 << 1;
 /// The state `ESOCK_STATE_CLOSED` of a read or write state (`prim_socket_nif.c:4829-4890`).
 pub(super) const CLOSED: u32 = 1 << 2;
+/// The read state `ESOCK_STATE_LISTENING` (`prim_socket_int.h:44`).
+pub(super) const LISTENING: u32 = 1 << 3;
+/// The read state `ESOCK_STATE_ACCEPTING` (`prim_socket_int.h:45`).
+pub(super) const ACCEPTING: u32 = 1 << 4;
+/// The write state `ESOCK_STATE_CONNECTING` (`prim_socket_int.h:46`).
+pub(super) const CONNECTING: u32 = 1 << 5;
+/// The write state `ESOCK_STATE_CONNECTED` (`prim_socket_int.h:47`).
+pub(super) const CONNECTED: u32 = 1 << 6;
+/// The state `ESOCK_STATE_SELECTED` of a read or write state
+/// (`prim_socket_int.h:53`). ERTS does not clear it after a select.
+pub(super) const SELECTED: u32 = 1 << 7;
 
 /// The sockets of the node and the global data of `prim_socket_nif.c`
 /// that PBeam reads.
@@ -55,26 +67,52 @@ impl Sockets {
     /// close the socket (`unix_socket_syncio.c:9696-9723`). For the owner,
     /// clear the owner, and close the socket when it is still open. A close
     /// closes the host socket, adds the states `closing` and `closed`, and
-    /// counts the socket out. Return the registry to send
-    /// `{'$socket', del, Socket}` to, if the registry knows the socket and
-    /// the socket closed.
+    /// counts the socket out. A close also stops the selects (see
+    /// [`SocketState::stop`]). The exit of the connector or the current
+    /// acceptor clears it. Return the requestors to abort, and the registry
+    /// to send `{'$socket', del, Socket}` to, if the registry knows the
+    /// socket and the socket closed.
     pub(super) fn monitor_down(
         &mut self,
         reference: Reference,
         pid: ProcessId,
-    ) -> Option<ProcessId> {
-        let socket = self.by_reference.get(&reference)?;
+        poll: &NodePoll,
+    ) -> (Vec<(ProcessId, Term)>, Option<ProcessId>) {
+        let Some(socket) = self.by_reference.get(&reference) else {
+            return (Vec::new(), None);
+        };
         let mut socket = socket.lock().unwrap_or_else(|poison| poison.into_inner());
+        // The connector and the current acceptor: clear the state and keep
+        // the select, as `essio_down` and `essio_down_acceptor` do
+        // (`unix_socket_syncio.c:9762-9780`, `10583-10608`).
+        if socket
+            .connector
+            .as_ref()
+            .is_some_and(|(owner, _)| *owner == pid)
+        {
+            socket.connector = None;
+            socket.write &= !CONNECTING;
+        }
+        if socket
+            .acceptor
+            .as_ref()
+            .is_some_and(|(owner, _)| *owner == pid)
+        {
+            socket.acceptor = None;
+            socket.read &= !ACCEPTING;
+        }
         if socket.closer == Some(pid) {
             socket.closer = None;
         } else if socket.owner == Some(pid) {
             socket.owner = None;
             if socket.read & (CLOSING | CLOSED) != 0 {
-                return None;
+                return (Vec::new(), None);
             }
         } else {
-            return None;
+            return (Vec::new(), None);
         }
+        // A close cancels each select before the fd closes.
+        let aborted = socket.stop(poll);
         socket.socket = None;
         socket.read |= CLOSING | CLOSED;
         socket.write |= CLOSING | CLOSED;
@@ -82,7 +120,7 @@ impl Sockets {
         let registered = socket.registered;
         drop(socket);
         self.counters.count(domain, kind, protocol, -1);
-        registered.then_some(self.registry).flatten()
+        (aborted, registered.then_some(self.registry).flatten())
     }
 }
 
@@ -166,6 +204,39 @@ pub(super) struct SocketState {
     pub(super) write: u32,
     /// Whether the socket registry knows the socket.
     pub(super) registered: bool,
+    /// The process of the connect in progress and its reference, as
+    /// `descP->connectorP`.
+    pub(super) connector: Option<(ProcessId, Term)>,
+    /// The current acceptor and its reference, as
+    /// `descP->currentAcceptorP`.
+    pub(super) acceptor: Option<(ProcessId, Term)>,
+}
+
+impl SocketState {
+    /// Cancel both selects of the socket on `poll` and clear the connect
+    /// in progress and the current acceptor, as `do_stop` does at a close
+    /// (`unix_socket_syncio.c:4600-4730`). Return the requestors whose
+    /// select was still active: each gets `{'$socket', Socket, abort,
+    /// {Ref, closed}}` (`esock_stop_handle_current`).
+    pub(super) fn stop(&mut self, poll: &NodePoll) -> Vec<(ProcessId, Term)> {
+        let fd = std::os::fd::AsRawFd::as_raw_fd(
+            self.socket
+                .as_ref()
+                .expect("a socket that closes has a host socket"),
+        );
+        let mut aborted = Vec::new();
+        for (requestor, direction) in [
+            (self.connector.take(), Direction::Write),
+            (self.acceptor.take(), Direction::Read),
+        ] {
+            if poll.cancel_select(fd, direction)
+                && let Some(requestor) = requestor
+            {
+                aborted.push(requestor);
+            }
+        }
+        aborted
+    }
 }
 
 #[cfg(test)]

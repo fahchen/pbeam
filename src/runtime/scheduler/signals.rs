@@ -98,11 +98,22 @@ impl Scheduler {
     /// does (`prim_socket_nif.c:7698-7702`). The load callback made both
     /// atoms (`prim_socket_nif.c:18842-18857`), so their `put` finds them.
     pub(in crate::runtime) fn socket_owner_down(&mut self, owner: ProcessId, socket: Reference) {
-        let registry = lock(&self.node().resources.kind::<Sockets>()).monitor_down(socket, owner);
+        let (aborted, registry) = lock(&self.node().resources.kind::<Sockets>()).monitor_down(
+            socket,
+            owner,
+            &self.node().poll,
+        );
+        let tag = Term::Atom(self.atoms.put("$socket").expect("made at load"));
+        let socket = Term::tuple(vec![tag.clone(), Term::Reference(socket)]);
+        for (requestor, reference) in aborted {
+            let abort = Term::Atom(self.atoms.put("abort").expect("made at load"));
+            let closed = Term::static_atom("closed");
+            let info = Term::tuple(vec![reference, closed]);
+            let message = Term::tuple(vec![tag.clone(), socket.clone(), abort, info]);
+            self.send_message(owner, requestor, message);
+        }
         if let Some(registry) = registry {
-            let tag = Term::Atom(self.atoms.put("$socket").expect("made at load"));
             let del = Term::Atom(self.atoms.put("del").expect("made at load"));
-            let socket = Term::tuple(vec![tag.clone(), Term::Reference(socket)]);
             self.send_message(owner, registry, Term::tuple(vec![tag, del, socket]));
         }
     }

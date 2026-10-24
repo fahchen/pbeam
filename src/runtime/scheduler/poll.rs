@@ -30,11 +30,15 @@ use std::{
 use super::node::Node;
 use crate::{
     runtime::host::input::{self, Readiness},
-    term::PortId,
+    term::{PortId, ProcessId, Term},
 };
 
 /// No scheduler has the read select of fd 0.
 const NO_SCHEDULER: usize = usize::MAX;
+
+/// The scheduler index of an fd of a socket select: the thread itself
+/// sends its message (see [`NodePoll::select`]).
+const SELECT: usize = usize::MAX;
 
 /// The direction of a ready fd.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -86,6 +90,9 @@ pub(in crate::runtime) struct NodePoll {
     released: Box<[Condvar]>,
     /// The scheduler that has the read select of fd 0, or [`NO_SCHEDULER`].
     stdin: AtomicUsize,
+    /// The one-shot socket selects: each fd and direction with the process
+    /// that gets the select message, and the message.
+    selects: Mutex<HashMap<Ready, (ProcessId, Term)>>,
 }
 
 impl NodePoll {
@@ -101,6 +108,7 @@ impl NodePoll {
             served: (0..count).map(|_| Mutex::default()).collect(),
             released: (0..count).map(|_| Condvar::new()).collect(),
             stdin: AtomicUsize::new(NO_SCHEDULER),
+            selects: Mutex::default(),
         })
     }
 
@@ -185,6 +193,35 @@ impl NodePoll {
                 node.wake_scheduler(index);
             }
         }
+    }
+
+    /// Add the one-shot select of `fd` in `direction`, as `enif_select`
+    /// does (`erl_check_io.c:1561-1790`): when the fd is ready, the thread
+    /// removes the select and sends `message` to `pid`. A new select of the
+    /// same fd and direction replaces the old one.
+    pub(in crate::runtime) fn select(
+        &self,
+        fd: c_int,
+        direction: Direction,
+        pid: ProcessId,
+        message: Term,
+    ) {
+        self.selects().insert((fd, direction), (pid, message));
+        self.changed();
+    }
+
+    /// Remove the select of `fd` in `direction`, as `enif_select` with
+    /// `ERL_NIF_SELECT_CANCEL` does. Return true when the select was still
+    /// active, the `ERL_NIF_SELECT_*_CANCELLED` bit; false when its message
+    /// went out or no select was made.
+    pub(in crate::runtime) fn cancel_select(&self, fd: c_int, direction: Direction) -> bool {
+        self.selects().remove(&(fd, direction)).is_some()
+    }
+
+    fn selects(&self) -> MutexGuard<'_, HashMap<Ready, (ProcessId, Term)>> {
+        self.selects
+            .lock()
+            .expect("the poll select table is not poisoned")
     }
 
     /// Return the port that the poll waits to read `fd` for: the port that
@@ -326,6 +363,13 @@ fn run(node: &Weak<Node>, mut reader: UnixStream) {
         }
         let mut woken = Vec::new();
         for (entry, index) in found {
+            if index == SELECT {
+                // A cancel after the wait removed the select: no message.
+                if let Some((pid, message)) = strong.poll.selects().remove(&entry) {
+                    strong.send_message(0, None, message, pid, None);
+                }
+                continue;
+            }
             served[index].ready.push(entry);
             served[index].disarmed.push(entry);
             if !strong.poll.marks[index].swap(true, Ordering::SeqCst) {
@@ -403,6 +447,7 @@ fn collect(poll: &NodePoll) -> Vec<Owned> {
     if stdin != NO_SCHEDULER && armed(&entry, stdin) {
         owned.push((entry, stdin));
     }
+    owned.extend(poll.selects().keys().map(|&entry| (entry, SELECT)));
     owned
 }
 
