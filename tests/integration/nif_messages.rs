@@ -82,14 +82,11 @@ fn gives_the_erts_results_of_the_process_message_and_mutex_enif_calls() {
 fn stops_the_run_for_a_message_that_no_env_has() {
     // ERTS reads the handle as a term, which is undefined behavior.
     let path = build("bad_message");
-    for kind in [9, 10] {
-        let failure =
-            execute("call", &path, vec![Term::Integer(kind), Term::Integer(1)]).unwrap_err();
-        assert!(
-            failure
-                .to_string()
-                .ends_with(", which its env does not have"),
-            "{kind}: {failure}"
-        );
-    }
+    let failure = execute("call", &path, vec![Term::Integer(9), Term::Integer(1)]).unwrap_err();
+    assert!(
+        failure
+            .to_string()
+            .ends_with("enif_send sent the term 0x7ff0, which its env does not have"),
+        "{failure}"
+    );
 }

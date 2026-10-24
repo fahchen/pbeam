@@ -8,7 +8,7 @@
 //! `enif_alloc_env` and `enif_send` with a NULL env get no env of the call.
 //! The scheduler of the caller sends the messages when the call returns.
 //! Thus a message of a dirty NIF arrives when the NIF returns, where ERTS
-//! puts it into the queue of the receiver at once (`erl_nif.c:1080`).
+//! puts it into the queue of the receiver at once (`erl_nif.c:1077-1080`).
 //!
 //! An `ErlNifPid` holds the number of a local process, not a handle of an
 //! env, because the C code keeps it after the call (`erl_nif.h:201-203`).
@@ -37,6 +37,8 @@ pub(super) struct Context {
     atoms: Arc<AtomTable>,
     /// The node of the process of the call.
     node: Arc<Node>,
+    /// The address of the env of the call.
+    env: usize,
     /// The messages of `enif_send`: the receiver and the message, in send
     /// order.
     sends: Vec<(ProcessId, Term)>,
@@ -53,23 +55,26 @@ pub(super) struct Ended {
     pub(super) unsupported: Option<String>,
 }
 
-/// Run `call` in a new context with the atom table `atoms` and the node
-/// `node`, and return its result and the end of the context.
+/// Run `call` in a new context with the atom table `atoms`, the node
+/// `node`, and the env `env` of the call, and return its result and the end
+/// of the context.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let (value, ended) = within(&atoms, &node, || 7);
+/// let (value, ended) = within(&atoms, &node, &raw mut env, || 7);
 /// assert!(ended.sends.is_empty());
 /// ```
 pub(super) fn within<T>(
     atoms: &Arc<AtomTable>,
     node: &Arc<Node>,
+    env: *mut Env,
     call: impl FnOnce() -> T,
 ) -> (T, Ended) {
     CONTEXT.set(Some(Context {
         atoms: Arc::clone(atoms),
         node: Arc::clone(node),
+        env: env.expose_provenance(),
         sends: Vec::new(),
         unsupported: None,
     }));
@@ -183,14 +188,15 @@ pub unsafe extern "C" fn enif_is_process_alive(_env: *mut Env, pid: *const ErlNi
 }
 
 /// `int enif_send(ErlNifEnv*, const ErlNifPid*, ErlNifEnv*, ERL_NIF_TERM)`:
-/// send the term `msg` of `msg_env`, or of `env` when `msg_env` is NULL, to
-/// the process `to_pid` and return 1, or return 0 when the process does not
-/// exist or exits (`erl_nif.c:860-1094`). The scheduler of the caller sends
-/// the message when the call returns.
+/// send the term `msg` of `msg_env`, or of the env of the call when
+/// `msg_env` is NULL, to the process `to_pid` and return 1, or return 0
+/// when the process does not exist or exits (`erl_nif.c:860-1094`). ERTS
+/// copies a term of the call also when `env` is NULL (`erl_nif.c:965-993`).
+/// The scheduler of the caller sends the message when the call returns.
 ///
-/// A NULL `env` and a NULL `msg_env`, or a `msg` that the env does not
-/// have, break the C API contract, and the call gives a runtime error. On a
-/// thread that runs no NIF call, the call returns 0.
+/// A `msg` that the env does not have breaks the C API contract, and the
+/// call gives a runtime error. On a thread that runs no NIF call, the call
+/// returns 0.
 ///
 /// # Safety
 ///
@@ -199,7 +205,7 @@ pub unsafe extern "C" fn enif_is_process_alive(_env: *mut Env, pid: *const ErlNi
 /// the C API requires.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn enif_send(
-    env_pointer: *mut Env,
+    _env: *mut Env,
     to_pid: *const ErlNifPid,
     msg_env: *mut Env,
     msg: NifTerm,
@@ -209,17 +215,15 @@ pub unsafe extern "C" fn enif_send(
     if !alive(target) {
         return 0;
     }
-    let source = if msg_env.is_null() {
-        env_pointer
-    } else {
-        msg_env
-    };
-    // SAFETY: a non-NULL `source` is a valid env, as the C API requires.
-    let term = (!source.is_null())
-        .then(|| unsafe { super::env::env(source) }.get(msg))
-        .flatten();
     with_context(|context| {
-        let Some(term) = term else {
+        let source = if msg_env.is_null() {
+            std::ptr::with_exposed_provenance_mut(context.env)
+        } else {
+            msg_env
+        };
+        // SAFETY: `source` is an env of `enif_alloc_env` or the env of the
+        // running call, which is alive until the call returns.
+        let Some(term) = unsafe { super::env::env(source) }.get(msg) else {
             context.unsupported.get_or_insert_with(|| {
                 format!("enif_send sent the term {msg:#x}, which its env does not have")
             });

@@ -20,7 +20,8 @@
  *    7  enif_self of an env of enif_alloc_env: is_null, or not_null
  *    8  enif_send of Arg to the pid of the load callback: the send result
  *    9  enif_send of a term that no env has: undefined in ERTS
- *   10  enif_send with a NULL env and a NULL message env: undefined in ERTS
+ *   10  enif_send of Arg to the caller with a NULL env and no message env:
+ *       the send result
  *
  * dirty_probe:
  *    0  enif_send of {dirty, Arg} in an env of enif_alloc_env with a NULL

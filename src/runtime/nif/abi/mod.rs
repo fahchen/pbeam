@@ -130,12 +130,13 @@ impl Function {
         let argv = env.handles();
         // The arity of a BEAM function is at most 255.
         let argc = c_int::try_from(argv.len()).unwrap_or(c_int::MAX);
-        let (handle, ended) = process::within(caller.atoms, caller.node, || {
+        let pointer = &raw mut env;
+        let (handle, ended) = process::within(caller.atoms, caller.node, pointer, || {
             // SAFETY: `fptr` is the function of a library that `open`
             // loaded, and the library stays open while `self` is alive. The
             // env is alive and unique for the call, and `argv` holds `argc`
             // handles of it, as the C API gives a NIF its arguments.
-            unsafe { (self.fptr)(&raw mut env, argc, argv.as_ptr()) }
+            unsafe { (self.fptr)(pointer, argc, argv.as_ptr()) }
         });
         let result = match ended.unsupported {
             Some(text) => Err(error(text)),

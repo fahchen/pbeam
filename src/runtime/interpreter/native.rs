@@ -469,7 +469,7 @@ fn run_extension(
 
 /// Send the messages of the NIF call `called` from the current process, in
 /// their order, and return its result. ERTS puts each message into the
-/// queue of its receiver in the `enif_send` call (`erl_nif.c:1080`), and a
+/// queue of its receiver in the `enif_send` call (`erl_nif.c:1077-1080`), and a
 /// process sees its messages only after the NIF returns, so a message of a
 /// NIF on a scheduler arrives in the same order. A message to a process
 /// that exited since the call is dropped, as for a process that exits

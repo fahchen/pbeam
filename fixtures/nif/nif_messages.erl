@@ -22,9 +22,10 @@ results(Path) ->
     Mutexes = [probe(4, 0), probe(5, 0), probe(6, 0)],
     AllocSelf = probe(7, 0),
     Loader = [probe(8, loaded), flush()],
+    NoEnv = [probe(10, {no_env, [1]}), flush()],
     Dirty = [dirty_probe(0, 5), flush(), dirty_probe(1, echo()), echoed(),
              dirty_probe(1, Dead), dirty_probe(1, self)],
-    [ToSelf, Received, Pids, Others, Order, Mutexes, AllocSelf, Loader, Dirty].
+    [ToSelf, Received, Pids, Others, Order, Mutexes, AllocSelf, Loader, NoEnv, Dirty].
 
 %% Load the library `Path` and return each case whose result is not the
 %% result of the pinned ERTS, as {Index, Result, Expected}.
@@ -70,4 +71,5 @@ expected() ->
      [ok, ok, ok],
      is_null,
      [1, [loaded]],
+     [1, [{no_env, [1]}]],
      [{1, 1}, [{dirty, 5}], 1, {dirty, 0}, 0, not_pid]].
