@@ -399,7 +399,7 @@ fn gives_snifs_and_the_tuple_items_of_system_info_as_pinned_erts() {
                 {cpu_topology}, {internal_cpu_topology, defined}, \
                 {internal_cpu_topology, detected}, {internal_cpu_topology, used}, \
                 {memory_checker, test_leak}, {memory_checker, x}, {memory_checker}, \
-                {allocator}, {allocator_sizes}, {memory_internal, a}, {foo, 1}, {}]]]]), \
+                {allocator}, {allocator_sizes}, {memory_internal, a}, {foo, 1}, {1, a}, {}]]]]), \
                 halt().";
     let arguments = ["-noshell", "-eval", eval];
     let mut reference = Command::new("erl");
