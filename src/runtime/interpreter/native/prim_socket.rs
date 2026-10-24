@@ -16,6 +16,7 @@ use crate::runtime::resources::lock;
 use crate::runtime::sockets::Sockets;
 
 mod atoms;
+mod io;
 mod select;
 mod socket;
 mod supports;
@@ -102,6 +103,34 @@ pub(super) const BINDINGS: &[Binding] = &[
         job: Job::Normal,
         run: |scheduler, arguments| {
             socket::open_4(
+                scheduler,
+                &arguments[0],
+                &arguments[1],
+                &arguments[2],
+                &arguments[3],
+            )
+        },
+    },
+    Binding {
+        name: "nif_recv",
+        arity: 4,
+        job: Job::Normal,
+        run: |scheduler, arguments| {
+            io::recv(
+                scheduler,
+                &arguments[0],
+                &arguments[1],
+                &arguments[2],
+                &arguments[3],
+            )
+        },
+    },
+    Binding {
+        name: "nif_send",
+        arity: 4,
+        job: Job::Normal,
+        run: |scheduler, arguments| {
+            io::send(
                 scheduler,
                 &arguments[0],
                 &arguments[1],

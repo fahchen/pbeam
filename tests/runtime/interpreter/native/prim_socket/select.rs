@@ -35,6 +35,9 @@ fn resource(scheduler: &mut Scheduler, socket: Socket, read: u32, acceptor: Opti
             registered: false,
             connector: None,
             acceptor: acceptor.map(|reference| (owner, reference)),
+            reader: None,
+            writer: None,
+            counters: IoCounters::default(),
         },
     );
     Term::Reference(reference)

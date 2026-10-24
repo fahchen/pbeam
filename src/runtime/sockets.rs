@@ -103,6 +103,23 @@ impl Sockets {
             socket.acceptor = None;
             socket.read &= !ACCEPTING;
         }
+        // The current reader and writer: clear them and keep the select, as
+        // `essio_down_reader` and `essio_down_writer` do
+        // (`unix_socket_syncio.c:10632-10716`).
+        if socket
+            .reader
+            .as_ref()
+            .is_some_and(|(owner, _)| *owner == pid)
+        {
+            socket.reader = None;
+        }
+        if socket
+            .writer
+            .as_ref()
+            .is_some_and(|(owner, _)| *owner == pid)
+        {
+            socket.writer = None;
+        }
         if socket.closer == Some(pid) {
             socket.closer = None;
         } else if socket.owner == Some(pid) {
@@ -184,6 +201,39 @@ impl Counters {
     }
 }
 
+/// The read and write counters of a socket of `esock_socket_info_counters`
+/// (`prim_socket_nif.c:4920-4990`). The I/O backend never adds to
+/// `read_waits`, so PBeam has no field for it.
+#[derive(Debug, Default, Clone, Copy)]
+pub(super) struct IoCounters {
+    /// `readByteCnt`.
+    pub(super) read_byte: u64,
+    /// `readFails`.
+    pub(super) read_fails: u64,
+    /// `readPkgCnt`.
+    pub(super) read_pkg: u64,
+    /// `readPkgMax`.
+    pub(super) read_pkg_max: u64,
+    /// `readPkgMaxCnt`, the bytes of the read in progress.
+    pub(super) read_pkg_max_count: u64,
+    /// `readTries`.
+    pub(super) read_tries: u64,
+    /// `writeByteCnt`.
+    pub(super) write_byte: u64,
+    /// `writeFails`.
+    pub(super) write_fails: u64,
+    /// `writePkgCnt`.
+    pub(super) write_pkg: u64,
+    /// `writePkgMax`.
+    pub(super) write_pkg_max: u64,
+    /// `writePkgMaxCnt`, the bytes of the write in progress.
+    pub(super) write_pkg_max_count: u64,
+    /// `writeTries`.
+    pub(super) write_tries: u64,
+    /// `writeWaits`.
+    pub(super) write_waits: u64,
+}
+
 /// One socket of `prim_socket:nif_open/4`, as the fields of
 /// `ESockDescriptor` that PBeam reads.
 #[derive(Debug)]
@@ -212,32 +262,38 @@ pub(super) struct SocketState {
     /// The current acceptor and its reference, as
     /// `descP->currentAcceptorP`.
     pub(super) acceptor: Option<(ProcessId, Term)>,
+    /// The current reader and its reference, as `descP->currentReaderP`.
+    pub(super) reader: Option<(ProcessId, Term)>,
+    /// The current writer and its reference, as `descP->currentWriterP`.
+    pub(super) writer: Option<(ProcessId, Term)>,
+    /// The read and write counters.
+    pub(super) counters: IoCounters,
 }
 
 impl SocketState {
-    /// Cancel both selects of the socket on `poll` and clear the connect
-    /// in progress and the current acceptor, as `do_stop` does at a close
+    /// Cancel both selects of the socket on `poll` and clear the current
+    /// writer, the connect in progress, the current reader, and the current
+    /// acceptor, as `do_stop` does at a close
     /// (`unix_socket_syncio.c:4600-4730`). Return the requestors whose
-    /// select was still active: each gets `{'$socket', Socket, abort,
-    /// {Ref, closed}}` (`esock_stop_handle_current`).
+    /// select was still active, in this order: each gets `{'$socket',
+    /// Socket, abort, {Ref, closed}}` (`esock_stop_handle_current`).
     pub(super) fn stop(&mut self, poll: &NodePoll) -> Vec<(ProcessId, Term)> {
         let fd = std::os::fd::AsRawFd::as_raw_fd(
             self.socket
                 .as_ref()
                 .expect("a socket that closes has a host socket"),
         );
-        let mut aborted = Vec::new();
-        for (requestor, direction) in [
-            (self.connector.take(), Direction::Write),
-            (self.acceptor.take(), Direction::Read),
-        ] {
-            if poll.cancel_select(fd, direction)
-                && let Some(requestor) = requestor
-            {
-                aborted.push(requestor);
-            }
-        }
-        aborted
+        let write = poll.cancel_select(fd, Direction::Write);
+        let read = poll.cancel_select(fd, Direction::Read);
+        [
+            (self.writer.take(), write),
+            (self.connector.take(), write),
+            (self.reader.take(), read),
+            (self.acceptor.take(), read),
+        ]
+        .into_iter()
+        .filter_map(|(requestor, cancelled)| requestor.filter(|_| cancelled))
+        .collect()
     }
 }
 
