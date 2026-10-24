@@ -430,8 +430,13 @@ fn sets_and_gets_the_host_socket_options_as_pinned_erts() {
     // `esock_setopt_multicast_if`, `esock_getopt_multicast_if`, and
     // `esock_setopt_in_update_membership` (prim_socket_nif.c:8728-8834,
     // 8941-8954, 11219-11259, 12638-12669, 13009-13048), the get of an
-    // option without a get handler (prim_socket_nif.c:12234-12236), and the
-    // options that the host does not support. The host options differ
+    // option without a get handler (prim_socket_nif.c:12234-12236),
+    // `esock_setopt_tos` and `esock_getopt_tos` (prim_socket_nif.c:8757-8775,
+    // 12679-12697, 16087-16344, 16637-16816), on Linux the string, domain,
+    // protocol, and IPv6 membership handlers (prim_socket_nif.c:8538-8545,
+    // 8961-9027, 11297-11338, 12259-12268, 12456-12476, 12569-12600,
+    // 12741-12752, 13422-13451), and the options that the host does not
+    // support. The host options differ
     // between Linux and macOS, so the test compares the two runs on the
     // host.
     let (reference, status, node) = run_kernel_boot("sockopt_host", false, &["{sockopt_host,"]);
