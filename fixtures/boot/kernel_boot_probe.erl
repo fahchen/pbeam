@@ -864,7 +864,7 @@ sockopt_otp() ->
 %% unmap/1 replaces each map with its sorted list of pairs.
 unmap(M) when is_map(M) -> {map, lists:sort(unmap(maps:to_list(M)))};
 unmap(T) when is_tuple(T) -> list_to_tuple(unmap(tuple_to_list(T)));
-unmap(L) when is_list(L) -> [unmap(E) || E <- L];
+unmap([H | T]) -> [unmap(H) | unmap(T)];
 unmap(Other) -> Other.
 
 flush_recv(S) ->
