@@ -437,6 +437,60 @@ pub(super) fn next_turn(
     Ok((Turn::Trap(last, end, accum, got, program), reductions))
 }
 
+/// Count the objects of the `ordered_set` table `table` for which `spec`
+/// gives `true`, as `db_select_count_tree_common` does
+/// (`erl_db_tree.c:1690-1765`): an impossible key counts nothing, a bound
+/// key reads only its object and charges no reduction, and another key
+/// walks down from the greatest key of the range. Return the count and the
+/// number of objects that the walk read. The walk does not trap after
+/// 1000 objects as ERTS does (row "ETS tables" in
+/// `docs/erts-differences.md`).
+///
+/// # Errors
+///
+/// Return a runtime error when a comparison meets two alias references.
+pub(super) fn count(
+    atoms: &AtomTable,
+    table: &Table,
+    spec: &MatchSpec,
+) -> Result<(usize, i64), BeamError> {
+    let keypos = usize::try_from(table.keypos())
+        .ok()
+        .filter(|&keypos| keypos > 0)
+        .unwrap_or(usize::MAX);
+    let range = key_range(atoms, spec, keypos)?;
+    let mut walk = Walk {
+        atoms,
+        spec,
+        key: key_index(table),
+        end: None,
+        chunk: 0,
+        got: 0,
+        accum: Term::nil(),
+        max: i64::MAX,
+        last: None,
+    };
+    let reductions = match &range {
+        KeyRange::Impossible => 0,
+        KeyRange::Bound(key) => {
+            if let Some(object) = table.ordered_get(atoms, key)? {
+                walk.visit(object, false)?;
+            }
+            0
+        }
+        KeyRange::Partial { .. } | KeyRange::Unbound => {
+            let (after, end) = bounds(atoms, table, &range, false)?;
+            walk.end = end;
+            walk.run(table, after.as_ref(), false)?;
+            i64::MAX - walk.max
+        }
+    };
+    let count = (walk.accum.proper_list().into_iter().flatten())
+        .filter(|found| **found == Term::static_atom("true"))
+        .count();
+    Ok((count, reductions))
+}
+
 /// The end of a turn of a select delete.
 pub(super) enum DeleteTurn {
     /// Return the number of deleted objects.

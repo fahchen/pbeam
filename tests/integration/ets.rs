@@ -709,6 +709,18 @@ fn runs_the_select_and_iteration_bifs_as_pinned_erts() {
 }
 
 #[test]
+fn runs_select_count_slot_and_rename_as_pinned_erts() {
+    // `ets_probe:rename_slot_count/0`: `ets:select_count/2`, `ets:slot/2`,
+    // and `ets:rename/2` on each table type, with the access and `badarg`
+    // cases of erl_db.c:2444-2547, 3739-3760, and 4096-4137.
+    let beams = ["erlang", "ets", "lists"].map(pinned_beam);
+    let mut modules: Vec<&[u8]> = beams.iter().map(Vec::as_slice).collect();
+    modules.push(ETS_PROBE);
+    let program = BeamProgram::load(&modules).unwrap();
+    assert_probe_matches_erts(&program, "rename_slot_count");
+}
+
+#[test]
 fn transfers_tables_to_heirs_and_receivers_as_pinned_erts() {
     // `ets_probe:heir_transfer/0` and `give_away/0`: the exit of an owner
     // gives each table to its live heir before the 'DOWN' message
