@@ -53,7 +53,7 @@ active() ->
     Send("d"),
     Once = [Next(), Next(), prim_inet:getopts(S, [active])],
     ok = prim_inet:setopts(S, [{active, 2}]),
-    Two = [prim_inet:getopts(S, [active]), Next(), Send("e"), Next(), Next(), Next(),
+    Two = [Next(), prim_inet:getopts(S, [active]), Send("e"), Next(), Next(), Next(),
            prim_inet:getopts(S, [active])],
     Negative = [prim_inet:setopts(S, [{active, -5}]), Next(), prim_inet:getopts(S, [active])],
     Count = [prim_inet:setopts(S, [{active, 32767}]), prim_inet:setopts(S, [{active, 1}]),
