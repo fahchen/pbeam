@@ -6566,8 +6566,9 @@ pub(super) fn pre_loaded(scheduler: &mut Scheduler) -> Result<BifResult, BeamErr
 /// (`erl_bif_info.c:5918-5945`, `5986-6030`) do. A `Module` that is not an
 /// atom or that names no loaded module raises `badarg`. The key `module`
 /// returns `Module`, `md5` the MD5 of the module, `functions` the functions
-/// in code order, and
-/// `nifs` the functions of its NIF shared library or `[]`. A term that is
+/// in code order, `nifs` the functions of its NIF shared library or `[]`,
+/// `attributes` and `compile` the terms of the `Attr` and `CInf` chunks or
+/// `[]`, `native_addresses` `[]`, and `native` `false`. A term that is
 /// not a key of `get_module_info/3`
 /// (`md5`, `exports`, `functions`, `nifs`, `attributes`, `compile`,
 /// `native_addresses`, `native`, or `module`) raises `badarg`. The caller
@@ -6587,9 +6588,10 @@ pub(super) fn pre_loaded(scheduler: &mut Scheduler) -> Result<BifResult, BeamErr
 ///
 /// # Errors
 ///
-/// The keys `exports`, `attributes`, `compile`, `native_addresses`, and
-/// `native` are
-/// the runtime error `erlang:get_module_info/2 key K is not implemented`.
+/// The key `exports` is the runtime error
+/// `erlang:get_module_info/2 key exports is not implemented`. A chunk term
+/// that PBeam cannot hold gives the runtime error of
+/// `erlang:binary_to_term/2`.
 /// The key `nifs` of a module with a linked static or extension library is
 /// a runtime error. A new
 /// `capability_denied` atom in a full atom table gives the error of
@@ -6618,9 +6620,7 @@ const MODULE_INFO_MISSING_KEY: &str = "exports";
 /// name, as for `erlang:get_module_info/2`.
 ///
 /// PBeam cannot give the key `exports`, which needs the order of the ERTS
-/// export table, and the keys `attributes` and `compile`, which need the
-/// chunks of the beam file that the loader does not keep (row "Module
-/// information" of `docs/erts-differences.md`). Thus the call of a loaded
+/// export table (row "Module information" of `docs/erts-differences.md`). Thus the call of a loaded
 /// module stops the run with the runtime error
 /// `erlang:get_module_info/1 key exports is not implemented`, as
 /// `erlang:get_module_info/2` stops at a key that it does not implement.
@@ -6656,7 +6656,7 @@ pub(super) fn get_module_info_1(
 }
 
 /// Run the key of `erlang:get_module_info/2` that `bif` names, for the
-/// runtime error of a key that PBeam does not implement yet.
+/// runtime error of the key `exports`, which PBeam does not implement.
 fn get_module_info_key(
     context: &mut BifContext<'_>,
     module: &Term,
@@ -6725,16 +6725,29 @@ fn get_module_info_key(
             .map(|function| (function.name.as_str(), function.arity))
             .rev();
         function_pairs(context, pairs)
-    } else if key.is_one_of(&[
-        "exports",
-        "attributes",
-        "compile",
-        "native_addresses",
-        "native",
-    ]) {
+    } else if key.is_static("attributes") || key.is_static("compile") {
+        // `attributes_for_module` and `compilation_info_for_module`
+        // (`erl_bif_info.c:5864-5909`) decode the chunk that the loader
+        // checked (`jit/asm_load.c:1080-1111`), and give `[]` for a module
+        // without the chunk.
+        let chunk = if key.is_static("attributes") {
+            &code.attributes
+        } else {
+            &code.compile_info
+        };
+        if chunk.is_empty() {
+            return Ok(Value(Term::nil()));
+        }
+        super::term::binary_to_term(context, &Term::binary(chunk.clone()), &Term::nil())
+    } else if key.is_static("native_addresses") {
+        // `native_addresses` (`erl_bif_info.c:5814-5820`).
+        Ok(Value(Term::nil()))
+    } else if key.is_static("native") {
+        // `has_native` (`erl_bif_info.c:5807-5812`).
+        Ok(Value(Term::static_atom("false")))
+    } else if key.is_static("exports") {
         Err(error(format!(
-            "erlang:{bif} key {} is not implemented",
-            context.scheduler.atoms.name_of(key)
+            "erlang:{bif} key exports is not implemented"
         )))
     } else {
         Ok(BifResult::badarg())

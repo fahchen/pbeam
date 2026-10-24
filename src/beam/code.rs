@@ -460,6 +460,12 @@ fn decode(
         .map(|data| attributes::native_declarations(data))
         .transpose()?
         .unwrap_or_default();
+    module.attributes = chunks
+        .get(b"Attr".as_slice())
+        .map_or_else(Vec::new, |data| data.to_vec());
+    let compile_info = chunks.get(b"CInf".as_slice()).copied().unwrap_or_default();
+    attributes::check_compile_info(compile_info)?;
+    module.compile_info = compile_info.to_vec();
     Ok(module)
 }
 

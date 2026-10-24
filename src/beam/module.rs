@@ -174,6 +174,14 @@ pub struct BeamModule {
     /// can check each declaration against the registered native functions
     /// before a run uses the module.
     pub(crate) native_declarations: Vec<(String, u32)>,
+    /// The bytes of the `Attr` chunk, or no bytes for a module without the
+    /// chunk. `erlang:get_module_info/2` decodes them for the key
+    /// `attributes` (`erl_bif_info.c:5864-5885`).
+    pub(crate) attributes: Vec<u8>,
+    /// The bytes of the `CInf` chunk, or no bytes for a module without the
+    /// chunk. `erlang:get_module_info/2` decodes them for the key `compile`
+    /// (`erl_bif_info.c:5887-5909`).
+    pub(crate) compile_info: Vec<u8>,
     /// The line table of the `Line` chunk, keyed by instruction index (see
     /// [`LineTable`]). A module with no `Line` chunk has an empty table, and
     /// each of its frames has the location `[]`.
@@ -559,6 +567,8 @@ impl BeamModule {
             tables,
             on_load: None,
             native_declarations: Vec::new(),
+            attributes: Vec::new(),
+            compile_info: Vec::new(),
             lines: LineTable::default(),
             records: Vec::new(),
         })
