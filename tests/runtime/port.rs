@@ -14,6 +14,7 @@ fn stops_the_read_select_of_an_fd_port_after_a_failed_read() {
         packets: Packets::new(0),
         binary: true,
         lines: None,
+        parallelism: false,
         program: Program::Fds(Fds {
             input: directory.as_raw_fd(),
             output: 1,

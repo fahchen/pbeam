@@ -125,6 +125,9 @@ pub(super) struct Spawn {
     /// (`ERTS_PORT_SFLG_LINEBUF_IO`, `erl_bif_port.c:1139-1142`), or `None`
     /// without them.
     pub(super) lines: Option<Lines>,
+    /// True with `{parallelism, true}` (`ERTS_PORT_SFLG_PARALLELISM`,
+    /// `erl_bif_port.c:913-919`), which `port_info/2` gives.
+    pub(super) parallelism: bool,
     /// The started program and the parent ends of its pipes, or the fds of
     /// an fd port.
     pub(super) program: Program,

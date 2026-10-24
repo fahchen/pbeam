@@ -6,6 +6,7 @@ use super::{
     Control, Inet, State, errno_reply, error_reply,
     stream::{Event, Receiver},
 };
+use crate::error::BeamError;
 
 impl Inet {
     /// Run `INET_REQ_CONNECT` of `caller` with `[T3, T2, T1, T0, 1, P1, P0,
@@ -21,11 +22,19 @@ impl Inet {
     ///
     /// ```rust,ignore
     /// let request = [0, 0, 3, 232, 1, 0, 80, 127, 0, 0, 1];
-    /// assert_eq!(port.connect(&request, caller), Control::Connect(1000));
-    /// assert_eq!(port.connect(&request, caller), Control::Reply(b"\0einval".to_vec()));
+    /// assert_eq!(port.connect(&request, caller)?, Control::Connect(1000));
+    /// assert_eq!(port.connect(&request, caller)?, Control::Reply(b"\0einval".to_vec()));
     /// ```
-    pub(super) fn connect(&mut self, request: &[u8], caller: crate::term::ProcessId) -> Control {
-        let reply = Control::Reply;
+    ///
+    /// # Errors
+    ///
+    /// The address family `local`, which PBeam does not run.
+    pub(super) fn connect(
+        &mut self,
+        request: &[u8],
+        caller: crate::term::ProcessId,
+    ) -> Result<Control, BeamError> {
+        let reply = |bytes| Ok(Control::Reply(bytes));
         match self.state {
             State::Closed => return reply(error_reply("exbadport")),
             State::Connected => return reply(error_reply("eisconn")),
@@ -39,7 +48,7 @@ impl Inet {
             return reply(error_reply("einval"));
         }
         let timeout = u32::from_be_bytes([t3, t2, t1, t0]);
-        let remote = match self.address(address) {
+        let remote = match self.address(address, "connect")? {
             Ok(remote) => remote,
             Err(bytes) => return reply(bytes),
         };
@@ -61,7 +70,7 @@ impl Inet {
             caller,
             timer: None,
         });
-        Control::Connect(timeout)
+        Ok(Control::Connect(timeout))
     }
 
     /// End the connect of a socket that the poll found ready for write, as

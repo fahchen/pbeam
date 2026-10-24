@@ -15,10 +15,8 @@ use std::sync::{LazyLock, RwLock};
 /// for the copy (`sysenv_rwmtx`, `sys_env.c:63-82`), which PBeam matches.
 ///
 /// ERTS gives the child of a port a new environment from this copy
-/// (`erts_osenv_export`). PBeam gives each child the `environ` of the
-/// process instead (see [`environ`]), so a child of PBeam does not see the
-/// change of `os:putenv/2` (row "OS environment" of
-/// `docs/erts-differences.md`).
+/// (`erts_osenv_export`), and PBeam does the same (see [`merged`]), so a
+/// child sees the change of `os:putenv/2`.
 static ENVIRONMENT: LazyLock<RwLock<Entries>> = LazyLock::new(|| RwLock::new(import()));
 
 /// The key and the value of one entry of the environment.
@@ -62,6 +60,36 @@ pub(crate) fn variable(key: &[u8]) -> Option<Vec<u8>> {
 /// ```
 pub(crate) fn variables() -> Entries {
     entries().clone()
+}
+
+/// One change of the `{env, Env}` option of `open_port/2`: a key and its
+/// value, or a key without a value to remove.
+pub(crate) type Change = (Vec<u8>, Option<Vec<u8>>);
+
+/// Return the environment that ERTS gives the child of a port: the copy
+/// of the run, with each change of the `{env, Env}` option of `open_port/2`
+/// in order, as `merge_global_environment` makes it
+/// (`erl_bif_port.c:1170-1211`). A change with a value sets the key, as
+/// `erts_osenv_put_term` does, and a change without a value removes the
+/// key, as `erts_osenv_unset_term` does (`erl_osenv.c:269-313`). The caller
+/// checks each key and value first.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // HOME=/root
+/// let changes = [(b"A".to_vec(), Some(b"1".to_vec())), (b"HOME".to_vec(), None)];
+/// assert_eq!(merged(&changes), [(b"A".to_vec(), b"1".to_vec())]);
+/// ```
+pub(crate) fn merged(changes: &[Change]) -> Entries {
+    let mut entries = variables();
+    for (key, value) in changes {
+        match value {
+            Some(value) => set(&mut entries, key, value.clone()),
+            None => entries.retain(|(name, _)| name != key),
+        }
+    }
+    entries
 }
 
 /// Set the environment variable `key` to `value`, as `os_putenv_2`

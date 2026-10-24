@@ -13,11 +13,14 @@ use std::{
     ffi::{CString, c_char, c_int, c_short},
     fs::File,
     io::{IoSlice, Write},
-    os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
+    os::{
+        fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
+        unix::ffi::OsStrExt,
+    },
     thread,
 };
 
-use super::{environment, errno::errno, input, output};
+use super::{errno::errno, input, output};
 
 /// The size of one read of the output pipe, as `ERTS_SYS_READ_BUF_SZ`
 /// (`sys_drivers.c:165`, `1336-1347`).
@@ -54,6 +57,17 @@ pub(crate) struct Streams {
     pub(crate) stderr_to_stdout: bool,
 }
 
+/// The environment and the working directory of a child: the `{env, Env}`
+/// and `{cd, Dir}` options of `open_port/2`.
+#[derive(Debug, Default)]
+pub(crate) struct Setting {
+    /// The key and the value of each variable of the environment of the
+    /// child (see [`super::environment::merged`]).
+    pub(crate) environment: Vec<(Vec<u8>, Vec<u8>)>,
+    /// The native path of `{cd, Dir}`, or `None` without it.
+    pub(crate) directory: Option<Vec<u8>>,
+}
+
 /// Why [`spawn`] did not start the program.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum SpawnError {
@@ -67,6 +81,11 @@ pub(crate) enum SpawnError {
     /// with the `errno` of the failed `execve` as its status
     /// (`erl_child_setup.c:361-369`).
     Start(c_int),
+    /// The child cannot change to the directory of `{cd, Dir}`: `chdir`
+    /// fails with this `errno`. The child of ERTS then writes
+    /// `spawn: Could not cd to Dir\r\n` to its fd 2 and exits with the
+    /// `errno` as its status (`erl_child_setup.c:302-306`).
+    Directory(c_int),
 }
 
 /// A program that [`spawn`] started, with the parent ends of its pipes.
@@ -101,8 +120,12 @@ pub(crate) struct Child {
 ///    (`sys_drivers.c:518-526`).
 /// 3. Start the child with `posix_spawn`: the pipes as its fds 0 and 1, or
 ///    3 and 4, the output pipe also as fd 2 with `stderr_to_stdout`, a new
-///    session (`setsid`), an empty signal mask, `argv[0]` the path, and the
-///    environment of the process (`erl_child_setup.c:310-369`).
+///    session (`setsid`), an empty signal mask, `argv[0]` `arg0`, the
+///    environment and the working directory of `setting`
+///    (`erl_child_setup.c:290-369`). Before the start, check that the
+///    child can change to the directory: `access(X_OK)` of the directory,
+///    and `ENOTDIR` for a file that is not a directory, the `errno` values
+///    of `chdir`.
 /// 4. Start the waiter thread, which reaps the child.
 ///
 /// A path or an argument ends at its first byte 0, as the C string that
@@ -112,11 +135,17 @@ pub(crate) struct Child {
 ///
 /// ```rust,ignore
 /// let streams = Streams { use_stdio: true, stderr_to_stdout: false };
-/// let child = spawn(b"/bin/sh", &[b"-c".to_vec(), b"echo hi".to_vec()], streams)?;
-/// assert_eq!(spawn(b"/nonexistent", &[], streams).unwrap_err(), SpawnError::Open(libc::ENOENT));
+/// let child = spawn(b"/bin/sh", b"sh", &[b"-c".to_vec(), b"echo hi".to_vec()], streams, &setting)?;
+/// assert_eq!(spawn(b"/nonexistent", b"x", &[], streams, &setting).unwrap_err(), SpawnError::Open(libc::ENOENT));
 /// ```
-pub(crate) fn spawn(path: &[u8], args: &[Vec<u8>], streams: Streams) -> Result<Child, SpawnError> {
-    start(path, path, args, streams)
+pub(crate) fn spawn(
+    path: &[u8],
+    arg0: &[u8],
+    args: &[Vec<u8>],
+    streams: Streams,
+    setting: &Setting,
+) -> Result<Child, SpawnError> {
+    start(path, arg0, args, streams, setting)
 }
 
 /// Start the command `command` of `open_port({spawn, Command}, Settings)`
@@ -129,11 +158,15 @@ pub(crate) fn spawn(path: &[u8], args: &[Vec<u8>], streams: Streams) -> Result<C
 /// # Examples
 ///
 /// ```rust,ignore
-/// let child = spawn_shell(b"echo hi", streams)?;
+/// let child = spawn_shell(b"echo hi", streams, &setting)?;
 /// ```
-pub(crate) fn spawn_shell(command: &[u8], streams: Streams) -> Result<Child, SpawnError> {
+pub(crate) fn spawn_shell(
+    command: &[u8],
+    streams: Streams,
+    setting: &Setting,
+) -> Result<Child, SpawnError> {
     let line = [b"exec ".as_slice(), command].concat();
-    start(b"/bin/sh", b"sh", &[b"-c".to_vec(), line], streams)
+    start(b"/bin/sh", b"sh", &[b"-c".to_vec(), line], streams, setting)
 }
 
 /// Start the program at the native path `path` with `argv[0]` `arg0` and
@@ -143,6 +176,7 @@ fn start(
     arg0: &[u8],
     args: &[Vec<u8>],
     streams: Streams,
+    setting: &Setting,
 ) -> Result<Child, SpawnError> {
     let (output, child_output) = pipe().map_err(SpawnError::Open)?;
     let (child_input, input) = pipe().map_err(SpawnError::Open)?;
@@ -150,6 +184,17 @@ fn start(
     let path = c_string(path);
     // SAFETY: `path` is a NUL-terminated string.
     os_result(unsafe { libc::access(path.as_ptr(), libc::X_OK) }).map_err(SpawnError::Open)?;
+    let directory = setting.directory.as_deref().map(c_string);
+    if let Some(directory) = &directory {
+        enterable(directory).map_err(SpawnError::Directory)?;
+    }
+    let environment: Vec<CString> = setting
+        .environment
+        .iter()
+        .map(|(key, value)| c_string(&[key.as_slice(), b"=", value].concat()))
+        .collect();
+    let mut envp: Vec<*const c_char> = environment.iter().map(|entry| entry.as_ptr()).collect();
+    envp.push(std::ptr::null());
     let arg0 = c_string(arg0);
     let args: Vec<CString> = args.iter().map(|arg| c_string(arg)).collect();
     let mut argv: Vec<*const c_char> = [arg0.as_ptr()]
@@ -165,7 +210,8 @@ fn start(
     if streams.stderr_to_stdout {
         targets.push((child_output.as_raw_fd(), libc::STDERR_FILENO));
     }
-    let os_pid = posix_spawn(&path, &argv, &targets).map_err(SpawnError::Start)?;
+    let os_pid = posix_spawn(&path, &argv, &envp, directory.as_ref(), &targets)
+        .map_err(SpawnError::Start)?;
     let status_writer = File::from(status_writer);
     thread::spawn(move || wait(os_pid, status_writer));
     Ok(Child {
@@ -386,24 +432,47 @@ fn c_string(bytes: &[u8]) -> CString {
     CString::new(&bytes[..end]).expect("the bytes before the first 0 have no 0")
 }
 
-/// Start `path` with `argv` and the environment of the process in a new
-/// session with an empty signal mask, after each `dup2` of `targets`
+/// Return `Ok` when a child can change to `directory`, or the `errno` that
+/// `chdir` gives: the `errno` of `stat`, `ENOTDIR` for a file that is not
+/// a directory, or the `errno` of `access(X_OK)`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(enterable(&c_string(b"/nonexistent")), Err(libc::ENOENT));
+/// ```
+fn enterable(directory: &CString) -> Result<(), c_int> {
+    let path = std::ffi::OsStr::from_bytes(directory.as_bytes());
+    match std::fs::metadata(path) {
+        Err(error) => Err(error.raw_os_error().unwrap_or(libc::ENOENT)),
+        Ok(metadata) if !metadata.is_dir() => Err(libc::ENOTDIR),
+        Ok(_) => nix::unistd::access(path, nix::unistd::AccessFlags::X_OK)
+            .map_err(|errno| errno as c_int),
+    }
+}
+
+/// Start `path` with `argv` and the environment `envp` in a new
+/// session with an empty signal mask, in the working directory
+/// `directory`, after each `dup2` of `targets`
 /// (source fd, child fd) in order. Return the pid of the child, or the
 /// `errno` that `posix_spawn` returns.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let pid = posix_spawn(&path, &argv, &[(child_output, 1), (child_input, 0)])?;
+/// let pid = posix_spawn(&path, &argv, &envp, None, &[(child_output, 1), (child_input, 0)])?;
 /// ```
 fn posix_spawn(
     path: &CString,
     argv: &[*const c_char],
+    envp: &[*const c_char],
+    directory: Option<&CString>,
     targets: &[(RawFd, RawFd)],
 ) -> Result<libc::pid_t, c_int> {
     // SAFETY: `init` initializes the zeroed action list and attributes,
     // which `destroy` frees after the call. Each `dup2` source is an open
-    // fd of this process. `argv` and the environment are null-terminated
+    // fd of this process. `directory` is a NUL-terminated string that
+    // lives during the call. `argv` and `envp` are null-terminated
     // arrays of NUL-terminated strings that live during the call, and
     // `posix_spawn` writes the pid only to `pid`.
     unsafe {
@@ -414,6 +483,9 @@ fn posix_spawn(
         libc::posix_spawnattr_init(&raw mut attributes);
         for &(source, target) in targets {
             libc::posix_spawn_file_actions_adddup2(&raw mut actions, source, target);
+        }
+        if let Some(directory) = directory {
+            libc::posix_spawn_file_actions_addchdir_np(&raw mut actions, directory.as_ptr());
         }
         libc::sigemptyset(&raw mut mask);
         libc::posix_spawnattr_setsigmask(&raw mut attributes, &raw const mask);
@@ -427,7 +499,7 @@ fn posix_spawn(
             &raw const actions,
             &raw const attributes,
             argv.as_ptr().cast(),
-            environment::environ().cast(),
+            envp.as_ptr().cast(),
         );
         libc::posix_spawn_file_actions_destroy(&raw mut actions);
         libc::posix_spawnattr_destroy(&raw mut attributes);

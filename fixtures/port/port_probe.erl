@@ -1,6 +1,6 @@
 -module(port_probe).
 -export([exit_status/0, output/0, command/0, close/0, owner_exit/0, epipe/0, errors/0,
-         nul_name/0, spawn/0, sigchld_ignored/0, packet/0, packet_errors/0, eof/0, lines/0, monitor/0, fd/3, fd_steal/2, unsupported/1, terminal/0, high_fd/0, fd_closed/0, costs/1, measure/2]).
+         nul_name/0, spawn/0, options/0, sigchld_ignored/0, packet/0, packet_errors/0, eof/0, lines/0, monitor/0, fd/3, fd_steal/2, unsupported/1, terminal/0, high_fd/0, fd_closed/0, costs/1, measure/2]).
 
 %% Each result replaces a port with the atom port, because the port numbers
 %% of ERTS and PBeam differ.
@@ -391,6 +391,56 @@ spawn() ->
             || Kind <- [{spawn, "true"}, {spawn, "tcp_inet"}, {spawn_driver, "tcp_inet"}], Vector <- [[], ["a"]]],
     [Name, EchoMessages, ArgsMessages, CatData, MissingStatus, TcpName, UdpName, Errors, flush()].
 
+%% The env, arg0, cd, hide, and parallelism options: the argv[0], the
+%% environment, and the directory that the program sees, the parallelism
+%% item of port_info/2, the exit status of a child that cannot enter its
+%% directory, and the badarg of each bad option.
+options() ->
+    process_flag(trap_exit, true),
+    os:putenv("PBEAM_PROBE_PUT", "p"),
+    os:putenv("PBEAM_PROBE_KEEP", "k"),
+    Show = "printf '%s %s %s %s %s %s %s' $0 ${PBEAM_A-unset} ${PBEAM_B-unset} "
+        "${PBEAM_PROBE_PUT-unset} ${PBEAM_PROBE_KEEP-unset} ${PBEAM_GONE-unset} $(pwd)",
+    Exe = open_port({spawn_executable, sh()},
+                    [binary, exit_status, {arg0, "zz"}, {args, ["-c", Show]},
+                     {env, [{"PBEAM_GONE", "x"}]},
+                     {env, [{"PBEAM_A", "1"}, {"PBEAM_PROBE_PUT", false}, {"PBEAM_B", []},
+                            {["PBEAM_", "C"], "c"}]},
+                     {cd, "/"}, hide, {parallelism, true}]),
+    Parallel = erlang:port_info(Exe, parallelism),
+    ExeMessages = [receive {Exe, M} -> M end || _ <- [1, 2]],
+    Shell = open_port({spawn, "sh -c 'pwd; echo $PBEAM_C'"},
+                      [binary, exit_status, {env, [{"PBEAM_C", "c"}]}, {cd, <<"/">>},
+                       {parallelism, false}]),
+    ShellParallel = erlang:port_info(Shell, parallelism),
+    ShellMessages = collect_status(Shell, <<>>),
+    Cat = cat(),
+    Default = erlang:port_info(Cat, parallelism),
+    true = port_close(Cat),
+    NoDir = open_port({spawn_executable, sh()},
+                      [binary, exit_status, stderr_to_stdout, {args, ["-c", "echo x"]},
+                       {cd, "/pbeam_no_such_dir"}]),
+    NoDirMessages = [receive {NoDir, M1} -> M1 end],
+    File = open_port({spawn, "true"}, [binary, exit_status, {cd, sh()}]),
+    FileMessages = [receive {File, M2} -> M2 end],
+    Errors = [catch_error(fun() -> open_port(Name, [binary | Opts]) end)
+              || {Name, Opts} <- [{{spawn, "true"}, [{env, [{"A=B", "1"}]}]},
+                                  {{spawn, "true"}, [{env, [{"A", 1}]}]},
+                                  {{spawn, "true"}, [{env, [{"A"}]}]},
+                                  {{spawn, "true"}, [{env, x}]},
+                                  {{spawn, "true"}, [{cd, 1}]},
+                                  {{spawn, "true"}, [{parallelism, x}]},
+                                  {{spawn, "true"}, [{arg0, "x"}]},
+                                  {{spawn_executable, sh()}, [{arg0, 1}]}]],
+    [Parallel, ExeMessages, ShellParallel, ShellMessages, Default, NoDirMessages, FileMessages, Errors,
+     flush()].
+
+collect_status(Port, Data) ->
+    receive
+        {Port, {data, More}} -> collect_status(Port, <<Data/binary, More/binary>>);
+        {Port, {exit_status, S}} -> [Data, S]
+    end.
+
 %% The port name of a binary path ends at its first byte 0.
 nul_name() ->
     Port = open_port({spawn_executable, <<"/bin/sh", 0, "junk">>}, [binary, {args, ["-c", "cat"]}]),
@@ -468,10 +518,10 @@ fd_closed() ->
 %% Each call stops the PBeam run with a runtime error.
 unsupported(line) ->
     open_port({spawn_executable, sh()}, [binary, {line, 1 bsl 31}]);
-unsupported(env) ->
-    open_port({spawn_executable, sh()}, [binary, {env, []}]);
-unsupported(hide) ->
-    open_port({spawn_executable, sh()}, [binary, hide]);
+unsupported(in) ->
+    open_port({spawn_executable, sh()}, [binary, in]);
+unsupported(out) ->
+    open_port({spawn_executable, sh()}, [binary, out]);
 unsupported(empty_line) ->
     open_port({spawn_executable, sh()}, [binary, {line, 1 bsl 32}]);
 unsupported(fd_list) ->
