@@ -1,5 +1,5 @@
 -module(external_term_probe).
--export([literals/0, options/0, decode/0, used/0, sizes/0, errors/0, decode_record/0, bits/0, iovec/0]).
+-export([literals/0, options/0, decode/0, used/0, sizes/0, errors/0, decode_record/0, decode_remote_pid/0, bits/0, iovec/0]).
 
 -define(VALUES,
         [0, 255, 256, -1, 1 bsl 40, -(1 bsl 40), 1 bsl 70, -(1 bsl 70),
@@ -89,6 +89,10 @@ check(F) ->
 %% well-formed `RECORD_EXT` of the record `m:r` with no fields.
 decode_record() ->
     binary_to_term(<<131, 67, 0, 0, 0, 0, 1, 119, 1, "m", 119, 1, "r">>).
+
+%% The pinned ERTS gives a pid of node 'a@b'.
+decode_remote_pid() ->
+    binary_to_term(<<131, 88, 119, 3, "a@b", 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1>>).
 
 bits() ->
     Tail = id(<<255, 7:3>>),
