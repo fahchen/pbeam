@@ -556,6 +556,10 @@ fn rejects_tables_that_pbeam_cannot_model() {
             "select_count/2 on a table that changed while the count trapped",
         ),
         (
+            "replace_changed",
+            "select_replace/2 on a table that changed while the replace trapped",
+        ),
+        (
             "match_changed",
             "match/2,3 or ets:select/2,3 on a table that changed while the match trapped",
         ),
@@ -722,6 +726,20 @@ fn runs_select_count_slot_and_rename_as_pinned_erts() {
     modules.push(ETS_PROBE);
     let program = BeamProgram::load(&modules).unwrap();
     assert_probe_matches_erts(&program, "rename_slot_count");
+}
+
+#[test]
+fn runs_select_replace_as_pinned_erts() {
+    // `ets_probe:select_replace/0`: `ets:select_replace/2` on each table
+    // type, with the `table_type` cause of a bag (erl_db.c:4197-4203), the
+    // key check of db_match_keeps_key (erl_db_util.c:1422-1507), the access
+    // and `badarg` cases, and the 1000-object trap of a hash and an
+    // `ordered_set` table (erl_db_hash.c:2810-2903, erl_db_tree.c:2336-2450).
+    let beams = ["erlang", "ets", "lists"].map(pinned_beam);
+    let mut modules: Vec<&[u8]> = beams.iter().map(Vec::as_slice).collect();
+    modules.push(ETS_PROBE);
+    let program = BeamProgram::load(&modules).unwrap();
+    assert_probe_matches_erts(&program, "select_replace");
 }
 
 #[test]

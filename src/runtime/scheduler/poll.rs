@@ -21,7 +21,7 @@ use std::{
     os::{fd::AsRawFd, unix::net::UnixStream},
     sync::{
         Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     thread,
     time::Duration,
@@ -30,11 +30,15 @@ use std::{
 use super::node::Node;
 use crate::{
     runtime::host::input::{self, Readiness},
-    term::PortId,
+    term::{PortId, ProcessId, Term},
 };
 
 /// No scheduler has the read select of fd 0.
 const NO_SCHEDULER: usize = usize::MAX;
+
+/// The scheduler index of an fd of a socket select: the thread itself
+/// sends its message (see [`NodePoll::select`]).
+const SELECT: usize = usize::MAX;
 
 /// The direction of a ready fd.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -47,6 +51,10 @@ pub(in crate::runtime) enum Direction {
 
 /// An fd and its direction.
 pub(in crate::runtime) type Ready = (c_int, Direction);
+
+/// A socket select: the process that gets the message, the message, and
+/// the serial number that tells a select from the select that replaced it.
+type Select = (ProcessId, Term, u64);
 
 /// The I/O state of one scheduler.
 #[derive(Debug, Default)]
@@ -86,6 +94,10 @@ pub(in crate::runtime) struct NodePoll {
     released: Box<[Condvar]>,
     /// The scheduler that has the read select of fd 0, or [`NO_SCHEDULER`].
     stdin: AtomicUsize,
+    /// The one-shot socket selects of each fd and direction.
+    selects: Mutex<HashMap<Ready, Select>>,
+    /// The serial number of the last select.
+    serial: AtomicU64,
 }
 
 impl NodePoll {
@@ -101,6 +113,8 @@ impl NodePoll {
             served: (0..count).map(|_| Mutex::default()).collect(),
             released: (0..count).map(|_| Condvar::new()).collect(),
             stdin: AtomicUsize::new(NO_SCHEDULER),
+            selects: Mutex::default(),
+            serial: AtomicU64::new(0),
         })
     }
 
@@ -185,6 +199,37 @@ impl NodePoll {
                 node.wake_scheduler(index);
             }
         }
+    }
+
+    /// Add the one-shot select of `fd` in `direction`, as `enif_select`
+    /// does (`erl_check_io.c:1561-1790`): when the fd is ready, the thread
+    /// removes the select and sends `message` to `pid`. A new select of the
+    /// same fd and direction replaces the old one.
+    pub(in crate::runtime) fn select(
+        &self,
+        fd: c_int,
+        direction: Direction,
+        pid: ProcessId,
+        message: Term,
+    ) {
+        let serial = self.serial.fetch_add(1, Ordering::Relaxed);
+        self.selects()
+            .insert((fd, direction), (pid, message, serial));
+        self.changed();
+    }
+
+    /// Remove the select of `fd` in `direction`, as `enif_select` with
+    /// `ERL_NIF_SELECT_CANCEL` does. Return true when the select was still
+    /// active, the `ERL_NIF_SELECT_*_CANCELLED` bit; false when its message
+    /// went out or no select was made.
+    pub(in crate::runtime) fn cancel_select(&self, fd: c_int, direction: Direction) -> bool {
+        self.selects().remove(&(fd, direction)).is_some()
+    }
+
+    fn selects(&self) -> MutexGuard<'_, HashMap<Ready, Select>> {
+        self.selects
+            .lock()
+            .expect("the poll select table is not poisoned")
     }
 
     /// Return the port that the poll waits to read `fd` for: the port that
@@ -297,7 +342,7 @@ fn run(node: &Weak<Node>, mut reader: UnixStream) {
         let Some(strong) = node.upgrade() else { return };
         let poll = &strong.poll;
         poll.changed.store(false, Ordering::SeqCst);
-        let owned = collect(poll);
+        let (owned, serials) = collect(poll);
         poll.sleeping.store(true, Ordering::SeqCst);
         if poll.changed.load(Ordering::SeqCst) {
             poll.sleeping.store(false, Ordering::SeqCst);
@@ -326,6 +371,18 @@ fn run(node: &Weak<Node>, mut reader: UnixStream) {
         }
         let mut woken = Vec::new();
         for (entry, index) in found {
+            if index == SELECT {
+                // A cancel after the collect removed the select, or a new
+                // select replaced it: the thread waits on the new one next.
+                let mut selects = strong.poll.selects();
+                if selects.get(&entry).map(|select| select.2) == serials.get(&entry).copied()
+                    && let Some((pid, message, _)) = selects.remove(&entry)
+                {
+                    drop(selects);
+                    strong.send_message(0, None, message, pid, None);
+                }
+                continue;
+            }
             served[index].ready.push(entry);
             served[index].disarmed.push(entry);
             if !strong.poll.marks[index].swap(true, Ordering::SeqCst) {
@@ -374,8 +431,9 @@ pub(in crate::runtime) fn wait(
 }
 
 /// Return the registered fds and fd 0, each with its scheduler, without
-/// the fds that a scheduler did not serve yet.
-fn collect(poll: &NodePoll) -> Vec<Owned> {
+/// the fds that a scheduler did not serve yet, and the fds of the socket
+/// selects with the serial number of each select.
+fn collect(poll: &NodePoll) -> (Vec<Owned>, HashMap<Ready, u64>) {
     let disarmed: Vec<Option<Vec<Ready>>> = (0..poll.served.len())
         .map(|index| {
             let mut served = poll.served(index);
@@ -403,7 +461,13 @@ fn collect(poll: &NodePoll) -> Vec<Owned> {
     if stdin != NO_SCHEDULER && armed(&entry, stdin) {
         owned.push((entry, stdin));
     }
-    owned
+    let serials: HashMap<Ready, u64> = poll
+        .selects()
+        .iter()
+        .map(|(&entry, select)| (entry, select.2))
+        .collect();
+    owned.extend(serials.keys().map(|&entry| (entry, SELECT)));
+    (owned, serials)
 }
 
 /// Read the wake bytes. The end of file comes only after the node ended,

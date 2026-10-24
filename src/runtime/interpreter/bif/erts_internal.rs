@@ -9,9 +9,10 @@ use crate::runtime::scheduler::{Accept, PTAB_SIZE, check_process_code_reply};
 use crate::runtime::{
     capability::{CapabilityKind, Operation},
     host::{
+        environment,
         errno::errno_id,
         filename_encoding, gethost,
-        spawn::{self, Fds, SpawnError, Streams},
+        spawn::{self, Fds, Setting, SpawnError, Streams},
     },
     port::{
         self, Driver, Input, Lines, Packets, Port, PortCell, Program, Spawn,
@@ -201,18 +202,11 @@ const PORT_REDUCTIONS: i32 = 40;
 
 /// The tuple options of `open_port/2` that ERTS accepts and PBeam does not
 /// support (`erl_bif_port.c:849-976`).
-const UNSUPPORTED_TUPLE_OPTIONS: [&str; 6] = [
-    "env",
-    "arg0",
-    "cd",
-    "parallelism",
-    "busy_limits_port",
-    "busy_limits_msgq",
-];
+const UNSUPPORTED_TUPLE_OPTIONS: [&str; 2] = ["busy_limits_port", "busy_limits_msgq"];
 
 /// The atom options of `open_port/2` that ERTS accepts and PBeam does not
 /// support (`erl_bif_port.c:979-1009`).
-const UNSUPPORTED_ATOM_OPTIONS: [&str; 3] = ["in", "out", "hide"];
+const UNSUPPORTED_ATOM_OPTIONS: [&str; 2] = ["in", "out"];
 
 /// The options of `open_port/2` that PBeam supports, as the fields of the
 /// ERTS `SysDriverOpts` and the port flags that `open_port` sets
@@ -239,6 +233,18 @@ struct PortSettings {
     /// The native bytes of the strings of `{args, Args}`, or `None`
     /// without it.
     args: Option<Vec<Vec<u8>>>,
+    /// The native bytes of `{arg0, A}`, or `None` without it
+    /// (`erl_bif_port.c:894-910`).
+    arg0: Option<Vec<u8>>,
+    /// The changes of the last `{env, Env}` in order: a key and its value,
+    /// or a key without a value to remove (`erl_bif_port.c:870-880`,
+    /// `1170-1211`).
+    environment: Vec<environment::Change>,
+    /// The `Dir` of the last `{cd, Dir}`, which `open_port` converts after
+    /// the name (`erl_bif_port.c:911-912`, `1094-1098`).
+    directory: Option<Term>,
+    /// `{parallelism, Boolean}`, false without it (`erl_bif_port.c:913-919`).
+    parallelism: bool,
 }
 
 /// Run `erts_internal:open_port(PortName, PortSettings)`, which
@@ -292,19 +298,35 @@ pub(super) fn open_port(
     let Some(settings) = port_settings(&context.scheduler.atoms, settings)? else {
         return Ok(Value(Term::static_atom("badopt")));
     };
-    let (path, args, is_command) = match (port_name(&context.scheduler.atoms, name), &settings.args)
-    {
-        (Some(PortName::Executable(path)), args) => (path, args.clone().unwrap_or_default(), false),
+    let atoms = &context.scheduler.atoms;
+    let has_argv = settings.args.is_some() || settings.arg0.is_some();
+    let name = match port_name(atoms, name) {
+        Some(name) if !has_argv || matches!(name, PortName::Executable(_)) => name,
         // An argument vector only with `spawn_executable`
         // (`erl_bif_port.c:1086-1092`).
-        (Some(_), Some(_)) | (None, _) => return Ok(Value(Term::static_atom("badarg"))),
-        (Some(PortName::Driver(driver)), None) => {
+        _ => return Ok(Value(Term::static_atom("badarg"))),
+    };
+    // `open_port` converts no `Dir` for `{cd, []}` (`erl_bif_port.c:1094-1098`).
+    let directory = match settings
+        .directory
+        .as_ref()
+        .filter(|directory| !directory.is_nil())
+    {
+        Some(directory) => match native_name(atoms, directory, false) {
+            Some(directory) => Some(directory),
+            None => return Ok(Value(Term::static_atom("badarg"))),
+        },
+        None => None,
+    };
+    let (path, args, is_command) = match name {
+        PortName::Executable(path) => (path, settings.args.clone().unwrap_or_default(), false),
+        PortName::Driver(driver) => {
             return open_driver_port(context, driver, &settings);
         }
-        (Some(PortName::Fd(input, output)), None) => {
+        PortName::Fd(input, output) => {
             return open_fd_port(context, input, output, &settings);
         }
-        (Some(PortName::Command(command)), None) => {
+        PortName::Command(command) => {
             // The first word of the command names a driver, or the spawn
             // driver runs the command (`io.c:599-622`).
             if matches!(
@@ -328,12 +350,17 @@ pub(super) fn open_port(
         return Ok(denied);
     }
     let lines = settings.line.map(line_size).transpose()?;
+    let setting = Setting {
+        environment: environment::merged(&settings.environment),
+        directory,
+    };
     let started = if is_command {
-        spawn::spawn_shell(&path, settings.streams)
+        spawn::spawn_shell(&path, settings.streams, &setting)
     } else if is_gethost(&path) {
         spawn::serve(move |input, output| gethost::serve(&args, input, output))
     } else {
-        spawn::spawn(&path, &args, settings.streams)
+        let arg0 = settings.arg0.as_deref().unwrap_or(&path);
+        spawn::spawn(&path, arg0, &args, settings.streams, &setting)
     };
     let child = match started {
         Ok(child) => child,
@@ -353,6 +380,7 @@ pub(super) fn open_port(
         packets: Packets::new(settings.packet),
         binary: settings.binary,
         lines,
+        parallelism: settings.parallelism,
         program: Program::Child(child),
         input: Input::Open,
     };
@@ -429,8 +457,12 @@ fn open_driver_port(
             packet: 0,
             line: None,
             args: None,
+            arg0: None,
+            directory: None,
+            parallelism: false,
+            ..
         }
-    );
+    ) && settings.environment.is_empty();
     if !only_binary {
         return Err(error(
             "unsupported open_port/2 settings of an inet driver port other than [binary]: see \"tcp_inet ports\" in docs/erts-differences.md",
@@ -523,6 +555,7 @@ fn open_fd_port(
         packets: Packets::new(settings.packet),
         binary: true,
         lines: settings.line.map(line_size).transpose()?,
+        parallelism: settings.parallelism,
         program: Program::Fds(Fds { input, output }),
         input: port_input,
     };
@@ -564,6 +597,10 @@ fn port_settings(atoms: &AtomTable, settings: &Term) -> Result<Option<PortSettin
         packet: 0,
         line: None,
         args: None,
+        arg0: None,
+        environment: Vec::new(),
+        directory: None,
+        parallelism: false,
     };
     for element in elements {
         let option = match element {
@@ -596,6 +633,30 @@ fn port_settings(atoms: &AtomTable, settings: &Term) -> Result<Option<PortSettin
                         _ => return Ok(None),
                     }
                     continue;
+                } else if option.is_static("env") {
+                    // A later `env` replaces an earlier one
+                    // (`erl_bif_port.c:870-880`).
+                    let Some(changes) = environment_changes(&pair[1]) else {
+                        return Ok(None);
+                    };
+                    result.environment = changes;
+                    continue;
+                } else if option.is_static("arg0") {
+                    let Some(arg0) = native_name(atoms, &pair[1], true) else {
+                        return Ok(None);
+                    };
+                    result.arg0 = Some(arg0);
+                    continue;
+                } else if option.is_static("cd") {
+                    result.directory = Some(pair[1].clone());
+                    continue;
+                } else if option.is_static("parallelism") {
+                    result.parallelism = match &pair[1] {
+                        Term::Atom(value) if value.is_static("true") => true,
+                        Term::Atom(value) if value.is_static("false") => false,
+                        _ => return Ok(None),
+                    };
+                    continue;
                 } else if option.is_one_of(&UNSUPPORTED_TUPLE_OPTIONS) {
                     option
                 } else {
@@ -621,6 +682,9 @@ fn port_settings(atoms: &AtomTable, settings: &Term) -> Result<Option<PortSettin
                     result.eof = true
                 } else if option.is_static("overlapped_io") {
                     // Only a Windows port uses it (`erl_sys_driver.h:56`).
+                } else if option.is_static("hide") {
+                    // Only a Windows port hides its window
+                    // (`erl_bif_port.c:997-998`, `hide_window`).
                 } else if option.is_one_of(&UNSUPPORTED_ATOM_OPTIONS) {
                     return Err(unsupported_option(atoms.name_of(option)));
                 } else {
@@ -639,6 +703,38 @@ fn port_settings(atoms: &AtomTable, settings: &Term) -> Result<Option<PortSettin
         return Ok(None);
     }
     Ok(Some(result))
+}
+
+/// Return the changes of the `Env` of `{env, Env}` in order, as
+/// `merge_global_environment` reads them (`erl_bif_port.c:1183-1210`), or
+/// `None` for the `badopt` of ERTS: `Env` is not a proper list, an element
+/// is not a pair, or a key or a value is not valid. A key is a flat or
+/// nested list of characters without `=` and without 0, as for
+/// `os:putenv/2`. The value `false` or `[]` removes the key; another value
+/// is a list of characters without 0 (`erl_osenv.c:269-313`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(environment_changes(&env), Some(vec![(b"A".to_vec(), Some(b"1".to_vec()))]));
+/// ```
+fn environment_changes(env: &Term) -> Option<Vec<environment::Change>> {
+    let encoding = filename_encoding();
+    let key = |term: &Term| native_filename(term, encoding).filter(|key| !key.contains(&b'='));
+    env.proper_list()?
+        .map(|pair| match pair {
+            Term::Tuple(pair) if pair.len() == 2 => {
+                let key = key(&pair[0])?;
+                let value = &pair[1];
+                if value.is_nil() || matches!(value, Term::Atom(atom) if atom.is_static("false")) {
+                    Some((key, None))
+                } else {
+                    Some((key, Some(native_filename(value, encoding)?)))
+                }
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// Return the line buffer of a `{line, L}` whose low 32 bits are `size`.
@@ -1423,19 +1519,18 @@ const PORT_INFO_ITEMS: [&str; 7] = [
 
 /// The items of `port_info/2` that PBeam does not give yet
 /// (`erts_bld_port_info`, `erl_bif_info.c:3654-3830`).
-const OTHER_PORT_ITEMS: [&str; 7] = [
+const OTHER_PORT_ITEMS: [&str; 6] = [
     "registered_name",
     "memory",
     "monitors",
     "monitored_by",
-    "parallelism",
     "queue_size",
     "locking",
 ];
 
 /// Return the item `{Name, Value}` of the open port `port` with the number
 /// `id`, as `erts_bld_port_info` builds it (`erl_bif_info.c:3654-3830`),
-/// for a name of [`PORT_INFO_ITEMS`]. The
+/// for a name of [`PORT_INFO_ITEMS`] or `parallelism`. The
 /// name is the list of the bytes of the program path or driver name,
 /// `links` holds each linked process in the ERTS link tree order, and `id`
 /// is the port number.
@@ -1464,6 +1559,12 @@ fn port_item(id: PortId, port: &Port, name: &str) -> Result<Term, BeamError> {
         "connected" => Term::Pid(port.owner),
         "input" => Term::Integer(port.input.try_into().expect("an input count below 2^63")),
         "output" => Term::Integer(port.output.try_into().expect("an output count below 2^63")),
+        // `ERTS_PORT_SFLG_PARALLELISM` (`erl_bif_info.c:3884-3895`). An
+        // inet port opens without the option.
+        "parallelism" => Term::static_atom(match &port.driver {
+            Driver::Spawn(spawn) if spawn.parallelism => "true",
+            _ => "false",
+        }),
         // The last item, `os_pid`.
         _ => match &port.driver {
             Driver::Spawn(spawn) => match spawn.program.child() {
@@ -1513,7 +1614,10 @@ pub(super) fn port_info_item(
                 _ => String::new(),
             };
             let name = name.as_str();
-            if !PORT_INFO_ITEMS.contains(&name) && !OTHER_PORT_ITEMS.contains(&name) {
+            if !PORT_INFO_ITEMS.contains(&name)
+                && !OTHER_PORT_ITEMS.contains(&name)
+                && name != "parallelism"
+            {
                 return Ok(signals_return(scheduler, port, Term::static_atom("badarg")));
             }
             if let Some(denied) = port_denial(scheduler, &port_state.name, Operation::Inspect)? {

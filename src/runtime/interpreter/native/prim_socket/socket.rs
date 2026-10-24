@@ -6,8 +6,8 @@
 //!
 //! A socket resource is a reference to a `SocketState` in the `Sockets`
 //! value of the node resources, so a socket does not pin its process to
-//! one scheduler. PBeam runs no select, so `nif_close/1` always returns
-//! `ok` (`unix_socket_syncio.c:4574-4593`, `4627-4633`).
+//! one scheduler. The selects of a connect and an accept are in the
+//! sibling module `select`.
 
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
@@ -23,7 +23,10 @@ use super::*;
 use crate::runtime::port::inet::errno_name;
 use crate::runtime::resources::lock;
 use crate::runtime::signal::Signal;
-use crate::runtime::sockets::{BOUND, CLOSED, CLOSING, SocketState, Sockets};
+use crate::runtime::sockets::{
+    ACCEPTING, BOUND, CLOSED, CLOSING, CONNECTED, CONNECTING, LISTENING, SELECTED, SocketState,
+    Sockets,
+};
 use crate::term::{AtomTable, ProcessId, Reference};
 pub(super) use options::{getopt_3, getopt_5, setopt_5};
 
@@ -131,7 +134,7 @@ pub(super) fn info_0(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> 
 
 /// Return the socket of the resource term `socket`, or `None` for a term
 /// that is not a socket resource, which raises `error:badarg`.
-fn socket_argument(
+pub(super) fn socket_argument(
     scheduler: &Scheduler,
     socket: &Term,
 ) -> Option<(Reference, Arc<Mutex<SocketState>>)> {
@@ -146,7 +149,17 @@ fn socket_argument(
 /// `esock_socket_info_state` does (`prim_socket_nif.c:4815-4904`).
 fn states(scheduler: &mut Scheduler, state: u32) -> Result<Term, BeamError> {
     let mut names = Vec::new();
-    for (bit, name) in [(BOUND, "bound"), (CLOSING, "closing"), (CLOSED, "closed")] {
+    let bits = [
+        (BOUND, "bound"),
+        (LISTENING, "listening"),
+        (ACCEPTING, "accepting"),
+        (CONNECTING, "connecting"),
+        (CONNECTED, "connected"),
+        (SELECTED, "selected"),
+        (CLOSING, "closing"),
+        (CLOSED, "closed"),
+    ];
+    for (bit, name) in bits {
         if state & bit != 0 {
             names.push(atom(scheduler, name)?);
         }
@@ -257,13 +270,16 @@ fn atom_name<'a>(scheduler: &'a Scheduler, term: &Term) -> Option<&'a str> {
 
 /// Return the result `{invalid, Reason}` of `esock_make_invalid`
 /// (`socket_util.c:3336-3340`).
-fn invalid(reason: Term) -> BifResult {
+pub(super) fn invalid(reason: Term) -> BifResult {
     BifResult::Value(Term::tuple(vec![Term::static_atom("invalid"), reason]))
 }
 
 /// Return `{error, Errno}` of a failed socket call, as
 /// `esock_make_error_errno` does.
-fn errno_error(scheduler: &mut Scheduler, failure: &io::Error) -> Result<BifResult, BeamError> {
+pub(super) fn errno_error(
+    scheduler: &mut Scheduler,
+    failure: &io::Error,
+) -> Result<BifResult, BeamError> {
     let name = atom(scheduler, &errno_name(failure))?;
     Ok(BifResult::Value(Term::tuple(vec![
         Term::static_atom("error"),
@@ -272,7 +288,7 @@ fn errno_error(scheduler: &mut Scheduler, failure: &io::Error) -> Result<BifResu
 }
 
 /// Return `{error, closed}` of `esock_make_error_closed`.
-fn closed() -> BifResult {
+pub(super) fn closed() -> BifResult {
     BifResult::Value(Term::tuple(vec![
         Term::static_atom("error"),
         Term::static_atom("closed"),
@@ -379,6 +395,8 @@ pub(super) fn open_4(
                 write: 0,
                 registered,
                 meta: Term::static_atom("undefined"),
+                connector: None,
+                acceptor: None,
             },
         );
         sockets.registry
@@ -418,7 +436,21 @@ fn which_protocol(_socket: &Socket, protocol: i32) -> i32 {
 /// Send `{'$socket', Tag, {'$socket', Ref}}` from the caller to the socket
 /// registry, as `mk_reg_msg` and `esock_send_msg` do
 /// (`prim_socket_nif.c:17300-17338`, `17551-17558`).
-fn send_registry(
+/// Return `{'$socket', {'$socket', Ref}, Tag, Info}` of the socket `socket`,
+/// as `esock_mk_socket_msg` makes it (`prim_socket_nif.c:17640-17680`).
+pub(super) fn socket_message(
+    scheduler: &mut Scheduler,
+    socket: Reference,
+    tag: &str,
+    info: Term,
+) -> Result<Term, BeamError> {
+    let socket_tag = atom(scheduler, "$socket")?;
+    let socket = Term::tuple(vec![socket_tag.clone(), Term::Reference(socket)]);
+    let tag = atom(scheduler, tag)?;
+    Ok(Term::tuple(vec![socket_tag, socket, tag, info]))
+}
+
+pub(super) fn send_registry(
     scheduler: &mut Scheduler,
     registry: ProcessId,
     tag: &str,
@@ -445,7 +477,10 @@ fn send_registry(
 ///
 /// The family `unspec` or a native family number stops the run: PBeam does
 /// not decode a native `sockaddr` yet.
-fn sockaddr(scheduler: &Scheduler, address: &Term) -> Result<Option<SockAddr>, BeamError> {
+pub(super) fn sockaddr(
+    scheduler: &Scheduler,
+    address: &Term,
+) -> Result<Option<SockAddr>, BeamError> {
     let get = |name: &str| field(&scheduler.atoms, address, name);
     let family = get("family");
     let port = || get("port").and_then(int).map(|port| port as u16);
@@ -656,30 +691,43 @@ pub(super) fn sockname(scheduler: &mut Scheduler, socket: &Term) -> Result<BifRe
 /// Run `prim_socket:nif_close(Socket)`, as `essio_close` does
 /// (`unix_socket_syncio.c:4544-4594`): `badarg` for a term that is not a
 /// socket, `{error, closed}` for a closing socket, and `ok`, which keeps the
-/// caller as the closer and adds the state `closing`. PBeam runs no select,
-/// so `do_stop` schedules no stop and the result is `ok`.
-pub(super) fn close(scheduler: &mut Scheduler, socket: &Term) -> BifResult {
+/// caller as the closer and adds the state `closing`. `do_stop` cancels the
+/// selects at once (`ERL_NIF_SELECT_STOP_CALLED`, as the pinned ERTS gives
+/// for a socket of the poll thread), so the result is `ok`, and each
+/// requestor whose select was active gets `{'$socket', Socket, abort,
+/// {Ref, closed}}` (`unix_socket_syncio.c:4600-4730`).
+///
+/// # Errors
+///
+/// A new atom in a full atom table gives the error of `AtomTable::put`.
+pub(super) fn close(scheduler: &mut Scheduler, socket: &Term) -> Result<BifResult, BeamError> {
     let Some((reference, socket)) = socket_argument(scheduler, socket) else {
-        return BifResult::badarg();
+        return Ok(BifResult::badarg());
     };
     let mut socket = lock(&socket);
     if socket.read & (CLOSING | CLOSED) != 0 {
-        return closed();
+        return Ok(closed());
     }
     let caller = scheduler.current_process().id;
     socket.closer = Some(caller);
     socket.read |= CLOSING;
     socket.write |= CLOSING;
+    let owner = socket.owner;
+    let aborted = socket.stop(&scheduler.node().poll);
+    drop(socket);
     // A closer that is not the owner gets a monitor
     // (`unix_socket_syncio.c:4560-4566`).
-    if socket.owner != Some(caller) {
-        drop(socket);
+    if owner != Some(caller) {
         scheduler
             .send_signal(None, caller, Signal::SocketMonitor { socket: reference })
             .expect("the caller is alive");
-        return BifResult::Value(Term::static_atom("ok"));
     }
-    BifResult::Value(Term::static_atom("ok"))
+    for (requestor, operation) in aborted {
+        let info = Term::tuple(vec![operation, Term::static_atom("closed")]);
+        let abort = socket_message(scheduler, reference, "abort", info)?;
+        scheduler.send_message(caller, requestor, abort);
+    }
+    Ok(BifResult::Value(Term::static_atom("ok")))
 }
 
 /// Run `prim_socket:nif_finalize_close(Socket)`, as `essio_fin_close` and

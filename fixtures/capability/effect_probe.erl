@@ -602,6 +602,7 @@ ambient() ->
         end,
         ets:select(Name, [{{'_', '_'}, [], ['$_']}]),
         ets:select_count(Name, [{{'_', '_'}, [], [true]}]),
+        ets:select_replace(Name, [{{'_', '_'}, [], ['$_']}]),
         is_list(ets:slot(Name, 0)),
         ets:delete(ets:rename(ets:new(effect_probe_renamed, [named_table]), effect_probe_renamed2)),
         begin

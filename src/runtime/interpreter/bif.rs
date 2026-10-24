@@ -954,6 +954,12 @@ impl BeamProgram {
     /// - `ets:select_delete_trap/1`, with the continuation of a select delete
     ///   on an `ordered_set` table ([`ets::select_delete_trap`]), as ERTS
     ///   traps to the same export (`erl_db.c:3387-3427`, `4817-4819`).
+    /// - `ets:select_replace_trap/6`, with the table reference, the
+    ///   specification, the next bucket or the last key, the end key or
+    ///   `[]`, the count so far, and the change count of the table
+    ///   ([`ets::select_replace_trap`]). ERTS traps to
+    ///   `ets:select_replace/1` with a continuation tuple
+    ///   (`erl_db_hash.c:2861-2868`, `erl_db_tree.c:2438-2447`).
     /// - `ets:delete_trap/0`, which frees the segments of the table that
     ///   `ets:delete/1` deleted ([`ets::delete_trap`]). The segments that
     ///   remain stay in the ETS store under the caller. ERTS traps to
@@ -1113,6 +1119,22 @@ impl BeamProgram {
         {
             let resume = Some((position, end, *got, *writes));
             return ets::select_count_trap(&mut BifContext { scheduler }, table, spec, resume);
+        }
+        if let (
+            "ets",
+            "select_replace_trap",
+            [
+                table,
+                spec,
+                position,
+                end,
+                Term::Integer(got),
+                Term::Integer(writes),
+            ],
+        ) = (module, function, arguments.as_slice())
+        {
+            let resume = Some((position, end, *got, *writes));
+            return ets::select_replace_trap(&mut BifContext { scheduler }, table, spec, resume);
         }
         if let ("ets", "info", [table, item]) = (module, function, arguments.as_slice()) {
             let mut context = BifContext { scheduler };

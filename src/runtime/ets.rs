@@ -1,15 +1,18 @@
 //! ETS tables of the node, as the ERTS table store (`erl_db.c`). All
 //! processes of a run share one store.
 
+pub(super) mod order;
 pub(super) mod pattern;
 pub(super) mod range;
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::{DefaultHasher, Hasher};
-use std::sync::{Mutex, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use crate::error::{BeamError, error};
+use order::KeyOrder;
+
+use crate::error::BeamError;
 use crate::term::atom_hash;
 use crate::term::{AtomTable, LiveBytes, ProcessId, Reference, Term, internal_hash};
 
@@ -316,16 +319,9 @@ pub(super) struct Table {
     /// The number of pseudo-deleted objects, which `object_count` leaves
     /// out.
     deleted_objects: usize,
-    /// The key of each object of an `ordered_set` table, in the ERTS term
-    /// order, as the AVL tree of `erl_db_tree.c` orders them with
-    /// `cmp_key_eq` (`erl_db_tree.c:758-761`). Two keys that compare equal
-    /// (`1` and `1.0`) are one key. The other table types keep it empty.
-    order: Vec<Term>,
-    /// Whether a key of the table has no PBeam order with another key, so
-    /// `order` is not current. The order of two different alias references
-    /// is the only such case (`src/term/order.rs`). A walk then returns a
-    /// runtime error, and a key lookup compares each object.
-    unordered: bool,
+    /// The keys of an `ordered_set` table in the ERTS term order. The other
+    /// table types have none.
+    order: Option<KeyOrder>,
 }
 
 /// A key that a process deleted while the table was fixed: its stored
@@ -595,7 +591,7 @@ impl EtsTables {
                     live.term(term);
                 }
             }
-            for key in &table.order {
+            for key in table.order.iter().flat_map(KeyOrder::iter) {
                 live.term(key);
             }
             for walk in table
@@ -1452,7 +1448,9 @@ impl Freeing {
             self.table.objects[slot] = None;
             // Drop one key of the key order with each object, so the free
             // of the keys also stays in the budget of the turn.
-            self.table.order.pop();
+            if let Some(order) = &mut self.table.order {
+                order.pop();
+            }
             freed += 1;
             if self.next == EMPTY {
                 self.bucket += 1;
@@ -1524,8 +1522,28 @@ impl Table {
             select_slot: EMPTY,
             deleted: Vec::new(),
             deleted_objects: 0,
-            order: Vec::new(),
-            unordered: false,
+            order: None,
+        }
+    }
+
+    /// Return an empty `ordered_set` table, as [`Table::new`] does, whose
+    /// key order compares atoms with `atoms`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let table = Table::ordered(ProcessId(0), Access::Public, 1, Arc::new(AtomTable::new()));
+    /// assert_eq!(table.table_type(), TableType::OrderedSet);
+    /// ```
+    pub(super) fn ordered(
+        owner: ProcessId,
+        access: Access,
+        keypos: i32,
+        atoms: Arc<AtomTable>,
+    ) -> Table {
+        Table {
+            order: Some(KeyOrder::new(atoms)),
+            ..Table::new(owner, access, keypos, TableType::OrderedSet)
         }
     }
 
@@ -1797,6 +1815,42 @@ impl Table {
         true
     }
 
+    /// Read each live object of the chain of the bucket `bucket` in chain
+    /// order, and store the object that `replace` gives for it in its place,
+    /// as `select_replace_on_match_res` (`erl_db_hash.c:2819-2846`) does.
+    /// The caller makes sure that each new object keeps the key. Return the
+    /// number of objects read and the number of objects replaced.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let (read, replaced) = table.replace_chain(0, |object| Some(object.to_vec()));
+    /// assert_eq!(read, replaced);
+    /// ```
+    pub(super) fn replace_chain(
+        &mut self,
+        bucket: usize,
+        mut replace: impl FnMut(&[Term]) -> Option<Vec<Term>>,
+    ) -> (i64, i64) {
+        let slots: Vec<usize> = self
+            .chain_keys(bucket)
+            .flat_map(|node| links(node, &self.older))
+            .collect();
+        let (mut read, mut replaced) = (0, 0);
+        for slot in slots {
+            if self.is_deleted(slot) {
+                continue;
+            }
+            read += 1;
+            if let Some(object) = replace(self.object_of(slot)) {
+                self.objects[slot] = Some(object);
+                self.writes += 1;
+                replaced += 1;
+            }
+        }
+        (read, replaced)
+    }
+
     /// Return the next key after `key` in the order of a hash table, as
     /// `db_next_hash` (`erl_db_hash.c:1147-1200`) gives it: the key of the
     /// next live object in the chain of the bucket, then the chain of each
@@ -1872,15 +1926,11 @@ impl Table {
         key: &Term,
         forward: bool,
     ) -> Result<Option<Term>, BeamError> {
-        let index = match (self.order_search(atoms, key)?, forward) {
-            (Ok(index), true) => index + 1,
-            (Err(index), true) => index,
-            (Ok(index) | Err(index), false) => match index.checked_sub(1) {
-                Some(index) => index,
-                None => return Ok(None),
-            },
-        };
-        Ok(self.order.get(index).cloned())
+        Ok(self
+            .key_order()
+            .beyond(atoms, key, forward)?
+            .next()
+            .cloned())
     }
 
     /// Return the least key of an `ordered_set` table when `first` is true,
@@ -1891,7 +1941,7 @@ impl Table {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let table = Table::new(ProcessId(0), Access::Public, 1, TableType::OrderedSet);
+    /// let table = Table::ordered(ProcessId(0), Access::Public, 1, atoms);
     /// assert_eq!(table.ordered_end(true), None);
     /// ```
     ///
@@ -1899,12 +1949,10 @@ impl Table {
     ///
     /// Return a runtime error when the order of a key is not supported.
     pub(super) fn ordered_end(&self, first: bool) -> Result<Option<Term>, BeamError> {
-        self.check_ordered()?;
-        Ok(if first {
-            self.order.first().cloned()
-        } else {
-            self.order.last().cloned()
-        })
+        let order = self.key_order();
+        order.check()?;
+        let mut keys = order.iter();
+        Ok(if first { keys.next() } else { keys.next_back() }.cloned())
     }
 
     /// Return the object of an `ordered_set` table whose key is equal to
@@ -1925,10 +1973,10 @@ impl Table {
         atoms: &AtomTable,
         key: &Term,
     ) -> Result<Option<&[Term]>, BeamError> {
-        Ok(match self.order_search(atoms, key)? {
-            Ok(index) => Some(self.ordered_object(atoms, index)),
-            Err(_) => None,
-        })
+        Ok(self
+            .key_order()
+            .find(atoms, key)?
+            .map(|stored| self.ordered_object(atoms, stored)))
     }
 
     /// Return the objects of an `ordered_set` table in key order, up when
@@ -1953,28 +2001,14 @@ impl Table {
         after: Option<&Term>,
         forward: bool,
     ) -> Result<impl Iterator<Item = &'a [Term]> + 'a, BeamError> {
-        self.check_ordered()?;
-        let start = match after {
-            None if forward => 0,
-            None => self.order.len(),
-            Some(key) => match (self.order_search(atoms, key)?, forward) {
-                (Ok(index), true) => index + 1,
-                (Ok(index) | Err(index), _) => index,
-            },
+        let order = self.key_order();
+        order.check()?;
+        let keys: Box<dyn Iterator<Item = &'a Term> + 'a> = match after {
+            None if forward => Box::new(order.iter()),
+            None => Box::new(order.iter().rev()),
+            Some(key) => order.beyond(atoms, key, forward)?,
         };
-        let count = if forward {
-            self.order.len() - start
-        } else {
-            start
-        };
-        Ok((0..count).map(move |step| {
-            let index = if forward {
-                start + step
-            } else {
-                start - 1 - step
-            };
-            self.ordered_object(atoms, index)
-        }))
+        Ok(keys.map(move |key| self.ordered_object(atoms, key)))
     }
 
     /// Split the keys of an `ordered_set` table where `below` stops to give
@@ -1996,90 +2030,31 @@ impl Table {
     /// current.
     pub(super) fn ordered_split(
         &self,
-        mut below: impl FnMut(&Term) -> Result<bool, BeamError>,
+        below: impl Fn(&Term) -> Result<bool, BeamError>,
     ) -> Result<(Option<&Term>, Option<&Term>), BeamError> {
-        self.check_ordered()?;
-        let (mut low, mut high) = (0, self.order.len());
-        while low < high {
-            let middle = low + (high - low) / 2;
-            if below(&self.order[middle])? {
-                low = middle + 1;
-            } else {
-                high = middle;
-            }
-        }
-        Ok((
-            low.checked_sub(1).map(|index| &self.order[index]),
-            self.order.get(low),
-        ))
+        self.key_order().split(below)
     }
 
-    /// Return the object of the key at the index `index` of the key order.
-    fn ordered_object(&self, atoms: &AtomTable, index: usize) -> &[Term] {
+    /// Return the object of the stored key `key` of the key order.
+    fn ordered_object(&self, atoms: &AtomTable, key: &Term) -> &[Term] {
         let slot = self
-            .key_slot(atoms, &self.order[index])
+            .position(stored_hash(atoms, key), key)
             .expect("each key of the order has an object");
         self.object_of(slot)
     }
 
-    /// Return the runtime error of a table whose key order is not current.
-    fn check_ordered(&self) -> Result<(), BeamError> {
-        if self.unordered {
-            return Err(error(
-                "unsupported term order of an alias reference in an ordered_set key (see \"ETS tables\" in docs/erts-differences.md)",
-            ));
-        }
-        Ok(())
+    /// Return the key order of an `ordered_set` table.
+    fn key_order(&self) -> &KeyOrder {
+        self.order
+            .as_ref()
+            .expect("an ordered_set table has a key order")
     }
 
-    /// Find the key `key` in the key order of an `ordered_set` table with
-    /// the arithmetic term order, so `1` finds `1.0` (`cmp_key_eq`,
-    /// `erl_db_tree.c:758-761`). Return the index of the equal key, or the
-    /// index where the key would go.
-    ///
-    /// # Errors
-    ///
-    /// Return a runtime error when the order is not current or a key has no
-    /// PBeam order: the order of two different alias references is the only
-    /// such comparison (`src/term/order.rs`).
-    fn order_search(
-        &self,
-        atoms: &AtomTable,
-        key: &Term,
-    ) -> Result<Result<usize, usize>, BeamError> {
-        self.check_ordered()?;
-        let (mut low, mut high) = (0, self.order.len());
-        while low < high {
-            let middle = low + (high - low) / 2;
-            match self.order[middle].compare(key, atoms)? {
-                Ordering::Less => low = middle + 1,
-                Ordering::Greater => high = middle,
-                Ordering::Equal => return Ok(Ok(middle)),
-            }
-        }
-        Ok(Err(low))
-    }
-
-    /// Put the key `key` of an `ordered_set` table in the key order, in
-    /// place of an equal key. A key with no order makes the order stale.
-    fn order_put(&mut self, atoms: &AtomTable, key: Term) {
-        match self.order_search(atoms, &key) {
-            Ok(Ok(index)) => self.order[index] = key,
-            Ok(Err(index)) => self.order.insert(index, key),
-            Err(_) => self.unordered = true,
-        }
-    }
-
-    /// Remove the key `key` of an `ordered_set` table from the key order.
-    /// A key with no order makes the order stale.
-    fn order_remove(&mut self, atoms: &AtomTable, key: &Term) {
-        let Ok(found) = self.order_search(atoms, key) else {
-            self.unordered = true;
-            return;
-        };
-        if let Ok(index) = found {
-            self.order.remove(index);
-        }
+    /// Return the key order of an `ordered_set` table to change it.
+    fn key_order_mut(&mut self) -> &mut KeyOrder {
+        self.order
+            .as_mut()
+            .expect("an ordered_set table has a key order")
     }
 
     /// Return the key of the first slot that is not deleted after the slot
@@ -2504,8 +2479,6 @@ impl Table {
     /// chains, so the objects of one segment go in the turn that frees it
     /// (`db_free_table_continue_hash`, `erl_db_hash.c:3140-3149`).
     fn free_segments_objects(&mut self, index: usize) {
-        self.order.clear();
-        self.unordered = false;
         let first = match index {
             0 => 0,
             later => FIRST_SEGMENT_SLOTS + (later - 1) * SEGMENT_SLOTS,
@@ -2586,8 +2559,9 @@ impl Table {
     /// does for a table without a fixation (`erl_db_hash.c:4036-4037`).
     fn reset_cleared(&mut self) {
         self.objects.clear();
-        self.order.clear();
-        self.unordered = false;
+        if let Some(order) = &mut self.order {
+            order.clear();
+        }
         self.free.clear();
         self.older.clear();
         self.index = KeyIndex::default();
@@ -2911,7 +2885,8 @@ impl Table {
             (self.key_slot(atoms, key), hash)
         };
         if found.is_none() && self.table_type == TableType::OrderedSet {
-            self.order_put(atoms, self.key(&object).clone());
+            let key = self.key(&object).clone();
+            self.key_order_mut().put(atoms, key);
         }
         if found.is_none() && self.is_fixed() {
             let key = self.key(&object);
@@ -2936,7 +2911,8 @@ impl Table {
                 let old = stored_hash(atoms, self.key(self.object_of(slot)));
                 self.rekey(slot, old, hash);
                 if self.table_type == TableType::OrderedSet {
-                    self.order_put(atoms, self.key(&object).clone());
+                    let key = self.key(&object).clone();
+                    self.key_order_mut().put(atoms, key);
                 }
                 self.objects[slot] = Some(object);
                 self.writes += 1;
@@ -3679,7 +3655,9 @@ impl Table {
                 .map(|retained| retained.slots.capacity() * std::mem::size_of::<usize>())
                 .sum::<usize>()
             + self.deleted.capacity() * std::mem::size_of::<bool>()
-            + self.order.capacity() * std::mem::size_of::<Term>()
+            + self.order.as_ref().map_or(0, |order| {
+                order.len() * (std::mem::size_of::<Term>() + std::mem::size_of::<usize>())
+            })
             + self.busy.as_ref().map_or(0, |busy| {
                 busy.objects.capacity() * std::mem::size_of::<Vec<Term>>()
                     + busy
@@ -3752,12 +3730,9 @@ impl Table {
         if self.table_type != TableType::OrderedSet {
             return None;
         }
-        match self.order_search(atoms, key) {
-            Ok(Ok(index)) => {
-                let stored = &self.order[index];
-                self.position(stored_hash(atoms, stored), stored)
-            }
-            Ok(Err(_)) => None,
+        match self.key_order().find(atoms, key) {
+            Ok(Some(stored)) => self.position(stored_hash(atoms, stored), stored),
+            Ok(None) => None,
             // A key with no order compares with each object, and a
             // comparison error is not equal.
             Err(_) => self.objects.iter().enumerate().find_map(|(slot, object)| {
@@ -3881,7 +3856,7 @@ impl Table {
             slot = std::mem::replace(&mut self.older[slot], EMPTY);
         }
         if self.table_type == TableType::OrderedSet {
-            self.order_remove(atoms, key);
+            self.key_order_mut().remove(atoms, key);
             self.compact(atoms, newest);
         }
         self.count_lock(hash, size);
