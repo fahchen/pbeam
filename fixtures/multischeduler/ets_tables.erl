@@ -249,14 +249,29 @@ estimator() ->
       [{60,[{600,54643672},{60,105862991}]},{300,[{3000,35675020},{300,105637723}]},{1000,[{10000,96410069},{1000,66538492}]},
        {60,[{600,54643672},{60,105862991}]},{300,[{3000,35675020},{300,105637723}]},{1000,[{10000,96410069},{1000,66538492}]},
        {60,[{600,101583769},{60,102999779}]},{300,[{3000,14715952},{300,124455985}]},{1000,[{10000,118630101},{1000,108870912}]},
-       {300,[{1200,28259756},{300,78525928}]},{1500,[{6000,31789770},{1500,63203620}]},{5000,[{20000,73334443},{5000,118575545}]}]).
+       {300,[{1200,28259756},{300,78525928}]},{1500,[{6000,31789770},{1500,63203620}]},{5000,[{20000,73334443},{5000,118575545}]},
+       {1000,132173113}]).
 
 estimate_orders() ->
     Auto = {write_concurrency, auto},
     Fine = [{write_concurrency, true}, {decentralized_counters, true}],
     Locks = {write_concurrency, {debug_hash_fixed_number_of_locks, 128}},
     [estimate(Options, Count)
-     || Options <- [[Auto], Fine, [Locks], [bag, Auto]], Count <- [600, 3000, 10000]].
+     || Options <- [[Auto], Fine, [Locks], [bag, Auto]], Count <- [600, 3000, 10000]]
+    ++ [unfixed_select_delete(Fine)].
+
+%% The deletes of a fixed table do not shrink it, and a select_delete that
+%% removes no object does not shrink it either (erl_db_hash.c:2688-2706).
+unfixed_select_delete(Options) ->
+    T = ets:new(estimate_probe, Options),
+    true = ets:insert(T, [{K, a} || K <- seq(10000, [])]),
+    true = ets:safe_fixtable(T, true),
+    _ = [ets:delete(T, K) || K <- seq(9000, [])],
+    true = ets:safe_fixtable(T, false),
+    0 = ets:select_delete(T, [{{'_', b}, [], [true]}]),
+    Order = ets:tab2list(T),
+    true = ets:delete(T),
+    {length(Order), erlang:phash2(Order)}.
 
 estimate(Options, Count) ->
     T = ets:new(estimate_probe, Options),

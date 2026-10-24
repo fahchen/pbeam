@@ -3286,7 +3286,11 @@ pub(super) fn internal_select_delete(
             removed += 1;
         }
     }
-    table.shrink();
+    // ERTS shrinks only when the call removed an object
+    // (`erl_db_hash.c:2688-2706`).
+    if removed > 0 {
+        table.shrink();
+    }
     drop(taken);
     drop(ets);
     context
