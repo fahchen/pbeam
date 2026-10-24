@@ -5,7 +5,7 @@
          delete_order/0, deleter/2,
          insert_new/0, unsupported/1, insert_all/2, ping/1, busy/0, busy_insert/2,
          busy_helper/2,
-         own/2, write/1, select/0, match_object/0, iterate/0,
+         own/2, write/1, select/0, match_object/0, match_continue/0, iterate/0,
          update_element/0, info_items/0, delete_all/0, select_reductions/0, first/0,
          private_owner/1, ordered_set/0, ordered_set_reductions/0, take/0,
          walk/0, walk_alias/1,
@@ -597,10 +597,6 @@ match_private() ->
 %% Calls that ERTS runs and PBeam does not support yet.
 unsupported(Case) ->
     case Case of
-        match_1 ->
-            T = ets:new(ets_probe, []),
-            true = ets:insert(T, [{a}, {b}]),
-            ets:match(element(2, ets:match(T, '$1', 1)));
         match_changed ->
             T = ets:new(ets_probe, [public]),
             true = ets:insert(T, [{I} || I <- seq(5000)]),
@@ -1255,6 +1251,39 @@ match_object() ->
      ets:match_object(T, {'_', 2}),
      ets:match_object(B, {'$1', '$2'}),
      catch_error(fun() -> ets:match_object(ets_probe_missing, '_') end)].
+
+%% ets:match_object/3, ets:match/1, and ets:match_object/1 on each table
+%% type: ets_match_1 and ets_match_object_1 run ets_select1, and
+%% ets_match_object_3 runs ets_select3 with [{Pattern, [], ['$_']}]
+%% (erl_db.c:3766-3769, 4335-4393).
+match_continue() ->
+    Chunks = fun Chunks('$end_of_table') -> [eot];
+                 Chunks({L, C}) -> [lists:sort(L) | Chunks(ets:match_object(C))]
+             end,
+    Type = fun(Ty) ->
+                   T = ets:new(ets_probe, [Ty]),
+                   true = ets:insert(T, [{a, 1}, {b, 2}, {c, 3}, {a, 4}, {d, 5}]),
+                   {M, MC} = ets:match(T, {'$1', '_'}, 2),
+                   [Chunks(ets:match_object(T, {'_', '_'}, 2)),
+                    Chunks(ets:match_object(T, {a, '_'}, 1)),
+                    ets:match_object(T, {z, '_'}, 1),
+                    [lists:sort(M) | match_chunks(ets:match(MC))],
+                    catch_error(fun() -> ets:match_object(T, '_', 0) end),
+                    catch_error(fun() -> ets:match_object(T, '_', a) end),
+                    catch_error(fun() -> ets:match_object(T, [{bad}], 1) end)]
+           end,
+    O = ets:new(ets_probe, [ordered_set]),
+    true = ets:insert(O, [{I} || I <- lists:seq(1, 5)]),
+    {_, OC} = ets:match_object(O, '_', 2),
+    [Type(set), Type(bag), Type(duplicate_bag), Type(ordered_set),
+     element(1, ets:match_object(OC)), element(1, ets:match(OC)),
+     ets:match('$end_of_table'), ets:match_object('$end_of_table'),
+     catch_error(fun() -> ets:match(bad) end),
+     catch_error(fun() -> ets:match_object({bad}) end),
+     catch_error(fun() -> ets:match_object(ets_probe_missing, '_', 1) end)].
+
+match_chunks('$end_of_table') -> [eot];
+match_chunks({L, C}) -> [lists:sort(L) | match_chunks(ets:match(C))].
 
 %% ets:next/2 and ets:prev/2, which give the hash chain order; prev is next
 %% for a hash table (erl_db_hash.c:854-856, 1147-1200).

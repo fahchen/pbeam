@@ -41,7 +41,7 @@ impl Inet {
     /// which dissolve it first or after: each needs a connect to an
     /// `AF_UNSPEC` address (inet_drv.c:14803-14806, 14819-14836), which
     /// safe Rust cannot make.
-    /// The `any`, `loopback`, `inet6`, and `local` address tags.
+    /// The `any`, `loopback`, and `inet6` address tags.
     pub(super) fn datagram_connect(&mut self, request: &[u8]) -> Result<Vec<u8>, BeamError> {
         if self.state == State::Closed {
             return Ok(error_reply("exbadport"));
@@ -51,7 +51,7 @@ impl Inet {
             [_, _, _, _, address @ ..] if address.len() >= 2 => address,
             _ => return Ok(error_reply("einval")),
         };
-        let remote = match self.address(address, "connect")? {
+        let remote = match self.address(address) {
             Ok(remote) => remote,
             Err(reply) => return Ok(reply),
         };
