@@ -4,7 +4,7 @@
 //! and the binding in `interpreter/native/prim_net/ifaddrs.rs` makes the
 //! terms in safe Rust.
 
-use std::ffi::{CStr, c_int};
+use std::ffi::c_int;
 
 /// An entry of the list of `getifaddrs`: `ifa_name`, `ifa_flags`, and
 /// `ifa_addr`, `ifa_netmask`, and `ifa_dstaddr` (see [`copy`]).
@@ -59,7 +59,9 @@ pub(crate) fn getifaddrs() -> Result<Vec<Entry>, c_int> {
             };
             let point_to_point = interface.ifa_flags & libc::IFF_POINTOPOINT as u32 != 0;
             entries.push(Entry {
-                name: CStr::from_ptr(interface.ifa_name).to_bytes().to_vec(),
+                name: std::ffi::CStr::from_ptr(interface.ifa_name)
+                    .to_bytes()
+                    .to_vec(),
                 flags: interface.ifa_flags,
                 addr: copy(interface.ifa_addr, false),
                 netmask: copy(interface.ifa_netmask, inet(interface.ifa_addr)),
