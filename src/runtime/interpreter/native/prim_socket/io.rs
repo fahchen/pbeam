@@ -10,11 +10,11 @@
 //! waiting writers or readers: a call of another process while a current
 //! writer or reader waits stops the run (see the row "NIF stubs").
 
-use std::io::{self, IoSlice};
+use std::io::{self, IoSlice, IoSliceMut};
 use std::os::fd::AsRawFd;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use nix::sys::socket::SockaddrStorage;
+use nix::sys::socket::{MsgFlags, SockaddrStorage};
 
 use super::select::{fd, monitor, select};
 use super::socket::{closed, errno_error, invalid, sockaddr, socket_argument, source_term};
@@ -600,9 +600,12 @@ pub(super) fn recv(
 /// that gives `{select_read, ...}` is not supported, so it keeps its
 /// default `false` (`prim_socket_nif.c:17070`).
 ///
+/// `Flags` other than 0 go to `recvmsg(2)` (see [`recv_flagged`]).
+///
 /// # Errors
 ///
-/// The errors of [`recv`], and `Flags` other than 0 stop the run.
+/// The errors of [`recv`], and `Flags` other than 0 on a socket for which
+/// [`flagged_source_known`] is `false` stop the run.
 pub(super) fn recvfrom(
     scheduler: &mut Scheduler,
     socket: &Term,
@@ -627,23 +630,25 @@ pub(super) fn recvfrom(
     if let Some(result) = read_entry(scheduler, &state, name, caller)? {
         return Ok(result);
     }
-    // `essio_recvfrom` calls `recvfrom(2)` with the flags
-    // (unix_socket_syncio.c:3925-3927). The safe `recvfrom` of nix has no
-    // flags, and the safe `recvmsg` of nix gives an address that it does not
-    // initialize when the kernel gives none, as on a TCP socket.
-    if flags != 0 {
-        return Err(error(format!(
-            "prim_socket:{name}: the flags {flags} are not supported: see \"NIF stubs\" in docs/erts-differences.md"
-        )));
-    }
     let mut buffer = vec![0; buffer_size(size)];
-    state.counters.read_tries += 1;
+    let received = if flags == 0 {
+        state.counters.read_tries += 1;
+        let host = state
+            .socket
+            .as_ref()
+            .expect("an open socket has a host socket");
+        nix::sys::socket::recvfrom::<SockaddrStorage>(host.as_raw_fd(), &mut buffer)
+    } else {
+        if !flagged_source_known(&state, flags) {
+            return Err(error(format!(
+                "prim_socket:{name}: the flags {flags} on a socket of the domain {} are not supported: see \"NIF stubs\" in docs/erts-differences.md",
+                state.domain
+            )));
+        }
+        state.counters.read_tries += 1;
+        recv_flagged(&state, &mut buffer, flags)
+    };
     let stream = state.kind == libc::SOCK_STREAM;
-    let host = state
-        .socket
-        .as_ref()
-        .expect("an open socket has a host socket");
-    let received = nix::sys::socket::recvfrom::<SockaddrStorage>(host.as_raw_fd(), &mut buffer);
     let (read, from) = match received.map_err(io::Error::from) {
         Ok((0, _)) if stream => return Ok(end_of_stream(state)),
         Ok(received) => received,
@@ -662,6 +667,53 @@ pub(super) fn recvfrom(
         Term::static_atom("ok"),
         Term::tuple(vec![from, Term::binary(buffer)]),
     ])))
+}
+
+/// Return whether the kernel gives the source address of a receive with
+/// `flags` other than 0 on the socket of `state` each time, or never: always
+/// on an inet or inet6 socket that is not a stream socket, and never on an
+/// inet or inet6 stream socket. The safe `recvmsg` of nix reads an address
+/// that it does not initialize when the kernel gives one of length 0, as on
+/// a local socket of an unbound peer, or with `MSG_ERRQUEUE` on Linux, so
+/// these receives are not supported (row "NIF stubs").
+fn flagged_source_known(state: &SocketState, flags: i32) -> bool {
+    matches!(state.domain, libc::AF_INET | libc::AF_INET6) && !errqueue(flags)
+}
+
+/// Return whether `flags` hold the flag `MSG_ERRQUEUE` of Linux.
+#[cfg(target_os = "linux")]
+fn errqueue(flags: i32) -> bool {
+    flags & libc::MSG_ERRQUEUE != 0
+}
+
+/// Return `false`: the host has no flag `MSG_ERRQUEUE`.
+#[cfg(not(target_os = "linux"))]
+fn errqueue(_flags: i32) -> bool {
+    false
+}
+
+/// Receive one message with `flags` other than 0 into `buffer`, as the
+/// `recvfrom(2)` of `essio_recvfrom` does (`unix_socket_syncio.c:3925-3927`),
+/// with `recvmsg(2)`: the stream socket gives no address, and another socket
+/// gives the address of the sender (see [`flagged_source_known`]).
+fn recv_flagged(
+    state: &SocketState,
+    buffer: &mut [u8],
+    flags: i32,
+) -> nix::Result<(usize, Option<SockaddrStorage>)> {
+    let host = state
+        .socket
+        .as_ref()
+        .expect("an open socket has a host socket");
+    let mut slices = [IoSliceMut::new(buffer)];
+    let flags = MsgFlags::from_bits_retain(flags);
+    if state.kind == libc::SOCK_STREAM {
+        let received = nix::sys::socket::recvmsg::<()>(host.as_raw_fd(), &mut slices, None, flags)?;
+        return Ok((received.bytes, None));
+    }
+    let received =
+        nix::sys::socket::recvmsg::<SockaddrStorage>(host.as_raw_fd(), &mut slices, None, flags)?;
+    Ok((received.bytes, received.address))
 }
 
 /// Count the failed read at the end of a stream, release the current
