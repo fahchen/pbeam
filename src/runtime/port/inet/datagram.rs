@@ -186,7 +186,9 @@ impl Inet {
 
     /// Read one datagram of a `local` socket, as [`Inet::read_datagram`]
     /// does, with the `local` address of the sender
-    /// (inet_drv.c:4915-4936).
+    /// (inet_drv.c:4915-4936). Linux gives no address for the sender of an
+    /// unbound socket, and `inet_get_address` reads it as `AF_UNSPEC`,
+    /// `[0]` (inet_drv.c:4938-4941); macOS gives the empty name.
     fn read_local_datagram(&mut self) -> Result<Option<Datagram>, String> {
         use std::os::fd::AsRawFd;
         let socket = self.socket.as_ref().expect("an open port has a socket");
@@ -200,7 +202,8 @@ impl Inet {
         };
         self.stream.statistics.input(count as u64);
         data.truncate(count);
-        Ok(Some((data, super::local_name_bytes(from.as_ref()))))
+        let address = from.map_or_else(|| vec![0], |from| super::local_name_bytes(&from));
+        Ok(Some((data, address)))
     }
 
     /// Send the datagram of the output `bytes` of `sender`, after the tag,

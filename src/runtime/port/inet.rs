@@ -1250,19 +1250,18 @@ fn local_name(
     get: fn(std::os::fd::RawFd) -> nix::Result<nix::sys::socket::UnixAddr>,
 ) -> io::Result<Vec<u8>> {
     use std::os::fd::AsRawFd;
-    Ok(local_name_bytes(Some(&get(socket.as_raw_fd())?)))
+    Ok(local_name_bytes(&get(socket.as_raw_fd())?))
 }
 
 /// Return `[5, N, B1, ..., BN]` of the `local` address `address`, as
-/// `inet_get_address` gives it (inet_drv.c:4915-4936). No address, as the
-/// sender of a datagram from an unbound socket, gives the empty name.
-fn local_name_bytes(address: Option<&nix::sys::socket::UnixAddr>) -> Vec<u8> {
+/// `inet_get_address` gives it (inet_drv.c:4915-4936).
+fn local_name_bytes(address: &nix::sys::socket::UnixAddr) -> Vec<u8> {
     use std::os::unix::ffi::OsStrExt;
     #[cfg(target_os = "linux")]
-    let abstract_name = address.and_then(|address| address.as_abstract());
+    let abstract_name = address.as_abstract();
     #[cfg(not(target_os = "linux"))]
     let abstract_name: Option<&[u8]> = None;
-    let name: Vec<u8> = match (address.and_then(|address| address.path()), abstract_name) {
+    let name: Vec<u8> = match (address.path(), abstract_name) {
         (Some(path), _) => path
             .as_os_str()
             .as_bytes()

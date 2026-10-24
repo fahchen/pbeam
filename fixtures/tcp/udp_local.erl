@@ -8,7 +8,7 @@
 %% The calls that local_udp gives to prim_inet on `local` datagram
 %% sockets (local_udp.erl:71-86): OPEN with the family 5, BIND, NAME, a
 %% send to a `local` address, an active and a passive receive, CONNECT,
-%% PEER, a send to the peer, and a send from an unbound socket
+%% PEER, a send to the peer, and a passive and an active receive from an unbound socket
 %% (inet_drv.c:14585-14595, 1945-1948, 4915-4936). The test removes the
 %% files of the names before and after each run.
 run() ->
@@ -31,8 +31,10 @@ run() ->
     Unbound = prim_inet:sockname(V),
     ok = prim_inet:sendto(V, {local, ?A}, [], "q"),
     FromUnbound = prim_inet:recvfrom(S, 0, 1000),
+    ok = prim_inet:sendto(V, {local, ?B}, [], "r"),
+    ActiveUnbound = receive {udp, T, F2, P2, D2} -> {udp, F2, P2, D2} after 1000 -> none end,
     [prim_inet:close(X) || X <- [S, T, U, V]],
-    [Name, Sent, Active, Passive, NotConnected, Connect, Peer, FromPeer, List, Unbound, FromUnbound].
+    [Name, Sent, Active, Passive, NotConnected, Connect, Peer, FromPeer, List, Unbound, FromUnbound, ActiveUnbound].
 
 bound(Path, Options) ->
     {ok, S} = prim_inet:open(udp, local, dgram),

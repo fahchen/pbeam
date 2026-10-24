@@ -276,6 +276,15 @@ impl Scheduler {
                             vec![Term::static_atom("local"), Term::binary(name.to_vec())],
                             Term::Integer(0),
                         ),
+                        // `[0]`, `AF_UNSPEC`, gives `{unspec, <<>>}` and the
+                        // port 0 (inet_drv.c:1956-1963).
+                        [0] => (
+                            vec![
+                                Term::Atom(self.atoms.put("unspec")?),
+                                Term::binary(Vec::new()),
+                            ],
+                            Term::Integer(0),
+                        ),
                         _ => (
                             address[3..]
                                 .iter()
