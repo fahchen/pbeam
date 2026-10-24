@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use super::BifResult::Value;
 use super::*;
+use crate::runtime::interpreter::code_table::CodeTable;
 use crate::runtime::interpreter::record::{badrecord, field_reason};
 use crate::term::{AtomTable, Record, RecordDef, flatmap_order};
 
@@ -214,29 +215,14 @@ pub(super) fn create(
     }
     let (keys, values): (Vec<Atom>, Vec<Term>) = pairs.into_iter().unzip();
     let scheduler = &cx.scheduler;
-    let mut def = RecordDef::new(
+    let def = RecordDef::new(
         module.clone(),
         name.clone(),
         exported,
         keys.into_iter().map(|key| (key, None)).collect(),
         &scheduler.atoms,
     );
-    let canonical = scheduler
-        .code
-        .get(scheduler.atoms.name_of(module))
-        .and_then(|code| code.records.iter().find(|loaded| loaded.name == *name))
-        .filter(|loaded| {
-            loaded.is_exported == def.is_exported
-                && loaded.keys == def.keys
-                && loaded.order == def.order
-        });
-    let def = canonical.map_or_else(
-        || {
-            def.transient = true;
-            Arc::new(def)
-        },
-        Arc::clone,
-    );
+    let def = canonical(&scheduler.code, &scheduler.atoms, def);
     let mut sorted_values = vec![Term::Nil; values.len()];
     for (position, value) in values.into_iter().enumerate() {
         sorted_values[def.order[position]] = value;
@@ -311,4 +297,25 @@ pub(super) fn update(
         Some((key, _)) => raise(field_reason("badfield", def, key)),
         None => Value(Term::Record(Record::new(Arc::clone(def), values))),
     }
+}
+
+/// Return the loaded definition of the record of `def` when its export
+/// flag, keys, and field order are those of `def`, else `def` as a
+/// definition that only record terms hold (`erts_canonical_record_def`,
+/// `erl_record.c:106-153`).
+pub(super) fn canonical(code: &CodeTable, atoms: &AtomTable, mut def: RecordDef) -> Arc<RecordDef> {
+    code.get(atoms.name_of(&def.module))
+        .and_then(|code| code.records.iter().find(|loaded| loaded.name == def.name))
+        .filter(|loaded| {
+            loaded.is_exported == def.is_exported
+                && loaded.keys == def.keys
+                && loaded.order == def.order
+        })
+        .map_or_else(
+            || {
+                def.transient = true;
+                Arc::new(def)
+            },
+            Arc::clone,
+        )
 }

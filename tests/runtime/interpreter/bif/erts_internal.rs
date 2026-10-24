@@ -22,3 +22,16 @@ fn gives_badarg_for_a_bitstring_that_is_not_a_whole_number_of_bytes() {
         BifResult::Value(Term::Atom(atom)) if atom.is_static("badarg")
     ));
 }
+
+#[test]
+fn names_a_port_as_erts_does() {
+    // `erts_internal:term_type/1` gives `port` for a local port
+    // (`erl_map.c:3336-3417`). The size probe runs without a port, so
+    // this unit test builds the port term.
+    let atoms = AtomTable::new();
+    let result = term_type(&atoms, &Term::Port(crate::term::PortId(5))).unwrap();
+    assert!(matches!(
+        &result,
+        BifResult::Value(Term::Atom(atom)) if atom.is_static("port")
+    ));
+}

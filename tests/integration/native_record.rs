@@ -61,19 +61,57 @@ fn runs_native_records_as_pinned_erts() {
     assert_eq!(shown, EXPECTED);
 }
 
+const EXT: &[u8] = include_bytes!("../../fixtures/native_record/nr_ext.beam");
+
+/// The `~w` print of `nr_ext:results()` on the pinned ERTS (OTP 29.1.1).
+const EXT_EXPECTED: &str = include_str!("../../fixtures/native_record/nr_ext.expected");
+
 #[test]
-fn stops_the_run_at_term_to_binary_of_a_record() {
-    // ERTS encodes a native record (`external.c`); PBeam stops the run
-    // until #1039 (row "External term format").
-    let program = BeamProgram::load(&[PROBE, DEF, &pinned_beam("erlang")]).unwrap();
-    let error = program
-        .execute("nr_probe", "t2b", &[])
-        .unwrap_err()
-        .to_string();
-    assert!(
-        error.contains("unsupported erlang:term_to_binary/1,2 of a native record"),
-        "{error}"
-    );
+fn encodes_and_decodes_records_as_pinned_erts() {
+    // `RECORD_EXT` in `term_to_binary/1,2`, `external_size/1,2`, and
+    // `binary_to_term/1,2`: the loaded definition when the export flag and
+    // the fields match, and `badarg` for a bad flag, a field name that
+    // occurs twice, and a module, a name, or a field name that is not an
+    // atom (`external.c:4006-4036`, 5257-5380, 5917-5950;
+    // `erl_record.c:106-153`).
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/native_record",
+            "-eval",
+            "io:format(\"~w~n\", [nr_ext:results()]), halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(reference.status.success(), "{reference:?}");
+    assert_eq!(String::from_utf8(reference.stdout).unwrap(), EXT_EXPECTED);
+    let modules: Vec<Vec<u8>> = [
+        "erlang",
+        "lists",
+        "maps",
+        "unicode",
+        "io_lib",
+        "io_lib_format",
+        "io_lib_pretty",
+        "string",
+        "epp",
+        "erl_scan",
+        "erl_features",
+        "ets",
+    ]
+    .iter()
+    .map(|module| pinned_beam(module))
+    .collect();
+    let mut beams: Vec<&[u8]> = modules.iter().map(Vec::as_slice).collect();
+    beams.extend([EXT, DEF]);
+    let program = BeamProgram::load(&beams).unwrap();
+    let shown = program.execute("nr_ext", "show", &[]).unwrap().term;
+    let Term::Binary(shown) = &shown else {
+        panic!("not a binary: {shown:?}");
+    };
+    let shown = String::from_utf8(shown.bytes().unwrap().to_vec()).unwrap();
+    assert_eq!(shown, EXT_EXPECTED);
 }
 
 const BIF: &[u8] = include_bytes!("../../fixtures/native_record/nr_bif.beam");
