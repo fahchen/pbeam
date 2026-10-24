@@ -453,6 +453,31 @@ fn sets_and_gets_the_host_socket_options_as_pinned_erts() {
 }
 
 #[test]
+fn sets_and_gets_the_raw_and_native_socket_options_as_pinned_erts() {
+    // `kernel_boot_probe:sockopt_raw/0` runs `esock_setopt_bool_opt`,
+    // `esock_setopt_int_opt`, and their getters for the options without a
+    // typed call, `esock_setopt_ip_mtu_discover` and its IPv6 sibling with
+    // their getters, `esock_setopt_in_update_source`,
+    // `esock_setopt_addrform`, `esock_setopt_native`, and
+    // `esock_getopt_native` with each value spec (prim_socket_nif.c:8414-8465,
+    // 8704-8717, 8851-8934, 12117-12192, 12608-12629, 12709-12728,
+    // 13009-13048, 13126-13216, 16364-16570). The host options differ
+    // between Linux and macOS, so the test compares the two runs on the
+    // host.
+    let (reference, status, node) = run_kernel_boot("sockopt_raw", false, &["{sockopt_raw,"]);
+    assert_eq!(status, Some(0), "ERTS");
+    assert!(
+        reference.starts_with("{sockopt_raw,[[ok,{ok,true},"),
+        "{reference}"
+    );
+    assert!(
+        reference.contains("{error,{invalid,{value_spec,foo}}}"),
+        "{reference}"
+    );
+    assert_eq!(node, reference, "PBeam");
+}
+
+#[test]
 fn sets_and_gets_the_otp_socket_options_and_linger_as_pinned_erts() {
     // `kernel_boot_probe:sockopt_otp/0` runs the handlers of
     // `esock_setopt_otp` and `esock_getopt_otp`
