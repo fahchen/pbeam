@@ -14,3 +14,16 @@ fn gives_badarg_for_a_level_or_option_that_is_not_an_integer() {
     };
     assert_eq!(reason, Term::static_atom("badarg"));
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn allows_only_eperm_from_the_reset_of_so_priority() {
+    // `socket_setopt` ignores a failed reset of `SO_PRIORITY` only for
+    // `EPERM` (prim_socket_nif.c:11460-11469). An unprivileged process
+    // can always set back the priority that it read, so no fixture
+    // reaches the error.
+    use nix::errno::Errno;
+    assert_eq!(allow_eperm(Err(Errno::EPERM)), Ok(()));
+    assert_eq!(allow_eperm(Err(Errno::EINVAL)), Err(Errno::EINVAL));
+    assert_eq!(allow_eperm(Ok(())), Ok(()));
+}

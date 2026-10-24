@@ -97,9 +97,13 @@ pub(in crate::runtime::interpreter::native::prim_socket) fn setopt_5(
     scheduler: &mut Scheduler,
     arguments: &[Term],
 ) -> Result<BifResult, BeamError> {
-    let [socket, level, opt, value, native] = arguments else {
-        unreachable!("the binding has arity 5");
-    };
+    let [socket, level, opt, value, native] = [
+        &arguments[0],
+        &arguments[1],
+        &arguments[2],
+        &arguments[3],
+        &arguments[4],
+    ];
     let (Some((reference, state)), Some(native)) =
         (socket_argument(scheduler, socket), int(native))
     else {
@@ -215,16 +219,22 @@ fn keep_tos_and_priority(host: &Socket, set: impl FnOnce() -> io::Result<()>) ->
     let priority = getsockopt(host, sockopt::Priority);
     let tos = getsockopt(host, sockopt::Ipv4Tos);
     set()?;
-    if let Ok(tos) = tos {
-        setsockopt(host, sockopt::Ipv4Tos, &tos)?;
-    }
-    if let Ok(priority) = priority {
-        setsockopt(host, sockopt::Priority, &priority).or_else(|failure| match failure {
-            nix::errno::Errno::EPERM => Ok(()),
-            failure => Err(failure),
-        })?;
-    }
+    tos.map_or(Ok(()), |tos| setsockopt(host, sockopt::Ipv4Tos, &tos))?;
+    priority.map_or(Ok(()), |priority| {
+        allow_eperm(setsockopt(host, sockopt::Priority, &priority))
+    })?;
     Ok(())
+}
+
+/// Return `result`, but with `Ok` for the error `EPERM`: a failed reset of
+/// `SO_PRIORITY` with `EPERM` is not an error
+/// (`prim_socket_nif.c:11460-11466`).
+#[cfg(target_os = "linux")]
+fn allow_eperm(result: nix::Result<()>) -> nix::Result<()> {
+    match result {
+        Err(nix::errno::Errno::EPERM) => Ok(()),
+        result => result,
+    }
 }
 
 /// Run `set` on `host`: macOS has no `SO_PRIORITY`, so `socket_setopt`
@@ -394,13 +404,12 @@ fn setopt_otp(
     if *value != Term::static_atom("true") {
         return Ok(invalid(atom(scheduler, "value")?));
     }
-    if !socket.registered {
-        socket.registered = true;
-        drop(socket);
-        let registry = lock(&scheduler.node().resources.kind::<Sockets>()).registry;
-        if let Some(registry) = registry {
-            send_registry(scheduler, registry, "add", reference)?;
-        }
+    let newly = !socket.registered;
+    socket.registered = true;
+    drop(socket);
+    let registry = lock(&scheduler.node().resources.kind::<Sockets>()).registry;
+    if let (true, Some(registry)) = (newly, registry) {
+        send_registry(scheduler, registry, "add", reference)?;
     }
     Ok(BifResult::Value(Term::static_atom("ok")))
 }
