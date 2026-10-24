@@ -627,6 +627,15 @@ impl EtsTables {
         self.names.get(name).copied()
     }
 
+    /// Give the named table `id` the name `name` in place of its old name,
+    /// as `insert_named_tab` and `remove_named_tab` do
+    /// (`erl_db.c:2516-2520`). The caller makes sure that the name is not
+    /// in use.
+    pub(super) fn rename(&mut self, id: Reference, name: &str) {
+        self.names.retain(|_, named| *named != id);
+        self.names.insert(name.to_owned(), id);
+    }
+
     /// Return whether the table is a named table.
     ///
     /// # Examples

@@ -31,6 +31,9 @@ struct Walk<'a> {
     max: i64,
     /// The key of the last object that the walk read.
     last: Option<Term>,
+    /// Whether the walk only counts the results `true` in `got`, as
+    /// `doit_select_count` does, and keeps no match.
+    counting: bool,
 }
 
 impl Walk<'_> {
@@ -48,10 +51,14 @@ impl Walk<'_> {
             }
         }
         if let Some(found) = self.spec.run(self.atoms, object) {
-            if self.chunk != 0 {
-                self.got += 1;
+            if self.counting {
+                self.got += i64::from(found == Term::static_atom("true"));
+            } else {
+                if self.chunk != 0 {
+                    self.got += 1;
+                }
+                self.accum = Term::cons(found, std::mem::replace(&mut self.accum, Term::nil()));
             }
-            self.accum = Term::cons(found, std::mem::replace(&mut self.accum, Term::nil()));
         }
         self.max -= 1;
         Ok(self.max > 0 && (self.chunk == 0 || self.got != self.chunk))
@@ -148,6 +155,7 @@ pub(super) fn first_turn(
         accum: Term::nil(),
         max: TREE_ITERATIONS,
         last: None,
+        counting: false,
     };
     match &range {
         KeyRange::Impossible => {
@@ -401,6 +409,7 @@ pub(super) fn next_turn(
         accum: state.accum,
         max: TREE_ITERATIONS,
         last: None,
+        counting: false,
     };
     let forward = (state.chunk == 0) == state.reverse;
     walk.run(table, Some(&state.last), forward)?;
@@ -435,6 +444,80 @@ pub(super) fn next_turn(
         ));
     }
     Ok((Turn::Trap(last, end, accum, got, program), reductions))
+}
+
+/// The count, the reductions, and the trap position and end key of one
+/// turn of a count.
+pub(super) type CountTurn = (i64, i64, Option<(Term, Term)>);
+
+/// Run one turn of `ets:select_count/2` on the `ordered_set` table
+/// `table`, as `db_select_count_tree_common` and
+/// `db_select_count_continue_tree` do (`erl_db_tree.c:1690-1790`): an
+/// impossible key counts nothing, a bound key reads only its object and
+/// charges no reduction, and another key walks down from the greatest key
+/// of the range, or from the key below `resume.0` of a trapped count, until
+/// the end key `resume.1`. `got` is the count of the earlier turns. Return
+/// the count, the reductions of the turn, and the last key and the end key
+/// when the turn read 1000 objects and the count traps.
+///
+/// # Errors
+///
+/// Return a runtime error when a comparison meets two alias references.
+pub(super) fn count(
+    atoms: &AtomTable,
+    table: &Table,
+    spec: &MatchSpec,
+    resume: Option<(&Term, &Term)>,
+    got: i64,
+) -> Result<CountTurn, BeamError> {
+    let mut walk = Walk {
+        atoms,
+        spec,
+        key: key_index(table),
+        end: None,
+        chunk: 0,
+        got,
+        accum: Term::nil(),
+        max: TREE_ITERATIONS,
+        last: None,
+        counting: true,
+    };
+    let after = match resume {
+        Some((last, end)) => {
+            walk.end = (!end.is_nil()).then(|| end.clone());
+            Some(last.clone())
+        }
+        None => {
+            let keypos = usize::try_from(table.keypos())
+                .ok()
+                .filter(|&keypos| keypos > 0)
+                .unwrap_or(usize::MAX);
+            let range = key_range(atoms, spec, keypos)?;
+            match &range {
+                KeyRange::Impossible => return Ok((0, 0, None)),
+                KeyRange::Bound(key) => {
+                    if let Some(object) = table.ordered_get(atoms, key)? {
+                        walk.visit(object, false)?;
+                    }
+                    return Ok((walk.got, 0, None));
+                }
+                KeyRange::Partial { .. } | KeyRange::Unbound => {
+                    let (after, end) = bounds(atoms, table, &range, false)?;
+                    walk.end = end;
+                    after
+                }
+            }
+        }
+    };
+    walk.run(table, after.as_ref(), false)?;
+    let reductions = TREE_ITERATIONS - walk.max;
+    let trap = (walk.max == 0).then(|| {
+        (
+            walk.last.clone().unwrap_or(Term::Nil),
+            walk.end.clone().unwrap_or(Term::Nil),
+        )
+    });
+    Ok((walk.got, reductions, trap))
 }
 
 /// The end of a turn of a select delete.

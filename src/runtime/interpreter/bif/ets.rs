@@ -3301,3 +3301,258 @@ pub(super) fn internal_select_delete(
         .bump_reductions(i32::try_from(iterations).unwrap_or(i32::MAX));
     Ok(Value(Term::Integer(removed)))
 }
+
+/// Run `ets:select_count(Table, Spec)`, as `ets_select_count_2`
+/// (`erl_db.c:4096-4137`) does: count the objects for which the match
+/// specification gives `true` (`select_count_on_match_res`,
+/// `erl_db_hash.c:2498-2503`). A specification that cannot match counts 0
+/// (`erl_db_hash.c:2491-2496`), and a bound key reads only its bucket. A
+/// turn charges one reduction for each object that it reads
+/// (`erl_db_hash.c:2505-2514`). After 1000 objects it uses all reductions
+/// and traps to `ets:select_count_trap/6` ([`select_count_trap`]), as
+/// `on_simple_trap` does (`erl_db_hash.c:2516-2523`); an `ordered_set`
+/// table traps in the same way (`erl_db_tree.c:1765-1790`).
+///
+/// # Errors
+///
+/// Return a runtime error for a guard function that PBeam does not run yet.
+pub(super) fn select_count(
+    context: &mut BifContext<'_>,
+    table: &Term,
+    spec: &Term,
+) -> Result<BifResult, BeamError> {
+    select_count_trap(context, table, spec, None)
+}
+
+/// Run one turn of a count. `resume` is `None` for the first turn, else
+/// the state of the trap export `ets:select_count_trap/6`: the next bucket
+/// of a hash table or the last key of an `ordered_set` table, the end key
+/// or `[]`, the count, and the change count of the table. ERTS fixes the
+/// table while the count traps; PBeam returns a runtime error for a table
+/// that changed (row "ETS tables" in `docs/erts-differences.md`).
+///
+/// # Errors
+///
+/// Return a runtime error for a guard function that PBeam does not run
+/// yet, and for a table that changed while the count trapped.
+pub(super) fn select_count_trap(
+    context: &mut BifContext<'_>,
+    table: &Term,
+    spec: &Term,
+    resume: Option<(&Term, &Term, i64, i64)>,
+) -> Result<BifResult, BeamError> {
+    let caller = context.scheduler.current_process_mut().id;
+    let reds = context
+        .scheduler
+        .current_process_mut()
+        .bif_reductions_signed();
+    let store = Arc::clone(&context.scheduler.ets);
+    let ets = store.shared();
+    let found = match ets.read(&context.scheduler.atoms, table, caller, reds) {
+        Ok(found) => found,
+        Err(lacking) => {
+            let (function, arguments) = match resume {
+                None => ("select_count", vec![table.clone(), spec.clone()]),
+                Some(state) => ("select_count_trap", count_arguments(table, spec, state)),
+            };
+            return Ok(retry(context, lacking, function, arguments));
+        }
+    };
+    let atoms = &context.scheduler.atoms;
+    let Some(compiled) = compile_spec(atoms, spec)? else {
+        return Ok(BifResult::badarg());
+    };
+    let writes = found.writes() as i64;
+    // The continuation keeps the table identifier, as ERTS does, so a
+    // rename while the count traps does not change it.
+    let id = ets
+        .id(atoms, table)
+        .map_or_else(|| table.clone(), Term::Reference);
+    let tree = found.table_type() == TableType::OrderedSet;
+    if resume.is_some_and(|(_, _, _, before)| before != writes) {
+        // ponytail: ERTS fixes the table; see "ETS tables" in docs/erts-differences.md.
+        return Err(error(
+            "unsupported ets:select_count/2 on a table that changed while the count trapped",
+        ));
+    }
+    let got = resume.map_or(0, |(_, _, got, _)| got);
+    let (count, reductions, trap) = if tree {
+        let resume = resume.map(|(last, end, _, _)| (last, end));
+        tree::count(atoms, &found, &compiled, resume, got)?
+    } else {
+        let keypos = usize::try_from(found.keypos())
+            .ok()
+            .filter(|&keypos| keypos > 0)
+            .unwrap_or(usize::MAX);
+        let mut count = got;
+        let mut iterations = MATCH_ITERATIONS;
+        let mut read = |bucket: usize, iterations: &mut i64| {
+            for object in found.chain(bucket) {
+                *iterations -= 1;
+                count += i64::from(compiled.run(atoms, object) == Some(Term::static_atom("true")));
+            }
+        };
+        let mut walk = None;
+        match (resume, compiled.bound_key(keypos)) {
+            (Some((Term::Integer(bucket), ..)), _) => walk = Some(*bucket as usize),
+            _ if compiled.matches_nothing(keypos) => {}
+            (_, Some(key)) => {
+                if let Some(bucket) = found.key_bucket(atoms, key) {
+                    read(bucket, &mut iterations);
+                }
+            }
+            _ => walk = Some(0),
+        }
+        // The walk traps at a bucket boundary once it read 1000 objects
+        // (`match_traverse`, `erl_db_hash.c:1895-1960`).
+        let mut trap = None;
+        while let Some(bucket) = walk.take() {
+            read(bucket, &mut iterations);
+            match found.next_bucket(bucket) {
+                Some(next) if iterations <= 0 => {
+                    trap = Some((Term::Integer(next as i64), Term::Nil))
+                }
+                next => walk = next,
+            }
+        }
+        (count, MATCH_ITERATIONS - iterations, trap)
+    };
+    drop(found);
+    drop(ets);
+    let process = context.scheduler.current_process_mut();
+    // A hash count uses all reductions when it traps (`on_simple_trap`),
+    // and a tree count charges the objects that it read
+    // (`erl_db_tree.c:1765`).
+    if trap.is_none() || tree {
+        process.bump_reductions(i32::try_from(reductions).unwrap_or(i32::MAX));
+    } else {
+        process.bump_all_reductions();
+    }
+    let Some((position, end)) = trap else {
+        return Ok(Value(Term::Integer(count)));
+    };
+    Ok(BifResult::TrapBif {
+        module: "ets",
+        function: "select_count_trap",
+        arguments: count_arguments(&id, spec, (&position, &end, count, writes)),
+    })
+}
+
+/// Return the arguments of the trap export `ets:select_count_trap/6`.
+fn count_arguments(
+    table: &Term,
+    spec: &Term,
+    (position, end, got, writes): (&Term, &Term, i64, i64),
+) -> Vec<Term> {
+    vec![
+        table.clone(),
+        spec.clone(),
+        position.clone(),
+        end.clone(),
+        Term::Integer(got),
+        Term::Integer(writes),
+    ]
+}
+
+/// Run `ets:slot(Table, Slot)`, as `ets_slot_2` (`erl_db.c:3739-3760`)
+/// does. On a hash table, a slot below the bucket count gives the objects
+/// of that bucket, the last object of the chain first (`build_term_list`,
+/// `erl_db_hash.c:3591-3623`), the bucket count gives
+/// `'$end_of_table'`, and each other slot raises `badarg`
+/// (`db_slot_hash`, `erl_db_hash.c:1733-1759`). On an `ordered_set` table,
+/// the slot `N` gives the object at position `N` in key order, the object
+/// count gives `'$end_of_table'`, and a greater slot raises `badarg`
+/// (`db_slot_tree_common`, `erl_db_tree.c:1139-1188`). A slot that is not
+/// a small integer of 0 or more raises `badarg`.
+///
+/// # Errors
+///
+/// Return a runtime error when the order of a key is not supported.
+pub(super) fn slot(
+    context: &mut BifContext<'_>,
+    table: &Term,
+    slot: &Term,
+) -> Result<BifResult, BeamError> {
+    let caller = context.scheduler.current_process_mut().id;
+    let reds = context
+        .scheduler
+        .current_process_mut()
+        .bif_reductions_signed();
+    let store = Arc::clone(&context.scheduler.ets);
+    let ets = store.shared();
+    let found = match ets.read(&context.scheduler.atoms, table, caller, reds) {
+        Ok(found) => found,
+        Err(lacking) => {
+            let arguments = vec![table.clone(), slot.clone()];
+            return Ok(retry(context, lacking, "slot", arguments));
+        }
+    };
+    let atoms = &context.scheduler.atoms;
+    let Some(slot) = (slot.small_integer()).and_then(|slot| usize::try_from(slot).ok()) else {
+        return Ok(BifResult::badarg());
+    };
+    let (objects, end): (Vec<Vec<Term>>, usize) = if found.table_type() == TableType::OrderedSet {
+        let object = found.ordered_walk(atoms, None, true)?.nth(slot);
+        let end = found.ordered_walk(atoms, None, true)?.count();
+        (object.into_iter().map(<[Term]>::to_vec).collect(), end)
+    } else if slot < found.bucket_count() {
+        let mut objects: Vec<Vec<Term>> = found.chain(slot).map(<[Term]>::to_vec).collect();
+        objects.reverse();
+        (objects, usize::MAX)
+    } else {
+        (Vec::new(), found.bucket_count())
+    };
+    Ok(match (objects.is_empty(), slot.cmp(&end)) {
+        (false, _) | (true, Ordering::Less) => {
+            Value(Term::list_from(objects.into_iter().map(Term::tuple)))
+        }
+        (true, Ordering::Equal) => Value(Term::static_atom("$end_of_table")),
+        (true, Ordering::Greater) => BifResult::badarg(),
+    })
+}
+
+/// Run `ets:rename(Table, Name)`, as `ets_rename_2` (`erl_db.c:2444-2547`)
+/// does: the caller needs write access to the table, else the call raises
+/// `badarg` with the cause of the lookup. A name that is not an atom raises
+/// `badarg`. A named table takes the new name and the call returns it; a
+/// name that a named table has, also its own name, raises `badarg`
+/// (`insert_named_tab`, `erl_db.c:2516-2517`). A table that is not named
+/// only changes the name that `ets:info/2` gives, and the call returns
+/// `Table` (`erl_db.c:2523-2526`).
+pub(super) fn rename(
+    context: &mut BifContext<'_>,
+    table: &Term,
+    name: &Term,
+) -> Result<BifResult, BeamError> {
+    let caller = context.scheduler.current_process_mut().id;
+    let reds = context
+        .scheduler
+        .current_process_mut()
+        .bif_reductions_signed();
+    let store = Arc::clone(&context.scheduler.ets);
+    let mut ets = store.exclusive();
+    let mut found = match ets.write(&context.scheduler.atoms, table, caller, reds) {
+        Ok(found) => found,
+        Err(lacking) => {
+            let arguments = vec![table.clone(), name.clone()];
+            return Ok(retry(context, lacking, "rename", arguments));
+        }
+    };
+    let atoms = &context.scheduler.atoms;
+    let Term::Atom(atom) = name else {
+        return Ok(BifResult::badarg());
+    };
+    let new = atoms.name_of(atom);
+    let id = (ets.id(atoms, table)).expect("a table that the write lock found has an identifier");
+    let named = ets.named(id);
+    if named && ets.name_in_use(new) {
+        return Ok(BifResult::badarg());
+    }
+    found.set_name(new);
+    drop(found);
+    if named {
+        ets.rename(id, new);
+        return Ok(Value(name.clone()));
+    }
+    Ok(Value(table.clone()))
+}
