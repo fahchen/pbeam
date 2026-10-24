@@ -602,6 +602,11 @@ unsupported(Case) ->
             true = ets:insert(T, [{I} || I <- seq(5000)]),
             spawn(?MODULE, write, [T]) ! go,
             ets:match(T, '$1');
+        count_changed ->
+            T = ets:new(ets_probe, [public]),
+            true = ets:insert(T, [{I} || I <- seq(5000)]),
+            spawn(?MODULE, write, [T]) ! go,
+            ets:select_count(T, [{'_', [], [true]}]);
         delete_inserting ->
             T = ets:new(ets_probe, [public]),
             spawn(?MODULE, insert_all, [T, [{I} || I <- seq(400000)]]),
@@ -1320,6 +1325,22 @@ rename_slot_count() ->
     {Protected, Private} = receive {_, _} = Tables -> Tables end,
     Result = [Type(set), Type(bag), Type(duplicate_bag), Type(ordered_set),
               ets:select_count(Big, [{{'$1'}, [{'>', '$1', 1000}], [true]}]),
+              [begin
+                   L = ets:new(ets_probe, [Ty, public]),
+                   true = ets:insert(L, [{I, I rem 3} || I <- lists:seq(1, 2500)]),
+                   [ets:select_count(L, [{{'_', 0}, [], [true]}]),
+                    ets:select_count(L, [{{'$1', '_'}, [{'>', '$1', 1200}], [true]}]),
+                    ets:select_count(L, [{{'_', '_'}, [], [true]}])]
+               end || Ty <- [set, bag, duplicate_bag, ordered_set]],
+              [begin
+                   D = ets:new(ets_probe, [Ty, public]),
+                   true = ets:insert(D, [{I} || I <- lists:seq(1, 2500)]),
+                   Parent = self(),
+                   C = spawn(fun() -> Parent ! {count, catch_cause(fun() -> ets:select_count(D, [{'_', [], [true]}]) end)} end),
+                   erlang:yield(),
+                   true = ets:delete(D),
+                   receive {count, R} -> {is_pid(C), R} end
+               end || Ty <- [set, ordered_set]],
               ets:slot(Big, 1024), ets:slot(Big, 2048),
               ets:rename(N, ets_probe_named2), ets:info(ets_probe_named2, name),
               catch_cause(fun() -> ets:info(ets_probe_named, name) end),

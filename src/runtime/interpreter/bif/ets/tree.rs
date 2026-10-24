@@ -446,14 +446,19 @@ pub(super) fn next_turn(
     Ok((Turn::Trap(last, end, accum, got, program), reductions))
 }
 
-/// Count the objects of the `ordered_set` table `table` for which `spec`
-/// gives `true`, as `db_select_count_tree_common` does
-/// (`erl_db_tree.c:1690-1765`): an impossible key counts nothing, a bound
-/// key reads only its object and charges no reduction, and another key
-/// walks down from the greatest key of the range. Return the count and the
-/// number of objects that the walk read. The walk does not trap after
-/// 1000 objects as ERTS does (row "ETS tables" in
-/// `docs/erts-differences.md`).
+/// The count, the reductions, and the trap position and end key of one
+/// turn of a count.
+pub(super) type CountTurn = (i64, i64, Option<(Term, Term)>);
+
+/// Run one turn of `ets:select_count/2` on the `ordered_set` table
+/// `table`, as `db_select_count_tree_common` and
+/// `db_select_count_continue_tree` do (`erl_db_tree.c:1690-1790`): an
+/// impossible key counts nothing, a bound key reads only its object and
+/// charges no reduction, and another key walks down from the greatest key
+/// of the range, or from the key below `resume.0` of a trapped count, until
+/// the end key `resume.1`. `got` is the count of the earlier turns. Return
+/// the count, the reductions of the turn, and the last key and the end key
+/// when the turn read 1000 objects and the count traps.
 ///
 /// # Errors
 ///
@@ -462,40 +467,57 @@ pub(super) fn count(
     atoms: &AtomTable,
     table: &Table,
     spec: &MatchSpec,
-) -> Result<(usize, i64), BeamError> {
-    let keypos = usize::try_from(table.keypos())
-        .ok()
-        .filter(|&keypos| keypos > 0)
-        .unwrap_or(usize::MAX);
-    let range = key_range(atoms, spec, keypos)?;
+    resume: Option<(&Term, &Term)>,
+    got: i64,
+) -> Result<CountTurn, BeamError> {
     let mut walk = Walk {
         atoms,
         spec,
         key: key_index(table),
         end: None,
         chunk: 0,
-        got: 0,
+        got,
         accum: Term::nil(),
-        max: i64::MAX,
+        max: TREE_ITERATIONS,
         last: None,
         counting: true,
     };
-    let reductions = match &range {
-        KeyRange::Impossible => 0,
-        KeyRange::Bound(key) => {
-            if let Some(object) = table.ordered_get(atoms, key)? {
-                walk.visit(object, false)?;
-            }
-            0
+    let after = match resume {
+        Some((last, end)) => {
+            walk.end = (!end.is_nil()).then(|| end.clone());
+            Some(last.clone())
         }
-        KeyRange::Partial { .. } | KeyRange::Unbound => {
-            let (after, end) = bounds(atoms, table, &range, false)?;
-            walk.end = end;
-            walk.run(table, after.as_ref(), false)?;
-            i64::MAX - walk.max
+        None => {
+            let keypos = usize::try_from(table.keypos())
+                .ok()
+                .filter(|&keypos| keypos > 0)
+                .unwrap_or(usize::MAX);
+            let range = key_range(atoms, spec, keypos)?;
+            match &range {
+                KeyRange::Impossible => return Ok((0, 0, None)),
+                KeyRange::Bound(key) => {
+                    if let Some(object) = table.ordered_get(atoms, key)? {
+                        walk.visit(object, false)?;
+                    }
+                    return Ok((walk.got, 0, None));
+                }
+                KeyRange::Partial { .. } | KeyRange::Unbound => {
+                    let (after, end) = bounds(atoms, table, &range, false)?;
+                    walk.end = end;
+                    after
+                }
+            }
         }
     };
-    Ok((usize::try_from(walk.got).unwrap_or(usize::MAX), reductions))
+    walk.run(table, after.as_ref(), false)?;
+    let reductions = TREE_ITERATIONS - walk.max;
+    let trap = (walk.max == 0).then(|| {
+        (
+            walk.last.clone().unwrap_or(Term::Nil),
+            walk.end.clone().unwrap_or(Term::Nil),
+        )
+    });
+    Ok((walk.got, reductions, trap))
 }
 
 /// The end of a turn of a select delete.

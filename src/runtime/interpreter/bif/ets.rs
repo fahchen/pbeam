@@ -3306,10 +3306,12 @@ pub(super) fn internal_select_delete(
 /// (`erl_db.c:4096-4137`) does: count the objects for which the match
 /// specification gives `true` (`select_count_on_match_res`,
 /// `erl_db_hash.c:2498-2503`). A specification that cannot match counts 0
-/// (`erl_db_hash.c:2491-2496`), a bound key reads only its bucket, and the
-/// call charges one reduction for each object that it reads
-/// (`erl_db_hash.c:2505-2514`). The walk does not trap after 1000 objects
-/// as ERTS does (row "ETS tables" in `docs/erts-differences.md`).
+/// (`erl_db_hash.c:2491-2496`), and a bound key reads only its bucket. A
+/// turn charges one reduction for each object that it reads
+/// (`erl_db_hash.c:2505-2514`). After 1000 objects it uses all reductions
+/// and traps to `ets:select_count_trap/6` ([`select_count_trap`]), as
+/// `on_simple_trap` does (`erl_db_hash.c:2516-2523`); an `ordered_set`
+/// table traps in the same way (`erl_db_tree.c:1765-1790`).
 ///
 /// # Errors
 ///
@@ -3318,6 +3320,26 @@ pub(super) fn select_count(
     context: &mut BifContext<'_>,
     table: &Term,
     spec: &Term,
+) -> Result<BifResult, BeamError> {
+    select_count_trap(context, table, spec, None)
+}
+
+/// Run one turn of a count. `resume` is `None` for the first turn, else
+/// the state of the trap export `ets:select_count_trap/6`: the next bucket
+/// of a hash table or the last key of an `ordered_set` table, the end key
+/// or `[]`, the count, and the change count of the table. ERTS fixes the
+/// table while the count traps; PBeam returns a runtime error for a table
+/// that changed (row "ETS tables" in `docs/erts-differences.md`).
+///
+/// # Errors
+///
+/// Return a runtime error for a guard function that PBeam does not run
+/// yet, and for a table that changed while the count trapped.
+pub(super) fn select_count_trap(
+    context: &mut BifContext<'_>,
+    table: &Term,
+    spec: &Term,
+    resume: Option<(&Term, &Term, i64, i64)>,
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
     let reds = context
@@ -3329,45 +3351,95 @@ pub(super) fn select_count(
     let found = match ets.read(&context.scheduler.atoms, table, caller, reds) {
         Ok(found) => found,
         Err(lacking) => {
-            let arguments = vec![table.clone(), spec.clone()];
-            return Ok(retry(context, lacking, "select_count", arguments));
+            let (function, arguments) = match resume {
+                None => ("select_count", vec![table.clone(), spec.clone()]),
+                Some(state) => ("select_count_trap", count_arguments(table, spec, state)),
+            };
+            return Ok(retry(context, lacking, function, arguments));
         }
     };
     let atoms = &context.scheduler.atoms;
     let Some(compiled) = compile_spec(atoms, spec)? else {
         return Ok(BifResult::badarg());
     };
-    let (count, iterations) = if found.table_type() == TableType::OrderedSet {
-        tree::count(atoms, &found, &compiled)?
+    let writes = found.writes() as i64;
+    if resume.is_some_and(|(_, _, _, before)| before != writes) {
+        // ponytail: ERTS fixes the table; see "ETS tables" in docs/erts-differences.md.
+        return Err(error(
+            "unsupported ets:select_count/2 on a table that changed while the count trapped",
+        ));
+    }
+    let got = resume.map_or(0, |(_, _, got, _)| got);
+    let (count, reductions, trap) = if found.table_type() == TableType::OrderedSet {
+        let resume = resume.map(|(last, end, _, _)| (last, end));
+        tree::count(atoms, &found, &compiled, resume, got)?
     } else {
         let keypos = usize::try_from(found.keypos())
             .ok()
             .filter(|&keypos| keypos > 0)
             .unwrap_or(usize::MAX);
-        let buckets: Vec<usize> = if compiled.matches_nothing(keypos) {
-            Vec::new()
-        } else if let Some(key) = compiled.bound_key(keypos) {
-            found.key_bucket(atoms, key).into_iter().collect()
-        } else {
-            std::iter::successors(Some(0), |&bucket| found.next_bucket(bucket)).collect()
+        let mut count = got;
+        let mut iterations = MATCH_ITERATIONS;
+        let mut read = |bucket: usize, iterations: &mut i64| {
+            for object in found.chain(bucket) {
+                *iterations -= 1;
+                count += i64::from(compiled.run(atoms, object) == Some(Term::static_atom("true")));
+            }
         };
-        let mut iterations = 0_i64;
-        let count = (buckets.into_iter())
-            .flat_map(|bucket| found.chain(bucket))
-            .inspect(|_| iterations += 1)
-            .filter(|object| compiled.run(atoms, object) == Some(Term::static_atom("true")))
-            .count();
-        (count, iterations)
+        let mut walk = None;
+        match (resume, compiled.bound_key(keypos)) {
+            (Some((Term::Integer(bucket), ..)), _) => walk = Some(*bucket as usize),
+            _ if compiled.matches_nothing(keypos) => {}
+            (_, Some(key)) => {
+                if let Some(bucket) = found.key_bucket(atoms, key) {
+                    read(bucket, &mut iterations);
+                }
+            }
+            _ => walk = Some(0),
+        }
+        // The walk traps at a bucket boundary once it read 1000 objects
+        // (`match_traverse`, `erl_db_hash.c:1895-1960`).
+        let mut trap = None;
+        while let Some(bucket) = walk.take() {
+            read(bucket, &mut iterations);
+            match found.next_bucket(bucket) {
+                Some(next) if iterations <= 0 => {
+                    trap = Some((Term::Integer(next as i64), Term::Nil))
+                }
+                next => walk = next,
+            }
+        }
+        (count, MATCH_ITERATIONS - iterations, trap)
     };
     drop(found);
     drop(ets);
-    context
-        .scheduler
-        .current_process_mut()
-        .bump_reductions(i32::try_from(iterations).unwrap_or(i32::MAX));
-    Ok(Value(Term::Integer(
-        i64::try_from(count).unwrap_or(i64::MAX),
-    )))
+    let process = context.scheduler.current_process_mut();
+    let Some((position, end)) = trap else {
+        process.bump_reductions(i32::try_from(reductions).unwrap_or(i32::MAX));
+        return Ok(Value(Term::Integer(count)));
+    };
+    process.bump_all_reductions();
+    Ok(BifResult::TrapBif {
+        module: "ets",
+        function: "select_count_trap",
+        arguments: count_arguments(table, spec, (&position, &end, count, writes)),
+    })
+}
+
+/// Return the arguments of the trap export `ets:select_count_trap/6`.
+fn count_arguments(
+    table: &Term,
+    spec: &Term,
+    (position, end, got, writes): (&Term, &Term, i64, i64),
+) -> Vec<Term> {
+    vec![
+        table.clone(),
+        spec.clone(),
+        position.clone(),
+        end.clone(),
+        Term::Integer(got),
+        Term::Integer(writes),
+    ]
 }
 
 /// Run `ets:slot(Table, Slot)`, as `ets_slot_2` (`erl_db.c:3739-3760`)

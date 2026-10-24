@@ -552,6 +552,10 @@ fn rejects_tables_that_pbeam_cannot_model() {
         ("keypos_new", "insert_new/2 in a table with key position 0"),
         ("index", "lookup_element/4 index 4294967296 with position 0"),
         (
+            "count_changed",
+            "select_count/2 on a table that changed while the count trapped",
+        ),
+        (
             "match_changed",
             "match/2,3 or ets:select/2,3 on a table that changed while the match trapped",
         ),
