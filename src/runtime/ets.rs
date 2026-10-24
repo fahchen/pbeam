@@ -28,6 +28,9 @@ const SHRINK_SLOTS: usize = FIRST_SEGMENT_SLOTS + 2 * SEGMENT_SLOTS;
 /// The most buckets that one grow or shrink call joins or splits
 /// (`loop_limit`, `erl_db_hash.c:3656`, `3752`).
 const RESIZE_STEPS: usize = 5;
+/// The number of locks with an item counter (`NLOCKS_WITH_ITEM_COUNTERS`,
+/// `erl_db_hash.c:98`).
+const LOCK_COUNTERS: usize = 64;
 /// The marker of a free slot of the key index.
 const EMPTY: usize = usize::MAX;
 /// The number of slots of the first key index.
@@ -227,9 +230,10 @@ pub(super) struct Table {
     /// objects more than the buckets (`GROW_LIMIT`, `erl_db_hash.c:153`,
     /// `1349-1354`, `3648-3740`), and joins buckets when a delete makes the
     /// objects fewer than the shrink limit (`erl_db_hash.c:757-762`,
-    /// `3350-3392`, `3743-3818`). The decisions use the exact object count,
-    /// as ERTS does for a table with centralized counters
-    /// (`erl_db_hash.c:106-117`).
+    /// `3350-3392`, `3743-3818`). The decisions use the item counter of a
+    /// table with centralized counters, and the estimate of one lock counter
+    /// for a table with decentralized counters (`NITEMS_ESTIMATE`,
+    /// `erl_db_hash.c:106-117`).
     buckets: usize,
     /// The number of bucket locks (`nlocks`): 1 for a table that is not fine
     /// locked, else 64 or the count of `debug_hash_fixed_number_of_locks`
@@ -289,6 +293,14 @@ pub(super) struct Table {
     /// counter falls by each record of the key and the kept pseudo-deleted
     /// objects count as items (`db_take_hash`, `erl_db_hash.c:2949-2995`).
     size_adjust: i64,
+    /// The item counters of the first 64 locks of a hash table with
+    /// decentralized counters, else empty. A change of the item counter of
+    /// a key also changes the counter of the lock `hash % 64` (`ADD_NITEMS`,
+    /// `erl_db_hash.c:119-129`), and growth and shrink use 64 times that
+    /// counter (`NITEMS_ESTIMATE`, `erl_db_hash.c:106-117`). The clear of a
+    /// fixed table resets only the item counter (`RESET_NITEMS`,
+    /// `erl_db_hash.c:150-151`, `3050`).
+    lock_items: Vec<i64>,
     /// The number of delete records that the fixation keeps, as the count of
     /// the ERTS `FixedDeletion` records (`erl_db_hash.c:221-272`): one for a
     /// delete of a key, one for a clear, and one for each bucket of a select
@@ -1498,6 +1510,7 @@ impl Table {
             retained: HashMap::new(),
             retained_buckets: BTreeMap::new(),
             size_adjust: 0,
+            lock_items: Vec::new(),
             fixdels: 0,
             select_slot: EMPTY,
             deleted: Vec::new(),
@@ -1597,9 +1610,9 @@ impl Table {
         self.access = access;
     }
 
-    /// Set the options that `ets:info/2` gives. `ets:new/2` accepts them
-    /// and keeps no other effect of them, as it does not compress objects
-    /// and has one scheduler.
+    /// Set the options that `ets:info/2` gives. `ets:new/2` keeps no other
+    /// effect of them, as it does not compress objects, except that a hash
+    /// table with decentralized counters gets its lock counters.
     pub(super) fn set_options(
         &mut self,
         write_concurrency: Term,
@@ -1611,6 +1624,11 @@ impl Table {
         self.read_concurrency = read_concurrency;
         self.decentralized_counters = decentralized_counters;
         self.compressed = compressed;
+        // A decentralized `ordered_set` is a `catree`, which has no lock
+        // counters (`erl_db.c:2717-2721`).
+        if decentralized_counters && self.table_type != TableType::OrderedSet {
+            self.lock_items = vec![0; LOCK_COUNTERS];
+        }
     }
 
     /// Set the number of bucket locks of a fine-locked hash table. A table
@@ -1656,6 +1674,42 @@ impl Table {
     /// compare (`NITEMS_ESTIMATE`, `erl_db_hash.c:1352`, `759`).
     fn item_count(&self) -> i64 {
         self.size() as i64
+    }
+
+    /// Return the item estimate of a key with the hash `hash`: 64 times the
+    /// counter of its lock with decentralized counters, else the item
+    /// counter (`NITEMS_ESTIMATE`, `erl_db_hash.c:106-117`).
+    fn estimate(&self, hash: u64) -> i64 {
+        self.lock_items
+            .get(hash as usize % LOCK_COUNTERS)
+            .map_or_else(
+                || self.item_count(),
+                |items| items.wrapping_mul(LOCK_COUNTERS as i64),
+            )
+    }
+
+    /// Add the change of the item counter since it was `before` to the
+    /// counter of the lock of the key with the hash `hash` (`ADD_NITEMS`,
+    /// `erl_db_hash.c:119-129`).
+    fn count_lock(&mut self, hash: u64, before: u64) {
+        let change = self.size().wrapping_sub(before) as i64;
+        if let Some(items) = self.lock_items.get_mut(hash as usize % LOCK_COUNTERS) {
+            *items = items.wrapping_add(change);
+        }
+    }
+
+    /// Join buckets while the item estimate `nitems` is below the shrink
+    /// limit, up to 5 times (`try_shrink`, `shrink`,
+    /// `erl_db_hash.c:757-762`, `3743-3760`). ERTS compares the estimate as
+    /// an unsigned value, so an estimate below 0 is a huge value and stops
+    /// the shrink.
+    fn try_shrink(&mut self, nitems: i64) {
+        for _ in 0..RESIZE_STEPS {
+            if nitems as u64 >= u64::try_from(self.shrink_limit()).unwrap_or(u64::MAX) {
+                break;
+            }
+            self.join();
+        }
     }
 
     /// Return the reductions of `ets:delete_all_objects/1`, as
@@ -2151,8 +2205,10 @@ impl Table {
     /// keeps does (`erl_db_hash.c:1426-1437`): the object becomes live and
     /// moves to the head of the object chain.
     fn restore_object(&mut self, slot: usize, hash: u64, key: &Term) {
+        let size = self.size();
         self.deleted[slot] = false;
         self.deleted_objects -= 1;
+        self.count_lock(hash, size);
         let node = self
             .chain_node(hash, key)
             .expect("a deleted key has a chain node");
@@ -2530,6 +2586,8 @@ impl Table {
         self.next.clear();
         self.buckets = FIRST_SEGMENT_SLOTS;
         self.size_adjust = 0;
+        // `db_create_hash` gives new locks (`erl_db_hash.c:4033`).
+        self.lock_items.fill(0);
         self.writes += 1;
     }
 
@@ -2557,6 +2615,7 @@ impl Table {
         let node = self
             .chain_node(hash, key)
             .expect("a live key has a chain node");
+        let size = self.size();
         self.index.remove(hash, index_slot);
         let mut kept = Vec::new();
         let mut slot = node;
@@ -2594,6 +2653,7 @@ impl Table {
             self.older[last] = EMPTY;
         }
         self.size_adjust += live - records;
+        self.count_lock(hash, size);
         self.fixdels += 1;
         self.retain_record(hash, key, node);
         self.writes += 1;
@@ -2620,6 +2680,7 @@ impl Table {
         let Some(index_slot) = self.position(hash, &key) else {
             return false;
         };
+        let size = self.size();
         let mut previous = EMPTY;
         let mut slot = index_slot;
         while slot != EMPTY {
@@ -2633,9 +2694,11 @@ impl Table {
                         self.select_slot = bucket;
                     }
                     self.pseudo_delete(hash, &key, slot, index_slot);
-                    return true;
+                } else {
+                    self.delete_live_object(hash, slot, previous);
                 }
-                self.delete_live_object(hash, slot, previous);
+                // `DEC_NITEMS` (`erl_db_hash.c:2649-2650`).
+                self.count_lock(hash, size);
                 return true;
             }
             previous = slot;
@@ -2711,6 +2774,7 @@ impl Table {
         let Some(index_slot) = self.position(hash, &key) else {
             return;
         };
+        let size = self.size();
         let mut live = 0;
         let mut removed = false;
         let mut previous = EMPTY;
@@ -2753,7 +2817,10 @@ impl Table {
             slot = older;
         }
         if removed {
-            self.shrink();
+            // `db_erase_object_hash` reads the estimate of the key
+            // (`erl_db_hash.c:1718-1725`).
+            self.count_lock(hash, size);
+            self.try_shrink(self.estimate(hash));
         }
     }
 
@@ -2794,16 +2861,12 @@ impl Table {
     /// Join buckets after a `select_delete` traversal, as
     /// `select_delete_on_loop_ended` calls `try_shrink` once
     /// (`erl_db_hash.c:2677-2709`).
+    ///
+    /// With decentralized counters, ERTS reads the estimate of a lock that
+    /// a random hash selects (`erl_db_hash.c:2690-2700`). PBeam reads the
+    /// lock 0, which is one of the locks that ERTS can select.
     pub(super) fn shrink(&mut self) {
-        for _ in 0..RESIZE_STEPS {
-            // ERTS compares the unsigned counter with the shrink limit, so
-            // a counter below 0 is a huge value and stops the shrink
-            // (`erl_db_hash.c:3743-3760`).
-            if self.size() >= u64::try_from(self.shrink_limit()).unwrap_or(u64::MAX) {
-                break;
-            }
-            self.join();
-        }
+        self.try_shrink(self.estimate(0));
     }
 
     /// Add the object with the elements `object` to a `set` or a
@@ -2907,9 +2970,11 @@ impl Table {
             self.deleted[*slot] = false;
             self.older[*slot] = EMPTY;
         }
+        let size = self.size();
         self.deleted_objects -= retained.slots.len();
         self.objects[retained.newest] = Some(object);
         self.index.insert(hash, retained.newest);
+        self.count_lock(hash, size);
         self.writes += 1;
     }
 
@@ -3234,6 +3299,7 @@ impl Table {
     fn add(&mut self, atoms: &AtomTable, hash: u64, object: Vec<Term>, node: usize) -> usize {
         let key = self.key(&object).clone();
         let index_slot = self.position(hash, &key).unwrap_or(EMPTY);
+        let size = self.size();
         let slot = self.allocate();
         self.objects[slot] = Some(object);
         self.older[slot] = node;
@@ -3255,7 +3321,8 @@ impl Table {
         // `grow` splits up to 5 buckets in one call, until the item counter
         // is within the growth limit (`erl_db_hash.c:3648-3734`).
         let mut splits = 0;
-        while self.item_count() > i64::try_from(self.buckets).unwrap_or(i64::MAX)
+        self.count_lock(hash, size);
+        while self.estimate(hash) > i64::try_from(self.buckets).unwrap_or(i64::MAX)
             && splits < RESIZE_STEPS
         {
             self.split(atoms);
@@ -3780,6 +3847,7 @@ impl Table {
             return;
         };
         let hash = stored_hash(atoms, self.key(self.object_of(newest)));
+        let size = self.size();
         self.writes += 1;
         // A fixed ordered_set deletes as an unfixed one does: the tree of
         // ERTS keeps no pseudo-deleted object, and a walk steps from a key
@@ -3789,6 +3857,7 @@ impl Table {
                 .chain_node(hash, key)
                 .expect("a live key has a chain node");
             self.retain_key(hash, key, node);
+            self.count_lock(hash, size);
             return;
         }
         self.index.remove(hash, newest);
@@ -3806,15 +3875,8 @@ impl Table {
             self.order_remove(atoms, key);
             self.compact(atoms, newest);
         }
-        for _ in 0..RESIZE_STEPS {
-            // ERTS compares the unsigned counter with the shrink limit, so
-            // a counter below 0 is a huge value and stops the shrink
-            // (`erl_db_hash.c:3743-3760`).
-            if self.size() >= u64::try_from(self.shrink_limit()).unwrap_or(u64::MAX) {
-                break;
-            }
-            self.join();
-        }
+        self.count_lock(hash, size);
+        self.try_shrink(self.estimate(hash));
     }
 
     /// Move the object of the last slot into the slot `freed` of the
@@ -3893,7 +3955,10 @@ impl Table {
     /// ```
     fn shrink_limit(&self) -> usize {
         let slots = self.segment_slots();
-        if slots >= SHRINK_SLOTS.max(self.locks + SEGMENT_SLOTS) {
+        // Decentralized counters need 100 slots for each lock counter
+        // (`erl_db_hash.c:3355-3379`).
+        let sampled = self.lock_items.is_empty() || slots >= 100 * LOCK_COUNTERS;
+        if sampled && slots >= SHRINK_SLOTS.max(self.locks + SEGMENT_SLOTS) {
             (slots - SEGMENT_SLOTS) / 2
         } else {
             0

@@ -1,5 +1,5 @@
 -module(ets_tables).
--export([owner/0, user/0, fixer/0, deleter/0, inserter/0, helper/0, testator/0, heir/0, walker/0, walk_peer/0, walk_orders/0, reference/0]).
+-export([owner/0, user/0, fixer/0, deleter/0, inserter/0, helper/0, testator/0, heir/0, walker/0, walk_peer/0, walk_orders/0, estimator/0, estimate_orders/0, reference/0]).
 
 %% Run each pair of roots on the pinned ERTS, as PBeam runs the two roots of
 %% a pair on two scheduler threads, and return the results of each pair.
@@ -8,7 +8,8 @@ reference() ->
      pair(fun fixer/0, fun deleter/0),
      pair(fun inserter/0, fun helper/0),
      pair(fun testator/0, fun heir/0),
-     pair(fun walker/0, fun walk_peer/0)].
+     pair(fun walker/0, fun walk_peer/0),
+     pair(fun estimator/0, fun walk_peer/0)].
 
 pair(First, Second) ->
     Self = self(),
@@ -235,3 +236,39 @@ chunks('$end_of_table', Acc) -> lists:reverse(Acc);
 chunks({Objects, '$end_of_table'}, Acc) -> lists:reverse([Objects | Acc]);
 chunks({Objects, Cont}, Acc) ->
     chunks(ets:select(Cont), [{element(2, Cont), Objects} | Acc]).
+
+%% A table with decentralized counters grows and shrinks on the estimate of
+%% one lock counter: the counter of the lock hash rem 64, times 64
+%% (NITEMS_ESTIMATE, erl_db_hash.c:106-117), and it shrinks only with 6400
+%% slots or more (calc_shrink_limit, erl_db_hash.c:3355-3379). Each shape
+%% gives the order after the inserts and after the deletes of each key
+%% below 9/10 of the count, with ets:delete/2, ets:take/2 and
+%% ets:delete_object/2 in turn.
+estimator() ->
+    check(estimate_orders(),
+      [{60,[{600,54643672},{60,105862991}]},{300,[{3000,35675020},{300,105637723}]},{1000,[{10000,96410069},{1000,66538492}]},
+       {60,[{600,54643672},{60,105862991}]},{300,[{3000,35675020},{300,105637723}]},{1000,[{10000,96410069},{1000,66538492}]},
+       {60,[{600,101583769},{60,102999779}]},{300,[{3000,14715952},{300,124455985}]},{1000,[{10000,118630101},{1000,108870912}]},
+       {300,[{1200,28259756},{300,78525928}]},{1500,[{6000,31789770},{1500,63203620}]},{5000,[{20000,73334443},{5000,118575545}]}]).
+
+estimate_orders() ->
+    Auto = {write_concurrency, auto},
+    Fine = [{write_concurrency, true}, {decentralized_counters, true}],
+    Locks = {write_concurrency, {debug_hash_fixed_number_of_locks, 128}},
+    [estimate(Options, Count)
+     || Options <- [[Auto], Fine, [Locks], [bag, Auto]], Count <- [600, 3000, 10000]].
+
+estimate(Options, Count) ->
+    T = ets:new(estimate_probe, Options),
+    true = ets:insert(T, [{K, a} || K <- seq(Count, [])]),
+    lists:member(bag, Options) andalso ets:insert(T, [{K, b} || K <- seq(Count, [])]),
+    Inserted = ets:tab2list(T),
+    _ = [remove(T, K) || K <- seq(Count * 9 div 10, [])],
+    Deleted = ets:tab2list(T),
+    Size = ets:info(T, size),
+    true = ets:delete(T),
+    {Size, [{length(O), erlang:phash2(O)} || O <- [Inserted, Deleted]]}.
+
+remove(T, K) when K rem 3 =:= 0 -> ets:delete(T, K);
+remove(T, K) when K rem 3 =:= 1 -> ets:take(T, K);
+remove(T, K) -> ets:delete_object(T, {K, a}).
