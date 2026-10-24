@@ -344,10 +344,13 @@ fn decode_linger(scheduler: &Scheduler, value: &Term) -> Option<libc::linger> {
     })
 }
 
-/// The number `ESOCK_OPT_TCP_CONGESTION_NAME_MAX`, which is
-/// `TCP_CA_NAME_MAX` on Linux (`prim_socket_nif.c:490-495`).
+/// The number `ESOCK_OPT_TCP_CONGESTION_NAME_MAX`, which is 256
+/// (`prim_socket_nif.c:490-495`): only the kernel header
+/// `linux/tcp.h` defines `TCP_CA_NAME_MAX`, and the NIF includes the
+/// glibc header `netinet/tcp.h`, so a name of 17 bytes reaches the
+/// kernel and gives its `ENOENT` on the pinned ERTS.
 #[cfg(target_os = "linux")]
-const CONGESTION_NAME_MAX: usize = 16;
+const CONGESTION_NAME_MAX: usize = 256;
 
 /// The TOS values of `ESOCK_TOS_*` (`prim_socket_nif.c:470-474`).
 /// `decode_ip_tos` does not accept the first, `default`
