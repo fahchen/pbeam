@@ -1,5 +1,5 @@
 -module(udp_probe).
--export([active/0, active_options/0, connect/0, host_name/0, inet6/0, open/0, passive/0, port_zero/0, reconnect/0, active_waiter/0, refused_active/0, refused_passive/0, truncate/0, unsupported/1]).
+-export([active/0, active_options/0, connect/0, host_name/0, inet6/0, open/0, options/0, stream_buffer/0, passive/0, port_zero/0, reconnect/0, active_waiter/0, refused_active/0, refused_passive/0, truncate/0, unsupported/1]).
 
 %% The requests of the udp_inet driver that inet_config:set_hostname/0
 %% sends through inet_udp:open(0, []), inet:gethostname/1, and
@@ -324,3 +324,37 @@ inet6() ->
                 {Addr, prim_inet:getopts(R, [ipv6_v6only])}
             end || T <- [3, 4]],
     [Name, Sent, Data, Tag, Looped, Only, Tags].
+
+%% The socket options of a udp_inet port through prim_inet:setopts/2 and
+%% prim_inet:getopts/2 (inet_drv.c:6958-6966, 7293-7360, 7571-7587,
+%% 9156-9163, 9432-9446, 9487-9495): the start values, the values after a
+%% set, a multicast_ttl above 255 that the host rejects without an error,
+%% and the buffer that recbuf sets. The recbuf and sndbuf values of the
+%% host differ, so the result gives only whether they are at least the set
+%% value.
+options() ->
+    {ok, S} = udp(),
+    Flags = [broadcast, dontroute, multicast_ttl, multicast_loop, buffer],
+    Start = prim_inet:getopts(S, Flags),
+    Set = prim_inet:setopts(S, [{broadcast, true}, {dontroute, true}, {multicast_ttl, 255},
+                                {multicast_loop, false}, {sndbuf, 4000}]),
+    After = prim_inet:getopts(S, Flags),
+    Large = prim_inet:setopts(S, [{multicast_ttl, 300}]),
+    {ok, [{multicast_ttl, Ttl}, {sndbuf, Sndbuf}]} = prim_inet:getopts(S, [multicast_ttl, sndbuf]),
+    Buffers = [buffers(S, Options) || Options <- [[{recbuf, 10000}], [{recbuf, 100000}],
+                                                   [{buffer, 0}], [{recbuf, 500000}]]],
+    {Start, Set, After, Large, Ttl, Sndbuf >= 4000, Buffers}.
+
+buffers(S, Options) ->
+    ok = prim_inet:setopts(S, Options),
+    {ok, [{buffer, Buffer}, {recbuf, Recbuf}]} = prim_inet:getopts(S, [buffer, recbuf]),
+    {Buffer, Recbuf >= 500}.
+
+%% The buffer that recbuf sets on a tcp_inet port, which has no limit of
+%% 65536, and a buffer that a set of buffer keeps (inet_drv.c:7321-7360).
+stream_buffer() ->
+    {ok, S} = prim_inet:open(tcp, inet, stream),
+    A = buffers(S, [{recbuf, 100000}]),
+    B = buffers(S, [{buffer, 100}, {recbuf, 200000}]),
+    prim_inet:close(S),
+    {A, B}.

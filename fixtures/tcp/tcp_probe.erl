@@ -133,12 +133,12 @@ flush() ->
 unsupported(sctp) -> open_port({spawn_driver, "sctp_inet"}, [binary]);
 unsupported(list) -> open_port({spawn_driver, "tcp_inet"}, []);
 unsupported(mptcp) -> control(open_port({spawn_driver, "tcp_inet"}, [binary]), 1, [1, 1, 4]);
-unsupported(dontroute) -> control(opened(), 7, [2, 0, 0, 0, 1]);
+unsupported(oobinline) -> control(opened(), 7, [5, 0, 0, 0, 1]);
 unsupported(recvttl) -> control(opened(), 7, [47, 0, 0, 0, 1]);
 unsupported(linger) -> linger();
 unsupported(linger_off) -> control(opened(), 7, [3, 0, 0, 0, 0, 0, 0, 0, 5]);
 unsupported(active_n) -> control(opened(), 7, [22, 0, 0, 0, 3, 0, 1]);
-unsupported(getopt) -> control(opened(), 8, [2]);
+unsupported(getopt) -> control(opened(), 8, [5]);
 unsupported(policy) -> open_port({spawn_driver, "tcp_inet"}, [binary]);
 %% In boot mode, a process that entered the runtime is not a boot process,
 %% so prim_inet:open/3, which gen_udp:open/2 calls through inet_udp, cannot
