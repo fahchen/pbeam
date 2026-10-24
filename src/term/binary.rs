@@ -75,6 +75,10 @@ struct BinaryView {
     /// array with no copy. The `Arc` keeps a copy of such a binary O(1), as
     /// a copy of a byte-aligned binary is.
     packed: Option<Arc<Vec<u8>>>,
+    /// Whether the view is a sub-binary of an off-heap binary even when it
+    /// holds at most 512 bits, as each element of ERTS `term_to_iovec/1,2`
+    /// is (`external.c:2689-2719`, `3958`). Only [`Binary::off_heap`] sets it.
+    off_heap: bool,
 }
 
 /// The chunks of a view that an append built, in order, and their index. The
@@ -256,13 +260,38 @@ impl Binary {
     pub(crate) fn referenced_bytes(&self) -> usize {
         // `BYTE_SIZE` rounds down (`erl_bits.h:47`), and a heap bitstring
         // holds at most `ERL_ONHEAP_BITS_LIMIT` bits (`erl_bits.h:168`).
-        if self.0.size <= 64 * BITS_PER_BYTE {
+        if !self.0.off_heap && self.0.size <= 64 * BITS_PER_BYTE {
             return self.0.size / BITS_PER_BYTE;
         }
         match &self.0.chunks {
             Some(chunks) => chunks.iter().map(|chunk| chunk.len()).sum(),
             None => self.0.bytes.len(),
         }
+    }
+
+    /// Return this view as a sub-binary of an off-heap binary, so that
+    /// [`Binary::referenced_bytes`] gives the size of its source array or
+    /// chunks at each size, as for an element of ERTS `term_to_iovec/1,2`
+    /// (`external.c:2689-2719`, `3958`). A view that [`Binary::bits`] makes
+    /// of it does not keep the mark.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let bytes = Binary::from(vec![0; 8]);
+    /// assert_eq!(bytes.bits(0, 8).off_heap().referenced_bytes(), 8);
+    /// ```
+    pub(crate) fn off_heap(&self) -> Binary {
+        let view = &*self.0;
+        Binary(Arc::new(BinaryView {
+            bytes: Arc::clone(&view.bytes),
+            chunks: view.chunks.clone(),
+            flat: view.flat.clone(),
+            offset: view.offset,
+            size: view.size,
+            packed: view.packed.clone(),
+            off_heap: true,
+        }))
     }
 
     /// Return whether the first bit of this binary is on a byte boundary of
@@ -392,6 +421,7 @@ impl Binary {
             offset,
             size,
             packed,
+            off_heap: false,
         }))
     }
 
@@ -674,6 +704,7 @@ impl Binary {
                 offset: 0,
                 size,
                 packed: None,
+                off_heap: false,
             }));
         }
         // The index adds one word for each chunk to the walk that sums the
@@ -695,6 +726,7 @@ impl Binary {
             offset: 0,
             size,
             packed: None,
+            off_heap: false,
         }))
     }
 }
@@ -895,6 +927,7 @@ impl From<Vec<u8>> for Binary {
             offset: 0,
             size,
             packed: None,
+            off_heap: false,
         }))
     }
 }
