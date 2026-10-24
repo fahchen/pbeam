@@ -225,7 +225,20 @@ fn read_host_topology() -> Vec<CpuIds> {
     let root = std::path::Path::new("/sys/devices/system");
     let configured = numbered_entries(&root.join("cpu"), "cpu").map_or(0, |cpus| cpus.len());
     let online = cpu_list(&std::fs::read_to_string(root.join("cpu/online")).unwrap_or_default());
-    read_topology(root, configured, online.len())
+    processor_order(read_topology(root, configured, online.len()))
+}
+
+/// Sort `topology` by processor, node, processor node, core, and thread, as
+/// `verify_topology` sorts the topology that ERTS keeps
+/// (`processor_order_cmp`, `erl_cpu_topology.c:424-441`,
+/// `erl_cpu_topology.c:1210`). The entities of a topology that
+/// `verify_topology` accepts are unique, so the order is total.
+#[cfg(target_os = "linux")]
+fn processor_order(mut topology: Vec<CpuIds>) -> Vec<CpuIds> {
+    topology.sort_unstable_by_key(|&[node, processor, processor_node, core, thread, _]| {
+        (processor, node, processor_node, core, thread)
+    });
+    topology
 }
 
 /// Read the processor topology below `root` as `read_topology`

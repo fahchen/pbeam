@@ -142,6 +142,19 @@ fn moves_a_processor_on_two_nodes_to_processor_nodes_as_pinned_erts() {
         [1, 1, -1, 0, 0, 2],
     ];
     assert_eq!(super::read_topology(&root, 8, 3), expected);
+    // verify_topology keeps the topology in processor order
+    // (erl_cpu_topology.c:1210).
+    let ordered = vec![
+        [-1, 0, 0, 0, 0, 0],
+        [-1, 0, 1, 1, 0, 1],
+        [1, 1, -1, 0, 0, 2],
+    ];
+    assert_eq!(super::processor_order(expected), ordered);
+    let swapped = vec![[0, 1, -1, 0, 0, 0], [1, 0, -1, 0, 0, 1]];
+    assert_eq!(
+        super::processor_order(swapped),
+        vec![[1, 0, -1, 0, 0, 1], [0, 1, -1, 0, 0, 0]]
+    );
     // A node directory that cannot be read gives no topology
     // (erl_misc_utils.c:908-910).
     let broken = sysfs("broken", &[("node/node0", "")]);
