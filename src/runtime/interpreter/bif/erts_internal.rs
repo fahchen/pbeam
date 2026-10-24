@@ -1204,7 +1204,7 @@ pub(super) fn port_bang(
             // Of two closes on two schedulers, only the first closes the
             // port and replies, when the port terminates (io.c:2179-2180,
             // 3713-3719, 3870-3874).
-            if scheduler.close_port_replying(id) {
+            if scheduler.close_port_replying(id, owner) {
                 scheduler
                     .current_process_mut()
                     .bump_reductions(PORT_REDUCTIONS);
