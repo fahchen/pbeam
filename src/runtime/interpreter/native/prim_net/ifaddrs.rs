@@ -119,6 +119,16 @@ pub(super) fn entry(interface: nix::ifaddrs::InterfaceAddress) -> Result<Entry, 
     let address = |storage: Option<nix::sys::socket::SockaddrStorage>| {
         storage.map(|storage| host_address(&storage)).transpose()
     };
+    // `nix` replaces the bytes of a name that is not UTF-8, which ERTS
+    // gives as they are (`prim_net_nif.c:1693-1695`).
+    if interface
+        .interface_name
+        .contains(char::REPLACEMENT_CHARACTER)
+    {
+        return Err(Failure::Unsupported(
+            "prim_net:nif_getifaddrs/1 interface name that is not UTF-8 is not supported",
+        ));
+    }
     let extra = match (interface.destination, interface.broadcast) {
         (Some(destination), _) => Some(("dstaddr", host_address(&destination)?)),
         (None, Some(broadcast)) => Some(("broadaddr", host_address(&broadcast)?)),

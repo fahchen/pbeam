@@ -231,6 +231,11 @@ fn encodes_each_interface_address_form_as_prim_net_nif() {
     assert!(ifaddrs::packet(3, 2, 1, 0, &[9; 8], 9).is_err());
     let errno = ifaddrs::result(&atoms, Err(ifaddrs::Failure::Errno(libc::EPERM))).unwrap();
     assert!(format!("{errno:?}").contains(&atom("eperm")));
+    let replaced = InterfaceAddress {
+        interface_name: "x\u{FFFD}".into(),
+        ..interface(None, None)
+    };
+    assert!(ifaddrs::entry(replaced).is_err());
     let failure = ifaddrs::Failure::Unsupported("message");
     assert_eq!(
         ifaddrs::result(&atoms, Err(failure))
