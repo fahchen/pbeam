@@ -73,6 +73,14 @@ fn walks_a_fine_locked_table_in_lock_group_order() {
     run_pair("walker", "walk_peer");
 }
 
+/// A hash table with decentralized counters grows and shrinks on the
+/// estimate of one lock counter, so its walk order after inserts and
+/// deletes is the order of ERTS.
+#[test]
+fn resizes_a_decentralized_table_on_the_item_estimate() {
+    run_pair("estimator", "walk_peer");
+}
+
 /// Each pair gives `ok` for each root on the pinned ERTS.
 #[test]
 fn the_pinned_erts_gives_the_same_results() {
@@ -95,6 +103,6 @@ fn the_pinned_erts_gives_the_same_results() {
     assert!(output.status.success(), "{output:?}");
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "[{ok,ok},{ok,ok},{ok,ok},{ok,ok},{ok,ok}]\n"
+        "[{ok,ok},{ok,ok},{ok,ok},{ok,ok},{ok,ok},{ok,ok}]\n"
     );
 }
