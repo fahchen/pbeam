@@ -695,7 +695,7 @@ fn compares_the_program_name_of_a_port_as_the_caller_gives_it() {
     );
     assert_eq!(
         run(&program, "executables", &policy),
-        atoms(&program, &["ok", "ok", "ok", "denied", "denied"])
+        atoms(&program, &["ok", "ok", "ok", "denied", "denied", "denied"])
     );
 }
 

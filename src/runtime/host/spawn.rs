@@ -301,6 +301,33 @@ impl Child {
     }
 }
 
+/// The fds of a port of `open_port({fd, In, Out}, Settings)`, as the fd
+/// driver keeps them (`fd_start`, `sys_drivers.c:817-980`). The port does
+/// not own them: they stay open after the port closes (`fd_stop`,
+/// `sys_drivers.c:1002-1027`).
+#[derive(Debug)]
+pub(crate) struct Fds {
+    /// The fd that the port reads.
+    pub(crate) input: RawFd,
+    /// The fd that the port writes.
+    pub(crate) output: RawFd,
+}
+
+impl Fds {
+    /// Read `input` with one `read` of at most 64 KiB, as `ready_input`
+    /// does (`sys_drivers.c:1336-1347`). Empty bytes are the end of file.
+    pub(crate) fn read(&self) -> Result<Vec<u8>, c_int> {
+        input::read(self.input, READ_SIZE)
+    }
+
+    /// Write all bytes of `bytes` to `output`. ERTS writes an fd that is
+    /// not a tty from an async thread, which blocks as this write does
+    /// (`sys_drivers.c:894-899`, `976-979`).
+    pub(crate) fn write(&self, bytes: &[u8]) -> Result<(), c_int> {
+        output::write_all(self.output, &mut [IoSlice::new(bytes)])
+    }
+}
+
 /// Make a pipe and return its read end and its write end. Each end is
 /// close-on-exec and at least `FIRST_PIPE_FD`.
 ///
