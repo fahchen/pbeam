@@ -1374,20 +1374,19 @@ fn stops_the_run_for_a_socket_bind_to_a_native_family() {
 
 #[test]
 fn stops_the_run_for_a_socket_option_form_without_a_handler() {
-    // PBeam sets and gets only the options that the safe `nix` and
-    // `socket2` APIs type. A native value or value spec, another option of
-    // the host, `{otp, debug}` and `{otp, select_read}` with `true`, and
-    // `{otp, rcvbuf}` with a buffer count stop the run
-    // (row "NIF stubs" of docs/erts-differences.md).
-    let expected = [
-        "unsupported prim_socket native option value",
-        "unsupported prim_socket native value spec",
-        "unsupported prim_socket option (\"socket\", \"debug\")",
-        "unsupported prim_socket option (\"socket\", \"debug\")",
+    // `{otp, debug}` and `{otp, select_read}` with `true`, `{otp, rcvbuf}`
+    // with a buffer count, and on Linux `{ip, msfilter}` and
+    // `{ip, pktoptions}` stop the run (row "NIF stubs" of
+    // docs/erts-differences.md).
+    let mut expected = vec![
         "unsupported prim_socket option value {otp, 1001} true",
         "unsupported prim_socket option value {otp, 1011} true",
         "unsupported prim_socket option value {otp, rcvbuf} {N, Size}",
     ];
+    if cfg!(target_os = "linux") {
+        expected.push("unsupported prim_socket option (\"ip\", \"msfilter\")");
+        expected.push("unsupported prim_socket option (\"ip\", \"pktoptions\")");
+    }
     for (case, expected) in (1..).zip(expected) {
         let error = program()
             .execute("effect_probe", &format!("socket_option_{case}"), &[])

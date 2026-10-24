@@ -4,14 +4,18 @@
 //! `esock_getopt`, and `esock_getopt_otp` (`prim_socket_nif.c:19063-19065`).
 //!
 //! PBeam sets and gets a host option through the safe `nix` and `socket2`
-//! APIs, which have one typed call for each option. So PBeam has a handler
-//! only for the options of [`get_host`] and [`set_host`]. Each other option
-//! of the host and a native value or value spec stop the run with a
-//! runtime error (row "NIF stubs" of `docs/erts-differences.md`).
+//! APIs, which have one typed call for each option. An option without a
+//! typed call, and a native value or value spec, go through [`raw_set`]
+//! and [`raw_get`], the two owner-approved `unsafe` calls of `setsockopt`
+//! and `getsockopt` (#1209). The options `{ip, msfilter}` and
+//! `{ip | ipv6, pktoptions}` stop the run with a runtime error (row "NIF
+//! stubs" of `docs/erts-differences.md`).
 
+use nix::errno::Errno;
 use nix::sys::socket::{getsockopt, setsockopt, sockopt};
 
 use std::os::fd::AsRawFd;
+use std::ptr;
 
 use super::*;
 use crate::runtime::interpreter::native::prim_socket::supports::option_name;
@@ -55,8 +59,11 @@ enum Got {
     /// The `int` of `esock_getopt_tos` (`prim_socket_nif.c:12679-12697`).
     Tos(i32),
     /// The bytes of `esock_getopt_str_opt` (`prim_socket_nif.c:13422-13451`).
-    #[cfg(target_os = "linux")]
     Bytes(Vec<u8>),
+    /// The `int` of `esock_getopt_ip_mtu_discover` and
+    /// `esock_getopt_ipv6_mtu_discover` (`prim_socket_nif.c:12608-12629`,
+    /// `12709-12728`).
+    Pmtu(i32),
     /// The domain of `esock_getopt_sock_domain`
     /// (`prim_socket_nif.c:12456-12476`).
     #[cfg(target_os = "linux")]
@@ -89,8 +96,14 @@ enum Form {
     Tos,
     /// `esock_setopt_str_opt` with `IFNAMSIZ` (`prim_socket_nif.c:8538-8545`,
     /// `11297-11338`).
-    #[cfg(target_os = "linux")]
     Str,
+    /// `esock_setopt_ip_mtu_discover` and `esock_setopt_ipv6_mtu_discover`
+    /// (`prim_socket_nif.c:8704-8717`, `8921-8934`).
+    Pmtu,
+    /// `esock_setopt_in_update_source` (`prim_socket_nif.c:8851-8878`).
+    Source,
+    /// `esock_setopt_addrform` (`prim_socket_nif.c:8887-8909`).
+    Addrform,
     /// `esock_setopt_tcp_congestion` (`prim_socket_nif.c:9018-9027`).
     #[cfg(target_os = "linux")]
     Congestion,
@@ -112,8 +125,9 @@ enum Value {
     Membership(Ipv4Addr, Ipv4Addr),
     /// The string of [`Form::Str`] and [`Form::Congestion`], without a NUL
     /// byte.
-    #[cfg(target_os = "linux")]
     Bytes(Vec<u8>),
+    /// The `struct ip_mreq_source` of [`Form::Source`].
+    Source(libc::ip_mreq_source),
     /// The `struct ipv6_mreq` of [`Form::Membership6`]: the group and the
     /// interface index.
     #[cfg(target_os = "linux")]
@@ -198,16 +212,20 @@ pub(in crate::runtime::interpreter::native::prim_socket) fn setopt_5(
     let Some(level) = level_number(scheduler, level) else {
         return range_or_badarg(scheduler, level);
     };
-    if native != 0 {
-        return Err(unsupported("native option value"));
-    }
     let socket = lock(&state);
     if socket.write & (CLOSING | CLOSED) != 0 {
         return Ok(closed());
     }
+    let host = socket
+        .socket
+        .as_ref()
+        .expect("an open socket has a host socket");
+    if native != 0 {
+        return setopt_native(scheduler, host, level, opt, value);
+    }
     // `prim_socket:setopt/3` gives a value form only with the numbers of
     // `nif_supports(options)` (prim_socket.erl:1273-1280), and the native
-    // forms stop above.
+    // forms return above.
     let name = option_name(level, opt).expect("prim_socket gives a host option");
     let Some(form) = set_form(name) else {
         return match get_form_only(name) {
@@ -229,8 +247,10 @@ pub(in crate::runtime::interpreter::native::prim_socket) fn setopt_5(
         Form::Addr => in_addr(scheduler, value).map(Value::Addr),
         Form::Membership => decode_membership(scheduler, value),
         Form::Tos => decode_tos(scheduler, value).map(Value::Int),
-        #[cfg(target_os = "linux")]
         Form::Str => decode_str(value, libc::IFNAMSIZ).map(Value::Bytes),
+        Form::Pmtu => decode_pmtu(scheduler, value).map(Value::Int),
+        Form::Source => decode_source(scheduler, value).map(Value::Source),
+        Form::Addrform => decode_domain(scheduler, value).map(Value::Int),
         #[cfg(target_os = "linux")]
         Form::Congestion => decode_str(value, CONGESTION_NAME_MAX + 1).map(Value::Bytes),
         #[cfg(target_os = "linux")]
@@ -239,12 +259,32 @@ pub(in crate::runtime::interpreter::native::prim_socket) fn setopt_5(
     let Some(decoded) = decoded else {
         return Ok(invalid(atom(scheduler, "value")?));
     };
-    let host = socket
-        .socket
-        .as_ref()
-        .expect("an open socket has a host socket");
-    let result = set_host(host, name, opt, decoded).map(|()| None);
+    let result = set_host(host, name, (level, opt), decoded).map(|()| None);
     host_result(scheduler, result)
+}
+
+/// Set the option `opt` at the level `level` of `host` to a native value,
+/// as `esock_setopt_native` does (`prim_socket_nif.c:8444-8456`): the
+/// bytes of a binary, or the C `int` of an integer or a boolean.
+fn setopt_native(
+    scheduler: &mut Scheduler,
+    host: &Socket,
+    level: i32,
+    opt: i32,
+    value: &Term,
+) -> Result<BifResult, BeamError> {
+    let bytes = match (
+        value.binary_bytes(),
+        int(value),
+        decode_bool(scheduler, value),
+    ) {
+        (Some(bytes), _, _) => bytes.to_vec(),
+        (None, Some(integer), _) => integer.to_ne_bytes().to_vec(),
+        (None, None, Some(flag)) => i32::from(flag).to_ne_bytes().to_vec(),
+        (None, None, None) => return Ok(invalid(atom(scheduler, "value")?)),
+    };
+    let result = keep_tos_and_priority(host, opt, || raw_set(host, level, opt, bytes.as_slice()));
+    host_result(scheduler, result.map(|()| None))
 }
 
 /// Return the form of the host option `name` that PBeam sets, or `None`.
@@ -282,13 +322,73 @@ fn set_form(name: (&str, &str)) -> Option<Form> {
         ("socket", "linger") => Some(Form::Linger),
         ("ip", "tos") => Some(Form::Tos),
         #[cfg(target_os = "linux")]
-        ("socket", "bindtodevice") => Some(Form::Str),
-        #[cfg(target_os = "linux")]
         ("tcp", "congestion") => Some(Form::Congestion),
         #[cfg(target_os = "linux")]
         ("ipv6", "add_membership" | "drop_membership") => Some(Form::Membership6),
+        _ => raw_form(name),
+    }
+}
+
+/// Return the form of the host option `name` that PBeam sets and gets with
+/// [`raw_set`] and [`raw_get`], or `None` (`prim_socket_nif.c:3231-3236`,
+/// `3263-3264`, `3357-3358`, `3397-3398`, `3447-3448`, `3507-3741`,
+/// `3781-3782`, `3798-3991`, `4299-4301`, `4325-4327`). The host options
+/// differ between Linux and macOS, so a name of the other host never
+/// reaches the match.
+fn raw_form(name: (&str, &str)) -> Option<Form> {
+    match name {
+        ("socket", "debug" | "rcvlowat" | "sndlowat" | "peek_off")
+        | ("ip", "minttl" | "router_alert")
+        | ("ipv6", "mtu" | "router_alert") => Some(Form::Int),
+        ("ip", "recvopts" | "retopts" | "recvttl" | "nodefrag")
+        | ("ipv6", "authhdr" | "dstopts" | "flowinfo" | "hoplimit" | "hopopts" | "rthdr")
+        | ("tcp", "nopush")
+        | ("udp", "cork") => Some(Form::Bool),
+        ("socket", "bindtodevice") => Some(Form::Str),
+        ("ip" | "ipv6", "mtu_discover") => Some(Form::Pmtu),
+        ("ip", "add_source_membership" | "drop_source_membership")
+        | ("ip", "block_source" | "unblock_source") => Some(Form::Source),
+        ("ipv6", "addrform") => Some(Form::Addrform),
         _ => None,
     }
+}
+
+/// The values of `IP_PMTUDISC_*` and `IPV6_PMTUDISC_*` in the glibc
+/// header `bits/in.h`, which the NIF decodes and encodes with the atoms
+/// `dont`, `want`, `do`, and `probe` (`prim_socket_nif.c:16364-16388`,
+/// `16428-16463`, `16481-16509`, `16528-16570`). Only Linux has the
+/// options `{ip | ipv6, mtu_discover}`.
+const PMTUDISC: [(i32, &str); 4] = [(0, "dont"), (1, "want"), (2, "do"), (3, "probe")];
+
+/// Return the `int` of `decode_ip_pmtudisc` and `decode_ipv6_pmtudisc`
+/// (`prim_socket_nif.c:16364-16388`, `16428-16463`): the value of a
+/// [`PMTUDISC`] atom, or an integer.
+fn decode_pmtu(scheduler: &Scheduler, value: &Term) -> Option<i32> {
+    let name = atom_name(scheduler, value);
+    if name.is_some() {
+        return named_value(&PMTUDISC, name);
+    }
+    int(value)
+}
+
+/// Return the `struct ip_mreq_source` of `esock_setopt_in_update_source`
+/// (`prim_socket_nif.c:8860-8872`): the map `#{multiaddr := Addr,
+/// interface := Addr, sourceaddr := Addr}`, with the addresses of
+/// `esock_decode_in_addr`.
+fn decode_source(scheduler: &Scheduler, value: &Term) -> Option<libc::ip_mreq_source> {
+    let multiaddr = field(&scheduler.atoms, value, "multiaddr")?;
+    let interface = field(&scheduler.atoms, value, "interface")?;
+    let sourceaddr = field(&scheduler.atoms, value, "sourceaddr")?;
+    let address = |term: &Term| {
+        in_addr(scheduler, term).map(|address| libc::in_addr {
+            s_addr: u32::from_ne_bytes(address.octets()),
+        })
+    };
+    Some(libc::ip_mreq_source {
+        imr_multiaddr: address(multiaddr)?,
+        imr_interface: address(interface)?,
+        imr_sourceaddr: address(sourceaddr)?,
+    })
 }
 
 /// Return the hop count of `decode_hops` (`prim_socket_nif.c:16395-16410`):
@@ -474,7 +574,6 @@ fn tos_term(scheduler: &mut Scheduler, value: i32) -> Result<Term, BeamError> {
 /// (`prim_socket_nif.c:11297-11338`): a Latin-1 string that `GET_STR` puts
 /// with its NUL byte in `max` bytes, or the bytes of a binary before its
 /// first NUL byte, at most `max - 1`.
-#[cfg(target_os = "linux")]
 fn decode_str(value: &Term, max: usize) -> Option<Vec<u8>> {
     if let Some(elements) = value.proper_list() {
         let bytes = elements
@@ -509,23 +608,29 @@ fn get_form_only(name: (&str, &str)) -> bool {
 }
 
 /// Return whether ERTS has no get handler for the host option `name` that
-/// PBeam sets (`prim_socket_nif.c:3496-3532`, `3806-3833`, `12234-12236`).
+/// PBeam sets (`prim_socket_nif.c:3496-3541`, `3781-3833`, `12234-12236`).
 fn set_form_only(name: (&str, &str)) -> bool {
     match name {
         ("ip", "add_membership" | "drop_membership") => true,
+        _ if matches!(raw_form(name), Some(Form::Source | Form::Addrform)) => true,
         #[cfg(target_os = "linux")]
         ("ipv6", "add_membership" | "drop_membership") => true,
         _ => false,
     }
 }
 
-/// Set the host option `name` with the host number `opt` of `host` to
-/// `value`, as
+/// Set the host option `name` with the host level and number `level` and
+/// `opt` of `host` to `value`, as
 /// `esock_setopt_level_opt` and `socket_setopt` do
 /// (`prim_socket_nif.c:11384-11395`, `11422-11481`). Each option of the
 /// form [`Form::Int`] has an unsigned type in `nix` or `socket2`, and a
 /// negative value reaches the host as the same C `int` as on ERTS.
-fn set_host(host: &Socket, name: (&str, &str), opt: i32, value: Value) -> io::Result<()> {
+fn set_host(
+    host: &Socket,
+    name: (&str, &str),
+    (level, opt): (i32, i32),
+    value: Value,
+) -> io::Result<()> {
     let value = match value {
         Value::Linger(linger) => {
             return keep_tos_and_priority(host, opt, || {
@@ -541,12 +646,15 @@ fn set_host(host: &Socket, name: (&str, &str), opt: i32, value: Value) -> io::Re
                 _ => host.leave_multicast_v4(&group, &interface),
             });
         }
-        #[cfg(target_os = "linux")]
         Value::Bytes(bytes) => {
             return keep_tos_and_priority(host, opt, || match name {
+                #[cfg(target_os = "linux")]
                 ("tcp", "congestion") => host.set_tcp_congestion(&bytes),
-                _ => host.bind_device(Some(bytes.as_slice())),
+                _ => raw_set(host, level, opt, bytes.as_slice()),
             });
+        }
+        Value::Source(source) => {
+            return keep_tos_and_priority(host, opt, || raw_set(host, level, opt, &source));
         }
         #[cfg(target_os = "linux")]
         Value::Membership6(group, interface) => {
@@ -609,7 +717,7 @@ fn set_host(host: &Socket, name: (&str, &str), opt: i32, value: Value) -> io::Re
             ("ipv6", "recvhoplimit") => setsockopt(host, sockopt::Ipv6RecvHopLimit, &flag),
             #[cfg(target_os = "linux")]
             ("ipv6", "recvpktinfo") => setsockopt(host, sockopt::Ipv6RecvPacketInfo, &flag),
-            _ => return set_socket2(host, name, value),
+            _ => return set_socket2(host, name, (level, opt), value),
         };
         result.map_err(io::Error::from)
     })
@@ -617,8 +725,13 @@ fn set_host(host: &Socket, name: (&str, &str), opt: i32, value: Value) -> io::Re
 
 /// Set the host option `name` of `host` to the C `int` `value` with the
 /// typed calls of `socket2`, which pass each `u32` and `bool` on as a C
-/// `int`.
-fn set_socket2(host: &Socket, name: (&str, &str), value: i32) -> io::Result<()> {
+/// `int`, or with [`raw_set`] for an option without a typed call.
+fn set_socket2(
+    host: &Socket,
+    name: (&str, &str),
+    (level, opt): (i32, i32),
+    value: i32,
+) -> io::Result<()> {
     let flag = value != 0;
     let count = value as u32;
     match name {
@@ -638,9 +751,67 @@ fn set_socket2(host: &Socket, name: (&str, &str), value: i32) -> io::Result<()> 
         ("tcp", "cork") => host.set_tcp_cork(flag),
         #[cfg(target_os = "linux")]
         ("ip", "multicast_all") => host.set_multicast_all_v4(flag),
-        // ("ip", "ttl"), the last option of the form `Int` of `set_form`.
-        _ => host.set_ttl_v4(count),
+        ("ip", "ttl") => host.set_ttl_v4(count),
+        _ => raw_set(host, level, opt, &value),
     }
+}
+
+/// Set the option `opt` at the level `level` of `host` to the bytes of
+/// `value`, as `socket_setopt` passes a value and its size to
+/// `setsockopt` (`prim_socket_nif.c:11422-11481`). The size is a
+/// `socklen_t`, so a larger size wraps as in C.
+fn raw_set<T: ?Sized>(host: &Socket, level: i32, opt: i32, value: &T) -> io::Result<()> {
+    let size = std::mem::size_of_val(value) as libc::socklen_t;
+    // SAFETY: `value` is a live shared reference, so the `size` bytes at its
+    // address stay valid for reads during the call, and `setsockopt` reads
+    // at most `size` bytes. `host` owns the descriptor during the call.
+    // The owner approved this call for #1209 (AGENTS.md).
+    let result = unsafe {
+        libc::setsockopt(
+            host.as_raw_fd(),
+            level,
+            opt,
+            ptr::from_ref(value).cast(),
+            size,
+        )
+    };
+    Errno::result(result).map(drop).map_err(io::Error::from)
+}
+
+/// Read the option `opt` at the level `level` of `host` into `buffer`, as
+/// `sock_getopt` does, and return the bytes that the host gives
+/// (`prim_socket_nif.c:13143-13166`, `13187-13211`). `None` gives the host
+/// a null value and a null size, as `esock_getopt_size_opt` does for the
+/// size 0 (`prim_socket_nif.c:13136-13141`). The size is a `socklen_t`, so
+/// a larger buffer size wraps as in C.
+fn raw_get(host: &Socket, level: i32, opt: i32, buffer: Option<Vec<u8>>) -> io::Result<Vec<u8>> {
+    let mut buffer = buffer;
+    let mut size = buffer.as_ref().map_or(0, Vec::len) as libc::socklen_t;
+    let (value, size_ptr) = match buffer.as_mut() {
+        Some(buffer) => (buffer.as_mut_ptr().cast(), ptr::from_mut(&mut size)),
+        None => (ptr::null_mut(), ptr::null_mut()),
+    };
+    // SAFETY: `value` is null or the start of `buffer`, which is valid for
+    // writes of `size` bytes and lives past the call. `size_ptr` is null or
+    // points to `size`, which lives past the call. `getsockopt` writes at
+    // most `size` bytes and then the new size, and it gives `EFAULT` for a
+    // null pointer that it must use. `host` owns the descriptor during the
+    // call. The owner approved this call for #1209 (AGENTS.md).
+    let result = unsafe { libc::getsockopt(host.as_raw_fd(), level, opt, value, size_ptr) };
+    Errno::result(result).map_err(io::Error::from)?;
+    let mut bytes = buffer.unwrap_or_default();
+    bytes.truncate(size as usize);
+    Ok(bytes)
+}
+
+/// Read the C `int` of the option `opt` at the level `level` of `host`, as
+/// `esock_getopt_int` does (`prim_socket_nif.c:13080-13098`): the host
+/// writes at most 4 bytes over a zero `int`.
+fn raw_int(host: &Socket, level: i32, opt: i32) -> io::Result<i32> {
+    let bytes = raw_get(host, level, opt, Some(vec![0; 4]))?;
+    let mut value = [0; 4];
+    value[..bytes.len()].copy_from_slice(&bytes);
+    Ok(i32::from_ne_bytes(value))
 }
 
 /// Run `set` on `host`, as `socket_setopt` does on Linux
@@ -709,13 +880,13 @@ pub(in crate::runtime::interpreter::native::prim_socket) fn getopt_3(
 
 /// Run `prim_socket:nif_getopt(Socket, Level, Opt, Kind, Value)`, as
 /// `nif_getopt` does (`prim_socket_nif.c:11504-11585`). The handlers of
-/// PBeam do not read `Value` (`prim_socket_nif.c:13018`, `13042`).
+/// PBeam read `Value` only for the kind `native`
+/// (`prim_socket_nif.c:11558-11565`, `13018`, `13042`).
 ///
 /// # Errors
 ///
-/// The kind `native` and an option without a handler in PBeam stop the
-/// run. A new atom in a full atom table gives the error of
-/// `AtomTable::put`.
+/// An option without a handler in PBeam stops the run. A new atom in a
+/// full atom table gives the error of `AtomTable::put`.
 pub(in crate::runtime::interpreter::native::prim_socket) fn getopt_5(
     scheduler: &mut Scheduler,
     arguments: &[Term],
@@ -725,17 +896,18 @@ pub(in crate::runtime::interpreter::native::prim_socket) fn getopt_5(
         &arguments[0],
         &arguments[1],
         &arguments[2],
-        Some(&arguments[3]),
+        Some((&arguments[3], &arguments[4])),
     )
 }
 
-/// Run `nif_getopt` with the kind `kind` of `nif_getopt/5`, or `None`.
+/// Run `nif_getopt` with the kind and the value of `nif_getopt/5`, or
+/// `None`.
 fn getopt(
     scheduler: &mut Scheduler,
     socket: &Term,
     level: &Term,
     opt: &Term,
-    kind: Option<&Term>,
+    kind: Option<(&Term, &Term)>,
 ) -> Result<BifResult, BeamError> {
     let Some((_, state)) = socket_argument(scheduler, socket) else {
         return Ok(BifResult::badarg());
@@ -749,24 +921,26 @@ fn getopt(
     let Some(level) = level_number(scheduler, level) else {
         return range_or_badarg(scheduler, level);
     };
-    if kind.is_some_and(|kind| atom_name(scheduler, kind) == Some("native")) {
-        return Err(unsupported("native value spec"));
-    }
+    let spec = kind
+        .and_then(|(kind, spec)| (atom_name(scheduler, kind) == Some("native")).then_some(spec));
     let socket = lock(&state);
     if socket.read & (CLOSING | CLOSED) != 0 {
         return Ok(closed());
     }
-    let Some(name) = option_name(level, opt) else {
-        return Ok(invalid(atom(scheduler, "socket_option")?));
-    };
     let host = socket
         .socket
         .as_ref()
         .expect("an open socket has a host socket");
+    if let Some(spec) = spec {
+        return getopt_native(scheduler, host, level, opt, spec);
+    }
+    let Some(name) = option_name(level, opt) else {
+        return Ok(invalid(atom(scheduler, "socket_option")?));
+    };
     if set_form_only(name) {
         return Ok(invalid(atom(scheduler, "socket_option")?));
     }
-    let Some(got) = get_host(host, name) else {
+    let Some(got) = get_host(host, name, (level, opt)) else {
         return Err(unsupported(&format!("option {name:?}")));
     };
     let value = match got {
@@ -790,7 +964,7 @@ fn getopt(
             Ok(Some(Term::tuple(octets.to_vec())))
         }
         Ok(Got::Tos(value)) => Ok(Some(tos_term(scheduler, value)?)),
-        #[cfg(target_os = "linux")]
+        Ok(Got::Pmtu(value)) => Ok(Some(named(scheduler, &PMTUDISC, value)?)),
         Ok(Got::Bytes(bytes)) => Ok(Some(Term::list_from(
             bytes.into_iter().map(|byte| Term::Integer(byte.into())),
         ))),
@@ -809,9 +983,39 @@ fn getopt(
     host_result(scheduler, value)
 }
 
-/// Read the host option `name` of `host`, or `None` for an option without
-/// a handler in PBeam.
-fn get_host(host: &Socket, name: (&str, &str)) -> Option<io::Result<Got>> {
+/// Read the option `opt` at the level `level` of `host` with the value spec
+/// `spec`, as `esock_getopt_native` does (`prim_socket_nif.c:12151-12183`):
+/// a binary of a size, an `integer`, a `boolean`, or a binary of the bytes
+/// of a binary spec. The size 0 gives `ok` (`prim_socket_nif.c:13136-13141`).
+fn getopt_native(
+    scheduler: &mut Scheduler,
+    host: &Socket,
+    level: i32,
+    opt: i32,
+    spec: &Term,
+) -> Result<BifResult, BeamError> {
+    let binary = |bytes: Vec<u8>| Some(Term::binary(bytes));
+    let value = match (int(spec), atom_name(scheduler, spec), spec.binary_bytes()) {
+        (Some(0), _, _) => raw_get(host, level, opt, None).map(|_| None),
+        // `valueSz` is a `socklen_t`, so a negative size wraps as in C.
+        (Some(size), _, _) => {
+            raw_get(host, level, opt, Some(vec![0; size as u32 as usize])).map(binary)
+        }
+        (None, Some("integer"), _) => {
+            raw_int(host, level, opt).map(|value| Some(Term::Integer(value.into())))
+        }
+        (None, Some("boolean"), _) => {
+            raw_int(host, level, opt).map(|value| Some(boolean(value != 0)))
+        }
+        (None, _, Some(bytes)) => raw_get(host, level, opt, Some(bytes.to_vec())).map(binary),
+        (None, _, None) => return Ok(invalid(atom(scheduler, "value")?)),
+    };
+    host_result(scheduler, value)
+}
+
+/// Read the host option `name` with the host level and number `level_opt`
+/// of `host`, or `None` for an option without a handler in PBeam.
+fn get_host(host: &Socket, name: (&str, &str), level_opt: (i32, i32)) -> Option<io::Result<Got>> {
     let result = match name {
         ("socket", "broadcast") => getsockopt(host, sockopt::Broadcast).map(Got::Bool),
         ("socket", "keepalive") => getsockopt(host, sockopt::KeepAlive).map(Got::Bool),
@@ -879,15 +1083,20 @@ fn get_host(host: &Socket, name: (&str, &str)) -> Option<io::Result<Got>> {
         ("ipv6", "recvhoplimit") => getsockopt(host, sockopt::Ipv6RecvHopLimit).map(Got::Bool),
         #[cfg(target_os = "linux")]
         ("ipv6", "recvpktinfo") => getsockopt(host, sockopt::Ipv6RecvPacketInfo).map(Got::Bool),
-        _ => return get_socket2(host, name),
+        _ => return get_socket2(host, name, level_opt),
     };
     Some(result.map_err(io::Error::from))
 }
 
 /// Read the host option `name` of `host` with the typed calls of
-/// `socket2`, which read a C `int`, or `None` for an option without a
-/// handler in PBeam. The casts `as i32` give back the bits of the `int`.
-fn get_socket2(host: &Socket, name: (&str, &str)) -> Option<io::Result<Got>> {
+/// `socket2`, which read a C `int`, or with [`get_raw`] for an option
+/// without a typed call. The casts `as i32` give back the bits of the
+/// `int`.
+fn get_socket2(
+    host: &Socket,
+    name: (&str, &str),
+    level_opt: (i32, i32),
+) -> Option<io::Result<Got>> {
     let int = |value: io::Result<u32>| value.map(|value| Got::Int((value as i32).into()));
     Some(match name {
         ("ip", "ttl") => int(host.ttl_v4()),
@@ -908,13 +1117,6 @@ fn get_socket2(host: &Socket, name: (&str, &str)) -> Option<io::Result<Got>> {
         ("tcp", "cork") => host.tcp_cork().map(Got::Bool),
         #[cfg(target_os = "linux")]
         ("ip", "multicast_all") => host.multicast_all_v4().map(Got::Bool),
-        // ERTS gives each byte that the host gives, with the NUL byte
-        // (`prim_socket_nif.c:12259-12268`, `13436-13446`); `socket2`
-        // removes the last byte, which is the NUL byte of the name.
-        #[cfg(target_os = "linux")]
-        ("socket", "bindtodevice") => host.device().map(|device| {
-            Got::Bytes(device.map_or_else(Vec::new, |name| [name, vec![0]].concat()))
-        }),
         // `esock_getopt_str_opt` removes one NUL byte at the end
         // (`prim_socket_nif.c:12741-12752`, `13442-13446`).
         #[cfg(target_os = "linux")]
@@ -930,7 +1132,26 @@ fn get_socket2(host: &Socket, name: (&str, &str)) -> Option<io::Result<Got>> {
         ("socket", "protocol") => host
             .protocol()
             .map(|protocol| Got::Protocol(protocol.map_or(0, i32::from))),
-        _ => return None,
+        _ => return get_raw(host, name, level_opt),
+    })
+}
+
+/// Read the host option `name` of `host` with [`raw_get`] in the form of
+/// [`raw_form`], or `None` for an option without a handler in PBeam. ERTS
+/// gives each byte of `{socket, bindtodevice}` that the host gives, in a
+/// buffer of `IFNAMSIZ + 1` bytes (`prim_socket_nif.c:12259-12268`,
+/// `13430-13446`).
+fn get_raw(host: &Socket, name: (&str, &str), (level, opt): (i32, i32)) -> Option<io::Result<Got>> {
+    Some(match raw_form(name)? {
+        Form::Bool => raw_int(host, level, opt).map(|value| Got::Bool(value != 0)),
+        Form::Pmtu => raw_int(host, level, opt).map(Got::Pmtu),
+        Form::Str => {
+            let buffer = vec![0; libc::IFNAMSIZ + 1];
+            raw_get(host, level, opt, Some(buffer)).map(Got::Bytes)
+        }
+        // `Form::Int`: `getopt` answers the set-only forms `Source` and
+        // `Addrform` before.
+        _ => raw_int(host, level, opt).map(|value| Got::Int(value.into())),
     })
 }
 

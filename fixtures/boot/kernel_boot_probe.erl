@@ -4,7 +4,7 @@
 -behaviour(supervisor).
 -export([main/0, main/1, lookup/0, gethost/0, supports/0, socket/0, sockopt/0, socket_select/0, socket_io/0,
          socket_dgram/0,         socket_acceptors/0, socket_connect_invalid/0, socket_recvfrom_flags/0, socket_recvfrom_local_flags/0,
-         socket_recvfrom_errqueue/0, socket_sendv/0, socket_backend_tcp/0, socket_backend_udp/0, sockopt_otp/0, sockopt_host/0, start/2, stop/1, init/1]).
+         socket_recvfrom_errqueue/0, socket_sendv/0, socket_backend_tcp/0, socket_backend_udp/0, sockopt_otp/0, sockopt_host/0, sockopt_raw/0, start/2, stop/1, init/1]).
 
 %% `erl -noshell -boot start_clean -pa fixtures/boot -s kernel_boot_probe
 %% main -kernel logger_level warning` runs main/0 in the boot process of init after the boot script
@@ -715,14 +715,11 @@ socket_backend_udp() ->
 %% and tcp that have a boolean, an integer, a hop count, an address, a
 %% membership, a TOS, a string, a domain, or a protocol value: the values,
 %% the invalid values, and the options that the host does not support.
-%% PBeam has no handler for {ip, recvttl} and {socket, bindtodevice} on
-%% macOS, so the probe sets them only on Linux.
 sockopt_host() ->
     process_flag(trap_exit, true),
     {ok, T} = socket:open(inet, stream, tcp),
     {ok, U} = socket:open(inet, dgram, udp),
     {ok, U6} = socket:open(inet6, dgram, udp),
-    Linux = os:type() =:= {unix, linux},
     Bools = [[socket:setopt(S, O, true), socket:getopt(S, O), socket:setopt(S, O, false),
               socket:getopt(S, O), socket:setopt(S, O, 1)]
              || {S, O} <- [{U, {socket, timestamp}}, {U, {ip, multicast_loop}}, {U, {ip, recvtos}},
@@ -732,7 +729,7 @@ sockopt_host() ->
                            {U, {ip, freebind}}, {U, {ip, transparent}}, {U, {ip, recverr}},
                            {U, {ip, multicast_all}}, {U, {ip, recvorigdstaddr}}, {U6, {ipv6, recverr}},
                            {U6, {ipv6, recvhoplimit}}, {U6, {ipv6, recvpktinfo}}]
-                          ++ [{U, {ip, recvttl}} || Linux]],
+                          ++ [{U, {ip, recvttl}}]],
     Ints = [[socket:setopt(S, O, V), socket:getopt(S, O), socket:setopt(S, O, foo),
              socket:setopt(S, O, -1), socket:getopt(S, O)]
             || {S, O, V} <- [{U, {ip, multicast_ttl}, 5}, {U6, {ipv6, tclass}, 16},
@@ -775,7 +772,7 @@ sockopt_host() ->
                socket:setopt(S, B, "abcdefghijklmno"), socket:setopt(S, B, "abcdefghijklmnop"),
                socket:setopt(S, B, <<"abcdefghijklmnopqrstu">>), socket:setopt(S, B, [108, 256]),
                socket:setopt(S, B, [108 | 111]), socket:setopt(S, B, <<1:3>>), socket:setopt(S, B, foo)]
-              || S <- [C], Linux],
+              || S <- [C]],
     {ok, L} = socket:open(local, stream, default),
     Kinds = [socket:getopt(S, {socket, O}) || S <- [T, U6, L], O <- [domain, protocol]]
         ++ [socket:setopt(T, {socket, domain}, inet), socket:setopt(T, {socket, protocol}, tcp)],
@@ -795,6 +792,55 @@ sockopt_host() ->
     [ok = socket:close(S) || S <- [T, U, U6, C, L]],
     erlang:display(unmap({sockopt_host, Bools, Ints, UserTimeout, Hops, Ifs, Members, Tos, Mtu, Device, Kinds,
                           Congestion, Members6})),
+    init:stop().
+
+%% `-s kernel_boot_probe sockopt_raw` runs socket:setopt/3,
+%% socket:getopt/2, socket:setopt_native/3, and socket:getopt_native/3
+%% with the host options that PBeam sets and gets with its raw calls of
+%% setsockopt and getsockopt: the boolean, integer, path MTU discovery,
+%% source membership, and address form options, the native values and
+%% value specs, and a closed socket.
+sockopt_raw() ->
+    process_flag(trap_exit, true),
+    {ok, T} = socket:open(inet, stream, tcp),
+    {ok, U} = socket:open(inet, dgram, udp),
+    {ok, U6} = socket:open(inet6, dgram, udp),
+    {ok, A6} = socket:open(inet6, dgram, udp),
+    Bools = [[socket:setopt(S, O, true), socket:getopt(S, O), socket:setopt(S, O, false),
+              socket:getopt(S, O), socket:setopt(S, O, 1)]
+             || {S, O} <- [{U, {ip, recvopts}}, {U, {ip, retopts}}, {U, {ip, recvttl}}, {U, {ip, nodefrag}},
+                           {U6, {ipv6, authhdr}}, {U6, {ipv6, dstopts}}, {U6, {ipv6, flowinfo}},
+                           {U6, {ipv6, hoplimit}}, {U6, {ipv6, hopopts}}, {U6, {ipv6, rthdr}},
+                           {T, {tcp, nopush}}, {U, {udp, cork}}]],
+    Ints = [[socket:getopt(S, O), socket:setopt(S, O, V), socket:getopt(S, O), socket:setopt(S, O, true),
+             socket:setopt(S, O, 1 bsl 40)]
+            || {S, O, V} <- [{U, {socket, debug}, 0}, {U, {socket, rcvlowat}, 7}, {U, {socket, sndlowat}, 7},
+                             {U, {socket, peek_off}, 3}, {U, {ip, minttl}, 3}, {U, {ip, router_alert}, 1},
+                             {U6, {ipv6, mtu}, 1400}, {U6, {ipv6, router_alert}, 1}]],
+    Pmtu = [[socket:setopt(S, O, V), socket:getopt(S, O)]
+            || {S, O} <- [{U, {ip, mtu_discover}}, {U6, {ipv6, mtu_discover}}],
+               V <- [dont, want, do, probe, 5, 2]]
+        ++ [socket:setopt(U, {ip, mtu_discover}, V) || V <- [foo, 1 bsl 40, "x"]],
+    Src = #{multiaddr => {224, 0, 0, 251}, interface => {127, 0, 0, 1}, sourceaddr => {127, 0, 0, 1}},
+    Sources = [socket:setopt(U, {ip, O}, Src)
+               || O <- [add_source_membership, block_source, unblock_source, drop_source_membership]]
+        ++ [socket:getopt(U, {ip, add_source_membership}), socket:getopt(U, {ip, block_source}),
+            socket:setopt(U, {ip, block_source}, maps:remove(sourceaddr, Src)),
+            socket:setopt(U, {ip, block_source}, Src#{multiaddr := foo}),
+            socket:setopt(U, {ip, block_source}, Src#{interface := foo}),
+            socket:setopt(U, {ip, block_source}, Src#{sourceaddr := foo}),
+            socket:setopt(U, {ip, block_source}, foo)],
+    Addrform = [socket:setopt(A6, {ipv6, addrform}, V) || V <- [inet, 2, foo]]
+        ++ [socket:getopt(A6, {ipv6, addrform})],
+    N = {socket, case os:type() of {unix, linux} -> 8; _ -> 16#1002 end},
+    Native = [socket:setopt_native(U, N, V) || V <- [65536, true, <<70000:32/native>>, <<1:3>>, foo, 1 bsl 40]]
+        ++ [socket:getopt_native(U, N, V) || V <- [integer, boolean, 4, 2, 0, <<0:32>>, <<>>, foo, 1 bsl 40]]
+        ++ [socket:setopt_native(T, {6, 1}, true), socket:getopt_native(T, {6, 1}, integer),
+            socket:getopt_native(U, {socket, 9999}, integer), socket:getopt_native(U, {socket, 9999}, 4),
+            socket:setopt_native(U, {socket, 9999}, 1)],
+    [ok = socket:close(S) || S <- [T, U, U6, A6]],
+    Closed = [socket:setopt_native(U, N, 1), socket:getopt_native(U, N, integer)],
+    erlang:display(unmap({sockopt_raw, Bools, Ints, Pmtu, Sources, Addrform, Native, Closed})),
     init:stop().
 
 %% `-s kernel_boot_probe sockopt_otp` runs socket:setopt/3 and
