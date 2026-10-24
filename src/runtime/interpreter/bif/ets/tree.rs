@@ -31,6 +31,9 @@ struct Walk<'a> {
     max: i64,
     /// The key of the last object that the walk read.
     last: Option<Term>,
+    /// Whether the walk only counts the results `true` in `got`, as
+    /// `doit_select_count` does, and keeps no match.
+    counting: bool,
 }
 
 impl Walk<'_> {
@@ -48,10 +51,14 @@ impl Walk<'_> {
             }
         }
         if let Some(found) = self.spec.run(self.atoms, object) {
-            if self.chunk != 0 {
-                self.got += 1;
+            if self.counting {
+                self.got += i64::from(found == Term::static_atom("true"));
+            } else {
+                if self.chunk != 0 {
+                    self.got += 1;
+                }
+                self.accum = Term::cons(found, std::mem::replace(&mut self.accum, Term::nil()));
             }
-            self.accum = Term::cons(found, std::mem::replace(&mut self.accum, Term::nil()));
         }
         self.max -= 1;
         Ok(self.max > 0 && (self.chunk == 0 || self.got != self.chunk))
@@ -148,6 +155,7 @@ pub(super) fn first_turn(
         accum: Term::nil(),
         max: TREE_ITERATIONS,
         last: None,
+        counting: false,
     };
     match &range {
         KeyRange::Impossible => {
@@ -401,6 +409,7 @@ pub(super) fn next_turn(
         accum: state.accum,
         max: TREE_ITERATIONS,
         last: None,
+        counting: false,
     };
     let forward = (state.chunk == 0) == state.reverse;
     walk.run(table, Some(&state.last), forward)?;
@@ -469,6 +478,7 @@ pub(super) fn count(
         accum: Term::nil(),
         max: i64::MAX,
         last: None,
+        counting: true,
     };
     let reductions = match &range {
         KeyRange::Impossible => 0,
@@ -485,10 +495,7 @@ pub(super) fn count(
             i64::MAX - walk.max
         }
     };
-    let count = (walk.accum.proper_list().into_iter().flatten())
-        .filter(|found| **found == Term::static_atom("true"))
-        .count();
-    Ok((count, reductions))
+    Ok((usize::try_from(walk.got).unwrap_or(usize::MAX), reductions))
 }
 
 /// The end of a turn of a select delete.
