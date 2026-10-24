@@ -101,3 +101,35 @@ fn reads_nothing_at_once_when_a_connected_socket_becomes_active() {
         Control::Reply(vec![1])
     );
 }
+
+#[test]
+fn ends_the_receive_of_a_local_socket_at_a_failed_read() {
+    // A read error other than `ERRNO_BLOCK` ends the receive
+    // (inet_drv.c:15473-15489). An unconnected `local` stream socket in
+    // place of the datagram socket makes `recvfrom` fail at once: the host
+    // gives `enotconn` (macOS) or `einval` (Linux).
+    let caller = crate::term::ProcessId(1);
+    let mut port = Inet::new(SocketType::Datagram);
+    port.control(0x03f1_a301, &[5, 2, 0], caller).unwrap();
+    port.socket =
+        Some(socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None).unwrap());
+    let receiver = Receiver {
+        id: 0,
+        caller,
+        timer: None,
+    };
+    port.stream.receiver = Some(receiver);
+    let events = port.receive_datagram();
+    let name = if cfg!(target_os = "linux") {
+        "einval"
+    } else {
+        "enotconn"
+    };
+    assert_eq!(
+        events,
+        vec![Event::Received {
+            receiver,
+            result: Err(name.to_owned()),
+        }]
+    );
+}

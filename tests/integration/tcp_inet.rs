@@ -31,6 +31,7 @@ const TCP_ACTIVE: &[u8] = include_bytes!("../../fixtures/tcp/tcp_active.beam");
 const TCP_CLOSE: &[u8] = include_bytes!("../../fixtures/tcp/tcp_close.beam");
 
 const TCP_LOCAL: &[u8] = include_bytes!("../../fixtures/tcp/tcp_local.beam");
+const UDP_LOCAL: &[u8] = include_bytes!("../../fixtures/tcp/udp_local.beam");
 
 /// The pinned OTP modules that the probes call: `erlang` has
 /// `open_port/2`, `port_control/3`, `port_close/1`, and `port_info/1`,
@@ -108,6 +109,7 @@ fn load() -> BeamProgram {
         TCP_ACTIVE,
         TCP_CLOSE,
         TCP_LOCAL,
+        UDP_LOCAL,
     ];
     all.extend(beams.iter().map(Vec::as_slice));
     BeamProgram::load(&all).unwrap()
@@ -340,7 +342,6 @@ fn stops_the_run_for_each_udp_inet_part_that_is_not_implemented() {
         ("stream", "unsupported udp_inet type 1"),
         ("seqpacket", "unsupported udp_inet type 3"),
         ("sctp", "unsupported udp_inet protocol 3"),
-        ("local", "unsupported udp_inet family 5"),
         ("accept", "unsupported udp_inet request 26"),
         (
             "disconnect",
@@ -1072,6 +1073,38 @@ fn gives_the_bind_errors_of_a_local_socket_as_pinned_erts() {
     let expected = format!("[[1],{einval},{einval},{einval},{einval}]");
     assert_eq!(erts_text("tcp_local", "control"), expected);
     assert_eq!(pbeam_text("tcp_local", "control"), expected);
+}
+
+#[test]
+fn runs_a_local_udp_inet_socket_as_pinned_erts() {
+    // `OPEN` with the family 5 (inet_drv.c:14585-14595), `BIND`, `NAME`,
+    // `CONNECT`, `PEER`, a send to a `local` address, and a passive and an
+    // active receive with the `local` address of the sender
+    // (inet_drv.c:1945-1948, 4915-4936). The probe binds fixed names in
+    // `/tmp`, so the test removes them before and after each run.
+    let names = ["a", "b", "c"].map(|name| format!("/tmp/pbeam_udp_local_{name}"));
+    let clean = || {
+        for name in &names {
+            let _ = std::fs::remove_file(name);
+        }
+    };
+    clean();
+    let erts = erts_text("udp_local", "run");
+    clean();
+    let pbeam = pbeam_text("udp_local", "run");
+    clean();
+    // `~w` prints a binary as its bytes.
+    let bin = |text: &str| {
+        let bytes: Vec<String> = text.bytes().map(|byte| byte.to_string()).collect();
+        format!("<<{}>>", bytes.join(","))
+    };
+    let [a, b, c] = names.each_ref().map(|name| bin(name));
+    let (hi, yo, zz, q) = (bin("hi"), bin("yo"), bin("zz"), bin("q"));
+    let expected = format!(
+        "[{{ok,{{local,{a}}}}},ok,{{udp,{{local,{a}}},0,{hi}}},{{ok,{{{{local,{b}}},0,{yo}}}}},{{error,enotconn}},ok,{{ok,{{local,{a}}}}},{{ok,{{{{local,{c}}},0,{zz}}}}},{{ok,{{{{local,{a}}},0,[108,105]}}}},{{ok,{{local,<<>>}}}},{{ok,{{{{local,<<>>}},0,{q}}}}}]"
+    );
+    assert_eq!(erts, expected, "ERTS");
+    assert_eq!(pbeam, expected, "PBeam");
 }
 
 #[test]

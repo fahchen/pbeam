@@ -451,13 +451,12 @@ impl Inet {
         let &[family, kind, protocol] = request else {
             return Ok(error_reply("einval"));
         };
-        // `tcp_inet` and `udp_inet` take IPv6, and `tcp_inet` takes `local`
+        // `tcp_inet` and `udp_inet` take IPv6 and `local`
         // (inet_drv.c:11969-11984, 14585-14595).
         let domain = match family {
             AF_INET => Domain::IPV4,
             AF_INET6 => Domain::IPV6,
-            AF_LOCAL if self.socket_type == SocketType::Stream => Domain::UNIX,
-            5 => return Err(self.unsupported("family", family)),
+            AF_LOCAL => Domain::UNIX,
             _ => return Ok(error_reply("eafnosupport")),
         };
         let (socket_type, protocol) = match self.socket_type {
@@ -1250,13 +1249,20 @@ fn local_name(
     socket: &Socket,
     get: fn(std::os::fd::RawFd) -> nix::Result<nix::sys::socket::UnixAddr>,
 ) -> io::Result<Vec<u8>> {
-    use std::os::{fd::AsRawFd, unix::ffi::OsStrExt};
-    let address = get(socket.as_raw_fd())?;
+    use std::os::fd::AsRawFd;
+    Ok(local_name_bytes(Some(&get(socket.as_raw_fd())?)))
+}
+
+/// Return `[5, N, B1, ..., BN]` of the `local` address `address`, as
+/// `inet_get_address` gives it (inet_drv.c:4915-4936). No address, as the
+/// sender of a datagram from an unbound socket, gives the empty name.
+fn local_name_bytes(address: Option<&nix::sys::socket::UnixAddr>) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
     #[cfg(target_os = "linux")]
-    let abstract_name = address.as_abstract();
+    let abstract_name = address.and_then(|address| address.as_abstract());
     #[cfg(not(target_os = "linux"))]
     let abstract_name: Option<&[u8]> = None;
-    let name: Vec<u8> = match (address.path(), abstract_name) {
+    let name: Vec<u8> = match (address.and_then(|address| address.path()), abstract_name) {
         (Some(path), _) => path
             .as_os_str()
             .as_bytes()
@@ -1268,7 +1274,7 @@ fn local_name(
         (None, None) => Vec::new(),
     };
     let length = u8::try_from(name.len()).expect("a name that fits sun_path");
-    Ok([&[AF_LOCAL, length][..], &name].concat())
+    [&[AF_LOCAL, length][..], &name].concat()
 }
 
 /// Return `[1, P1, P0, A, B, C, D]` of an IPv4 address and `[2, P1, P0,

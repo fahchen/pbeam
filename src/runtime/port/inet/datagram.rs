@@ -15,7 +15,8 @@ use std::{io, net::UdpSocket};
 use socket2::SockAddr;
 
 use super::{
-    AF_INET, AF_INET6, Control, Event, Inet, OK, State, errno_name, error_reply, stream::Sender,
+    AF_INET, AF_INET6, AF_LOCAL, Control, Event, Inet, OK, State, errno_name, error_reply,
+    stream::Sender,
 };
 use crate::error::{BeamError, error};
 
@@ -164,6 +165,9 @@ impl Inet {
     /// and the address of the sender, `None` for `ERRNO_BLOCK`, or the
     /// error name of the read (inet_drv.c:15469-15528).
     fn read_datagram(&mut self) -> Result<Option<Datagram>, String> {
+        if self.family == AF_LOCAL {
+            return self.read_local_datagram();
+        }
         // The host socket moves into a `UdpSocket` for the read into an
         // initialized buffer, and back; the fd does not change.
         let socket = UdpSocket::from(self.socket.take().expect("an open port has a socket"));
@@ -178,6 +182,25 @@ impl Inet {
         self.stream.statistics.input(count as u64);
         data.truncate(count);
         Ok(Some((data, super::address_bytes(&SockAddr::from(from)))))
+    }
+
+    /// Read one datagram of a `local` socket, as [`Inet::read_datagram`]
+    /// does, with the `local` address of the sender
+    /// (inet_drv.c:4915-4936).
+    fn read_local_datagram(&mut self) -> Result<Option<Datagram>, String> {
+        use std::os::fd::AsRawFd;
+        let socket = self.socket.as_ref().expect("an open port has a socket");
+        let mut data = vec![0; self.stream.buffer];
+        let read =
+            nix::sys::socket::recvfrom::<nix::sys::socket::UnixAddr>(socket.as_raw_fd(), &mut data);
+        let (count, from) = match read {
+            Ok(read) => read,
+            Err(nix::errno::Errno::EAGAIN) => return Ok(None),
+            Err(failure) => return Err(errno_name(&failure.into())),
+        };
+        self.stream.statistics.input(count as u64);
+        data.truncate(count);
+        Ok(Some((data, super::local_name_bytes(from.as_ref()))))
     }
 
     /// Send the datagram of the output `bytes` of `sender`, after the tag,
@@ -195,7 +218,7 @@ impl Inet {
     ///
     /// # Errors
     ///
-    /// The family code 5 and ancillary data.
+    /// Ancillary data.
     pub(super) fn send_datagram(
         &mut self,
         bytes: &[u8],
@@ -222,6 +245,7 @@ impl Inet {
         let rest = &bytes[match bytes[0] {
             AF_INET => 7,
             AF_INET6 => 27,
+            AF_LOCAL => 2 + usize::from(bytes[1]),
             _ => 3,
         }..];
         let [l3, l2, l1, l0, data @ ..] = rest else {
