@@ -1047,7 +1047,11 @@ pub(super) fn port_exit(
             return Ok(denied);
         }
         drop(slot);
-        scheduler.close_port(id, reason.clone());
+        if scheduler.close_port(id, reason.clone()) {
+            scheduler
+                .current_process_mut()
+                .bump_reductions(PORT_REDUCTIONS);
+        }
     }
     Ok(Value(Term::static_atom("true")))
 }
@@ -1197,13 +1201,22 @@ pub(super) fn port_bang(
         }
         Bang::Close => {
             drop(slot);
-            scheduler.close_port(id, Term::static_atom("normal"));
-            let closed = Term::tuple(vec![port_term, Term::static_atom("closed")]);
-            scheduler.port_send(owner, closed);
+            // Of two closes on two schedulers, only the first closes the
+            // port and replies (io.c:2179-2180, 3870-3874).
+            if scheduler.close_port(id, Term::static_atom("normal")) {
+                scheduler
+                    .current_process_mut()
+                    .bump_reductions(PORT_REDUCTIONS);
+                let closed = Term::tuple(vec![port_term, Term::static_atom("closed")]);
+                scheduler.port_send(owner, closed);
+            }
         }
         Bang::Connect(pid) => {
             port_state.owner = pid;
             drop(slot);
+            scheduler
+                .current_process_mut()
+                .bump_reductions(CONNECT_REDUCTIONS);
             let connected = Term::tuple(vec![port_term, Term::static_atom("connected")]);
             scheduler.port_send(owner, connected);
         }
