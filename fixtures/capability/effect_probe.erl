@@ -690,6 +690,13 @@ ambient() ->
         element(1, prim_net:getaddrinfo("127.0.0.1", "pbeam-no-such-service")),
         prim_net:getservbyname("http", "tcp"),
         prim_net:getservbyport(80, "tcp"),
+        element(1, prim_net:if_names()),
+        element(1, prim_net:if_name2index("pbeam-no-if")),
+        element(1, prim_net:if_index2name(16#7fffffff)),
+        attempt(fun() -> prim_net:get_adapters_addresses(#{}) end),
+        attempt(fun() -> prim_net:get_if_entry(#{}) end),
+        attempt(fun() -> prim_net:get_interface_info(#{}) end),
+        attempt(fun() -> prim_net:get_ip_address_table(#{}) end),
         erts_internal:term_type(id(a))
     ].
 

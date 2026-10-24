@@ -22,7 +22,6 @@ fn stops_the_run_at_a_function_of_a_library_without_bindings() {
             1,
             "zstd:get_frame_header_nif/1",
         ),
-        ("prim_net", "nif_if_names", 0, "prim_net:nif_if_names/0"),
         ("erl_tracer", "enabled", 3, "erl_tracer:enabled/3"),
         ("prim_socket", "nif_listen", 2, "prim_socket:nif_listen/2"),
     ] {

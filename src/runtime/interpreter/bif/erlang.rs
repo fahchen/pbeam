@@ -17,6 +17,8 @@ use crate::runtime::process::{InitialCall, OTHER_PROCESS_INFO_ITEMS};
 use crate::runtime::process::{LinkId, ProcessState};
 use crate::runtime::scheduler::PTAB_SIZE;
 use crate::runtime::scheduler::{AliasMode, CONTEXT_REDS, Flushed, MonitorOptions, MonitorTarget};
+#[cfg(target_os = "linux")]
+use crate::runtime::schedulers::cpu_topology;
 use crate::runtime::schedulers::{Schedulers, logical_processors_available};
 use crate::runtime::signal::Signal;
 use crate::runtime::time::{self, TimeValue};
@@ -821,11 +823,8 @@ const MAX_CPU_TOPOLOGY_ID: i64 = 0xffff;
 /// Tell whether `erts_set_cpu_topology` accepts the list `cpus`
 /// (`erl_cpu_topology.c:1388-1450`). Each element is a tuple
 /// `{cpu, Node, Processor, ProcessorNode, Core, Thread, Logical}` of small
-/// integers from -1 to `MAX_CPU_TOPOLOGY_ID`, and `verify_topology`
-/// (`erl_cpu_topology.c:1188-1248`) accepts the list: the logical
-/// identifiers are unique, the entities are unique, and the NUMA nodes in
-/// processor order (`processor_order_cmp`, `erl_cpu_topology.c:425-441`)
-/// are consistent.
+/// integers from -1 to `MAX_CPU_TOPOLOGY_ID`, and [`verify_topology`]
+/// accepts the list.
 ///
 /// # Examples
 ///
@@ -857,6 +856,36 @@ fn valid_cpu_topology<'a>(cpus: impl Iterator<Item = &'a Term>) -> bool {
         let [node, processor, processor_node, core, thread, logical] = id;
         entries.push(([processor, node, processor_node, core, thread], logical));
     }
+    verify_topology(entries)
+}
+/// Return the detected CPU topology term of `system_info(cpu_topology)`:
+/// the `{cpu, ...}` list of `topology` when it passes `verify_topology`,
+/// else `undefined` (`erl_cpu_topology.c:1515-1543`).
+#[cfg(target_os = "linux")]
+fn detected_topology(topology: &[crate::runtime::schedulers::CpuIds]) -> Term {
+    let entries = topology.iter().map(
+        |&[node, processor, processor_node, core, thread, logical]| {
+            let entity = [processor, node, processor_node, core, thread];
+            (entity.map(i64::from), i64::from(logical))
+        },
+    );
+    if !topology.is_empty() && verify_topology(entries.collect()) {
+        Term::list_from(topology.iter().map(|ids| {
+            let mut elements = vec![Term::static_atom("cpu")];
+            elements.extend(ids.map(|id| Term::Integer(i64::from(id))));
+            Term::tuple(elements)
+        }))
+    } else {
+        Term::static_atom("undefined")
+    }
+}
+
+/// Tell whether `verify_topology` (`erl_cpu_topology.c:1188-1248`) accepts
+/// the non-empty topology `entries` of `([processor, node, processor_node,
+/// core, thread], logical)`: the logical identifiers are unique, the
+/// entities are unique, and the NUMA nodes in processor order
+/// (`processor_order_cmp`, `erl_cpu_topology.c:425-441`) are consistent.
+fn verify_topology(mut entries: Vec<([i64; 5], i64)>) -> bool {
     let mut logical: Vec<i64> = entries.iter().map(|(_, logical)| *logical).collect();
     logical.sort_unstable();
     if logical.windows(2).any(|pair| pair[0] == pair[1]) {
@@ -3354,6 +3383,21 @@ pub(super) fn system_info(scheduler: &mut Scheduler, item: &Term) -> Result<BifR
         #[cfg(not(target_os = "linux"))]
         Term::Atom(atom) if atoms.name_of(atom) == "cpu_topology" => {
             Ok(Value(Term::static_atom("undefined")))
+        }
+        // The topology that ERTS reads from `/sys/devices/system` when the
+        // node starts, or `undefined` when it reads none or `verify_topology`
+        // rejects it (`erl_cpu_topology.c:1690-1703`). ERTS builds the
+        // `{cpu, ...}` list (`bld_topology_term`,
+        // `erl_cpu_topology.c:1515-1543`) and traps to
+        // `erlang:format_cpu_topology/1` (`erl_bif_info.c:3111-3113`).
+        #[cfg(target_os = "linux")]
+        Term::Atom(atom) if atoms.name_of(atom) == "cpu_topology" => {
+            let detected = detected_topology(cpu_topology());
+            Ok(Trap {
+                module: "erlang",
+                function: "format_cpu_topology",
+                arguments: vec![detected],
+            })
         }
         // `erl_bif_info.c:3212-3221`. The count is never 0, so the item is
         // never `unknown`.

@@ -241,6 +241,12 @@ const DIRTY_FUNCTIONS: &[(&str, &str, u32, Job)] = &[
     ("zstd", "load_decompress_dictionary_nif", 2, Job::CpuBound),
     ("zstd", "create_cdict_nif", 2, Job::CpuBound),
     ("zstd", "create_ddict_nif", 1, Job::CpuBound),
+    // prim_net_nif.c:5010-5016.
+    ("prim_net", "nif_getifaddrs", 1, Job::IoBound),
+    ("prim_net", "nif_get_adapters_addresses", 1, Job::IoBound),
+    ("prim_net", "nif_get_if_entry", 1, Job::IoBound),
+    ("prim_net", "nif_get_interface_info", 1, Job::IoBound),
+    ("prim_net", "nif_get_ip_address_table", 1, Job::IoBound),
     ("prim_net", "nif_getservbyname", 2, Job::IoBound),
     ("prim_net", "nif_getservbyport", 2, Job::IoBound),
 ];

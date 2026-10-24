@@ -585,6 +585,13 @@ fn gives_the_referenced_size_of_the_erts_binary_kind() {
     assert_eq!(source.bits(3, 3 + 8 * 64).referenced_bytes(), 64);
     assert_eq!(source.bits(3, 4 + 8 * 64).referenced_bytes(), 200);
     assert_eq!(source.bits(8, 8 + 8 * 65).referenced_bytes(), 200);
+    // A view marked as an off-heap sub-binary gives its source size at
+    // each size, and a view made of it does not keep the mark.
+    assert_eq!(source.bits(8, 81).off_heap().referenced_bytes(), 200);
+    assert_eq!(
+        source.bits(8, 81).off_heap().bits(0, 8).referenced_bytes(),
+        1
+    );
     // A view that an append built refers to its chunks.
     let chunks = Binary::from_chunks(vec![Arc::new(vec![1; 40]), Arc::new(vec![2; 40])]);
     assert_eq!(chunks.referenced_bytes(), 80);

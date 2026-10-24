@@ -718,6 +718,10 @@ impl BeamProgram {
     /// errors of [`BeamProgram::execute`]. A program without the `erl_init`
     /// module gives the error `missing BEAM module erl_init`.
     pub fn boot(&self, arguments: &[&[u8]], schedulers: Schedulers) -> BeamError {
+        // ERTS reads the processor topology when the node starts
+        // (`erl_cpu_topology.c:1686-1703`).
+        #[cfg(target_os = "linux")]
+        crate::runtime::schedulers::cpu_topology();
         let arguments = arguments
             .iter()
             .map(|argument| Term::binary(argument.to_vec()));
