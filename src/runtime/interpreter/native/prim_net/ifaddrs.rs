@@ -1,21 +1,32 @@
 //! `nif_getifaddrs/1` of the `net` NIF library
-//! (`prim_net_nif.c:1381-1877`). The safe `nix` wrapper of `getifaddrs`
-//! gives each socket address only for the families that it knows, so
-//! PBeam reads the list only on Linux, where `getifaddrs` gives only the
-//! families `inet`, `inet6`, and `packet`. On another host the call stops
-//! the run with a runtime error (row "NIF stubs" of
+//! (`prim_net_nif.c:1381-1877`). On Linux, PBeam reads the list with the
+//! safe `nix` wrapper of `getifaddrs`, because `getifaddrs` there gives
+//! only the families `inet`, `inet6`, and `packet`. On macOS, PBeam reads
+//! the list with the host call of `host/ifaddrs.rs`, which copies the bytes
+//! that ERTS reads, and this module makes the terms. On another host the
+//! call stops the run with a runtime error (row "NIF stubs" of
 //! `docs/erts-differences.md`).
 
-// The encoder runs only on Linux; the unit tests run it on each host.
-#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+// Each reader runs on one host; the unit tests run them on each host.
+#![allow(dead_code)]
 
 use super::*;
 
 /// A socket address of an entry: the bytes of a full `inet` or `inet6`
-/// socket address for [`encode_sockaddr`], or the fields of a
-/// `sockaddr_ll`.
+/// socket address for [`encode_sockaddr`], the fields of a `sockaddr_ll`
+/// or of a macOS `sockaddr_dl`, or the macOS family and the data of
+/// `esock_encode_sockaddr_native` (`socket_util.c:2830-2859`).
 pub(super) enum Address {
     Socket(Vec<u8>),
+    Link {
+        index: u16,
+        kind: u8,
+        nlen: u8,
+        alen: u8,
+        slen: u8,
+        data: Vec<u8>,
+    },
+    Native(c_int, Vec<u8>),
     Packet {
         protocol: u16,
         ifindex: i32,
@@ -44,6 +55,7 @@ pub(super) enum Failure {
 
 /// The flags of `encode_ifaddrs_flags`, in its order
 /// (`prim_net_nif.c:1700-1784`), with the glibc values of `<net/if.h>`.
+#[cfg(not(target_os = "macos"))]
 const FLAGS: [(u32, &str); 15] = [
     (0x1, "up"),
     (0x2, "broadcast"),
@@ -60,6 +72,59 @@ const FLAGS: [(u32, &str); 15] = [
     (0x2000, "portsel"),
     (0x4000, "automedia"),
     (0x8000, "dynamic"),
+];
+
+/// The flags of `encode_ifaddrs_flags`, in its order
+/// (`prim_net_nif.c:1700-1784`), with the macOS values of `<net/if.h>`,
+/// which does not define `IFF_MASTER`, `IFF_SLAVE`, `IFF_PORTSEL`,
+/// `IFF_AUTOMEDIA`, and `IFF_DYNAMIC`.
+#[cfg(target_os = "macos")]
+const FLAGS: [(u32, &str); 10] = [
+    (0x1, "up"),
+    (0x2, "broadcast"),
+    (0x4, "debug"),
+    (0x8, "loopback"),
+    (0x10, "pointopoint"),
+    (0x20, "notrailers"),
+    (0x40, "running"),
+    (0x80, "noarp"),
+    (0x100, "promisc"),
+    (0x8000, "multicast"),
+];
+
+/// `IFF_BROADCAST` and `IFF_POINTOPOINT`, which have the same values in the
+/// glibc and the macOS `<net/if.h>`.
+const IFF_BROADCAST: u32 = 0x2;
+const IFF_POINTOPOINT: u32 = 0x10;
+
+/// The families of the macOS `<sys/socket.h>` that
+/// `esock_encode_sockaddr` knows (`socket_util.c:748-913`).
+const MACOS_AF_UNSPEC: c_int = 0;
+const MACOS_AF_LOCAL: c_int = 1;
+const MACOS_AF_INET: c_int = 2;
+const MACOS_AF_IMPLINK: c_int = 3;
+const MACOS_AF_PUP: c_int = 4;
+const MACOS_AF_CHAOS: c_int = 5;
+const MACOS_AF_LINK: c_int = 18;
+const MACOS_AF_INET6: c_int = 30;
+
+/// The interface types of `esock_encode_if_type`
+/// (`socket_util.c:1660-1762`), with the values of the macOS
+/// `<net/if_types.h>`, which does not define `IFT_IPV4`, `IFT_IPV6`, and
+/// `IFT_6TO4`.
+const IF_TYPES: [(u8, &str); 12] = [
+    (0x1, "other"),
+    (0x3, "hdh1822"),
+    (0x4, "x25ddn"),
+    (0x5, "x25"),
+    (0x6, "ether"),
+    (0x17, "ppp"),
+    (0x18, "loop"),
+    (0x37, "gif"),
+    (0x38, "faith"),
+    (0x39, "stf"),
+    (0xd1, "bridge"),
+    (0xff, "cellular"),
 ];
 
 /// The hardware types of `esock_encode_packet_hatype`
@@ -110,6 +175,83 @@ pub(super) fn read() -> Result<Vec<Entry>, Failure> {
         .map_err(|errno| Failure::Errno(errno as c_int))?
         .map(entry)
         .collect()
+}
+
+/// Read the list of `getifaddrs` on macOS, as `enet_getifaddrs` does
+/// (`prim_net_nif.c:1455-1508`).
+#[cfg(target_os = "macos")]
+pub(super) fn read() -> Result<Vec<Entry>, Failure> {
+    crate::runtime::host::ifaddrs::getifaddrs()
+        .map_err(Failure::Errno)?
+        .into_iter()
+        .map(macos_entry)
+        .collect()
+}
+
+/// Copy a macOS entry of `getifaddrs`. The `ifa_dstaddr` of the entry is
+/// the `dstaddr` of a point-to-point interface, or else the `broadaddr` of
+/// a broadcast interface (`prim_net_nif.c:1630-1664`).
+pub(super) fn macos_entry(entry: crate::runtime::host::ifaddrs::Entry) -> Result<Entry, Failure> {
+    let extra = match entry.dstaddr {
+        Some(address) if entry.flags & IFF_POINTOPOINT != 0 => {
+            Some(("dstaddr", macos_address(address)?))
+        }
+        Some(address) if entry.flags & IFF_BROADCAST != 0 => {
+            Some(("broadaddr", macos_address(address)?))
+        }
+        _ => None,
+    };
+    Ok(Entry {
+        name: entry.name,
+        flags: entry.flags,
+        addr: entry.addr.map(macos_address).transpose()?,
+        netmask: entry.netmask.map(macos_address).transpose()?,
+        extra,
+    })
+}
+
+/// Read a macOS socket address as `esock_encode_sockaddr` does with the
+/// length -1 (`socket_util.c:723`, `741-913`): an `inet` or `inet6`
+/// address of full size, a `sockaddr_dl` of `sdl_len` bytes
+/// (`socket_util.c:889-900`, `1599-1656`), or else the family and no data.
+/// An `AF_LOCAL` address is not supported: `getifaddrs` gives none.
+pub(super) fn macos_address(
+    address: crate::runtime::host::ifaddrs::Address,
+) -> Result<Address, Failure> {
+    let bytes = address.bytes;
+    let with_header = |family| {
+        let mut socket = header(bytes.len(), family);
+        socket.extend(&bytes[2..]);
+        Address::Socket(socket)
+    };
+    Ok(match address.family {
+        MACOS_AF_INET => with_header(libc::AF_INET),
+        MACOS_AF_INET6 => with_header(libc::AF_INET6),
+        MACOS_AF_LINK => match bytes.len() {
+            8.. => Address::Link {
+                index: u16::from_ne_bytes([bytes[2], bytes[3]]),
+                kind: bytes[4],
+                nlen: bytes[5],
+                alen: bytes[6],
+                slen: bytes[7],
+                data: bytes[8..].to_vec(),
+            },
+            0 => Address::Native(MACOS_AF_LINK, Vec::new()),
+            // ERTS reads `sdl_len - 2` bytes, which wraps for 1.
+            1 => {
+                return Err(Failure::Unsupported(
+                    "prim_net:nif_getifaddrs/1 link address of 1 byte is not supported",
+                ));
+            }
+            _ => Address::Native(MACOS_AF_LINK, bytes[2..].to_vec()),
+        },
+        MACOS_AF_LOCAL => {
+            return Err(Failure::Unsupported(
+                "prim_net:nif_getifaddrs/1 socket address of this family is not supported",
+            ));
+        }
+        family => Address::Native(family, Vec::new()),
+    })
 }
 
 /// Copy an entry of `getifaddrs`. The `ifa_ifu` union of the entry is the
@@ -274,8 +416,34 @@ fn entry_map(atoms: &AtomTable, entry: &Entry) -> Result<Term, BeamError> {
 /// Encode an address, as `esock_encode_sockaddr` does
 /// (`socket_util.c:726-915`, `1535-1574`, `3617-3640`).
 fn address(atoms: &AtomTable, address: &Address) -> Result<Term, BeamError> {
+    let key = |name: &str| atoms.put(name).map(Term::Atom);
     let (protocol, ifindex, hatype, pkttype, addr) = match address {
         Address::Socket(bytes) => return encode_sockaddr(atoms, bytes),
+        Address::Link {
+            index,
+            kind,
+            nlen,
+            alen,
+            slen,
+            data,
+        } => return link(atoms, *index, *kind, [*nlen, *alen, *slen], data),
+        Address::Native(family, data) => {
+            let family = match *family {
+                MACOS_AF_UNSPEC => key("unspec")?,
+                MACOS_AF_IMPLINK => key("implink")?,
+                MACOS_AF_PUP => key("pup")?,
+                MACOS_AF_CHAOS => key("chaos")?,
+                MACOS_AF_LINK => key("link")?,
+                family => Term::Integer(family.into()),
+            };
+            let pairs = vec![
+                (key("family")?, family),
+                (key("addr")?, Term::binary(data.clone())),
+            ];
+            return Ok(Term::Map(
+                Map::from_pairs(pairs, atoms).expect("atom keys fit each map form"),
+            ));
+        }
         Address::Packet {
             protocol,
             ifindex,
@@ -284,7 +452,6 @@ fn address(atoms: &AtomTable, address: &Address) -> Result<Term, BeamError> {
             addr,
         } => (protocol, ifindex, hatype, pkttype, addr),
     };
-    let key = |name: &str| atoms.put(name).map(Term::Atom);
     let hatype = match HATYPES.iter().find(|(value, _)| value == hatype) {
         Some((_, name)) => key(name)?,
         None => Term::Integer((*hatype).into()),
@@ -300,6 +467,34 @@ fn address(atoms: &AtomTable, address: &Address) -> Result<Term, BeamError> {
         (key("hatype")?, hatype),
         (key("pkttype")?, pkttype),
         (key("addr")?, Term::binary(addr.clone())),
+    ];
+    Ok(Term::Map(
+        Map::from_pairs(pairs, atoms).expect("atom keys fit each map form"),
+    ))
+}
+
+/// Encode the fields of a `sockaddr_dl`, as `esock_encode_sockaddr_dl` and
+/// `make_sockaddr_dl` do (`socket_util.c:1599-1656`, `3648-3675`).
+fn link(
+    atoms: &AtomTable,
+    index: u16,
+    kind: u8,
+    [nlen, alen, slen]: [u8; 3],
+    data: &[u8],
+) -> Result<Term, BeamError> {
+    let key = |name: &str| atoms.put(name).map(Term::Atom);
+    let kind = match IF_TYPES.iter().find(|(value, _)| *value == kind) {
+        Some((_, name)) => key(name)?,
+        None => Term::Integer(kind.into()),
+    };
+    let pairs = vec![
+        (key("family")?, key("link")?),
+        (key("index")?, Term::Integer(index.into())),
+        (key("type")?, kind),
+        (key("nlen")?, Term::Integer(nlen.into())),
+        (key("alen")?, Term::Integer(alen.into())),
+        (key("slen")?, Term::Integer(slen.into())),
+        (key("data")?, Term::binary(data.to_vec())),
     ];
     Ok(Term::Map(
         Map::from_pairs(pairs, atoms).expect("atom keys fit each map form"),

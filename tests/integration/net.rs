@@ -69,7 +69,7 @@ fn stops_the_run_at_the_debug_trace() {
 }
 
 #[test]
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn gives_the_interface_addresses_as_the_pinned_erts() {
     let output = Command::new("erl")
         .args([
@@ -111,21 +111,6 @@ fn stops_the_run_at_a_network_namespace() {
     assert_eq!(
         error.to_string(),
         "prim_net:nif_getifaddrs/1 network namespace is not supported"
-    );
-}
-
-#[test]
-#[cfg(not(target_os = "linux"))]
-fn stops_the_run_at_the_interface_addresses_of_another_host() {
-    // The safe `getifaddrs` of `nix` drops the link address bytes past
-    // `sdl_data` and each address of an unknown family (row "NIF stubs" of
-    // `docs/erts-differences.md`).
-    let error = program()
-        .execute("net_probe", "ifaddrs_netns", &[])
-        .unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        "prim_net:nif_getifaddrs/1 is supported only on Linux"
     );
 }
 

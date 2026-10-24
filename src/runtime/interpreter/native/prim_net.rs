@@ -855,8 +855,9 @@ fn notsup(atoms: &AtomTable) -> Result<BifResult, BeamError> {
 /// (`esock_get_bool_from_map`, `socket_util.c:252-269`). On Linux, which
 /// defines `HAVE_SETNS`, a key `netns` that is not a string raises `badarg`
 /// (`socket_util.c:282-320`), and a string stops the run with a runtime
-/// error: PBeam does not change the network namespace. On another host the
-/// call stops the run with a runtime error (see [`ifaddrs`]).
+/// error: PBeam does not change the network namespace. macOS does not
+/// define `HAVE_SETNS` and ignores the key. On another host the call stops
+/// the run with a runtime error (see [`ifaddrs`]).
 fn getifaddrs(atoms: &AtomTable, extra: &Term) -> Result<BifResult, BeamError> {
     let Term::Map(map) = extra else {
         return Ok(BifResult::badarg());
@@ -876,14 +877,17 @@ fn getifaddrs(atoms: &AtomTable, extra: &Term) -> Result<BifResult, BeamError> {
                 "prim_net:nif_getifaddrs/1 network namespace is not supported",
             ));
         }
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
         dirty(ifaddrs::read, |scheduler, entries| {
             ifaddrs::result(&scheduler.atoms, entries)
         })
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         Err(error(
-            "prim_net:nif_getifaddrs/1 is supported only on Linux",
+            "prim_net:nif_getifaddrs/1 is supported only on Linux and macOS",
         ))
     }
 }
