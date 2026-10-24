@@ -101,3 +101,45 @@ fn stops_at_a_control_message_that_ip_pktoptions_does_not_give() {
     buffer.extend([0; 8]);
     assert!(pktoptions(scheduler, &buffer).is_err());
 }
+
+#[test]
+fn has_a_set_and_a_get_handler_for_each_host_option() {
+    // `setopt` gives `{invalid, socket_option}` for an option without a set
+    // form, and `getopt` expects a get handler for each option with a get
+    // handler in ERTS. The ERTS tables have no set handler only for these
+    // options (prim_socket_nif.c:3272-3274, 3377-3379, 3481-3488,
+    // 3580-3586, 3654-3660), so each other option of the host table must
+    // have a set form.
+    let get_only: &[(&str, &str)] = &[
+        ("socket", "type"),
+        ("socket", "domain"),
+        ("socket", "protocol"),
+        ("ip", "mtu"),
+        ("ip", "pktoptions"),
+    ];
+    let host = Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).expect("socket");
+    let mut count = 0;
+    for level in [
+        libc::SOL_SOCKET,
+        libc::IPPROTO_IP,
+        libc::IPPROTO_IPV6,
+        libc::IPPROTO_UDP,
+        libc::IPPROTO_TCP,
+    ] {
+        for opt in 0..5000 {
+            let Some(name) = option_name(level, opt) else {
+                continue;
+            };
+            count += 1;
+            assert!(
+                set_form(name).is_some() || get_only.contains(&name),
+                "{name:?}"
+            );
+            let get = set_form_only(name)
+                || name == ("ip", "pktoptions")
+                || get_host(&host, name, (level, opt)).is_some();
+            assert!(get, "{name:?}");
+        }
+    }
+    assert!(count > 40, "{count}");
+}

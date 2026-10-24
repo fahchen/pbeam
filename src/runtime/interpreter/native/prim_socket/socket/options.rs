@@ -228,11 +228,12 @@ pub(in crate::runtime::interpreter::native::prim_socket) fn setopt_5(
     // `nif_supports(options)` (prim_socket.erl:1273-1280), and the native
     // forms return above.
     let name = option_name(level, opt).expect("prim_socket gives a host option");
+    // Each host option without a set form has no set handler in ERTS:
+    // `{socket, type}`, and on Linux `{ip, mtu}`, `{ip, pktoptions}`,
+    // `{socket, domain}`, and `{socket, protocol}` (`prim_socket_nif.c:3272-3274`,
+    // `3377-3379`, `3481-3488`, `3580-3586`, `3654-3660`, `8512-8514`).
     let Some(form) = set_form(name) else {
-        return match get_form_only(name) {
-            true => Ok(invalid(atom(scheduler, "socket_option")?)),
-            false => Err(unsupported(&format!("option {name:?}"))),
-        };
+        return Ok(invalid(atom(scheduler, "socket_option")?));
     };
     let decoded = match form {
         Form::Bool => decode_bool(scheduler, value).map(|flag| Value::Int(flag.into())),
@@ -723,18 +724,6 @@ fn decode_str(value: &Term, max: usize) -> Option<Vec<u8>> {
     )
 }
 
-/// Return whether ERTS has no set handler for the host option `name` that
-/// PBeam gets (`prim_socket_nif.c:3272-3274`, `3377-3379`, `3481-3488`,
-/// `3580-3586`, `3654-3660`, `8512-8514`).
-fn get_form_only(name: (&str, &str)) -> bool {
-    match name {
-        ("socket", "type") => true,
-        #[cfg(target_os = "linux")]
-        ("ip", "mtu" | "pktoptions") | ("socket", "domain" | "protocol") => true,
-        _ => false,
-    }
-}
-
 /// Return whether ERTS has no get handler for the host option `name` that
 /// PBeam sets (`prim_socket_nif.c:3496-3541`, `3571-3577`, `3781-3833`,
 /// `12234-12236`).
@@ -1082,9 +1071,7 @@ fn getopt(
         };
         return host_result(scheduler, value);
     }
-    let Some(got) = get_host(host, name, (level, opt)) else {
-        return Err(unsupported(&format!("option {name:?}")));
-    };
+    let got = get_host(host, name, (level, opt)).expect("each host option has a get handler");
     let value = match got {
         Ok(Got::Bool(value)) => Ok(Some(Term::static_atom(if value {
             "true"
