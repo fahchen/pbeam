@@ -582,15 +582,14 @@ fn decodes_the_unsupported_forms_and_local_terms() {
         decode_with(&atoms, &[67], false),
         Err(DecodeError::Badarg)
     ));
-    // A well-formed record passes the structure check, and the decoder
-    // gives the documented runtime error. An exported flag above 1 and a
-    // record without its fields raise badarg.
+    // A well-formed record decodes: the pinned ERTS gives `#erlang:x{}`.
+    // An exported flag above 1 and a record without its fields raise badarg.
     let empty_record = vec![
         67, 0, 0, 0, 0, 0, 119, 6, 101, 114, 108, 97, 110, 103, 119, 1, 120,
     ];
     assert!(matches!(
         decode_with(&atoms, &empty_record, false),
-        Err(DecodeError::Unsupported(_))
+        Ok(Term::Record(_))
     ));
     assert!(matches!(
         decode_with(&atoms, &[67, 0, 0, 0, 0, 2], false),
@@ -1082,12 +1081,9 @@ fn keeps_the_decoder_guards_behind_the_validation() {
     let mut bad_sysname = vec![88, 97, 1];
     bad_sysname.extend(with_words(&[], &[5, 0, 0]));
     assert!(matches!(term(&bad_sysname), Err(DecodeError::Badarg)));
-    for unsupported in [&[117][..], &[67]] {
-        assert!(matches!(
-            term(unsupported),
-            Err(DecodeError::Unsupported(_))
-        ));
-    }
+    assert!(matches!(term(&[117]), Err(DecodeError::Unsupported(_))));
+    // A truncated RECORD_EXT raises badarg on the pinned ERTS.
+    assert!(matches!(term(&[67]), Err(DecodeError::Badarg)));
     let mut tiny_pid = vec![103];
     tiny_pid.extend(node());
     tiny_pid.extend(with_words(&[], &[5, 0]));

@@ -550,6 +550,12 @@ ambient() ->
             PrevLookup -> PrevLookup
         end,
         ets:match_object(Name, {'_', '_'}),
+        begin
+            {_, MC} = ets:match(Name, {'$1', '_'}, 1),
+            {_, OC} = ets:match_object(Name, {'_', '_'}, 1),
+            {'$end_of_table', '$end_of_table'} = {ets:match(MC), ets:match_object(OC)},
+            eot
+        end,
         ets:select(Name, [{{'_', '_'}, [], ['$_']}]),
         begin
             {_, C} = ets:select(Name, [{{'_', '_'}, [], ['$_']}], 1),

@@ -1911,14 +1911,15 @@ pub(super) fn match_objects(
     select_objects(context, table, &match_specification(pattern), limit, false)
 }
 
-/// Run `ets:match_object(Table, Pattern)`, as `ets_match_object_2`
-/// (`erl_db.c:4343-4362`) does: [`select_objects`] with the specification
-/// `[{Pattern, [], ['$_']}]`.
+/// Run `ets:match_object(Table, Pattern)` or, with `Some(Limit)`,
+/// `ets:match_object(Table, Pattern, Limit)`, as `ets_match_object_2` and
+/// `ets_match_object_3` (`erl_db.c:4343-4393`) do: [`select_objects`] with
+/// the specification `[{Pattern, [], ['$_']}]`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = match_object(&mut context, &table, &test_atom("_"))?;
+/// let result = match_object(&mut context, &table, &test_atom("_"), None)?;
 /// assert!(matches!(result, BifResult::Value(_)));
 /// ```
 ///
@@ -1929,12 +1930,13 @@ pub(super) fn match_object(
     context: &mut BifContext<'_>,
     table: &Term,
     pattern: &Term,
+    limit: Option<&Term>,
 ) -> Result<BifResult, BeamError> {
     select_objects(
         context,
         table,
         &match_object_specification(pattern),
-        None,
+        limit,
         false,
     )
 }
@@ -3286,7 +3288,11 @@ pub(super) fn internal_select_delete(
             removed += 1;
         }
     }
-    table.shrink();
+    // ERTS shrinks only when the call removed an object
+    // (`erl_db_hash.c:2688-2706`).
+    if removed > 0 {
+        table.shrink();
+    }
     drop(taken);
     drop(ets);
     context

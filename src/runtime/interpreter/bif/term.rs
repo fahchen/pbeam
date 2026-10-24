@@ -3,7 +3,7 @@
 //! (`external.c`).
 //!
 //! The encoder writes the tags of `external.h` for each term that PBeam can
-//! make. A record and a pid, port, or reference of another node fail with a
+//! make. A pid, port, or reference of another node fails with a
 //! runtime error. Row "External term format" of
 //! `docs/erts-differences.md` gives these differences.
 //!
@@ -24,8 +24,8 @@ use super::BifResult::Value;
 use super::*;
 use crate::runtime::interpreter::code_table::CodeTable;
 use crate::term::{
-    AtomTable, Fun, Lambda, MAX_ATOM_CHARACTERS, MAX_TUPLE_SIZE, ProcessId, Reference, Target,
-    external, float_text,
+    AtomTable, Fun, Lambda, MAX_ATOM_CHARACTERS, MAX_TUPLE_SIZE, ProcessId, Record, RecordDef,
+    Reference, Target, external, float_text,
 };
 
 /// `VERSION_MAGIC`, the first byte of the external term format
@@ -647,10 +647,20 @@ fn encode_parts(
                     pending.extend(fun.free().iter().rev());
                 }
             },
-            Term::Record(_) => {
-                return Err(error(
-                    "unsupported erlang:term_to_binary/1,2 of a native record: see \"External term format\" in docs/erts-differences.md",
-                ));
+            // The field count, the export flag, the module, the name, the
+            // field names, and the values, both in definition order
+            // (`enc_term`, `external.c:4006-4036`).
+            Term::Record(record) => {
+                let def = record.def();
+                out.push(67);
+                out.extend_from_slice(&(def.order.len() as u32).to_be_bytes());
+                out.push(u8::from(def.is_exported));
+                encode_atom(atoms.name_of(&def.module), options, &mut out);
+                encode_atom(atoms.name_of(&def.name), options, &mut out);
+                for &index in &def.order {
+                    encode_atom(atoms.name_of(&def.keys[index]), options, &mut out);
+                }
+                pending.extend(def.order.iter().rev().map(|&index| &record.values()[index]));
             }
             Term::MatchContext(_) => {
                 return Err(error(
@@ -896,6 +906,15 @@ struct Decoder<'a> {
     ets: &'a crate::runtime::ets::NodeTables,
 }
 
+/// Return the record of `def` with `items`, the values in definition order.
+fn record_term(def: Arc<RecordDef>, items: Vec<Term>) -> Term {
+    let mut values = vec![Term::Nil; items.len()];
+    for (position, value) in items.into_iter().enumerate() {
+        values[def.order[position]] = value;
+    }
+    Term::Record(Record::new(def, values))
+}
+
 /// The container that the decoder walk still fills.
 enum FrameKind {
     /// A tuple of the remaining elements.
@@ -913,6 +932,14 @@ enum FrameKind {
         arity: u8,
         uniq: [u8; 16],
         index: i32,
+    },
+    /// A `RECORD_EXT` with its export flag, of the module, the name, the
+    /// field names, and then the values of the definition that the header
+    /// gives.
+    Record {
+        exported: bool,
+        header: Vec<crate::term::Atom>,
+        def: Option<Arc<RecordDef>>,
     },
     /// A `LOCAL_EXT` with its hash, the start of the wrapped term, and the
     /// local flag of the enclosing term.
@@ -1414,189 +1441,231 @@ impl Decoder<'_> {
         let mut frames: Vec<Frame> = Vec::new();
         'parse: loop {
             let tag = self.u8()?;
-            let mut term = match tag {
-                97 => Term::Integer(i64::from(self.u8()?)),
-                98 => Term::Integer(i64::from(i32::from_be_bytes(
-                    self.take(4)?.try_into().expect("four bytes"),
-                ))),
-                99 => self.float_text()?,
-                70 => {
-                    let bits = u64::from_be_bytes(self.take(8)?.try_into().expect("eight bytes"));
-                    let value = f64::from_bits(bits);
-                    value
-                        .is_finite()
-                        .then_some(Term::Float(value))
-                        .ok_or(DecodeError::Badarg)?
-                }
-                100 => {
-                    let length = usize::from(self.u16()?);
-                    Term::Atom(self.atom(length, true)?)
-                }
-                115 => {
-                    let length = usize::from(self.u8()?);
-                    Term::Atom(self.atom(length, true)?)
-                }
-                118 => {
-                    let length = usize::from(self.u16()?);
-                    Term::Atom(self.atom(length, false)?)
-                }
-                119 => {
-                    let length = usize::from(self.u8()?);
-                    Term::Atom(self.atom(length, false)?)
-                }
-                106 => Term::Nil,
-                107 => {
-                    let count = usize::from(self.u16()?);
-                    let bytes = self.take(count)?;
-                    Term::list_from(bytes.iter().map(|&byte| Term::Integer(i64::from(byte))))
-                }
-                108 => {
-                    let count = self.u32()? as usize;
-                    if count > self.remaining() {
-                        return Err(DecodeError::Badarg);
-                    }
-                    frames.push(Frame {
-                        kind: FrameKind::List,
-                        remaining: count,
-                        items: Vec::with_capacity(count),
-                    });
+            // The module, the name, and the field names of a `RECORD_EXT`
+            // take only an atom tag (`dec_atom`, `external.c:5300-5318`).
+            // The header ends when the values remain.
+            let mut term = if let Some(frame) = frames.last_mut()
+                && let FrameKind::Record {
+                    exported,
+                    header,
+                    def: def @ None,
+                } = &mut frame.kind
+            {
+                header.push(self.header_atom(tag)?);
+                frame.remaining -= 1;
+                if header.len() < frame.remaining + 2 {
                     continue 'parse;
                 }
-                104 => {
-                    let count = usize::from(self.u8()?);
-                    if count > self.remaining() {
-                        return Err(DecodeError::Badarg);
+                let record = self.record_def(*exported, std::mem::take(header))?;
+                if frame.remaining > 0 {
+                    *def = Some(record);
+                    continue 'parse;
+                }
+                frames.pop();
+                record_term(record, Vec::new())
+            } else {
+                match tag {
+                    97 => Term::Integer(i64::from(self.u8()?)),
+                    98 => Term::Integer(i64::from(i32::from_be_bytes(
+                        self.take(4)?.try_into().expect("four bytes"),
+                    ))),
+                    99 => self.float_text()?,
+                    70 => {
+                        let bits =
+                            u64::from_be_bytes(self.take(8)?.try_into().expect("eight bytes"));
+                        let value = f64::from_bits(bits);
+                        value
+                            .is_finite()
+                            .then_some(Term::Float(value))
+                            .ok_or(DecodeError::Badarg)?
                     }
-                    if count == 0 {
-                        Term::tuple(vec![])
-                    } else {
+                    100 => {
+                        let length = usize::from(self.u16()?);
+                        Term::Atom(self.atom(length, true)?)
+                    }
+                    115 => {
+                        let length = usize::from(self.u8()?);
+                        Term::Atom(self.atom(length, true)?)
+                    }
+                    118 => {
+                        let length = usize::from(self.u16()?);
+                        Term::Atom(self.atom(length, false)?)
+                    }
+                    119 => {
+                        let length = usize::from(self.u8()?);
+                        Term::Atom(self.atom(length, false)?)
+                    }
+                    106 => Term::Nil,
+                    107 => {
+                        let count = usize::from(self.u16()?);
+                        let bytes = self.take(count)?;
+                        Term::list_from(bytes.iter().map(|&byte| Term::Integer(i64::from(byte))))
+                    }
+                    108 => {
+                        let count = self.u32()? as usize;
+                        if count > self.remaining() {
+                            return Err(DecodeError::Badarg);
+                        }
                         frames.push(Frame {
-                            kind: FrameKind::Tuple,
+                            kind: FrameKind::List,
                             remaining: count,
                             items: Vec::with_capacity(count),
                         });
                         continue 'parse;
                     }
-                }
-                105 => {
-                    let count = self.u32()? as usize;
-                    if count > MAX_TUPLE_SIZE || count > self.remaining() {
-                        return Err(DecodeError::Badarg);
+                    104 => {
+                        let count = usize::from(self.u8()?);
+                        if count > self.remaining() {
+                            return Err(DecodeError::Badarg);
+                        }
+                        if count == 0 {
+                            Term::tuple(vec![])
+                        } else {
+                            frames.push(Frame {
+                                kind: FrameKind::Tuple,
+                                remaining: count,
+                                items: Vec::with_capacity(count),
+                            });
+                            continue 'parse;
+                        }
                     }
-                    if count == 0 {
-                        Term::tuple(vec![])
-                    } else {
+                    105 => {
+                        let count = self.u32()? as usize;
+                        if count > MAX_TUPLE_SIZE || count > self.remaining() {
+                            return Err(DecodeError::Badarg);
+                        }
+                        if count == 0 {
+                            Term::tuple(vec![])
+                        } else {
+                            frames.push(Frame {
+                                kind: FrameKind::Tuple,
+                                remaining: count,
+                                items: Vec::with_capacity(count),
+                            });
+                            continue 'parse;
+                        }
+                    }
+                    116 => {
+                        let count = self.u32()? as usize;
+                        if count
+                            .checked_mul(2)
+                            .is_none_or(|terms| terms > self.remaining())
+                        {
+                            return Err(DecodeError::Badarg);
+                        }
+                        if count == 0 {
+                            self.build_map(Vec::new())?
+                        } else {
+                            frames.push(Frame {
+                                kind: FrameKind::Map,
+                                remaining: count * 2,
+                                items: Vec::with_capacity(count * 2),
+                            });
+                            continue 'parse;
+                        }
+                    }
+                    109 => {
+                        let count = self.u32()? as usize;
+                        Term::binary(self.take(count)?.to_vec())
+                    }
+                    77 => {
+                        let count = self.u32()? as usize;
+                        let bits = self.u8()?;
+                        if count == 0 || !(1..=8).contains(&bits) {
+                            return Err(DecodeError::Badarg);
+                        }
+                        // `dec_term` keeps the high `bits` bits of the last
+                        // byte (`external.c:4895-4923`).
+                        let bytes = Binary::from(self.take(count)?.to_vec());
+                        Term::Binary(bytes.bits(0, count * 8 - (8 - usize::from(bits))))
+                    }
+                    110 => {
+                        let count = usize::from(self.u8()?);
+                        self.big(count)?
+                    }
+                    111 => {
+                        let count = self.u32()? as usize;
+                        self.big(count)?
+                    }
+                    88 => self.pid(4)?,
+                    103 => self.pid(1)?,
+                    89 => self.port(4)?,
+                    102 => self.port(1)?,
+                    120 => {
+                        let sysname = self.sysname()?;
+                        let number = self.u64()?;
+                        let creation = self.u32()?;
+                        self.local_port(sysname, number, creation)?
+                    }
+                    90 => self.reference(4)?,
+                    114 => self.reference(1)?,
+                    101 => self.old_reference()?,
+                    113 => {
                         frames.push(Frame {
-                            kind: FrameKind::Tuple,
-                            remaining: count,
+                            kind: FrameKind::Export,
+                            remaining: 3,
+                            items: Vec::with_capacity(3),
+                        });
+                        continue 'parse;
+                    }
+                    112 => {
+                        // The size, which the decoder skips, the arity, the
+                        // module MD5, the index, and the free count; then the
+                        // module, the old index, the old unique value, the
+                        // creator pid, and the free variables (`dec_term`,
+                        // `external.c:5102-5176`).
+                        self.take(4)?;
+                        let arity = self.take(1)?[0];
+                        let uniq: [u8; 16] =
+                            self.take(16)?.try_into().expect("16 bytes of the MD5");
+                        let index = self.u32()? as i32;
+                        let free = self.u32()? as usize;
+                        frames.push(Frame {
+                            kind: FrameKind::Fun { arity, uniq, index },
+                            remaining: 4 + free,
+                            items: Vec::with_capacity(4 + free),
+                        });
+                        continue 'parse;
+                    }
+                    117 => return Err(DecodeError::Unsupported("an old local fun")),
+                    67 => {
+                        // The field count, the export flag that `validate`
+                        // checks, then the module, the name, the field names,
+                        // and the values (`dec_term`, `external.c:5257-5380`).
+                        let count = self.u32()? as usize;
+                        let exported = self.u8()? == 1;
+                        frames.push(Frame {
+                            kind: FrameKind::Record {
+                                exported,
+                                header: Vec::with_capacity(2 + count),
+                                def: None,
+                            },
+                            remaining: 2 + 2 * count,
                             items: Vec::with_capacity(count),
                         });
                         continue 'parse;
                     }
-                }
-                116 => {
-                    let count = self.u32()? as usize;
-                    if count
-                        .checked_mul(2)
-                        .is_none_or(|terms| terms > self.remaining())
-                    {
-                        return Err(DecodeError::Badarg);
-                    }
-                    if count == 0 {
-                        self.build_map(Vec::new())?
-                    } else {
+                    121 => {
+                        let hash = u32::from_be_bytes(
+                            self.take(4)?
+                                .try_into()
+                                .expect("four bytes of the local hash"),
+                        );
+                        let prior = self.local;
+                        self.local = true;
                         frames.push(Frame {
-                            kind: FrameKind::Map,
-                            remaining: count * 2,
-                            items: Vec::with_capacity(count * 2),
+                            kind: FrameKind::Local {
+                                hash,
+                                start: self.pos,
+                                prior,
+                            },
+                            remaining: 1,
+                            items: Vec::new(),
                         });
                         continue 'parse;
                     }
+                    _ => return Err(DecodeError::Badarg),
                 }
-                109 => {
-                    let count = self.u32()? as usize;
-                    Term::binary(self.take(count)?.to_vec())
-                }
-                77 => {
-                    let count = self.u32()? as usize;
-                    let bits = self.u8()?;
-                    if count == 0 || !(1..=8).contains(&bits) {
-                        return Err(DecodeError::Badarg);
-                    }
-                    // `dec_term` keeps the high `bits` bits of the last
-                    // byte (`external.c:4895-4923`).
-                    let bytes = Binary::from(self.take(count)?.to_vec());
-                    Term::Binary(bytes.bits(0, count * 8 - (8 - usize::from(bits))))
-                }
-                110 => {
-                    let count = usize::from(self.u8()?);
-                    self.big(count)?
-                }
-                111 => {
-                    let count = self.u32()? as usize;
-                    self.big(count)?
-                }
-                88 => self.pid(4)?,
-                103 => self.pid(1)?,
-                89 => self.port(4)?,
-                102 => self.port(1)?,
-                120 => {
-                    let sysname = self.sysname()?;
-                    let number = self.u64()?;
-                    let creation = self.u32()?;
-                    self.local_port(sysname, number, creation)?
-                }
-                90 => self.reference(4)?,
-                114 => self.reference(1)?,
-                101 => self.old_reference()?,
-                113 => {
-                    frames.push(Frame {
-                        kind: FrameKind::Export,
-                        remaining: 3,
-                        items: Vec::with_capacity(3),
-                    });
-                    continue 'parse;
-                }
-                112 => {
-                    // The size, which the decoder skips, the arity, the
-                    // module MD5, the index, and the free count; then the
-                    // module, the old index, the old unique value, the
-                    // creator pid, and the free variables (`dec_term`,
-                    // `external.c:5102-5176`).
-                    self.take(4)?;
-                    let arity = self.take(1)?[0];
-                    let uniq: [u8; 16] = self.take(16)?.try_into().expect("16 bytes of the MD5");
-                    let index = self.u32()? as i32;
-                    let free = self.u32()? as usize;
-                    frames.push(Frame {
-                        kind: FrameKind::Fun { arity, uniq, index },
-                        remaining: 4 + free,
-                        items: Vec::with_capacity(4 + free),
-                    });
-                    continue 'parse;
-                }
-                117 => return Err(DecodeError::Unsupported("an old local fun")),
-                67 => return Err(DecodeError::Unsupported("a record")),
-                121 => {
-                    let hash = u32::from_be_bytes(
-                        self.take(4)?
-                            .try_into()
-                            .expect("four bytes of the local hash"),
-                    );
-                    let prior = self.local;
-                    self.local = true;
-                    frames.push(Frame {
-                        kind: FrameKind::Local {
-                            hash,
-                            start: self.pos,
-                            prior,
-                        },
-                        remaining: 1,
-                        items: Vec::new(),
-                    });
-                    continue 'parse;
-                }
-                _ => return Err(DecodeError::Badarg),
             };
             loop {
                 let Some(frame) = frames.last_mut() else {
@@ -1660,6 +1729,18 @@ impl Decoder<'_> {
                         }
                         break;
                     }
+                    FrameKind::Record { ref mut def, .. } => {
+                        frame.items.push(term);
+                        frame.remaining -= 1;
+                        if frame.remaining == 0 {
+                            let def = def.take().expect("the header precedes the values");
+                            let items = std::mem::take(&mut frame.items);
+                            frames.pop();
+                            term = record_term(def, items);
+                            continue;
+                        }
+                        break;
+                    }
                     FrameKind::Local { hash, start, prior } => {
                         frames.pop();
                         self.local = prior;
@@ -1671,6 +1752,27 @@ impl Decoder<'_> {
                 }
             }
         }
+    }
+
+    /// Return the definition of a `RECORD_EXT` header: the module, the
+    /// name, and the field names in definition order. A field name that
+    /// occurs twice is `badarg` before any value is decoded. The definition
+    /// is the loaded one when it has the same export flag and fields
+    /// (`dec_term`, `external.c:5300-5367`).
+    fn record_def(
+        &self,
+        exported: bool,
+        header: Vec<crate::term::Atom>,
+    ) -> Result<Arc<RecordDef>, DecodeError> {
+        let mut atoms = header.into_iter();
+        let module = atoms.next().expect("a module");
+        let name = atoms.next().expect("a name");
+        let fields = atoms.map(|key| (key, None)).collect();
+        let def = RecordDef::new(module, name, exported, fields, self.atoms);
+        if def.keys.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(DecodeError::Badarg);
+        }
+        Ok(records::canonical(self.code, self.atoms, def))
     }
 
     /// Decode `FLOAT_EXT`: 31 bytes of C text, as `sys_chars_to_double`
@@ -1721,6 +1823,22 @@ impl Decoder<'_> {
             .is_finite()
             .then_some(Term::Float(value))
             .ok_or(DecodeError::Badarg)
+    }
+
+    /// Decode an atom of a `RECORD_EXT` header. Each other tag is `badarg`
+    /// (`dec_atom`, `external.c:5300-5318`).
+    fn header_atom(&mut self, tag: u8) -> Result<crate::term::Atom, DecodeError> {
+        match tag {
+            100 | 118 => {
+                let length = usize::from(self.u16()?);
+                self.atom(length, tag == 100)
+            }
+            115 | 119 => {
+                let length = usize::from(self.u8()?);
+                self.atom(length, tag == 115)
+            }
+            _ => Err(DecodeError::Badarg),
+        }
     }
 
     /// Decode an atom of `length` bytes in Latin-1 or UTF-8, as
