@@ -378,6 +378,7 @@ fn stops_the_run_for_each_port_part_that_is_not_implemented() {
         ),
         ("in", "unsupported open_port/2 option in"),
         ("out", "unsupported open_port/2 option out"),
+        ("busy_limits", "unsupported open_port/2 option busy_limits_port"),
         (
             "empty_line",
             "unsupported open_port/2 option {line, L} whose low 32 bits are not positive",

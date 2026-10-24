@@ -526,6 +526,8 @@ unsupported(in) ->
     open_port({spawn_executable, sh()}, [binary, in]);
 unsupported(out) ->
     open_port({spawn_executable, sh()}, [binary, out]);
+unsupported(busy_limits) ->
+    open_port({spawn_executable, sh()}, [binary, {busy_limits_port, {4096, 8192}}]);
 unsupported(empty_line) ->
     open_port({spawn_executable, sh()}, [binary, {line, 1 bsl 32}]);
 unsupported(fd_list) ->
