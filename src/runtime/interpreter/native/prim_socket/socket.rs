@@ -25,8 +25,8 @@ use crate::runtime::port::inet::errno_name;
 use crate::runtime::resources::lock;
 use crate::runtime::signal::Signal;
 use crate::runtime::sockets::{
-    ACCEPTING, BOUND, CLOSED, CLOSING, CONNECTED, CONNECTING, IoCounters, LISTENING, SELECTED,
-    SocketState, Sockets,
+    ACCEPTING, BOUND, CLOSED, CLOSING, CONNECTED, CONNECTING, IoCounters, LISTENING, OtpOptions,
+    SELECTED, SocketState, Sockets,
 };
 use crate::term::{AtomTable, ProcessId, Reference};
 pub(super) use options::{getopt_3, getopt_5, setopt_5};
@@ -401,6 +401,7 @@ pub(super) fn open_4(
                 reader: None,
                 writer: None,
                 counters: IoCounters::default(),
+                options: OtpOptions::default(),
             },
         );
         sockets.registry

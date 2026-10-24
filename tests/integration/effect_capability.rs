@@ -1376,15 +1376,17 @@ fn stops_the_run_for_a_socket_bind_to_a_native_family() {
 fn stops_the_run_for_a_socket_option_form_without_a_handler() {
     // PBeam sets and gets only the options that the safe `nix` and
     // `socket2` APIs type. A native value or value spec, another option of
-    // the host or of the level `otp` stop the run
+    // the host, `{otp, debug}` and `{otp, select_read}` with `true`, and
+    // `{otp, rcvbuf}` with a buffer count stop the run
     // (row "NIF stubs" of docs/erts-differences.md).
     let expected = [
         "unsupported prim_socket native option value",
         "unsupported prim_socket native value spec",
         "unsupported prim_socket option (\"socket\", \"debug\")",
         "unsupported prim_socket option (\"socket\", \"debug\")",
-        "unsupported prim_socket option {otp, 1001}",
-        "unsupported prim_socket option {otp, 1001}",
+        "unsupported prim_socket option value {otp, 1001} true",
+        "unsupported prim_socket option value {otp, 1011} true",
+        "unsupported prim_socket option value {otp, rcvbuf} {N, Size}",
     ];
     for (case, expected) in (1..).zip(expected) {
         let error = program()

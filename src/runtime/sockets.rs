@@ -234,6 +234,35 @@ pub(super) struct IoCounters {
     pub(super) write_waits: u64,
 }
 
+/// The `otp` level options that a socket keeps, as `alloc_descriptor` sets
+/// them (`prim_socket_nif.c:17061-17068`). An accepted socket inherits them
+/// (`unix_socket_syncio.c:2843-2849`).
+#[derive(Debug, Clone, Copy)]
+pub(super) struct OtpOptions {
+    /// `iow`, the value of `{otp, iow}`.
+    pub(super) iow: bool,
+    /// `rBufSz`, the buffer size of a receive with length 0.
+    pub(super) recv_buffer: usize,
+    /// `rCtrlSz`, the value of `{otp, rcvctrlbuf}`.
+    pub(super) recv_ctrl: usize,
+    /// `wCtrlSz`, the value of `{otp, sndctrlbuf}`.
+    pub(super) send_ctrl: usize,
+}
+
+impl Default for OtpOptions {
+    /// The defaults `ESOCK_RECV_BUFFER_SIZE_DEFAULT` (8 KiB on Unix),
+    /// `ESOCK_RECV_CTRL_BUFFER_SIZE_DEFAULT`, and
+    /// `ESOCK_SEND_CTRL_BUFFER_SIZE_DEFAULT` (`prim_socket_nif.c:505-513`).
+    fn default() -> Self {
+        Self {
+            iow: false,
+            recv_buffer: 8 * 1024,
+            recv_ctrl: 1024,
+            send_ctrl: 1024,
+        }
+    }
+}
+
 /// One socket of `prim_socket:nif_open/4`, as the fields of
 /// `ESockDescriptor` that PBeam reads.
 #[derive(Debug)]
@@ -270,6 +299,8 @@ pub(super) struct SocketState {
     pub(super) writer: Option<(ProcessId, Term)>,
     /// The read and write counters.
     pub(super) counters: IoCounters,
+    /// The `otp` level options.
+    pub(super) options: OtpOptions,
 }
 
 impl SocketState {

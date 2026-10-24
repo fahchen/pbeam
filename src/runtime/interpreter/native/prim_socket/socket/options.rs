@@ -11,13 +11,31 @@
 
 use nix::sys::socket::{getsockopt, setsockopt, sockopt};
 
+use std::os::fd::AsRawFd;
+
 use super::*;
 use crate::runtime::interpreter::native::prim_socket::supports::option_name;
 
+/// The number `ESOCK_OPT_OTP_DEBUG` (`prim_socket_nif.c:920`).
+const OTP_DEBUG: i32 = 1001;
+/// The number `ESOCK_OPT_OTP_IOW` (`prim_socket_nif.c:921`).
+const OTP_IOW: i32 = 1002;
+/// The number `ESOCK_OPT_OTP_CTRL_PROC` (`prim_socket_nif.c:922`).
+const OTP_CTRL_PROC: i32 = 1003;
+/// The number `ESOCK_OPT_OTP_RCVBUF` (`prim_socket_nif.c:923`).
+const OTP_RCVBUF: i32 = 1004;
+/// The number `ESOCK_OPT_OTP_RCVCTRLBUF` (`prim_socket_nif.c:925`).
+const OTP_RCVCTRLBUF: i32 = 1006;
+/// The number `ESOCK_OPT_OTP_SNDCTRLBUF` (`prim_socket_nif.c:926`).
+const OTP_SNDCTRLBUF: i32 = 1007;
+/// The number `ESOCK_OPT_OTP_FD` (`prim_socket_nif.c:927`).
+const OTP_FD: i32 = 1008;
 /// The number `ESOCK_OPT_OTP_META` (`prim_socket_nif.c:928`).
 const OTP_META: i32 = 1009;
 /// The number `ESOCK_OPT_OTP_USE_REGISTRY` (`prim_socket_nif.c:929`).
 const OTP_USE_REGISTRY: i32 = 1010;
+/// The number `ESOCK_OPT_OTP_SELECT_READ` (`prim_socket_nif.c:930`).
+const OTP_SELECT_READ: i32 = 1011;
 /// The number `ESOCK_OPT_OTP_DOMAIN` (`prim_socket_nif.c:932`).
 const OTP_DOMAIN: i32 = 1999;
 
@@ -29,6 +47,8 @@ enum Got {
     Int(i64),
     /// The type of `esock_getopt_sock_type` (`prim_socket_nif.c:12542-12563`).
     Type(i32),
+    /// The value of `esock_getopt_linger` (`prim_socket_nif.c:12482-12530`).
+    Linger(libc::linger),
 }
 
 /// The value form of a host option that [`set_host`] writes.
@@ -38,6 +58,16 @@ enum Form {
     Bool,
     /// `esock_setopt_int_opt` (`prim_socket_nif.c:11241-11259`).
     Int,
+    /// `esock_setopt_linger` (`prim_socket_nif.c:8551-8597`).
+    Linger,
+}
+
+/// A decoded value of a host option that [`set_host`] writes.
+enum Value {
+    /// The C `int` of [`Form::Bool`] and [`Form::Int`].
+    Int(i32),
+    /// The `struct linger` of [`Form::Linger`].
+    Linger(libc::linger),
 }
 
 /// Return `{invalid, {integer_range, Term}}` of
@@ -136,12 +166,9 @@ pub(in crate::runtime::interpreter::native::prim_socket) fn setopt_5(
         };
     };
     let decoded = match form {
-        Form::Bool => match atom_name(scheduler, value) {
-            Some("true") => Some(1),
-            Some("false") => Some(0),
-            _ => None,
-        },
-        Form::Int => int(value),
+        Form::Bool => decode_bool(scheduler, value).map(|flag| Value::Int(flag.into())),
+        Form::Int => int(value).map(Value::Int),
+        Form::Linger => decode_linger(scheduler, value).map(Value::Linger),
     };
     let Some(decoded) = decoded else {
         return Ok(invalid(atom(scheduler, "value")?));
@@ -150,7 +177,7 @@ pub(in crate::runtime::interpreter::native::prim_socket) fn setopt_5(
         .socket
         .as_ref()
         .expect("an open socket has a host socket");
-    let result = set_host(host, name, decoded).map(|()| None);
+    let result = set_host(host, name, opt, decoded).map(|()| None);
     host_result(scheduler, result)
 }
 
@@ -163,11 +190,30 @@ fn set_form(name: (&str, &str)) -> Option<Form> {
         )
         | ("tcp", "nodelay")
         | ("ipv6", "v6only") => Some(Form::Bool),
-        ("socket", "rcvbuf" | "sndbuf") | ("tcp", "keepcnt" | "keepintvl") | ("ip", "ttl") => {
-            Some(Form::Int)
-        }
+        ("socket", "rcvbuf" | "sndbuf" | "priority")
+        | ("tcp", "keepcnt" | "keepintvl")
+        | ("ip", "ttl") => Some(Form::Int),
+        ("socket", "linger") => Some(Form::Linger),
         _ => None,
     }
+}
+
+/// Return the `struct linger` of `esock_setopt_linger`
+/// (`prim_socket_nif.c:8568-8587`): the map `#{onoff := boolean(), linger
+/// := non_neg_integer()}`, or the atom `abort` for `{1, 0}`.
+fn decode_linger(scheduler: &Scheduler, value: &Term) -> Option<libc::linger> {
+    let onoff = field(&scheduler.atoms, value, "onoff");
+    let linger = field(&scheduler.atoms, value, "linger");
+    let (Some(onoff), Some(linger)) = (onoff, linger) else {
+        return (atom_name(scheduler, value) == Some("abort")).then_some(libc::linger {
+            l_onoff: 1,
+            l_linger: 0,
+        });
+    };
+    Some(libc::linger {
+        l_onoff: decode_bool(scheduler, onoff)?.into(),
+        l_linger: int(linger).filter(|linger| *linger >= 0)?,
+    })
 }
 
 /// Return whether ERTS has no set handler for the host option `name` that
@@ -176,18 +222,27 @@ fn get_form_only(name: (&str, &str)) -> bool {
     name == ("socket", "type")
 }
 
-/// Set the host option `name` of `host` to `value`, as
+/// Set the host option `name` with the host number `opt` of `host` to
+/// `value`, as
 /// `esock_setopt_level_opt` and `socket_setopt` do
 /// (`prim_socket_nif.c:11384-11395`, `11422-11481`). Each option of the
 /// form [`Form::Int`] has an unsigned type in `nix` or `socket2`, and a
 /// negative value reaches the host as the same C `int` as on ERTS.
-fn set_host(host: &Socket, name: (&str, &str), value: i32) -> io::Result<()> {
+fn set_host(host: &Socket, name: (&str, &str), opt: i32, value: Value) -> io::Result<()> {
+    let value = match value {
+        Value::Linger(linger) => {
+            return keep_tos_and_priority(host, opt, || {
+                setsockopt(host, sockopt::Linger, &linger).map_err(io::Error::from)
+            });
+        }
+        Value::Int(value) => value,
+    };
     let flag = value != 0;
     // The safe APIs pass these values on as a C `int` (`nix` `SetUsize`
     // casts with `as c_int`, `socket2::set_ttl_v4` casts the `u32`), so the
     // bit-identical casts below give the host the `int` that ERTS gives.
     let count = value as u32;
-    keep_tos_and_priority(host, || {
+    keep_tos_and_priority(host, opt, || {
         let result = match name {
             ("socket", "broadcast") => setsockopt(host, sockopt::Broadcast, &flag),
             ("socket", "keepalive") => setsockopt(host, sockopt::KeepAlive, &flag),
@@ -201,6 +256,8 @@ fn set_host(host: &Socket, name: (&str, &str), value: i32) -> io::Result<()> {
             ("tcp", "keepcnt") => setsockopt(host, sockopt::TcpKeepCount, &count),
             ("tcp", "keepintvl") => setsockopt(host, sockopt::TcpKeepInterval, &count),
             ("ipv6", "v6only") => setsockopt(host, sockopt::Ipv6V6Only, &flag),
+            #[cfg(target_os = "linux")]
+            ("socket", "priority") => setsockopt(host, sockopt::Priority, &value),
             // ("ip", "ttl"), the last option of `set_form`.
             _ => return host.set_ttl_v4(count),
         };
@@ -212,14 +269,24 @@ fn set_host(host: &Socket, name: (&str, &str), value: i32) -> io::Result<()> {
 /// (`prim_socket_nif.c:11428-11472`): read `SO_PRIORITY` and `IP_TOS`
 /// first, and after a successful set, set `IP_TOS` and then `SO_PRIORITY`
 /// back to the values that it could read. A failed reset of `SO_PRIORITY`
-/// with `EPERM` is not an error. PBeam sets neither of these two options
-/// yet, so it always resets both.
+/// with `EPERM` is not an error. ERTS compares only the option number
+/// `opt`, at each level: it resets nothing for the number `SO_PRIORITY`,
+/// and it does not reset `IP_TOS` for the number `IP_TOS`.
 #[cfg(target_os = "linux")]
-fn keep_tos_and_priority(host: &Socket, set: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
+fn keep_tos_and_priority(
+    host: &Socket,
+    opt: i32,
+    set: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
     let priority = getsockopt(host, sockopt::Priority);
     let tos = getsockopt(host, sockopt::Ipv4Tos);
     set()?;
-    tos.map_or(Ok(()), |tos| setsockopt(host, sockopt::Ipv4Tos, &tos))?;
+    if opt == libc::SO_PRIORITY {
+        return Ok(());
+    }
+    if opt != libc::IP_TOS {
+        tos.map_or(Ok(()), |tos| setsockopt(host, sockopt::Ipv4Tos, &tos))?;
+    }
     priority.map_or(Ok(()), |priority| {
         allow_eperm(setsockopt(host, sockopt::Priority, &priority))
     })?;
@@ -240,7 +307,11 @@ fn allow_eperm(result: nix::Result<()>) -> nix::Result<()> {
 /// Run `set` on `host`: macOS has no `SO_PRIORITY`, so `socket_setopt`
 /// only sets the option (`prim_socket_nif.c:11474-11478`).
 #[cfg(not(target_os = "linux"))]
-fn keep_tos_and_priority(_host: &Socket, set: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
+fn keep_tos_and_priority(
+    _host: &Socket,
+    _opt: i32,
+    set: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
     set()
 }
 
@@ -325,6 +396,14 @@ fn getopt(
         }))),
         Ok(Got::Int(value)) => Ok(Some(Term::Integer(value))),
         Ok(Got::Type(kind)) => type_term(scheduler, kind).map(Some).map(Ok)?,
+        Ok(Got::Linger(linger)) => {
+            let entries = [
+                ("onoff", boolean(linger.l_onoff != 0)),
+                ("linger", Term::Integer(linger.l_linger.into())),
+            ];
+            let pairs = pairs(scheduler, &entries)?;
+            Ok(Some(map(scheduler, pairs)))
+        }
         Err(failure) => Err(failure),
     };
     host_result(scheduler, value)
@@ -341,6 +420,11 @@ fn get_host(host: &Socket, name: (&str, &str)) -> Option<io::Result<Got>> {
         ("socket", "oobinline") => getsockopt(host, sockopt::OobInline).map(Got::Bool),
         ("socket", "dontroute") => getsockopt(host, sockopt::DontRoute).map(Got::Bool),
         ("socket", "acceptconn") => getsockopt(host, sockopt::AcceptConn).map(Got::Bool),
+        ("socket", "linger") => getsockopt(host, sockopt::Linger).map(Got::Linger),
+        #[cfg(target_os = "linux")]
+        ("socket", "priority") => {
+            getsockopt(host, sockopt::Priority).map(|value| Got::Int(value.into()))
+        }
         ("socket", "rcvbuf") => {
             getsockopt(host, sockopt::RcvBuf).map(|value| Got::Int(value as i64))
         }
@@ -364,13 +448,65 @@ fn get_host(host: &Socket, name: (&str, &str)) -> Option<io::Result<Got>> {
     Some(result.map_err(io::Error::from))
 }
 
-/// Run `esock_setopt_otp` for the options `meta` and `use_registry`
-/// (`prim_socket_nif.c:7873-7961`, `8328-8405`).
+/// Return the raise of `error:{invalid, {otp_socket_option, Opt}}` of
+/// `esock_raise_invalid` for an `otp` option number without a handler
+/// (`prim_socket_nif.c:7942-7957`, `11692-11706`): `{otp, fd}` and
+/// `{otp, domain}` have no setter.
+fn invalid_otp_option(scheduler: &mut Scheduler, opt: i32) -> Result<BifResult, BeamError> {
+    let what = Term::tuple(vec![
+        atom(scheduler, "otp_socket_option")?,
+        Term::Integer(opt.into()),
+    ]);
+    Ok(BifResult::Raise {
+        class: ExceptionClass::Error,
+        reason: Term::tuple(vec![Term::static_atom("invalid"), what]),
+    })
+}
+
+/// Return the boolean of `esock_decode_bool` (`socket_util.c:3004-3014`).
+fn decode_bool(scheduler: &Scheduler, value: &Term) -> Option<bool> {
+    match atom_name(scheduler, value) {
+        Some("true") => Some(true),
+        Some("false") => Some(false),
+        _ => None,
+    }
+}
+
+/// Return the buffer size of `esock_decode_bufsz` (`socket_util.c:2887-2906`):
+/// an `unsigned long` above 0, or `default` for the atom `default`.
+fn decode_bufsz(scheduler: &Scheduler, value: &Term, default: usize) -> Option<usize> {
+    if atom_name(scheduler, value) == Some("default") {
+        return Some(default);
+    }
+    let size = u64::try_from(value.bigint()?.as_ref()).ok()?;
+    usize::try_from(size).ok().filter(|size| *size != 0)
+}
+
+/// Return the integer term of a size, as `MKUL` makes it.
+fn size_term(size: usize) -> Term {
+    Term::from_bigint(size.into())
+}
+
+/// Return `{error, {invalid, not_owner}}` of `esock_make_error_invalid`
+/// (`prim_socket_nif.c:8075-8079`).
+fn not_owner(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
+    let reason = Term::tuple(vec![
+        Term::static_atom("invalid"),
+        atom(scheduler, "not_owner")?,
+    ]);
+    Ok(BifResult::Value(Term::tuple(vec![
+        Term::static_atom("error"),
+        reason,
+    ])))
+}
+
+/// Run `esock_setopt_otp` (`prim_socket_nif.c:7873-8405`).
 ///
 /// # Errors
 ///
-/// Each other option of the level `otp` stops the run. A new atom in a full
-/// atom table gives the error of `AtomTable::put`.
+/// `{otp, debug}` and `{otp, select_read}` with `true`, and `{otp, rcvbuf}`
+/// with a buffer count, stop the run. A new atom in a full atom table
+/// gives the error of `AtomTable::put`.
 fn setopt_otp(
     scheduler: &mut Scheduler,
     reference: Reference,
@@ -379,61 +515,153 @@ fn setopt_otp(
     value: &Term,
 ) -> Result<BifResult, BeamError> {
     let mut socket = lock(state);
-    if !matches!(opt, OTP_META | OTP_USE_REGISTRY) {
-        return Err(unsupported(&format!("option {{otp, {opt}}}")));
-    }
-    if socket.write & (CLOSING | CLOSED) != 0 {
+    // Each handler checks the read or the write state first.
+    let bits = match opt {
+        OTP_SELECT_READ | OTP_RCVBUF | OTP_RCVCTRLBUF => socket.read,
+        OTP_DEBUG | OTP_IOW | OTP_CTRL_PROC | OTP_SNDCTRLBUF | OTP_META | OTP_USE_REGISTRY => {
+            socket.write
+        }
+        _ => return invalid_otp_option(scheduler, opt),
+    };
+    if bits & (CLOSING | CLOSED) != 0 {
         return Ok(closed());
     }
-    if opt == OTP_META {
-        // `esock_make_error_invalid` gives `{error, {invalid, not_owner}}`.
-        if socket.owner != Some(scheduler.current_process().id) {
-            let reason = Term::tuple(vec![
-                Term::static_atom("invalid"),
-                atom(scheduler, "not_owner")?,
-            ]);
-            return Ok(BifResult::Value(Term::tuple(vec![
-                Term::static_atom("error"),
-                reason,
-            ])));
+    let ok = Ok(BifResult::Value(Term::static_atom("ok")));
+    let invalid_value = |scheduler: &mut Scheduler| Ok(invalid(atom(scheduler, "value")?));
+    match opt {
+        OTP_DEBUG | OTP_SELECT_READ | OTP_IOW => {
+            let Some(flag) = decode_bool(scheduler, value) else {
+                return invalid_value(scheduler);
+            };
+            if opt == OTP_IOW {
+                socket.options.iow = flag;
+            } else if flag {
+                // `dbg` turns on the debug output of `SSDBG`, and
+                // `selectRead` makes a read select after each receive
+                // (`unix_socket_syncio.c:3967-3970`).
+                return Err(unsupported(&format!("option value {{otp, {opt}}} true")));
+            }
+            ok
         }
-        socket.meta = value.clone();
-        return Ok(BifResult::Value(Term::static_atom("ok")));
+        OTP_CTRL_PROC => {
+            if socket.owner != Some(scheduler.current_process().id) {
+                return not_owner(scheduler);
+            }
+            let Term::Pid(owner) = value else {
+                return invalid_value(scheduler);
+            };
+            let owner = *owner;
+            socket.owner = Some(owner);
+            drop(socket);
+            // The old monitor stays: `Sockets::monitor_down` acts only for
+            // the current owner. The signal to a new owner that is gone
+            // already gives the down of `essio_down_ctrl`
+            // (`prim_socket_nif.c:8100-8130`).
+            let _ = scheduler.send_signal(None, owner, Signal::SocketMonitor { socket: reference });
+            ok
+        }
+        OTP_RCVBUF => {
+            let default = OtpOptions::default().recv_buffer;
+            let Some(size) = decode_bufsz(scheduler, value, default) else {
+                // `{N, Size}` sets the buffer count `rNum`
+                // (`prim_socket_nif.c:8198-8212`), which PBeam does not have.
+                let count = value
+                    .tuple_elements()
+                    .filter(|elements| elements.len() == 2)
+                    .filter(|elements| uint(&elements[0]).is_some_and(|count| count != 0))
+                    .filter(|elements| decode_bufsz(scheduler, &elements[1], default).is_some());
+                return match count {
+                    Some(_) => Err(unsupported("option value {otp, rcvbuf} {N, Size}")),
+                    None => invalid_value(scheduler),
+                };
+            };
+            // The `ssize_t` check of `esock_setopt_otp_rcvbuf` converts the
+            // size and back, so it refuses no size
+            // (`prim_socket_nif.c:8215-8218`).
+            socket.options.recv_buffer = size;
+            ok
+        }
+        OTP_RCVCTRLBUF | OTP_SNDCTRLBUF => {
+            let default = OtpOptions::default();
+            let (slot, default) = match opt {
+                OTP_RCVCTRLBUF => (&mut socket.options.recv_ctrl, default.recv_ctrl),
+                _ => (&mut socket.options.send_ctrl, default.send_ctrl),
+            };
+            let Some(size) = decode_bufsz(scheduler, value, default) else {
+                return invalid_value(scheduler);
+            };
+            *slot = size;
+            ok
+        }
+        OTP_META => {
+            if socket.owner != Some(scheduler.current_process().id) {
+                return not_owner(scheduler);
+            }
+            socket.meta = value.clone();
+            ok
+        }
+        // OTP_USE_REGISTRY, the last option of the match above. Only `true`
+        // is valid: the option only turns the registry on.
+        _ => {
+            if *value != Term::static_atom("true") {
+                return invalid_value(scheduler);
+            }
+            let newly = !socket.registered;
+            socket.registered = true;
+            drop(socket);
+            let registry = lock(&scheduler.node().resources.kind::<Sockets>()).registry;
+            if let (true, Some(registry)) = (newly, registry) {
+                send_registry(scheduler, registry, "add", reference)?;
+            }
+            ok
+        }
     }
-    // Only `true` is valid: the option only turns the registry on.
-    if *value != Term::static_atom("true") {
-        return Ok(invalid(atom(scheduler, "value")?));
-    }
-    let newly = !socket.registered;
-    socket.registered = true;
-    drop(socket);
-    let registry = lock(&scheduler.node().resources.kind::<Sockets>()).registry;
-    if let (true, Some(registry)) = (newly, registry) {
-        send_registry(scheduler, registry, "add", reference)?;
-    }
-    Ok(BifResult::Value(Term::static_atom("ok")))
 }
 
-/// Run `esock_getopt_otp` for the options `domain`, `meta`, and
-/// `use_registry` (`prim_socket_nif.c:11593-11710`, `11946-12005`).
+/// Run `esock_getopt_otp` (`prim_socket_nif.c:11593-12010`).
 ///
 /// # Errors
 ///
-/// Each other option of the level `otp` stops the run. A new atom in a full
-/// atom table gives the error of `AtomTable::put`.
+/// A new atom in a full atom table gives the error of `AtomTable::put`.
 fn getopt_otp(
     scheduler: &mut Scheduler,
     state: &Arc<Mutex<SocketState>>,
     opt: i32,
 ) -> Result<BifResult, BeamError> {
     let socket = lock(state);
+    // Each handler but the one of `use_registry` checks the read or the
+    // write state first.
+    let bits = match opt {
+        OTP_USE_REGISTRY => 0,
+        OTP_SNDCTRLBUF | OTP_META => socket.write,
+        OTP_DEBUG | OTP_IOW | OTP_CTRL_PROC | OTP_SELECT_READ | OTP_RCVBUF | OTP_RCVCTRLBUF
+        | OTP_FD | OTP_DOMAIN => socket.read,
+        _ => return invalid_otp_option(scheduler, opt),
+    };
+    if bits & (CLOSING | CLOSED) != 0 {
+        return Ok(closed());
+    }
+    let options = socket.options;
     let value = match opt {
-        OTP_USE_REGISTRY => Term::static_atom(if socket.registered { "true" } else { "false" }),
-        OTP_META if socket.write & (CLOSING | CLOSED) != 0 => return Ok(closed()),
-        OTP_DOMAIN if socket.read & (CLOSING | CLOSED) != 0 => return Ok(closed()),
+        OTP_USE_REGISTRY => boolean(socket.registered),
+        // PBeam sets neither `dbg` nor `selectRead` (see `setopt_otp`).
+        OTP_DEBUG | OTP_SELECT_READ => Term::static_atom("false"),
+        OTP_IOW => boolean(options.iow),
+        OTP_CTRL_PROC => Term::Pid(socket.owner.expect("an open socket has an owner")),
+        OTP_RCVBUF => size_term(options.recv_buffer),
+        OTP_RCVCTRLBUF => size_term(options.recv_ctrl),
+        OTP_SNDCTRLBUF => size_term(options.send_ctrl),
+        OTP_FD => Term::Integer(
+            socket
+                .socket
+                .as_ref()
+                .expect("an open socket has a host socket")
+                .as_raw_fd()
+                .into(),
+        ),
         OTP_META => socket.meta.clone(),
-        OTP_DOMAIN => domain_term(scheduler, socket.domain)?,
-        _ => return Err(unsupported(&format!("option {{otp, {opt}}}"))),
+        // OTP_DOMAIN, the last option of the match above.
+        _ => domain_term(scheduler, socket.domain)?,
     };
     Ok(BifResult::Value(Term::tuple(vec![
         Term::static_atom("ok"),

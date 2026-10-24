@@ -1,7 +1,7 @@
 use super::*;
 use crate::runtime::capability::{AllowAll, Policy};
 use crate::runtime::process::tests::frame;
-use crate::runtime::sockets::{IoCounters, Sockets};
+use crate::runtime::sockets::{IoCounters, OtpOptions, Sockets};
 use crate::term::AtomTable;
 use socket2::{Domain, Socket, Type};
 
@@ -36,6 +36,7 @@ fn resource(scheduler: &mut Scheduler, change: impl FnOnce(&mut SocketState)) ->
         reader: None,
         writer: None,
         counters: IoCounters::default(),
+        options: OtpOptions::default(),
     };
     change(&mut state);
     let reference = scheduler.make_magic_ref().unwrap();
