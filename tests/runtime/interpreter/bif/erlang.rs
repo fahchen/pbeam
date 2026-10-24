@@ -565,3 +565,15 @@ fn gives_the_erts_results_of_the_byte_bifs_for_a_bitstring() {
     );
     assert!(badarg(split_binary(&term, &Term::Integer(3))));
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn gives_undefined_for_an_empty_detected_topology() {
+    // ERTS gives `undefined` when it reads no CPU topology
+    // (`erl_cpu_topology.c:1515-1543`). The Linux CI runner has a
+    // topology, so this unit test gives an empty one.
+    assert!(matches!(
+        detected_topology(&[]),
+        Term::Atom(atom) if atom.is_static("undefined")
+    ));
+}

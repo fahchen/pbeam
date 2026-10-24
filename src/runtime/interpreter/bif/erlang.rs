@@ -858,6 +858,27 @@ fn valid_cpu_topology<'a>(cpus: impl Iterator<Item = &'a Term>) -> bool {
     }
     verify_topology(entries)
 }
+/// Return the detected CPU topology term of `system_info(cpu_topology)`:
+/// the `{cpu, ...}` list of `topology` when it passes `verify_topology`,
+/// else `undefined` (`erl_cpu_topology.c:1515-1543`).
+#[cfg(target_os = "linux")]
+fn detected_topology(topology: &[crate::runtime::schedulers::CpuIds]) -> Term {
+    let entries = topology.iter().map(
+        |&[node, processor, processor_node, core, thread, logical]| {
+            let entity = [processor, node, processor_node, core, thread];
+            (entity.map(i64::from), i64::from(logical))
+        },
+    );
+    if !topology.is_empty() && verify_topology(entries.collect()) {
+        Term::list_from(topology.iter().map(|ids| {
+            let mut elements = vec![Term::static_atom("cpu")];
+            elements.extend(ids.map(|id| Term::Integer(i64::from(id))));
+            Term::tuple(elements)
+        }))
+    } else {
+        Term::static_atom("undefined")
+    }
+}
 
 /// Tell whether `verify_topology` (`erl_cpu_topology.c:1188-1248`) accepts
 /// the non-empty topology `entries` of `([processor, node, processor_node,
@@ -3372,22 +3393,7 @@ pub(super) fn system_info(scheduler: &mut Scheduler, item: &Term) -> Result<BifR
         // `erlang:format_cpu_topology/1` (`erl_bif_info.c:3111-3113`).
         #[cfg(target_os = "linux")]
         Term::Atom(atom) if atoms.name_of(atom) == "cpu_topology" => {
-            let topology = cpu_topology();
-            let entries = topology.iter().map(
-                |&[node, processor, processor_node, core, thread, logical]| {
-                    let entity = [processor, node, processor_node, core, thread];
-                    (entity.map(i64::from), i64::from(logical))
-                },
-            );
-            let detected = if !topology.is_empty() && verify_topology(entries.collect()) {
-                Term::list_from(topology.iter().map(|ids| {
-                    let mut elements = vec![Term::static_atom("cpu")];
-                    elements.extend(ids.map(|id| Term::Integer(i64::from(id))));
-                    Term::tuple(elements)
-                }))
-            } else {
-                Term::static_atom("undefined")
-            };
+            let detected = detected_topology(cpu_topology());
             Ok(Trap {
                 module: "erlang",
                 function: "format_cpu_topology",
