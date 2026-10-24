@@ -1021,7 +1021,8 @@ executables() ->
         attempt(fun() -> erlang:port_close(Port) end),
         attempt(fun() -> erlang:open_port({spawn_executable, <<"/bin/cat">>}, [binary]) end),
         attempt(fun() -> erlang:open_port({spawn_executable, "/bin/sh"}, [binary]) end),
-        attempt(fun() -> erlang:open_port({spawn_executable, "/bin/../bin/cat"}, [binary]) end)
+        attempt(fun() -> erlang:open_port({spawn_executable, "/bin/../bin/cat"}, [binary]) end),
+        attempt(fun() -> erlang:open_port({fd, 1, 2}, [binary]) end)
     ].
 
 %% The `signals` constraint of `signal`. SIG_DFL is the start disposition

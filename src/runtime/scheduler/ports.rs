@@ -29,7 +29,7 @@ impl Scheduler {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let spawn = Spawn { exit_status: true, soft_eof: false, packets: Packets::new(0), child, input: Input::Open };
+    /// let spawn = Spawn { exit_status: true, soft_eof: false, packets: Packets::new(0), binary: true, lines: None, program: Program::Child(child), input: Input::Open };
     /// let port = scheduler.open_port(b"/bin/sh".to_vec(), Driver::Spawn(spawn))?;
     /// assert_eq!(port, PortId(0));
     /// ```
@@ -140,7 +140,8 @@ impl Scheduler {
         if let Some(port) = port::inet_port(&handles, fd, Inet::stream_receive_fd) {
             return self.tcp_receive_ready(port);
         }
-        let Some((id, owner, event, slot)) = port::read(&handles, fd) else {
+        let Some((id, owner, event, slot)) = port::read(&handles, fd, self.node.poll.reader(fd))
+        else {
             return Ok(());
         };
         // The messages go out under the port lock; the lock is released
