@@ -124,6 +124,10 @@ unsupported(short_count) ->
 unsupported(disconnect) ->
     {ok, S} = udp(),
     control(S, 3, []);
+unsupported(failed_connect) ->
+    %% Linux rejects a connect to the broadcast address without SO_BROADCAST.
+    {ok, S} = udp(),
+    prim_inet:connect(S, {255, 255, 255, 255}, 9);
 unsupported(accept) ->
     P = open_port({spawn_driver, "udp_inet"}, [binary]),
     [1] = control(P, 1, [1, 2, 2]),
@@ -221,8 +225,7 @@ port_zero() ->
 %% (inet_drv.c:14710-14842, 15142-15182): PEER before and after the
 %% connect, a send without an address, a receive from the peer only, a
 %% send to another address that goes to the peer, BIND of a connected
-%% socket, a connect to the broadcast address, which Linux rejects without
-%% SO_BROADCAST, the errors of CONNECT, and a send to {loopback, Port}.
+%% socket, the errors of CONNECT, and a send to {loopback, Port}.
 connect() ->
     Lo = {127, 0, 0, 1},
     [{A, PA}, {B, PB}, {C, PC}] = [bound() || _ <- [a, b, c]],
@@ -238,15 +241,13 @@ connect() ->
     ok = prim_inet:sendto(A, Lo, PC, <<"to">>),
     ToPeer = [sender(prim_inet:recvfrom(B, 0, 1000), PA), prim_inet:recvfrom(C, 0, 50)],
     Bind = prim_inet:bind(A, {0, 0, 0, 0}, 0),
-    {E, _} = bound(),
-    Broadcast = prim_inet:connect(E, {255, 255, 255, 255}, 9),
     Unopened = open_port({spawn_driver, "udp_inet"}, [binary]),
     Errors = [control(A, 3, [0]), control(A, 3, [0, 0, 0, 0, 1]), control(A, 3, [0, 0, 0, 0, 9, 0]),
               control(A, 3, [0, 0, 0, 0, 1, 0, 1]), control(Unopened, 3, [0, 0, 0, 0, 1, 0, 1, 127, 0, 0, 1])],
     {D, PD} = bound(),
     Loopback = [prim_inet:sendto(D, {loopback, PD}, [], <<"l">>), sender(prim_inet:recvfrom(D, 0, 1000), PD),
                 command(D, [3, 0]), command(D, [4, 0, 1, 0, 0, 0])],
-    [NotConnected, Connect, Peer, Sent, Got, FromPeer, Filtered, ToPeer, Bind, Broadcast, Errors, Loopback].
+    [NotConnected, Connect, Peer, Sent, Got, FromPeer, Filtered, ToPeer, Bind, Errors, Loopback].
 
 %% A send of a connected socket to a closed port: the ICMP error gives
 %% econnrefused to the next receive of a passive socket, and

@@ -430,13 +430,7 @@ fn connects_a_udp_inet_port_as_pinned_erts() {
     // gives it (inet_drv.c:11272-11300), and a send of a connected socket
     // ignores its address (inet_drv.c:15142-15182); `any` and `loopback`
     // take only the port (inet_drv.c:4817-4844).
-    let broadcast = if cfg!(target_os = "linux") {
-        "{error,eacces}"
-    } else {
-        "ok"
-    };
-    let expected = "[{error,enotconn},ok,{ok,{{127,0,0,1},true}},ok,{ok,{{127,0,0,1},true,<<104,105>>}},{ok,{{127,0,0,1},true,<<112,101,101,114>>}},{error,timeout},[{ok,{{127,0,0,1},true,<<116,111>>}},{error,timeout}],{error,exbadport},BROADCAST,[[0,101,105,110,118,97,108],[0,101,105,110,118,97,108],[0,101,97,102,110,111,115,117,112,112,111,114,116],[0,101,105,110,118,97,108],[0,101,120,98,97,100,112,111,114,116]],[ok,{ok,{{127,0,0,1},true,<<108>>}},{error,einval},{error,einval}]]"
-        .replace("BROADCAST", broadcast);
+    let expected = "[{error,enotconn},ok,{ok,{{127,0,0,1},true}},ok,{ok,{{127,0,0,1},true,<<104,105>>}},{ok,{{127,0,0,1},true,<<112,101,101,114>>}},{error,timeout},[{ok,{{127,0,0,1},true,<<116,111>>}},{error,timeout}],{error,exbadport},[[0,101,105,110,118,97,108],[0,101,105,110,118,97,108],[0,101,97,102,110,111,115,117,112,112,111,114,116],[0,101,105,110,118,97,108],[0,101,120,98,97,100,112,111,114,116]],[ok,{ok,{{127,0,0,1},true,<<108>>}},{error,einval},{error,einval}]]";
     assert_eq!(erts_text("udp_probe", "connect"), expected, "ERTS");
     assert_eq!(pbeam_text("udp_probe", "connect"), expected, "PBeam");
 }
@@ -445,14 +439,25 @@ fn connects_a_udp_inet_port_as_pinned_erts() {
 fn reconnects_a_udp_inet_port_as_pinned_erts_or_stops_on_linux() {
     // `CONNECT` of a connected socket dissolves the association first
     // (inet_drv.c:14819-14836); xnu does it in each connect, and Linux needs
-    // an `AF_UNSPEC` connect, which safe Rust cannot make.
+    // an `AF_UNSPEC` connect, which safe Rust cannot make, also after a
+    // failed connect (inet_drv.c:14832-14836).
     if cfg!(target_os = "linux") {
-        let error = load()
+        let program = load();
+        let error = program
             .execute("udp_probe", "reconnect", &[])
             .unwrap_err()
             .to_string();
         assert!(
             error.starts_with("unsupported udp_inet connect of a connected socket"),
+            "{error}"
+        );
+        let argument = Term::Atom(program.atom("failed_connect").unwrap());
+        let error = program
+            .execute("udp_probe", "unsupported", &[program.host_term(argument)])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("unsupported failed udp_inet connect"),
             "{error}"
         );
         return;

@@ -14,9 +14,7 @@ use std::{io, net::UdpSocket};
 
 use socket2::SockAddr;
 
-use super::{
-    AF_INET, Control, Event, Inet, OK, State, errno_name, errno_reply, error_reply, stream::Sender,
-};
+use super::{AF_INET, Control, Event, Inet, OK, State, errno_name, error_reply, stream::Sender};
 use crate::error::{BeamError, error};
 
 /// The address tag `INET_AF_ANY` (inet_drv.c:759).
@@ -42,9 +40,10 @@ impl Inet {
     /// # Errors
     ///
     /// The request without an address, which dissolves the association,
-    /// and on Linux a connect of a connected socket, which dissolves it
-    /// first: both need a connect to an `AF_UNSPEC` address
-    /// (inet_drv.c:14803-14806, 14819-14828), which safe Rust cannot make.
+    /// and on Linux a connect of a connected socket and a failed connect,
+    /// which dissolve it first or after: each needs a connect to an
+    /// `AF_UNSPEC` address (inet_drv.c:14803-14806, 14819-14836), which
+    /// safe Rust cannot make.
     /// The `any`, `loopback`, `inet6`, and `local` address tags.
     pub(super) fn datagram_connect(&mut self, request: &[u8]) -> Result<Vec<u8>, BeamError> {
         if self.state == State::Closed {
@@ -70,9 +69,16 @@ impl Inet {
                 self.state = State::Connected;
                 Ok(vec![OK])
             }
+            // ERTS dissolves after a failed connect (inet_drv.c:14832-14836),
+            // which on Linux also releases a port that the bind did not lock.
+            #[cfg(target_os = "linux")]
+            Err(_) => Err(error(
+                "unsupported failed udp_inet connect: see \"udp_inet ports\" in docs/erts-differences.md",
+            )),
+            #[cfg(not(target_os = "linux"))]
             Err(failure) => {
                 self.state = State::Open;
-                Ok(errno_reply(&failure))
+                Ok(super::errno_reply(&failure))
             }
         }
     }
