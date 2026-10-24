@@ -63,6 +63,9 @@ enum Form {
     Int,
     /// `esock_setopt_linger` (`prim_socket_nif.c:8551-8597`).
     Linger,
+    /// `esock_setopt_uint_opt` (`prim_socket_nif.c:11263-11288`).
+    #[cfg(target_os = "linux")]
+    Uint,
     /// `esock_setopt_hops` (`prim_socket_nif.c:8941-8954`).
     Hops,
     /// `esock_setopt_multicast_if` (`prim_socket_nif.c:8728-8746`).
@@ -183,6 +186,12 @@ pub(in crate::runtime::interpreter::native::prim_socket) fn setopt_5(
         Form::Bool => decode_bool(scheduler, value).map(|flag| Value::Int(flag.into())),
         Form::Int => int(value).map(Value::Int),
         Form::Linger => decode_linger(scheduler, value).map(Value::Linger),
+        // The `unsigned int` reaches the host with the same bits.
+        #[cfg(target_os = "linux")]
+        Form::Uint => value
+            .bigint()
+            .and_then(|value| u32::try_from(value.as_ref()).ok())
+            .map(|value| Value::Int(value as i32)),
         Form::Hops => decode_hops(scheduler, value).map(Value::Int),
         Form::Addr => in_addr(scheduler, value).map(Value::Addr),
         Form::Membership => decode_membership(scheduler, value),
@@ -220,7 +229,9 @@ fn set_form(name: (&str, &str)) -> Option<Form> {
         | ("ip", "ttl" | "multicast_ttl")
         | ("ipv6", "tclass" | "multicast_if") => Some(Form::Int),
         #[cfg(target_os = "linux")]
-        ("tcp", "keepidle" | "user_timeout") => Some(Form::Int),
+        ("tcp", "keepidle") => Some(Form::Int),
+        #[cfg(target_os = "linux")]
+        ("tcp", "user_timeout") => Some(Form::Uint),
         ("ipv6", "multicast_hops" | "unicast_hops") => Some(Form::Hops),
         ("ip", "multicast_if") => Some(Form::Addr),
         ("ip", "add_membership" | "drop_membership") => Some(Form::Membership),
@@ -572,7 +583,7 @@ fn get_host(host: &Socket, name: (&str, &str)) -> Option<io::Result<Got>> {
         }
         #[cfg(target_os = "linux")]
         ("tcp", "user_timeout") => {
-            getsockopt(host, sockopt::TcpUserTimeout).map(|value| Got::Int((value as i32).into()))
+            getsockopt(host, sockopt::TcpUserTimeout).map(|value| Got::Int(value.into()))
         }
         _ => return get_socket2(host, name),
     };

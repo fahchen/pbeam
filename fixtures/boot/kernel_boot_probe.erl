@@ -738,6 +738,8 @@ sockopt_host() ->
              socket:getopt(U6, O), socket:setopt(U6, O, 256), socket:setopt(U6, O, -1),
              socket:setopt(U6, O, 1 bsl 40), socket:setopt(U6, O, foo)]
             || O <- [{ipv6, multicast_hops}, {ipv6, unicast_hops}]],
+    UserTimeout = [socket:setopt(T, {tcp, user_timeout}, 1 bsl 31),
+                   socket:setopt(T, {tcp, user_timeout}, 1 bsl 32)],
     If = {ip, multicast_if},
     Ifs = [socket:setopt(U, If, {127, 0, 0, 1}), socket:getopt(U, If), socket:setopt(U, If, any),
            socket:getopt(U, If), socket:setopt(U, If, foo), socket:setopt(U, If, {1, 2, 3})],
@@ -749,7 +751,7 @@ sockopt_host() ->
                socket:setopt(U, Add, M#{interface := foo}), socket:setopt(U, Add, foo),
                socket:setopt(U, Drop, M#{interface := any})],
     [ok = socket:close(S) || S <- [T, U, U6]],
-    erlang:display(unmap({sockopt_host, Bools, Ints, Hops, Ifs, Members})),
+    erlang:display(unmap({sockopt_host, Bools, Ints, UserTimeout, Hops, Ifs, Members})),
     init:stop().
 
 %% `-s kernel_boot_probe sockopt_otp` runs socket:setopt/3 and
