@@ -921,7 +921,7 @@ fn call(atoms: &AtomTable, function: Guard, arguments: &[Term]) -> Option<Term> 
         Guard::Node0 => Some(Term::static_atom("nonode@nohost")),
         Guard::Node1 => matches!(
             arguments[0],
-            Term::Pid(_) | Term::Port(_) | Term::Reference(_)
+            Term::Pid(_) | Term::Port(_) | Term::Reference(_) | Term::Resource(_)
         )
         .then(|| Term::static_atom("nonode@nohost")),
         Guard::Plus1 => number(&arguments[0]),

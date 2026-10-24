@@ -31,10 +31,14 @@ results(Path) ->
     Maps = [maps:get(A, Big), maps:get(B, Small), maps:get(M2, Big)],
     External = [binary_to_term(term_to_binary(A)) =:= A,
                 binary_to_term(term_to_binary(A)) =:= B],
+    Table = ets:new(resources, [set]),
+    true = ets:insert(Table, [{A}, {B}]),
+    Spec = [{{'$1'}, [{is_reference, '$1'}, {'==', {node, '$1'}, node()}], [{{'$1'}}]}],
+    Ets = [lists:sort(ets:select(Table, Spec)) =:= [{A}, {B}], ets:lookup(Table, A) =:= [{A}]],
     Lifetimes = lifetimes(),
     %% A and B stay live until here, so no collection before drops them.
     Live = [probe(5, A), probe(6, B)],
-    [Load, Outside, Types, Gets, Same, Text, Hashes, Maps, External, Lifetimes, Live].
+    [Load, Outside, Types, Gets, Same, Text, Hashes, Maps, External, Ets, Lifetimes, Live].
 
 %% Load the library `Path` and return each case whose result is not the
 %% result of the pinned ERTS, as {Index, Result, Expected}.
@@ -96,6 +100,7 @@ expected() ->
      [true, true, true, true],
      [a, b, a],
      [true, false],
+     [true, true],
      [[], ok, [1011], [10], [20], [30]],
      [1, 2]].
 
