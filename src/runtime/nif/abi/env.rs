@@ -237,7 +237,7 @@ impl Env {
         match self.atoms.put(&name) {
             Ok(atom) => self.make(Term::Atom(atom)),
             // ERTS stops the node when the atom table is full
-            // (`index.c:69-72`); PBeam gives a runtime error.
+            // (`index.c:86-91`); PBeam gives a runtime error.
             Err(failure) => {
                 self.unsupported.get_or_insert(failure.to_string());
                 NON_VALUE
@@ -731,23 +731,24 @@ pub unsafe extern "C" fn enif_inspect_iolist_as_binary(
 
 /// Return the bytes of the atom name `name` in `encoding` with no NUL
 /// byte, or `None` for the Latin-1 encoding of a name with a character
-/// above 255, whose `latin1_chars` is -1 in ERTS (`erl_nif.c:1820-1838`).
-/// ERTS asserts the encoding in a debug build only; PBeam reads each
-/// encoding other than `ERL_NIF_UTF8` as Latin-1.
+/// above 255, whose `latin1_chars` is -1 in ERTS, and for an encoding
+/// that is neither `ERL_NIF_LATIN1` nor `ERL_NIF_UTF8`
+/// (`erl_nif.c:1820-1840`).
 fn atom_bytes(name: &str, encoding: c_int) -> Option<Vec<u8>> {
-    if encoding == UTF8 {
-        return Some(name.as_bytes().to_vec());
+    match encoding {
+        LATIN1 => name.chars().map(|char| u8::try_from(char).ok()).collect(),
+        UTF8 => Some(name.as_bytes().to_vec()),
+        _ => None,
     }
-    name.chars().map(|char| u8::try_from(char).ok()).collect()
 }
 
 /// `int enif_get_atom(ErlNifEnv*, ERL_NIF_TERM, char*, unsigned,
 /// ErlNifCharEncoding)`: write the name of the atom `atom` in `encoding`
 /// and a NUL byte to `buf`, and return the number of bytes with the NUL
 /// byte (`erl_nif.c:1810-1841`). A term that is not an atom, a name that
-/// does not fit with its NUL byte, also in a buffer of 0 bytes, and the
-/// Latin-1 encoding of a name with a character above 255 give 0 and write
-/// no byte.
+/// does not fit with its NUL byte, also in a buffer of 0 bytes, the Latin-1
+/// encoding of a name with a character above 255, and another encoding
+/// give 0 and write no byte.
 ///
 /// # Safety
 ///

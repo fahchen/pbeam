@@ -49,7 +49,8 @@ cases() ->
      {12, 0}, {12, 1}, {12, 2}, {12, 3}, {12, 4},
      {13, 1},
      {14, {my, reason}}, {14, badarg},
-     {15, {my, reason}}].
+     {15, {my, reason}},
+     {17, [abc | 8]}].
 
 %% The results of probes/1 on the pinned ERTS (OTP 29.1.1), in the order of
 %% cases/0.
@@ -79,7 +80,8 @@ expected() ->
      hello, 'été', list_to_atom(duplicate(255, $a)), Bad, '',
      {[], [1, a, 1], [1 | a], [], [1, a], {}},
      {error, {my, reason}}, {error, badarg},
-     {error, {my, reason}}].
+     {error, {my, reason}},
+     {0, <<"xxxxxxxx">>}].
 
 duplicate(0, _) -> [];
 duplicate(N, Element) -> [Element | duplicate(N - 1, Element)].

@@ -27,6 +27,8 @@
  *   14  enif_raise_exception of Arg
  *   15  enif_make_badarg, then enif_raise_exception of Arg
  *   16  enif_make_list_cell with a term that no enif call made
+ *   17  enif_get_atom as in 5 with the encoding 0, which is neither
+ *       ERL_NIF_LATIN1 nor ERL_NIF_UTF8
  */
 #include <stdint.h>
 #include <string.h>
@@ -191,6 +193,8 @@ static ERL_NIF_TERM probe(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
     case 15:
         (void)enif_make_badarg(env);
         return enif_raise_exception(env, argv[1]);
+    case 17:
+        return get_atom(env, argv[1], (ErlNifCharEncoding)0);
     default:
         return enif_make_list_cell(env, argv[1], (ERL_NIF_TERM)12345);
     }
