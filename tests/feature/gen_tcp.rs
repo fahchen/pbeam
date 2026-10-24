@@ -23,6 +23,8 @@ const GEN_TCP_PROBE: &str = "fixtures/gen_tcp/gen_tcp_probe.beam";
 
 const GEN_TCP_CONNECT: &str = "fixtures/gen_tcp/gen_tcp_connect.beam";
 
+const GEN_TCP_LOCAL: &str = "fixtures/gen_tcp/gen_tcp_local.beam";
+
 #[test]
 fn runs_the_gen_tcp_calls_of_thousand_island_as_pinned_erts() {
     // `gen_tcp_probe:main/0` listens with the options of Thousand Island
@@ -261,6 +263,65 @@ fn assert_connect_runs(function: &str, expected: &str) {
         assert_eq!(
             (stdout.as_ref(), stderr.as_ref(), output.status.code()),
             (expected, "", Some(0)),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn runs_the_local_family_as_pinned_erts() {
+    // `gen_tcp_local:main/0` listens, connects, accepts, sends, and
+    // receives at a `local` file name, connects to a name with no socket,
+    // and on Linux listens on an abstract address. `inet_set_address` and
+    // `inet_get_address` of `AF_UNIX` (inet_drv.c:4748-4778, 4915-4936)
+    // give the address bytes: the accepted and the connected socket have
+    // no name, and an abstract name keeps its first zero byte. Each run
+    // removes the file name before and after it.
+    let abstract_name = if cfg!(target_os = "linux") {
+        let name = "{local,<<0,112,98,101,97,109,45,97,98,115,116,114,97,99,116,45,49,49,57,56>>}";
+        format!("[{{ok,{name}}},{{ok,{name}}}]")
+    } else {
+        "linux_only".to_owned()
+    };
+    let expected = format!(
+        "[[<<112,105,110,103>>,<<112,111,110,103>>,true,{{ok,{{local,<<>>}}}},true,\
+         {{ok,{{local,<<>>}}}},{{error,eaddrinuse}}],{{error,enoent}},{abstract_name}]\n"
+    );
+    let path = std::env::temp_dir().join(format!("pbeam-local-{}", std::process::id()));
+    let mut erts = Command::new("erl");
+    erts.args([
+        "+S",
+        "1",
+        "-noshell",
+        "-boot",
+        "start_clean",
+        "-pa",
+        "fixtures/gen_tcp",
+        "-eval",
+        "gen_tcp_local:main(), halt().",
+    ]);
+    let mut pbeam = Command::new(env!("CARGO_BIN_EXE_pbeam"));
+    pbeam
+        .args(["pbeam_boot", "start", "gen_tcp_local", "main", "--root"])
+        .arg(otp_root())
+        .args(["--", GEN_TCP_LOCAL])
+        .args(BOOT_MODULES.map(pinned_beam_path))
+        .arg(boot_beam());
+    for (name, command) in [("ERTS", &mut erts), ("PBeam", &mut pbeam)] {
+        let _ = std::fs::remove_file(&path);
+        let output = command
+            .env("PBEAM_LOCAL_PATH", &path)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(
+            (
+                String::from_utf8_lossy(&output.stdout).into_owned(),
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+                output.status.code()
+            ),
+            (expected.clone(), "".into(), Some(0)),
             "{name}"
         );
     }
