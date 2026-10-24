@@ -16,6 +16,7 @@ nix = { version = "0.31.3", default-features = false, features = [
   "feature",
   "fs",
   "hostname",
+  "net",
   "resource",
   "socket",
 ] }

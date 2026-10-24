@@ -5,10 +5,11 @@
 //! `prim_net` (`prim_net_nif.c:5148`).
 //!
 //! PBeam binds `nif_info/0`, `nif_command/1`, `nif_gethostname/0`,
-//! `nif_getnameinfo/2`, `nif_getaddrinfo/3`, `nif_getservbyname/2`, and
-//! `nif_getservbyport/2`. A
-//! call of another function of the table stops the run with the runtime
-//! error of the static library (`Library::unbound_fails`). The load callback of the library returns 0
+//! `nif_getnameinfo/2`, `nif_getaddrinfo/3`, `nif_getifaddrs/1`,
+//! `nif_getservbyname/2`, `nif_getservbyport/2`, `nif_if_name2index/1`,
+//! `nif_if_index2name/1`, `nif_if_names/0`, and the four Windows functions,
+//! which raise `notsup` on Unix. The binding covers each function of the
+//! table. The load callback of the library returns 0
 //! for each load info: it reads only the optional `debug` flag of a map
 //! (`prim_net_nif.c:5103-5107`, `5116-5146`). ERTS gives the veto 1 only
 //! when it cannot make its resource type (`prim_net_nif.c:5135-5145`);
@@ -20,6 +21,8 @@ use std::os::unix::ffi::OsStrExt;
 use super::prim_file::dirty;
 use super::*;
 use crate::runtime::host::{errno::errno_id, netdb};
+
+mod ifaddrs;
 
 /// The functions of the ERTS `net` NIF library, as `(name, arity)` in the
 /// order of `net_funcs` (`prim_net_nif.c:4997-5022`). `erlang:load_nif/2`
@@ -69,6 +72,30 @@ pub(super) const BINDINGS: &[Binding] = &[
         run: |scheduler, arguments| command(&scheduler.atoms, &arguments[0]),
     },
     Binding {
+        name: "nif_get_adapters_addresses",
+        arity: 1,
+        job: Job::IoBound,
+        run: |scheduler, _| notsup(&scheduler.atoms),
+    },
+    Binding {
+        name: "nif_get_if_entry",
+        arity: 1,
+        job: Job::IoBound,
+        run: |scheduler, _| notsup(&scheduler.atoms),
+    },
+    Binding {
+        name: "nif_get_interface_info",
+        arity: 1,
+        job: Job::IoBound,
+        run: |scheduler, _| notsup(&scheduler.atoms),
+    },
+    Binding {
+        name: "nif_get_ip_address_table",
+        arity: 1,
+        job: Job::IoBound,
+        run: |scheduler, _| notsup(&scheduler.atoms),
+    },
+    Binding {
         name: "nif_getaddrinfo",
         arity: 3,
         job: Job::Normal,
@@ -79,6 +106,12 @@ pub(super) const BINDINGS: &[Binding] = &[
         arity: 0,
         job: Job::Normal,
         run: |_, _| Ok(BifResult::Value(gethostname(nix::unistd::gethostname()))),
+    },
+    Binding {
+        name: "nif_getifaddrs",
+        arity: 1,
+        job: Job::IoBound,
+        run: |scheduler, arguments| getifaddrs(&scheduler.atoms, &arguments[0]),
     },
     Binding {
         name: "nif_getnameinfo",
@@ -97,6 +130,24 @@ pub(super) const BINDINGS: &[Binding] = &[
         arity: 2,
         job: Job::IoBound,
         run: |_, arguments| getservbyport(&arguments[0], &arguments[1]),
+    },
+    Binding {
+        name: "nif_if_index2name",
+        arity: 1,
+        job: Job::Normal,
+        run: |scheduler, arguments| if_index2name(&scheduler.atoms, &arguments[0]),
+    },
+    Binding {
+        name: "nif_if_name2index",
+        arity: 1,
+        job: Job::Normal,
+        run: |scheduler, arguments| if_name2index(&scheduler.atoms, &arguments[0]),
+    },
+    Binding {
+        name: "nif_if_names",
+        arity: 0,
+        job: Job::Normal,
+        run: |scheduler, _| if_names(&scheduler.atoms, nix::net::if_::if_nameindex()),
     },
     Binding {
         name: "nif_info",
@@ -785,6 +836,105 @@ fn getservbyport(port: &Term, protocol: &Term) -> Result<BifResult, BeamError> {
             None => failure(&scheduler.atoms, "einval"),
         },
     )
+}
+
+/// Raise `error:notsup`, as each Windows function of the library does on
+/// Unix (`prim_net_nif.c:1918-1919`, `3128-3129`, `3553-3554`,
+/// `3786-3787`).
+fn notsup(atoms: &AtomTable) -> Result<BifResult, BeamError> {
+    Ok(BifResult::Raise {
+        class: ExceptionClass::Error,
+        reason: Term::Atom(atoms.put("notsup")?),
+    })
+}
+
+/// Run `nif_getifaddrs/1` on a dirty IO thread
+/// (`prim_net_nif.c:1381-1421`, `5010`). A term that is not a map raises
+/// `badarg`. The key `debug` with the value `true` stops the run with a
+/// runtime error: ERTS then writes a debug trace, and PBeam has none
+/// (`esock_get_bool_from_map`, `socket_util.c:252-269`). On Linux, which
+/// defines `HAVE_SETNS`, a key `netns` that is not a string raises `badarg`
+/// (`socket_util.c:282-320`), and a string stops the run with a runtime
+/// error: PBeam does not change the network namespace. On another host the
+/// call stops the run with a runtime error (see [`ifaddrs`]).
+fn getifaddrs(atoms: &AtomTable, extra: &Term) -> Result<BifResult, BeamError> {
+    let Term::Map(map) = extra else {
+        return Ok(BifResult::badarg());
+    };
+    if map.get(&Term::Atom(atoms.put("debug")?)) == Some(&Term::static_atom("true")) {
+        return Err(error(
+            "prim_net:nif_getifaddrs/1 debug trace is not supported",
+        ));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(netns) = map.get(&Term::Atom(atoms.put("netns")?)) {
+            if c_string(netns, None).is_none() {
+                return Ok(BifResult::badarg());
+            }
+            return Err(error(
+                "prim_net:nif_getifaddrs/1 network namespace is not supported",
+            ));
+        }
+        dirty(ifaddrs::read, |scheduler, entries| {
+            ifaddrs::result(&scheduler.atoms, entries)
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Err(error(
+            "prim_net:nif_getifaddrs/1 is supported only on Linux",
+        ))
+    }
+}
+
+/// Run `nif_if_name2index/1` (`prim_net_nif.c:4272-4330`): a name that is
+/// not a string of at most `IF_NAMESIZE` (16) bytes gives
+/// `{error, einval}`, and a failed `if_nametoindex` gives
+/// `{error, Errno}`. `MKI` makes the index signed.
+#[allow(clippy::cast_possible_wrap)]
+fn if_name2index(atoms: &AtomTable, name: &Term) -> Result<BifResult, BeamError> {
+    let Some(name) = c_string(name, Some(16)) else {
+        return failure(atoms, "einval");
+    };
+    match nix::net::if_::if_nametoindex(name.as_c_str()) {
+        Ok(index) => success(Term::Integer((index as i32).into())),
+        Err(errno) => failure(atoms, &errno_id(errno as c_int)),
+    }
+}
+
+/// Run `nif_if_index2name/1` (`prim_net_nif.c:4346-4399`): an index that
+/// is not an `unsigned int` raises `badarg`, and a failed
+/// `if_indextoname` gives `{error, enxio}`. The `nix` wrapper does not see
+/// the NULL result of a failed call and gives the empty name of its zeroed
+/// buffer, so an empty name is a failure: no interface has an empty name.
+fn if_index2name(atoms: &AtomTable, index: &Term) -> Result<BifResult, BeamError> {
+    let Some(index) = uint(index) else {
+        return Ok(BifResult::badarg());
+    };
+    match nix::net::if_::if_indextoname(index) {
+        Ok(name) if !name.as_bytes().is_empty() => success(latin1(name.as_bytes())),
+        _ => failure(atoms, "enxio"),
+    }
+}
+
+/// Give the result of `nif_if_names/0` (`prim_net_nif.c:4413-4494`) for the
+/// result of `if_nameindex`: `{ok, [{Index, Name}]}`, or `{error, Errno}`.
+/// `MKI` makes each index signed.
+#[allow(clippy::cast_possible_wrap)]
+fn if_names(
+    atoms: &AtomTable,
+    interfaces: nix::Result<nix::net::if_::Interfaces>,
+) -> Result<BifResult, BeamError> {
+    match interfaces {
+        Ok(interfaces) => success(Term::list_from(interfaces.iter().map(|interface| {
+            Term::tuple(vec![
+                Term::Integer((interface.index() as i32).into()),
+                latin1(interface.name().to_bytes()),
+            ])
+        }))),
+        Err(errno) => failure(atoms, &errno_id(errno as c_int)),
+    }
 }
 
 #[cfg(test)]
