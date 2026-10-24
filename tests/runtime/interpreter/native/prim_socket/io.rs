@@ -87,13 +87,12 @@ fn stops_the_run_at_a_second_writer_or_reader() {
 }
 
 #[test]
-fn stops_the_run_at_recv_flags_and_a_length_above_the_ssize_t_range() {
+fn checks_the_recv_flags_and_stops_the_run_at_a_length_above_the_ssize_t_range() {
     // `prim_socket:recv/4` encodes the flags of a list
     // (prim_socket.erl:824-830), so only `nif_recv/4` gets a flag integer
     // outside the `int` range (prim_socket_nif.c:7081-7091). A length above
     // the `ssize_t` range makes ERTS give a term of the integer itself
-    // (prim_socket_nif.c:7092-7094). PBeam reads with `read(2)`, so flags
-    // other than 0 stop the run.
+    // (prim_socket_nif.c:7092-7094).
     let mut scheduler = scheduler();
     let (_, socket) = resource(&mut scheduler, |_| {});
     let reference = Term::Reference(scheduler.make_ref().unwrap());
@@ -109,10 +108,23 @@ fn stops_the_run_at_recv_flags_and_a_length_above_the_ssize_t_range() {
         error_text(recv(&mut scheduler, &socket, &above, &zero, &reference))
             .contains("the length 9223372036854775808 above the ssize_t range")
     );
-    let peek = Term::Integer(i64::from(libc::MSG_PEEK));
-    assert!(
-        error_text(recv(&mut scheduler, &socket, &zero, &peek, &reference))
-            .contains("the flags 2 are not supported")
+}
+
+#[test]
+fn gives_badarg_for_send_flags_that_are_not_an_integer() {
+    // `prim_socket:send/4` encodes a flag list before `nif_send/4`
+    // (prim_socket.erl:569-576), so only a direct call gives the NIF flags
+    // that are not an integer; `enif_get_int` fails and `nif_send` gives
+    // `badarg` (prim_socket_nif.c:6440-6509).
+    let mut scheduler = scheduler();
+    let (_, socket) = resource(&mut scheduler, |_| {});
+    let reference = Term::Reference(scheduler.make_ref().unwrap());
+    let data = Term::binary(Vec::new());
+    let flags = Term::static_atom("ok");
+    let result = send(&mut scheduler, &socket, &data, &flags, &reference);
+    assert_eq!(
+        format!("{:?}", result.unwrap()),
+        format!("{:?}", BifResult::badarg())
     );
 }
 

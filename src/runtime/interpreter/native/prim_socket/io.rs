@@ -9,7 +9,8 @@
 //! waiting writers or readers: a call of another process while a current
 //! writer or reader waits stops the run (see the row "NIF stubs").
 
-use std::io::{self, Read};
+use std::io;
+use std::os::fd::AsRawFd;
 use std::sync::MutexGuard;
 
 use super::select::{fd, monitor, select};
@@ -210,8 +211,7 @@ fn send_retry(
 /// A `Length` above the `ssize_t` range stops the run: ERTS then gives a
 /// term made of the integer itself (`prim_socket_nif.c:7092-7094`). A call
 /// of another process while a reader waits stops the run: PBeam has no
-/// reader queue. `Flags` other than 0 stop the run: PBeam reads with
-/// `read(2)`. A new atom in a full atom table gives the error of
+/// reader queue. A new atom in a full atom table gives the error of
 /// `AtomTable::put`.
 pub(super) fn recv(
     scheduler: &mut Scheduler,
@@ -258,11 +258,6 @@ pub(super) fn recv(
             "prim_socket:nif_recv/4: a second reader process is not supported".to_owned(),
         ));
     }
-    if flags != 0 {
-        return Err(error(format!(
-            "prim_socket:nif_recv/4: the flags {flags} are not supported"
-        )));
-    }
     let buffer_size = if size == 0 {
         RECV_BUFFER_SIZE
     } else {
@@ -271,11 +266,17 @@ pub(super) fn recv(
     let mut buffer = vec![0; buffer_size];
     state.counters.read_tries += 1;
     let stream = state.kind == libc::SOCK_STREAM;
-    let mut host = state
+    let host = state
         .socket
         .as_ref()
         .expect("an open socket has a host socket");
-    let read = match host.read(&mut buffer) {
+    // `essio_recv` calls `recv(2)` with the flags (unix_socket_syncio.c:3835).
+    let received = nix::sys::socket::recv(
+        host.as_raw_fd(),
+        &mut buffer,
+        nix::sys::socket::MsgFlags::from_bits_retain(flags),
+    );
+    let read = match received.map_err(io::Error::from) {
         Ok(0) if stream => {
             state.counters.read_fails += 1;
             state.reader = None;

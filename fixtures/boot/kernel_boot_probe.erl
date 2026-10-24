@@ -299,7 +299,7 @@ socket_select() ->
     {ok, E} = socket:open(inet, stream, tcp),
     {select, {select_info, connect, EH}} = socket:connect(E, Addr, nowait),
     EConnect = [receive {'$socket', E, select, EH} -> connect_select after 5000 -> none end,
-                socket:cancel(E, {select_info, connect, EH}), element(1, socket:accept(L, 0))],
+                socket:cancel(E, {select_info, connect, EH}), element(1, socket:accept(L, 5000))],
     {select, {select_info, accept, H5}} = socket:accept(L, nowait),
     ok = socket:close(E),
     ok = socket:close(L),
@@ -403,7 +403,7 @@ socket_cancel_recvfrom() ->
 %% `erl -noshell -boot start_clean -pa fixtures/boot -s kernel_boot_probe
 %% socket_io -kernel logger_level warning` runs socket_io/0. It sends and
 %% receives on connected stream sockets with socket:send/2,3,4 and
-%% socket:recv/1,2,3,4, with timeouts, nowait, a partial send, cancel, a
+%% socket:recv/1,2,3,4, with timeouts, the flag peek, nowait, a partial send, cancel, a
 %% peer close, a close of a waiting reader, and the counters of
 %% socket:info/1. It displays only the results that are the same on Linux
 %% and macOS.
@@ -424,7 +424,8 @@ socket_io() ->
              socket:recv(A, 0, 0), socket:recv(A, 3, 0), socket:recv(A, 3, 50),
              socket:send(C, <<"pq">>), timer:sleep(50), socket:recv(A, 5, 0),
              socket:send(C, <<"rs">>), timer:sleep(50), socket:recv(A, 5, 50),
-             socket:send(C, <<"tu">>, [], infinity), socket:recv(A, 2, [], infinity)],
+             socket:send(C, <<"tu">>, [], infinity), socket:recv(A, 2, [], infinity),
+             socket:send(C, <<"pk">>), socket:recv(A, 2, [peek], 1000), socket:recv(A, 2, 1000)],
     {select, {select_info, recv, H1}} = socket:recv(A, 0, nowait),
     Selected = [maps:with([rstates, num_readers], socket:info(A)), socket:send(C, <<"late">>),
                 receive {'$socket', A, select, H1} -> recv_select after 5000 -> none end,
