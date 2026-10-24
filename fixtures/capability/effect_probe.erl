@@ -47,6 +47,7 @@
     exit_other3/0,
     send_instruction/0,
     send2/0,
+    bang/0,
     send3/0,
     start_timer/0,
     start_timer_4/0,
@@ -246,6 +247,9 @@ exit_other3() ->
 send_instruction() -> attempt(fun() -> self() ! ping end).
 
 send2() -> attempt(fun() -> erlang:send(self(), ping) end).
+
+%% A module atom that the compiler cannot see keeps the call of erlang:'!'/2.
+bang() -> attempt(fun() -> apply(binary_to_atom(id(<<"erlang">>)), '!', [self(), ping]) end).
 
 send3() -> attempt(fun() -> erlang:send(self(), ping, []) end).
 
