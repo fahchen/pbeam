@@ -388,6 +388,58 @@ fn gives_the_other_items_of_system_info_and_badarg_as_pinned_erts() {
 }
 
 #[test]
+fn gives_snifs_and_the_tuple_items_of_system_info_as_pinned_erts() {
+    // erl_bif_info.c:2489-2640 (info_1_tuple), 2763-2771 and 2890-2898
+    // (snifs); erl_cpu_topology.c:1557-1589, 1619-1638.
+    let eval = "io:format(\"~p~n\", [[erlang:system_info(snifs) | \
+                [try erlang:system_info(I) catch C:R -> {C, R} end \
+                || I <- [{wordsize, internal}, {wordsize, external}, {wordsize, x}, \
+                {wordsize}, {wordsize, internal, 1}, {cpu_topology, defined}, \
+                {cpu_topology, detected}, {cpu_topology, used}, {cpu_topology, x}, \
+                {cpu_topology}, {internal_cpu_topology, defined}, \
+                {internal_cpu_topology, detected}, {internal_cpu_topology, used}, \
+                {memory_checker, test_leak}, {memory_checker, x}, {memory_checker}, \
+                {allocator}, {allocator_sizes}, {memory_internal, a}, {foo, 1}, {1, a}, {}]]]]), \
+                halt().";
+    let arguments = ["-noshell", "-eval", eval];
+    let mut reference = Command::new("erl");
+    reference.args(arguments);
+    let reference = isolate(&mut reference).output().unwrap();
+    let actual = pbeam_erl(&arguments, &[]);
+    assert!(reference.status.success(), "{reference:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&actual.stdout),
+        String::from_utf8_lossy(&reference.stdout),
+        "{actual:?}"
+    );
+}
+
+#[test]
+fn rejects_the_allocator_items_of_system_info() {
+    // PBeam has no ERTS memory allocators (erl_bif_info.c:2499-2538), and
+    // ERTS crashes on {internal_cpu_topology, x} and reads past an array
+    // on {memory_checker, test_overflow} (erl_bif_info.c:2539-2556).
+    for item in [
+        "{allocator, binary_alloc}",
+        "{allocator, binary_alloc, x}",
+        "{allocator_sizes, binary_alloc}",
+        "{memory_internal, a, b}",
+        "{internal_cpu_topology, x}",
+        "{memory_checker, test_overflow}",
+        "allocated_areas",
+        "alloc_util_allocators",
+    ] {
+        let eval = format!("erlang:system_info({item}), halt().");
+        let actual = pbeam_erl(&["-noshell", "-eval", eval.as_str()], &[]);
+        let stderr = String::from_utf8_lossy(&actual.stderr);
+        assert!(
+            stderr.contains("unsupported erlang:system_info/1 argument"),
+            "{item}: {actual:?}"
+        );
+    }
+}
+
+#[test]
 fn rejects_system_version_with_a_thread_pool_size() {
     // ERTS reads ERL_THREAD_POOL_SIZE (erl_init.c:873-876); PBeam has no
     // async threads, so it gives a clear runtime error.
