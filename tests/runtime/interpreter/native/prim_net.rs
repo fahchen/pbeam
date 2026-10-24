@@ -244,3 +244,138 @@ fn encodes_each_interface_address_form_as_prim_net_nif() {
         "message"
     );
 }
+
+#[test]
+fn encodes_each_macos_interface_address_form_as_prim_net_nif() {
+    // The macOS families and `sockaddr_dl` forms of `esock_encode_sockaddr`
+    // with the length -1 (`socket_util.c:723-915`, `1599-1656`,
+    // `2830-2859`). The Linux CI host runs them here.
+    use crate::runtime::host::ifaddrs::{Address, Entry};
+    let atoms = AtomTable::new();
+    let atom = |name: &str| Term::Atom(atoms.put(name).unwrap());
+    let map = |pairs: Vec<(&str, Term)>| {
+        let pairs = pairs
+            .into_iter()
+            .map(|(key, value)| (atom(key), value))
+            .collect();
+        Term::Map(Map::from_pairs(pairs, &atoms).unwrap())
+    };
+    let address = |family, bytes: &[u8]| Address {
+        family,
+        bytes: bytes.to_vec(),
+    };
+    let inet_bytes = [16, 2, 0, 80, 10, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0];
+    let encode = |flags, dstaddr| {
+        let entry = Entry {
+            name: vec![b'u', 0xE9],
+            flags,
+            addr: Some(address(2, &inet_bytes)),
+            netmask: None,
+            dstaddr,
+        };
+        let entry = ifaddrs::macos_entry(entry).ok().unwrap();
+        let BifResult::Value(value) = ifaddrs::result(&atoms, Ok(vec![entry])).unwrap() else {
+            panic!("the result is a value");
+        };
+        let Term::Tuple(tuple) = &value else {
+            panic!("the result is {{ok, List}}");
+        };
+        tuple[1].proper_list().unwrap().next().unwrap().clone()
+    };
+    let get = |entry: &Term, key: &str| {
+        let Term::Map(entry) = entry else {
+            panic!("an entry is a map");
+        };
+        entry.get(&atom(key)).cloned()
+    };
+    let integer = |value: i64| Term::Integer(value);
+    let inet = map(vec![
+        ("family", atom("inet")),
+        ("port", integer(80)),
+        (
+            "addr",
+            Term::tuple(vec![integer(10), integer(0), integer(0), integer(1)]),
+        ),
+    ]);
+    let point = encode(0x10, Some(address(2, &inet_bytes)));
+    assert_eq!(get(&point, "addr"), Some(inet.clone()));
+    assert_eq!(get(&point, "dstaddr"), Some(inet));
+    assert_eq!(
+        get(&point, "name"),
+        Some(Term::list_from([integer(117), integer(0xE9)]))
+    );
+    let broadcast = encode(0x2, Some(address(2, &[0; 16])));
+    assert!(get(&broadcast, "broadaddr").is_some() && get(&broadcast, "dstaddr").is_none());
+    let neither = encode(0, Some(address(2, &[0; 16])));
+    assert!(get(&neither, "broadaddr").is_none() && get(&neither, "dstaddr").is_none());
+    let mut inet6 = vec![28, 30, 0, 0, 0, 0, 0, 7];
+    inet6.extend([0; 15]);
+    inet6.extend([1, 0, 0, 0, 0]);
+    assert_eq!(
+        get(&encode(0x10, Some(address(30, &inet6))), "dstaddr"),
+        Some(map(vec![
+            ("family", atom("inet6")),
+            ("port", integer(0)),
+            ("flowinfo", integer(i32::from_ne_bytes([0, 0, 0, 7]).into())),
+            (
+                "addr",
+                Term::tuple([0, 0, 0, 0, 0, 0, 0, 1].map(integer).to_vec()),
+            ),
+            ("scope_id", integer(0)),
+        ]))
+    );
+    let link = |bytes: &[u8]| get(&encode(0x10, Some(address(18, bytes))), "dstaddr");
+    let dl = |kind: Term, data: &[u8]| {
+        map(vec![
+            ("family", atom("link")),
+            ("index", integer(15)),
+            ("type", kind),
+            ("nlen", integer(2)),
+            ("alen", integer(1)),
+            ("slen", integer(0)),
+            ("data", Term::binary(data.to_vec())),
+        ])
+    };
+    let [low, high] = 15u16.to_ne_bytes();
+    assert_eq!(
+        link(&[11, 18, low, high, 0xd1, 2, 1, 0, 1, 2, 3]),
+        Some(dl(atom("bridge"), &[1, 2, 3]))
+    );
+    assert_eq!(
+        link(&[8, 18, low, high, 0x99, 2, 1, 0]),
+        Some(dl(integer(0x99), &[]))
+    );
+    let native = |family: Term, data: &[u8]| {
+        map(vec![
+            ("family", family),
+            ("addr", Term::binary(data.to_vec())),
+        ])
+    };
+    assert_eq!(link(&[]), Some(native(atom("link"), &[])));
+    assert_eq!(
+        link(&[5, 18, 7, 8, 9]),
+        Some(native(atom("link"), &[7, 8, 9]))
+    );
+    for (family, name) in [
+        (0, atom("unspec")),
+        (3, atom("implink")),
+        (4, atom("pup")),
+        (5, atom("chaos")),
+        (17, integer(17)),
+    ] {
+        assert_eq!(
+            get(&encode(0x10, Some(address(family, &[]))), "dstaddr"),
+            Some(native(name, &[]))
+        );
+    }
+    for (family, bytes) in [(18, vec![1]), (1, vec![])] {
+        let entry = Entry {
+            name: Vec::new(),
+            flags: 0,
+            addr: Some(address(family, &bytes)),
+            netmask: None,
+            dstaddr: None,
+        };
+        assert!(ifaddrs::macos_entry(entry).is_err());
+    }
+}
