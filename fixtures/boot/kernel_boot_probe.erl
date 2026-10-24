@@ -712,10 +712,11 @@ socket_backend_udp() ->
 
 %% `-s kernel_boot_probe sockopt_host` runs socket:setopt/3 and
 %% socket:getopt/2 with the host options of the levels socket, ip, ipv6,
-%% and tcp that have a boolean, an integer, a hop count, an address, or a
-%% membership value: the values, the invalid values, and the options that
-%% the host does not support. PBeam has no handler for {ip, recvttl} on
-%% macOS, so the probe sets it only on Linux.
+%% and tcp that have a boolean, an integer, a hop count, an address, a
+%% membership, a TOS, a string, a domain, or a protocol value: the values,
+%% the invalid values, and the options that the host does not support.
+%% PBeam has no handler for {ip, recvttl} and {socket, bindtodevice} on
+%% macOS, so the probe sets them only on Linux.
 sockopt_host() ->
     process_flag(trap_exit, true),
     {ok, T} = socket:open(inet, stream, tcp),
@@ -727,7 +728,10 @@ sockopt_host() ->
              || {S, O} <- [{U, {socket, timestamp}}, {U, {ip, multicast_loop}}, {U, {ip, recvtos}},
                            {U, {ip, pktinfo}}, {U, {ip, recvif}}, {U, {ip, recvdstaddr}},
                            {U, {ip, hdrincl}}, {U6, {ipv6, recvtclass}}, {U6, {ipv6, multicast_loop}},
-                           {T, {tcp, cork}}, {U, {socket, passcred}}]
+                           {T, {tcp, cork}}, {U, {socket, passcred}}, {U, {socket, timestampns}},
+                           {U, {ip, freebind}}, {U, {ip, transparent}}, {U, {ip, recverr}},
+                           {U, {ip, multicast_all}}, {U, {ip, recvorigdstaddr}}, {U6, {ipv6, recverr}},
+                           {U6, {ipv6, recvhoplimit}}, {U6, {ipv6, recvpktinfo}}]
                           ++ [{U, {ip, recvttl}} || Linux]],
     Ints = [[socket:setopt(S, O, V), socket:getopt(S, O), socket:setopt(S, O, foo),
              socket:setopt(S, O, -1), socket:getopt(S, O)]
@@ -750,8 +754,47 @@ sockopt_host() ->
                socket:getopt(U, Drop), socket:setopt(U, Add, #{multiaddr => {224, 0, 0, 251}}),
                socket:setopt(U, Add, M#{interface := foo}), socket:setopt(U, Add, foo),
                socket:setopt(U, Drop, M#{interface := any})],
-    [ok = socket:close(S) || S <- [T, U, U6]],
-    erlang:display(unmap({sockopt_host, Bools, Ints, UserTimeout, Hops, Ifs, Members})),
+    Tos = [[socket:setopt(U, {ip, tos}, V), socket:getopt(U, {ip, tos})]
+           || V <- [lowdelay, throughput, reliability, mincost, cs0, cs1, cs2, cs3, cs4, cs5, cs6, cs7,
+                    af11, af12, af13, af21, af22, af23, af31, af32, af33, af41, af42, af43, ef,
+                    voice_admit, le, nqb, 16#b8, 16#e0, 16#ff, 0, #{precedence => 5, tos => lowdelay},
+                    #{precedence => flash, tos => default}, #{precedence => routine, tos => 3},
+                    #{precedence => 300, tos => 260, extra => 1}]]
+        ++ [socket:setopt(U, {ip, tos}, V)
+            || V <- [default, foo, 1 bsl 40, 1.5, "x", #{tos => lowdelay}, #{precedence => 1},
+                     #{precedence => -1, tos => 0}, #{precedence => 1 bsl 33, tos => 0},
+                     #{precedence => 1, tos => foo}, #{precedence => foo, tos => 0},
+                     #{precedence => 1.0, tos => 0}, #{precedence => 1, tos => "x"}]]
+        ++ [socket:setopt(T, {ip, tos}, -1), socket:setopt(T, {ip, tos}, 16#1ff)],
+    {ok, C} = socket:open(inet, dgram, udp),
+    ok = socket:connect(C, #{family => inet, addr => loopback, port => 9}),
+    Mtu = [socket:setopt(U, {ip, mtu}, 1500), socket:getopt(U, {ip, mtu}), socket:getopt(C, {ip, mtu})],
+    B = {socket, bindtodevice},
+    Device = [[socket:getopt(S, B), socket:setopt(S, B, "lo"), socket:getopt(S, B), socket:setopt(S, B, <<"lo">>),
+               socket:setopt(S, B, ""), socket:getopt(S, B), socket:setopt(S, B, <<"lo", 0, "x">>), socket:getopt(S, B),
+               socket:setopt(S, B, "abcdefghijklmno"), socket:setopt(S, B, "abcdefghijklmnop"),
+               socket:setopt(S, B, <<"abcdefghijklmnopqrstu">>), socket:setopt(S, B, [108, 256]),
+               socket:setopt(S, B, [108 | 111]), socket:setopt(S, B, <<1:3>>), socket:setopt(S, B, foo)]
+              || S <- [C], Linux],
+    {ok, L} = socket:open(local, stream, default),
+    Kinds = [socket:getopt(S, {socket, O}) || S <- [T, U6, L], O <- [domain, protocol]]
+        ++ [socket:setopt(T, {socket, domain}, inet), socket:setopt(T, {socket, protocol}, tcp)],
+    Cc = {tcp, congestion},
+    Congestion = [socket:getopt(T, Cc), socket:setopt(T, Cc, "reno"), socket:getopt(T, Cc),
+                  socket:setopt(T, Cc, <<"cubic", 0, "x">>), socket:getopt(T, Cc),
+                  socket:setopt(T, Cc, "abcdefghijklmnop"), socket:setopt(T, Cc, lists:duplicate(256, $a)), socket:setopt(T, Cc, lists:duplicate(257, $a)),
+                  socket:setopt(T, Cc, <<"abcdefghijklmnopqrstu">>), socket:setopt(T, Cc, foo),
+                  socket:setopt(T, Cc, [$r, foo])],
+    M6 = #{multiaddr => {16#ff02, 0, 0, 0, 0, 0, 0, 16#fb}, interface => 0},
+    Add6 = {ipv6, add_membership},
+    Drop6 = {ipv6, drop_membership},
+    Members6 = [socket:setopt(U6, Add6, M6), socket:getopt(U6, Add6), socket:setopt(U6, Drop6, M6),
+                socket:getopt(U6, Drop6), socket:setopt(U6, Add6, M6#{interface := -1}),
+                socket:setopt(U6, Add6, M6#{interface := 1 bsl 32}), socket:setopt(U6, Add6, M6#{multiaddr := foo}),
+                socket:setopt(U6, Add6, #{interface => 0}), socket:setopt(U6, Drop6, foo)],
+    [ok = socket:close(S) || S <- [T, U, U6, C, L]],
+    erlang:display(unmap({sockopt_host, Bools, Ints, UserTimeout, Hops, Ifs, Members, Tos, Mtu, Device, Kinds,
+                          Congestion, Members6})),
     init:stop().
 
 %% `-s kernel_boot_probe sockopt_otp` runs socket:setopt/3 and
@@ -820,9 +863,9 @@ sockopt_otp() ->
     init:stop().
 
 %% unmap/1 replaces each map with its sorted list of pairs.
-unmap(M) when is_map(M) -> {map, lists:sort(maps:to_list(M))};
+unmap(M) when is_map(M) -> {map, lists:sort(unmap(maps:to_list(M)))};
 unmap(T) when is_tuple(T) -> list_to_tuple(unmap(tuple_to_list(T)));
-unmap(L) when is_list(L) -> [unmap(E) || E <- L];
+unmap([H | T]) -> [unmap(H) | unmap(T)];
 unmap(Other) -> Other.
 
 flush_recv(S) ->
