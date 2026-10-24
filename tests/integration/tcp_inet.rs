@@ -468,6 +468,16 @@ fn reconnects_a_udp_inet_port_as_pinned_erts_or_stops_on_linux() {
 }
 
 #[test]
+fn gives_a_datagram_to_the_owner_of_a_connected_active_udp_inet_port_as_pinned_erts() {
+    // An active socket sends each datagram to its owner, also with a
+    // receive that waits (`packet_reply_binary_data`,
+    // inet_drv.c:4335-4357).
+    let expected = "[{udp,<<119>>},none]"; // The waiter end differs: #1246.
+    assert_eq!(erts_text("udp_probe", "active_waiter"), expected, "ERTS");
+    assert_eq!(pbeam_text("udp_probe", "active_waiter"), expected, "PBeam");
+}
+
+#[test]
 fn gives_econnrefused_on_a_connected_udp_inet_port_as_pinned_erts() {
     // A read error goes to the receive of a passive socket and to the
     // owner of an active socket as `{udp_error, S, Reason}`

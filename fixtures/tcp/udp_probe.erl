@@ -1,5 +1,5 @@
 -module(udp_probe).
--export([active/0, active_options/0, connect/0, host_name/0, open/0, passive/0, port_zero/0, reconnect/0, refused_active/0, refused_passive/0, truncate/0, unsupported/1]).
+-export([active/0, active_options/0, connect/0, host_name/0, open/0, passive/0, port_zero/0, reconnect/0, active_waiter/0, refused_active/0, refused_passive/0, truncate/0, unsupported/1]).
 
 %% The requests of the udp_inet driver that inet_config:set_hostname/0
 %% sends through inet_udp:open(0, []), inet:gethostname/1, and
@@ -285,3 +285,20 @@ reconnect() ->
     [prim_inet:connect(S, {255, 255, 255, 255}, 9), prim_inet:connect(S, {127, 0, 0, 1}, 0),
      prim_inet:peername(S), prim_inet:connect(S, {127, 0, 0, 1}, PB), sender(prim_inet:peername(S), PB),
      prim_inet:close(B)].
+
+%% A connected passive socket with a receive that waits becomes active
+%% once, and a datagram of the peer comes: the socket gives it to the owner,
+%% because it is active (inet_drv.c:4335-4357). The waiter does not get
+%% it; its end differs on PBeam (#1246).
+active_waiter() ->
+    {S, PS} = bound(),
+    {B, PB} = bound(),
+    ok = prim_inet:connect(S, {127, 0, 0, 1}, PB),
+    Self = self(),
+    spawn(fun() -> Self ! {waiter, prim_inet:recvfrom(S, 0, 300)} end),
+    timer:sleep(50),
+    ok = prim_inet:setopts(S, [{active, once}]),
+    ok = prim_inet:sendto(B, {127, 0, 0, 1}, PS, <<"w">>),
+    Owner = receive {udp, S, _, _, Data} -> {udp, Data} after 500 -> none end,
+    Waiter = receive {waiter, {ok, _} = W} -> W after 0 -> none end,
+    [Owner, Waiter].
