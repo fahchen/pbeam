@@ -297,7 +297,7 @@ fn set_form(name: (&str, &str)) -> Option<Form> {
             "socket",
             "broadcast" | "keepalive" | "reuseaddr" | "reuseport" | "oobinline" | "dontroute",
         )
-        | ("socket", "timestamp")
+        | ("socket", "timestamp" | "acceptconn")
         | ("tcp", "nodelay")
         | ("ip", "multicast_loop" | "recvtos" | "hdrincl")
         | ("ipv6", "v6only" | "recvtclass" | "multicast_loop") => Some(Form::Bool),

@@ -209,7 +209,7 @@ sockopt() ->
               socket:getopt(S, O), socket:setopt(S, O, 1)]
              || O <- [{socket, broadcast}, {socket, keepalive}, {socket, reuseaddr},
                       {socket, reuseport}, {socket, oobinline}, {socket, dontroute},
-                      {tcp, nodelay}]],
+                      {tcp, nodelay}, {socket, acceptconn}]],
     Ints = [[socket:setopt(S, O, V), socket:getopt(S, O), socket:setopt(S, O, foo),
              socket:setopt(S, O, 1 bsl 40), socket:setopt(S, O, -1)]
             || {O, V} <- [{{tcp, keepcnt}, 5}, {{tcp, keepintvl}, 7}, {{ip, ttl}, 33},
