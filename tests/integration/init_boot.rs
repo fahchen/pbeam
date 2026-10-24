@@ -483,14 +483,68 @@ fn sends_and_receives_on_datagram_and_stream_sockets_with_addresses_as_pinned_er
 }
 
 #[test]
+fn receives_with_flags_on_inet_sockets_as_pinned_erts() {
+    // `kernel_boot_probe:socket_recvfrom_flags/0` runs `socket:recvfrom/4`
+    // with the flag peek on inet and inet6 datagram sockets and an inet
+    // stream socket. `essio_recvfrom` passes the flags to `recvfrom(2)`
+    // (unix_socket_syncio.c:3925-3927); a stream socket gives the address
+    // of length 0, `#{family => unspec, addr => <<>>}`.
+    let (reference, status, node) =
+        run_kernel_boot("socket_recvfrom_flags", false, &["{socket_recvfrom_flags,"]);
+    assert_eq!(status, Some(0), "ERTS");
+    assert!(
+        reference.starts_with(
+            "{socket_recvfrom_flags,[{error,timeout},ok,{ok,{true,<<\"peek\">>}},{ok,{true,<<\"pe\">>}},"
+        ),
+        "{reference}"
+    );
+    assert_eq!(node, reference, "PBeam");
+}
+
+#[test]
+fn sends_io_vectors_as_pinned_erts() {
+    // `kernel_boot_probe:socket_sendv/0` runs `socket:sendv/2,3` on the NIF
+    // `nif_sendv/3` (prim_socket_nif.c:6777-6822; unix_socket_syncio.c:3361-3524):
+    // an I/O vector of more than `iov_max` elements, which gives
+    // `{iov, Written}` on a stream socket and `{invalid, iov}` on a datagram
+    // socket, a partial send, the counters, and the argument errors. The
+    // `writev(2)` of no entry gives `EINVAL` on macOS and 0 on Linux.
+    let (reference, status, node) = run_kernel_boot("socket_sendv", false, &["{socket_sendv,"]);
+    assert_eq!(status, Some(0), "ERTS");
+    assert!(
+        reference.starts_with("{socket_sendv,[ok,{ok,<<\"abcd\">>},"),
+        "{reference}"
+    );
+    assert_eq!(node, reference, "PBeam");
+}
+
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn receives_with_the_flag_errqueue_as_pinned_erts() {
+    // macOS has no `MSG_ERRQUEUE`, so the flag errqueue gives the flags 0.
+    let (reference, status, node) = run_kernel_boot(
+        "socket_recvfrom_errqueue",
+        false,
+        &["{socket_recvfrom_errqueue,"],
+    );
+    assert_eq!(status, Some(0), "ERTS");
+    assert_eq!(reference, "{socket_recvfrom_errqueue,{error,timeout}}\r\n");
+    assert_eq!(node, reference, "PBeam");
+}
+
+#[test]
 fn stops_the_run_at_the_socket_calls_that_pbeam_does_not_support() {
     // PBeam has no acceptor queue (`essio_accept_accepting_other`,
     // unix_socket_syncio.c:2746-2757). ERTS connects with an
     // address that it did not decode (prim_socket_nif.c:6122-6143), and it
     // passes the flags of a recvfrom to `recvfrom(2)`
-    // (unix_socket_syncio.c:3925-3927), which PBeam does not. These
-    // calls stop the run with a runtime error (row "NIF stubs").
-    for (probe, text) in [
+    // (unix_socket_syncio.c:3925-3927), which PBeam does only on inet and
+    // inet6 sockets without `MSG_ERRQUEUE`. `gen_tcp` and `gen_udp` with
+    // `{inet_backend, socket}` set the option `{otp, iow}`
+    // (gen_tcp_socket.erl, gen_udp_socket.erl), which PBeam does not
+    // support yet (#1209). These calls stop the run with a runtime error
+    // (row "NIF stubs").
+    let mut probes = vec![
         (
             "socket_acceptors",
             "prim_socket:nif_accept/2: a second acceptor process is not supported",
@@ -500,10 +554,25 @@ fn stops_the_run_at_the_socket_calls_that_pbeam_does_not_support() {
             "prim_socket:nif_connect/3: an address that does not decode is not supported",
         ),
         (
-            "socket_recvfrom_flags",
-            "prim_socket:nif_recvfrom/4: the flags 2 are not supported",
+            "socket_recvfrom_local_flags",
+            "prim_socket:nif_recvfrom/4: the flags 2 on a socket of the domain 1 are not supported",
         ),
-    ] {
+        (
+            "socket_backend_tcp",
+            "unsupported prim_socket option {otp, 1002}",
+        ),
+        (
+            "socket_backend_udp",
+            "unsupported prim_socket option {otp, 1002}",
+        ),
+    ];
+    if cfg!(target_os = "linux") {
+        probes.push((
+            "socket_recvfrom_errqueue",
+            "prim_socket:nif_recvfrom/4: the flags 8192 on a socket of the domain 2 are not supported",
+        ));
+    }
+    for (probe, text) in probes {
         let child = Command::new(env::current_exe().unwrap())
             .args([
                 "--exact",

@@ -3,7 +3,8 @@
 -behaviour(application).
 -behaviour(supervisor).
 -export([main/0, main/1, lookup/0, gethost/0, supports/0, socket/0, sockopt/0, socket_select/0, socket_io/0,
-         socket_dgram/0,         socket_acceptors/0, socket_connect_invalid/0, socket_recvfrom_flags/0, start/2, stop/1, init/1]).
+         socket_dgram/0,         socket_acceptors/0, socket_connect_invalid/0, socket_recvfrom_flags/0, socket_recvfrom_local_flags/0,
+         socket_recvfrom_errqueue/0, socket_sendv/0, socket_backend_tcp/0, socket_backend_udp/0, start/2, stop/1, init/1]).
 
 %% `erl -noshell -boot start_clean -pa fixtures/boot -s kernel_boot_probe
 %% main -kernel logger_level warning` runs main/0 in the boot process of init after the boot script
@@ -394,10 +395,98 @@ socket_connect_invalid() ->
     erlang:display(socket:connect(S, #{family => inet, addr => {1, 2, 3}})),
     init:stop().
 
-%% `-s kernel_boot_probe socket_recvfrom_flags` receives with the flag peek.
+%% `-s kernel_boot_probe socket_recvfrom_flags` runs socket:recvfrom/4 with the
+%% flag peek on inet and inet6 datagram sockets and an inet stream socket.
 socket_recvfrom_flags() ->
-    {ok, S} = socket:open(inet, dgram, udp),
+    Loopback = #{family => inet, addr => {127, 0, 0, 1}, port => 0},
+    {ok, U1} = socket:open(inet, dgram, udp),
+    {ok, U2} = socket:open(inet, dgram, udp),
+    ok = socket:bind(U1, Loopback),
+    ok = socket:bind(U2, Loopback),
+    {ok, A1} = socket:sockname(U1),
+    {ok, A2} = socket:sockname(U2),
+    From = fun({ok, {Addr, Data}}) -> {ok, {Addr =:= A1, Data}}; (Other) -> Other end,
+    Udp = [socket:recvfrom(U2, 0, [peek], 0), socket:sendto(U1, <<"peek">>, A2),
+           From(socket:recvfrom(U2, 0, [peek], 1000)), From(socket:recvfrom(U2, 2, [peek], 0)),
+           From(socket:recvfrom(U2, 0, [], 0)), socket:recvfrom(U2, 0, [peek], 0)],
+    Loopback6 = #{family => inet6, addr => loopback, port => 0},
+    {ok, V1} = socket:open(inet6, dgram, udp),
+    {ok, V2} = socket:open(inet6, dgram, udp),
+    ok = socket:bind(V1, Loopback6),
+    ok = socket:bind(V2, Loopback6),
+    {ok, B1} = socket:sockname(V1),
+    {ok, B2} = socket:sockname(V2),
+    ok = socket:sendto(V1, <<"six">>, B2),
+    Inet6 = [socket:recvfrom(V2, 0, [peek], 1000) =:= {ok, {B1, <<"six">>}}],
+    {ok, L} = socket:open(inet, stream, tcp),
+    ok = socket:bind(L, Loopback),
+    ok = socket:listen(L),
+    {ok, Addr} = socket:sockname(L),
+    {ok, C} = socket:open(inet, stream, tcp),
+    ok = socket:connect(C, Addr),
+    {ok, A} = socket:accept(L),
+    Stream = [socket:recvfrom(A, 0, [peek], 0), socket:send(C, <<"st">>), socket:recvfrom(A, 0, [peek], 1000),
+              socket:recvfrom(A, 1, [peek], 0), socket:recvfrom(A, 0, [], 0), socket:shutdown(C, write),
+              socket:recvfrom(A, 0, [peek], 1000)],
+    Keys = [read_byte, read_pkg, read_pkg_max, read_tries, read_fails, read_waits],
+    Counters = [maps:with(Keys, maps:get(counters, socket:info(S))) || S <- [U2, A]],
+    erlang:display({socket_recvfrom_flags, Udp, Inet6, Stream, Counters}),
+    init:stop().
+
+%% `-s kernel_boot_probe socket_recvfrom_local_flags` receives with the flag
+%% peek on a local datagram socket.
+socket_recvfrom_local_flags() ->
+    {ok, S} = socket:open(local, dgram, default),
     erlang:display(socket:recvfrom(S, 0, [peek], 0)),
+    init:stop().
+
+%% `-s kernel_boot_probe socket_recvfrom_errqueue` receives with the flag
+%% errqueue on an inet datagram socket.
+socket_recvfrom_errqueue() ->
+    {ok, S} = socket:open(inet, dgram, udp),
+    erlang:display({socket_recvfrom_errqueue, catch socket:recvfrom(S, 0, [errqueue], 0)}),
+    init:stop().
+
+%% `-s kernel_boot_probe socket_sendv` runs socket:sendv/2,3 on inet stream and
+%% datagram sockets: an I/O vector of more than 1024 elements, a partial send,
+%% nowait, the counters of socket:info/1, and the argument errors.
+socket_sendv() ->
+    Loopback = #{family => inet, addr => {127, 0, 0, 1}, port => 0},
+    {ok, L} = socket:open(inet, stream, tcp),
+    ok = socket:bind(L, Loopback),
+    ok = socket:listen(L),
+    {ok, Addr} = socket:sockname(L),
+    {ok, C} = socket:open(inet, stream, tcp),
+    {_, CRef} = C,
+    ok = socket:connect(C, Addr),
+    {ok, A} = socket:accept(L),
+    Many = lists:duplicate(1500, <<"x">>),
+    Stream = [socket:sendv(C, [<<"ab">>, <<>>, <<"cd">>]), socket:recv(A, 4, 1000), socket:sendv(C, []),
+              socket:sendv(C, Many), socket:recv(A, 1500, 1000) =:= {ok, binary:copy(<<"x">>, 1500)},
+              socket:sendv(C, lists:duplicate(1024, <<"y">>) ++ [<<>>]), socket:recv(A, 1024, 1000) =:= {ok, binary:copy(<<"y">>, 1024)},
+              socket:sendv(C, [<<"z">>], 1000), socket:sendv(C, [<<"n">>], nowait), socket:recv(A, 2, 1000)],
+    Big = binary:copy(<<"0123456789abcdef">>, 1 bsl 19),
+    {select, {SI, Rest}} = socket:sendv(C, [Big, <<"tail">>], nowait),
+    Partial = [element(1, SI), iolist_size(Rest) < byte_size(Big), lists:last(Rest), socket:cancel(C, SI)],
+    flush_recv(A),
+    Keys = [write_byte, write_pkg, write_pkg_max, write_tries, write_fails, write_waits],
+    Counters = maps:with(Keys, maps:get(counters, socket:info(C))),
+    {ok, U1} = socket:open(inet, dgram, udp),
+    {ok, U2} = socket:open(inet, dgram, udp),
+    {_, U1Ref} = U1,
+    ok = socket:bind(U2, Loopback),
+    {ok, A2} = socket:sockname(U2),
+    NotConnected = socket:sendv(U1, [<<"a">>]),
+    ok = socket:connect(U1, A2),
+    Dgram = [NotConnected, socket:sendv(U1, [<<"da">>, <<"ta">>]), socket:recv(U2, 0, 1000),
+             strip(catch socket:sendv(U1, Many)), strip(catch prim_socket:sendv(U1Ref, Many, make_ref()))],
+    ok = socket:close(C),
+    Errors = [socket:sendv(C, [<<"x">>]), strip(catch socket:sendv(U1, foo)), strip(catch socket:sendv(U1, [foo])),
+              strip(catch prim_socket:sendv(make_ref(), [], make_ref())), strip(catch prim_socket:sendv(U1Ref, [], foo)),
+              strip(catch prim_socket:sendv(U1Ref, foo, make_ref())), strip(catch prim_socket:sendv(U1Ref, [foo], make_ref())),
+              strip(catch prim_socket:sendv(U1Ref, [<<"a">> | <<"b">>], make_ref())),
+              strip(catch prim_socket:sendv(U1Ref, [<<1:3>>], make_ref())), strip(catch prim_socket:sendv(CRef, [], make_ref()))],
+    erlang:display({socket_sendv, Stream, Partial, Counters, Dgram, Errors}),
     init:stop().
 
 %% `erl -noshell -boot start_clean -pa fixtures/boot -s kernel_boot_probe
@@ -591,6 +680,34 @@ socket_dgram() ->
               strip(catch prim_socket:recvfrom(U2Ref, 0, [], zero))],
     erlang:display({socket_dgram, Udp, Selected, Cancel, Connected, Counters, Inet6, Local, Stream, Partial,
                     Shutdown, Closed, Errors}),
+    init:stop().
+
+%% `-s kernel_boot_probe socket_backend_tcp` sends and receives with gen_tcp
+%% on the socket backend (gen_tcp_socket.erl).
+socket_backend_tcp() ->
+    Opts = [{inet_backend, socket}, binary, {active, false}],
+    {ok, L} = gen_tcp:listen(0, Opts ++ [{ip, {127, 0, 0, 1}}]),
+    {ok, Port} = inet:port(L),
+    {ok, C} = gen_tcp:connect({127, 0, 0, 1}, Port, Opts),
+    {ok, A} = gen_tcp:accept(L, 1000),
+    Result = [gen_tcp:send(C, <<"ping">>), gen_tcp:recv(A, 4, 1000), gen_tcp:send(A, [<<"po">>, "ng"]),
+              gen_tcp:recv(C, 0, 1000), gen_tcp:recv(C, 0, 0), gen_tcp:shutdown(C, write), gen_tcp:recv(A, 0, 1000),
+              gen_tcp:close(C), gen_tcp:close(A), gen_tcp:close(L)],
+    erlang:display({socket_backend_tcp, Result}),
+    init:stop().
+
+%% `-s kernel_boot_probe socket_backend_udp` sends and receives with gen_udp
+%% on the socket backend (gen_udp_socket.erl).
+socket_backend_udp() ->
+    Opts = [{inet_backend, socket}, binary, {active, false}, {ip, {127, 0, 0, 1}}],
+    {ok, U1} = gen_udp:open(0, Opts),
+    {ok, U2} = gen_udp:open(0, Opts),
+    {ok, P1} = inet:port(U1),
+    {ok, P2} = inet:port(U2),
+    Result = [gen_udp:send(U1, {127, 0, 0, 1}, P2, <<"ping">>), gen_udp:recv(U2, 0, 1000) =:= {ok, {{127, 0, 0, 1}, P1, <<"ping">>}},
+              gen_udp:send(U2, {127, 0, 0, 1}, P1, [<<"po">>, "ng"]), element(3, element(2, gen_udp:recv(U1, 0, 1000))),
+              gen_udp:recv(U1, 0, 0), gen_udp:close(U1), gen_udp:close(U2)],
+    erlang:display({socket_backend_udp, Result}),
     init:stop().
 
 flush_recv(S) ->

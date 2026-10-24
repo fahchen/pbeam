@@ -1,7 +1,8 @@
-//! The bindings of `prim_socket:nif_send/4`, `nif_sendto/5`, `nif_recv/4`,
-//! and `nif_recvfrom/4` (`prim_socket_nif.c:6440-6600`, `7056-7231`), with
-//! the Unix I/O backend `unix_essio` (`unix_socket_syncio.c:2996-3091`,
-//! `3796-3977`, `6809-7196`, `9869-10520`).
+//! The bindings of `prim_socket:nif_send/4`, `nif_sendto/5`, `nif_sendv/3`,
+//! `nif_recv/4`, and `nif_recvfrom/4` (`prim_socket_nif.c:6440-6600`,
+//! `6777-6822`, `7056-7231`), with the Unix I/O backend `unix_essio`
+//! (`unix_socket_syncio.c:2996-3091`, `3361-3524`, `3796-3977`, `6809-7196`,
+//! `9869-10520`).
 //!
 //! A send or a receive that would block makes a one-shot select on the
 //! node poll thread, as `esock_select_write` and `esock_select_read` do, and
@@ -9,11 +10,11 @@
 //! waiting writers or readers: a call of another process while a current
 //! writer or reader waits stops the run (see the row "NIF stubs").
 
-use std::io;
+use std::io::{self, IoSlice, IoSliceMut};
 use std::os::fd::AsRawFd;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use nix::sys::socket::SockaddrStorage;
+use nix::sys::socket::{MsgFlags, SockaddrStorage};
 
 use super::select::{fd, monitor, select};
 use super::socket::{closed, errno_error, invalid, sockaddr, socket_argument, source_term};
@@ -29,6 +30,11 @@ use crate::term::{ProcessId, Reference};
 /// option `{otp, rcvbuf}` that changes it is not supported yet, and the
 /// buffer count `rNum` keeps its default 0 (`prim_socket_nif.c:17061-17064`).
 const RECV_BUFFER_SIZE: usize = 8 * 1024;
+
+/// The most elements of the I/O vector of one `nif_sendv/3` call,
+/// `iov_max`, which is `sysconf(_SC_IOV_MAX)` (`prim_socket_nif.c:18981-18990`):
+/// 1024 on Linux and macOS.
+const IOV_MAX: usize = 1024;
 
 /// Return `{error, {invalid, state}}` of `esock_make_error_invalid`.
 fn invalid_state(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
@@ -168,17 +174,8 @@ fn write(
     };
     let caller = scheduler.current_process().id;
     let mut state = lock(&socket);
-    if state.write & (CLOSING | CLOSED) != 0 {
-        return Ok(closed());
-    }
-    if state.connector.is_some() {
-        drop(state);
-        return invalid_state(scheduler);
-    }
-    if state.writer.as_ref().is_some_and(|(pid, _)| *pid != caller) {
-        return Err(error(format!(
-            "prim_socket:{name}: a second writer process is not supported"
-        )));
+    if let Some(result) = write_entry(scheduler, &state, name, caller)? {
+        return Ok(result);
     }
     state.counters.write_tries += 1;
     let host = state
@@ -189,8 +186,131 @@ fn write(
         Some(address) => host.send_to_with_flags(bytes, address, flags),
         None => host.send_with_flags(bytes, flags),
     };
+    let request = (key, caller, reference);
+    send_result(scheduler, state, sent, bytes.len(), false, request)
+}
+
+/// Check the socket state before a write, as `essio_send` does
+/// (`unix_socket_syncio.c:3005-3021`): `{error, closed}`, and
+/// `{error, {invalid, state}}` during a connect.
+///
+/// # Errors
+///
+/// A call of another process while a writer waits stops the run: PBeam
+/// has no writer queue.
+fn write_entry(
+    scheduler: &mut Scheduler,
+    state: &SocketState,
+    name: &str,
+    caller: ProcessId,
+) -> Result<Option<BifResult>, BeamError> {
+    if state.write & (CLOSING | CLOSED) != 0 {
+        return Ok(Some(closed()));
+    }
+    if state.connector.is_some() {
+        return invalid_state(scheduler).map(Some);
+    }
+    if state.writer.as_ref().is_some_and(|(pid, _)| *pid != caller) {
+        return Err(error(format!(
+            "prim_socket:{name}: a second writer process is not supported"
+        )));
+    }
+    Ok(None)
+}
+
+/// Run `prim_socket:nif_sendv(Socket, IOV, Ref)`, as `nif_sendv`
+/// (`prim_socket_nif.c:6777-6822`) and `essio_sendv`
+/// (`unix_socket_syncio.c:3361-3524`) do: `badarg` for a term that is not a
+/// socket or a `Ref` that is not a reference; `{error, closed}`;
+/// `{error, {invalid, state}}` during a connect; `{invalid, iov}` for an
+/// `IOV` that `enif_inspect_iovec` does not take (`erl_nif.c:4092-4152`),
+/// or for more than `iov_max` elements on a socket that is not a stream
+/// socket; then one `writev(2)` of the first `iov_max` elements
+/// (`unix_socket_syncio.c:254`, `3509`) with the results of [`send`], and
+/// `{iov, Written}` without a select when the host takes each byte and more
+/// elements follow (`unix_socket_syncio.c:6920-6931`, `7151-7155`).
+///
+/// # Errors
+///
+/// The errors of [`send`].
+pub(super) fn sendv(
+    scheduler: &mut Scheduler,
+    socket: &Term,
+    iov: &Term,
+    reference: &Term,
+) -> Result<BifResult, BeamError> {
+    let Some((key, socket)) = socket_argument(scheduler, socket) else {
+        return Ok(BifResult::badarg());
+    };
+    let Term::Reference(_) = reference else {
+        return Ok(BifResult::badarg());
+    };
+    let caller = scheduler.current_process().id;
+    let mut state = lock(&socket);
+    if let Some(result) = write_entry(scheduler, &state, "nif_sendv/3", caller)? {
+        return Ok(result);
+    }
+    let Some((buffers, data_in_tail)) = iovec(iov) else {
+        drop(state);
+        return Ok(invalid(atom(scheduler, "iov")?));
+    };
+    if data_in_tail && state.kind != libc::SOCK_STREAM {
+        drop(state);
+        return Ok(invalid(atom(scheduler, "iov")?));
+    }
+    let size = buffers.iter().map(|buffer| buffer.len()).sum();
+    let slices: Vec<IoSlice<'_>> = buffers.iter().map(|buffer| IoSlice::new(buffer)).collect();
+    state.counters.write_tries += 1;
+    let host = state
+        .socket
+        .as_ref()
+        .expect("an open socket has a host socket");
+    let sent = nix::sys::uio::writev(host, &slices).map_err(io::Error::from);
+    let request = (key, caller, reference);
+    send_result(scheduler, state, sent, size, data_in_tail, request)
+}
+
+/// Return the bytes of the binaries that are not empty in the first
+/// `iov_max` elements of `iov` and whether more elements follow, as
+/// `examine_iovec_term` reads them (`erl_nif.c:4092-4152`): an empty binary
+/// gives no `writev(2)` entry, so `[<<>>]` gives no entry. Return `None`
+/// for a term that is not a list, an element that is not a binary, or an
+/// improper tail. A tail after
+/// `iov_max` elements counts as data even when it holds only empty
+/// binaries: `essio_sendv` sets `dataInTail` before it skips them
+/// (`unix_socket_syncio.c:3414`, `3451-3461`).
+fn iovec(iov: &Term) -> Option<(Vec<&[u8]>, bool)> {
+    let mut elements = iov.list_iter()?;
+    let mut buffers = Vec::new();
+    for element in elements.by_ref().take(IOV_MAX) {
+        let bytes = element.binary_bytes()?;
+        if !bytes.is_empty() {
+            buffers.push(bytes);
+        }
+    }
+    let tail = elements.rest();
+    match tail {
+        Term::Nil => Some((buffers, false)),
+        Term::Cons(_) => Some((buffers, true)),
+        _ => None,
+    }
+}
+
+/// Handle the result `sent` of a send of `size` bytes, as
+/// `send_check_result` does (`unix_socket_syncio.c:6868-6945`): a partial
+/// write or `EAGAIN` makes the write select; each byte written with
+/// `data_in_tail` gives `{iov, Written}`; each byte written gives `ok`; and
+/// another errno gives `{error, Errno}`.
+fn send_result(
+    scheduler: &mut Scheduler,
+    mut state: MutexGuard<'_, SocketState>,
+    sent: io::Result<usize>,
+    size: usize,
+    data_in_tail: bool,
+    (key, caller, reference): (Reference, ProcessId, &Term),
+) -> Result<BifResult, BeamError> {
     match sent {
-        Ok(written) if written < bytes.len() => Ok(send_retry(
+        Ok(written) if written < size => Ok(send_retry(
             scheduler,
             state,
             Some(written),
@@ -198,6 +318,19 @@ fn write(
             caller,
             reference,
         )),
+        Ok(written) if data_in_tail => {
+            // `send_check_retry` with the `sendRef` `iov`
+            // (`unix_socket_syncio.c:7091-7155`).
+            state.counters.write_pkg_max_count += written as u64;
+            let iov = atom(scheduler, "iov")?;
+            let mut writer = state.writer.take();
+            make_current(scheduler, &mut writer, caller, &iov, key);
+            state.writer = writer;
+            Ok(BifResult::Value(Term::tuple(vec![
+                iov,
+                Term::Integer(written as i64),
+            ])))
+        }
         Ok(written) => {
             let counters = &mut state.counters;
             counters.write_pkg += 1;
@@ -467,9 +600,12 @@ pub(super) fn recv(
 /// that gives `{select_read, ...}` is not supported, so it keeps its
 /// default `false` (`prim_socket_nif.c:17070`).
 ///
+/// `Flags` other than 0 go to `recvmsg(2)` (see [`recv_flagged`]).
+///
 /// # Errors
 ///
-/// The errors of [`recv`], and `Flags` other than 0 stop the run.
+/// The errors of [`recv`], and `Flags` other than 0 on a socket for which
+/// [`flagged_source_known`] is `false` stop the run.
 pub(super) fn recvfrom(
     scheduler: &mut Scheduler,
     socket: &Term,
@@ -494,23 +630,25 @@ pub(super) fn recvfrom(
     if let Some(result) = read_entry(scheduler, &state, name, caller)? {
         return Ok(result);
     }
-    // `essio_recvfrom` calls `recvfrom(2)` with the flags
-    // (unix_socket_syncio.c:3925-3927). The safe `recvfrom` of nix has no
-    // flags, and the safe `recvmsg` of nix gives an address that it does not
-    // initialize when the kernel gives none, as on a TCP socket.
-    if flags != 0 {
-        return Err(error(format!(
-            "prim_socket:{name}: the flags {flags} are not supported: see \"NIF stubs\" in docs/erts-differences.md"
-        )));
-    }
     let mut buffer = vec![0; buffer_size(size)];
-    state.counters.read_tries += 1;
+    let received = if flags == 0 {
+        state.counters.read_tries += 1;
+        let host = state
+            .socket
+            .as_ref()
+            .expect("an open socket has a host socket");
+        nix::sys::socket::recvfrom::<SockaddrStorage>(host.as_raw_fd(), &mut buffer)
+    } else {
+        if !flagged_source_known(&state, flags) {
+            return Err(error(format!(
+                "prim_socket:{name}: the flags {flags} on a socket of the domain {} are not supported: see \"NIF stubs\" in docs/erts-differences.md",
+                state.domain
+            )));
+        }
+        state.counters.read_tries += 1;
+        recv_flagged(&state, &mut buffer, flags)
+    };
     let stream = state.kind == libc::SOCK_STREAM;
-    let host = state
-        .socket
-        .as_ref()
-        .expect("an open socket has a host socket");
-    let received = nix::sys::socket::recvfrom::<SockaddrStorage>(host.as_raw_fd(), &mut buffer);
     let (read, from) = match received.map_err(io::Error::from) {
         Ok((0, _)) if stream => return Ok(end_of_stream(state)),
         Ok(received) => received,
@@ -529,6 +667,56 @@ pub(super) fn recvfrom(
         Term::static_atom("ok"),
         Term::tuple(vec![from, Term::binary(buffer)]),
     ])))
+}
+
+/// Return whether the kernel gives the source address of a receive with
+/// `flags` other than 0 on the socket of `state` each time, or never: always
+/// on an inet or inet6 socket that is not a stream socket, and never on an
+/// inet or inet6 TCP stream socket (the protocol 0 is TCP on macOS, which
+/// has no `SO_PROTOCOL`). The safe `recvmsg` of nix reads an address that it
+/// does not initialize when the kernel gives one of length 0, as on a local
+/// socket of an unbound peer, on another stream protocol such as MPTCP, or
+/// with `MSG_ERRQUEUE` on Linux, so these receives are not supported (row
+/// "NIF stubs"). Another stream protocol such as SCTP gives an address.
+fn flagged_source_known(state: &SocketState, flags: i32) -> bool {
+    let tcp = state.kind != libc::SOCK_STREAM || matches!(state.protocol, 0 | libc::IPPROTO_TCP);
+    matches!(state.domain, libc::AF_INET | libc::AF_INET6) && tcp && !errqueue(flags)
+}
+
+/// Return whether `flags` hold the flag `MSG_ERRQUEUE` of Linux.
+#[cfg(target_os = "linux")]
+fn errqueue(flags: i32) -> bool {
+    flags & libc::MSG_ERRQUEUE != 0
+}
+
+/// Return `false`: the host has no flag `MSG_ERRQUEUE`.
+#[cfg(not(target_os = "linux"))]
+fn errqueue(_flags: i32) -> bool {
+    false
+}
+
+/// Receive one message with `flags` other than 0 into `buffer`, as the
+/// `recvfrom(2)` of `essio_recvfrom` does (`unix_socket_syncio.c:3925-3927`),
+/// with `recvmsg(2)`: the TCP stream socket gives no address, and another socket
+/// gives the address of the sender (see [`flagged_source_known`]).
+fn recv_flagged(
+    state: &SocketState,
+    buffer: &mut [u8],
+    flags: i32,
+) -> nix::Result<(usize, Option<SockaddrStorage>)> {
+    let host = state
+        .socket
+        .as_ref()
+        .expect("an open socket has a host socket");
+    let mut slices = [IoSliceMut::new(buffer)];
+    let flags = MsgFlags::from_bits_retain(flags);
+    if state.kind == libc::SOCK_STREAM {
+        let received = nix::sys::socket::recvmsg::<()>(host.as_raw_fd(), &mut slices, None, flags)?;
+        return Ok((received.bytes, None));
+    }
+    let received =
+        nix::sys::socket::recvmsg::<SockaddrStorage>(host.as_raw_fd(), &mut slices, None, flags)?;
+    Ok((received.bytes, received.address))
 }
 
 /// Count the failed read at the end of a stream, release the current
