@@ -453,7 +453,7 @@ const AMBIENT: &[&str] = &[
 /// `effect_probe:ambient/0` also calls each entry once. `null_read/0` and
 /// `buffer/0` call the `prim_buffer` entries, and `buffer/0` calls
 /// `peek_head/1` and `copying_read/2` through `prim_buffer:read/2`.
-const LATER: [&str; 29] = [
+const LATER: [&str; 36] = [
     "prim_buffer:copying_read/2",
     "prim_buffer:find_byte_index/2",
     "prim_buffer:new/0",
@@ -483,6 +483,13 @@ const LATER: [&str; 29] = [
     "prim_file:set_permissions_nif/2",
     "prim_file:set_time_nif/4",
     "prim_file:write_nif/2",
+    "prim_socket:nif_bind/2",
+    "prim_socket:nif_close/1",
+    "prim_socket:nif_finalize_close/1",
+    "prim_socket:nif_info/0",
+    "prim_socket:nif_info/1",
+    "prim_socket:nif_open/4",
+    "prim_socket:nif_sockname/1",
 ];
 
 /// Return the entry and the cell of the column "Capability" of each row of
@@ -1303,4 +1310,55 @@ fn compares_the_program_name_of_a_port_for_its_information() {
         run(&program, "inspect_names", &AllowAll),
         atoms(&program, &["ok", "denied"])
     );
+}
+
+#[test]
+fn stops_the_run_for_a_socket_open_by_a_runtime_process_in_a_run_with_a_policy() {
+    // No capability permits a network effect yet (M6 is postponed), so
+    // `prim_socket:nif_open/4` stops the run, as an inet port does (row
+    // "NIF stubs" of docs/erts-differences.md).
+    let error = program()
+        .execute_with_policy("effect_probe", "socket_open", &[], &Grants(vec![]))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.starts_with("unsupported prim_socket:nif_open/4 in a run with a policy"),
+        "{error}"
+    );
+}
+
+#[test]
+fn stops_the_run_for_a_socket_bind_to_a_native_family() {
+    // ERTS decodes a `sockaddr` of the family `unspec` or of a family number
+    // as a native `sockaddr` (socket_util.c:484-548) and gives
+    // `{error, einval}` for these maps. PBeam does not decode a native
+    // `sockaddr` and stops the run (row "NIF stubs" of
+    // docs/erts-differences.md).
+    for function in ["socket_bind_unspec", "socket_bind_family_number"] {
+        let error = program()
+            .execute("effect_probe", function, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("unsupported prim_socket sockaddr of the family unspec"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn stops_the_run_for_a_socket_open_with_netns_on_linux_and_ignores_it_on_macos() {
+    // ERTS on Linux enters the network namespace of `netns` before
+    // `socket(2)` (unix_socket_syncio.c:1729-1745), and PBeam stops the run.
+    // The macOS build has no `HAVE_SETNS` and ignores the option.
+    let result = program().execute("effect_probe", "socket_open_netns", &[]);
+    if cfg!(target_os = "linux") {
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.starts_with("prim_socket:nif_open/4 option netns is not supported"),
+            "{error}"
+        );
+    } else {
+        result.unwrap();
+    }
 }

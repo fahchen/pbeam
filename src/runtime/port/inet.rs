@@ -86,6 +86,15 @@ const AF_INET: u8 = 1;
 /// The family code of IPv6 (`INET_AF_INET6`, inet_int.hrl:32).
 const AF_INET6: u8 = 2;
 
+/// The family code of the `local` family (`INET_AF_LOCAL`, inet_int.hrl:35).
+const AF_LOCAL: u8 = 5;
+
+/// The size of `sun_path` of `struct sockaddr_un` on the host.
+#[cfg(target_os = "linux")]
+const SUN_PATH: usize = 108;
+#[cfg(not(target_os = "linux"))]
+const SUN_PATH: usize = 104;
+
 /// The state of the socket of a port (`INET_STATE_*`, inet_drv.c).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
@@ -385,7 +394,7 @@ impl Inet {
             1 => self.open(request)?,
             4 => self.peer(),
             5 => self.name(),
-            6 => self.bind(request)?,
+            6 => self.bind(request),
             7 => {
                 let old = self.active;
                 let mut count = 0;
@@ -397,7 +406,7 @@ impl Inet {
             }
             8 => self.get_options(request)?,
             11 => return Ok(self.statistics(request)),
-            3 if self.socket_type == SocketType::Stream => return self.connect(request, caller),
+            3 if self.socket_type == SocketType::Stream => return Ok(self.connect(request, caller)),
             3 => self.datagram_connect(request)?,
             12 => get_host_name(request),
             24 => return Ok(self.subscribe(request, caller)),
@@ -436,10 +445,11 @@ impl Inet {
         let &[family, kind, protocol] = request else {
             return Ok(error_reply("einval"));
         };
-        // A `tcp_inet` port takes IPv6 (inet_drv.c:11969-11984).
+        // A `tcp_inet` port takes IPv6 and `local` (inet_drv.c:11969-11984).
         let domain = match family {
             AF_INET => Domain::IPV4,
             AF_INET6 if self.socket_type == SocketType::Stream => Domain::IPV6,
+            AF_LOCAL if self.socket_type == SocketType::Stream => Domain::UNIX,
             2 | 5 => return Err(self.unsupported("family", family)),
             _ => return Ok(error_reply("eafnosupport")),
         };
@@ -489,12 +499,14 @@ impl Inet {
         socket_type: Type,
         protocol: Option<Protocol>,
     ) -> io::Result<()> {
+        // A `local` socket takes the protocol 0 (inet_drv.c:5167).
+        let protocol = protocol.filter(|_| domain != Domain::UNIX);
         let socket = Socket::new(domain, socket_type, protocol)?;
         let _ = socket.set_nonblocking(true);
-        self.family = if domain == Domain::IPV6 {
-            AF_INET6
-        } else {
-            AF_INET
+        self.family = match domain {
+            Domain::IPV6 => AF_INET6,
+            Domain::UNIX => AF_LOCAL,
+            _ => AF_INET,
         };
         self.socket = Some(socket);
         self.state = State::Open;
@@ -509,6 +521,11 @@ impl Inet {
         let Some(socket) = &self.socket else {
             return error_reply("ebadf");
         };
+        if self.family == AF_LOCAL {
+            return reply(local_name(socket, nix::sys::socket::getsockname), |name| {
+                [&[OK][..], &name].concat()
+            });
+        }
         reply(socket.local_addr(), |address| {
             [&[OK][..], &address_bytes(&address)].concat()
         })
@@ -521,6 +538,11 @@ impl Inet {
         let (State::Connected, Some(socket)) = (self.state, &self.socket) else {
             return error_reply("enotconn");
         };
+        if self.family == AF_LOCAL {
+            return reply(local_name(socket, nix::sys::socket::getpeername), |name| {
+                [&[OK][..], &name].concat()
+            });
+        }
         reply(socket.peer_addr(), |address| {
             [&[OK][..], &address_bytes(&address)].concat()
         })
@@ -542,20 +564,20 @@ impl Inet {
     /// (inet_drv.c:11409-11437; `inet_set_faddress`, inet_drv.c:4795-4880):
     /// bind the socket, and reply with the port number, which the host
     /// selects for port 0.
-    fn bind(&mut self, request: &[u8]) -> Result<Vec<u8>, BeamError> {
+    fn bind(&mut self, request: &[u8]) -> Vec<u8> {
         if request.len() < 2 {
-            return Ok(error_reply("einval"));
+            return error_reply("einval");
         }
         if self.state != State::Open {
-            return Ok(error_reply("exbadport"));
+            return error_reply("exbadport");
         }
-        let local = match self.address(request, "bind")? {
+        let local = match self.address(request) {
             Ok(local) => local,
-            Err(reply) => return Ok(reply),
+            Err(reply) => return reply,
         };
         let port = local.as_socket().map_or(0, |address| address.port());
         let socket = self.socket.as_ref().expect("an open port has a socket");
-        Ok(reply(socket.bind(&local), |()| {
+        reply(socket.bind(&local), |()| {
             let port = match port {
                 0 => socket
                     .local_addr()
@@ -565,7 +587,7 @@ impl Inet {
                 port => port,
             };
             [&[OK][..], &port.to_be_bytes()].concat()
-        }))
+        })
     }
 
     /// Read the address of a request of at least 2 bytes, as
@@ -574,22 +596,18 @@ impl Inet {
     /// C, D]` for IPv4, `[2, P1, P0, A1, ..., A16, F3, ..., F0, S3, ...,
     /// S0]` for IPv6 with the flow info and the scope id, and `[3, P1, P0]`
     /// (`any`) and `[4, P1, P0]` (`loopback`) for the address of the
-    /// family of the socket. The family code `local` (5) is not
-    /// implemented, an unknown code gives `eafnosupport`, and a short
-    /// address `einval`.
+    /// family of the socket, and `[5, N, B1, ..., BN]` for the `local`
+    /// file name of N bytes. An unknown code gives `eafnosupport`, and a
+    /// short address `einval`.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let address = port.address(&[1, 0, 80, 127, 0, 0, 1], "bind")?;
+    /// let address = port.address(&[1, 0, 80, 127, 0, 0, 1]);
     /// assert_eq!(address.map(|a| a.as_socket()), Ok(Some("127.0.0.1:80".parse().unwrap())));
-    /// assert_eq!(port.address(&[9, 0], "bind")?, Err(b"\0eafnosupport".to_vec()));
+    /// assert_eq!(port.address(&[9, 0]), Err(b"\0eafnosupport".to_vec()));
     /// ```
-    ///
-    /// # Errors
-    ///
-    /// The family code 5, which PBeam does not run.
-    fn address(&self, request: &[u8], what: &str) -> Result<Result<SockAddr, Vec<u8>>, BeamError> {
+    fn address(&self, request: &[u8]) -> Result<SockAddr, Vec<u8>> {
         use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
         let (&tag, address) = request.split_first().expect("a request of 2 bytes");
         let address: SockAddr = match (tag, address) {
@@ -608,17 +626,20 @@ impl Inet {
             (3 | 4, &[p1, p0, ..]) => {
                 let port = u16::from_be_bytes([p1, p0]);
                 match (self.family, tag) {
+                    // `inet_set_faddress` has no `any` or `loopback` of
+                    // `AF_UNIX` (inet_drv.c:4822-4872).
+                    (AF_LOCAL, _) => return Err(error_reply("einval")),
                     (AF_INET6, 3) => SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0).into(),
                     (AF_INET6, _) => SocketAddrV6::new(Ipv6Addr::LOCALHOST, port, 0, 0).into(),
                     (_, 3) => SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port).into(),
                     _ => SocketAddrV4::new(Ipv4Addr::LOCALHOST, port).into(),
                 }
             }
-            (AF_INET | AF_INET6 | 3 | 4, _) => return Ok(Err(error_reply("einval"))),
-            (5, _) => return Err(self.unsupported(&format!("{what} address family"), tag)),
-            _ => return Ok(Err(error_reply("eafnosupport"))),
+            (AF_LOCAL, &[n, ref name @ ..]) => local_address(n, name)?,
+            (AF_INET | AF_INET6 | 3 | 4 | AF_LOCAL, _) => return Err(error_reply("einval")),
+            _ => return Err(error_reply("eafnosupport")),
         };
-        Ok(Ok(address))
+        Ok(address)
     }
 
     /// Run `INET_REQ_SETOPTS` (inet_set_opts, inet_drv.c:6871-7530): set
@@ -1135,6 +1156,53 @@ impl Inet {
             socket.set_priority(value as u32)
         })
     }
+}
+
+/// Read the `local` address of the file name of `n` bytes at the start of
+/// `name`, as `inet_set_address` does (inet_drv.c:4748-4778): fewer than
+/// `n` bytes, or a name with its terminating zero byte longer than
+/// `sun_path`, give `einval`. On Linux a name that starts with a zero
+/// byte is an abstract address, which has no terminating zero byte.
+fn local_address(n: u8, name: &[u8]) -> Result<SockAddr, Vec<u8>> {
+    use std::os::unix::ffi::OsStrExt;
+    let name = name.get(..n.into()).ok_or_else(|| error_reply("einval"))?;
+    let terminator = usize::from(!(cfg!(target_os = "linux") && name.first() == Some(&0)));
+    if name.len() + terminator > SUN_PATH {
+        return Err(error_reply("einval"));
+    }
+    Ok(SockAddr::unix(std::ffi::OsStr::from_bytes(name)).expect("a name that fits sun_path"))
+}
+
+/// Return `[5, N, B1, ..., BN]` of the `local` address that `get` reads
+/// from `socket`, as `inet_get_address` gives it (inet_drv.c:4915-4936):
+/// the name ends at its first zero byte, except a Linux abstract name,
+/// which starts with a zero byte, and an unnamed address gives the empty
+/// name. `nix` keeps each byte of the length that the host gives, which
+/// on macOS has no terminating zero byte for a name that ERTS binds
+/// (inet_drv.c:4772).
+fn local_name(
+    socket: &Socket,
+    get: fn(std::os::fd::RawFd) -> nix::Result<nix::sys::socket::UnixAddr>,
+) -> io::Result<Vec<u8>> {
+    use std::os::{fd::AsRawFd, unix::ffi::OsStrExt};
+    let address = get(socket.as_raw_fd())?;
+    #[cfg(target_os = "linux")]
+    let abstract_name = address.as_abstract();
+    #[cfg(not(target_os = "linux"))]
+    let abstract_name: Option<&[u8]> = None;
+    let name: Vec<u8> = match (address.path(), abstract_name) {
+        (Some(path), _) => path
+            .as_os_str()
+            .as_bytes()
+            .iter()
+            .copied()
+            .take_while(|&byte| byte != 0)
+            .collect(),
+        (None, Some(name)) => [&[0][..], name].concat(),
+        (None, None) => Vec::new(),
+    };
+    let length = u8::try_from(name.len()).expect("a name that fits sun_path");
+    Ok([&[AF_LOCAL, length][..], &name].concat())
 }
 
 /// Return `[1, P1, P0, A, B, C, D]` of an IPv4 address and `[2, P1, P0,

@@ -109,6 +109,7 @@ open() ->
 unsupported(stream) -> open_with([1, 1, 0]);
 unsupported(seqpacket) -> open_with([1, 3, 0]);
 unsupported(sctp) -> open_with([1, 2, 3]);
+unsupported(local) -> open_with([5, 2, 0]);
 unsupported(inet6) ->
     {ok, S} = udp(),
     command(S, [2, 0, 1 | lists:duplicate(16, 0)] ++ [0, 0, 0, 0]);
