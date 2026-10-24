@@ -657,10 +657,8 @@ pub(super) fn source_term(
 ) -> Result<Term, BeamError> {
     let Some(from) = from else {
         let family = domain_term(scheduler, libc::AF_UNSPEC)?;
-        let entries = pairs(
-            scheduler,
-            &[("family", family), ("addr", Term::binary(Vec::new()))],
-        )?;
+        let addr = Term::binary(Vec::new());
+        let entries = pairs(scheduler, &[("family", family), ("addr", addr)])?;
         return Ok(map(scheduler, entries));
     };
     if let Some(address) = from.as_unix_addr() {
