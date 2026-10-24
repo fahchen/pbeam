@@ -326,3 +326,45 @@ fn runs_the_local_family_as_pinned_erts() {
         );
     }
 }
+
+#[test]
+fn gives_the_peer_name_of_a_local_socket_that_erts_binds() {
+    // ERTS binds the name without its terminating zero byte
+    // (inet_drv.c:4772), and `inet_get_address` gives the name to its first
+    // zero byte (inet_drv.c:4921). The PBeam connect gives each byte.
+    let path = std::env::temp_dir().join(format!("pbeam-local-peer-{}", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let mut erts = Command::new("erl")
+        .args(["-noshell", "-eval"])
+        .arg(format!(
+            "{{ok, L}} = gen_tcp:listen(0, [{{ifaddr, {{local, \"{}\"}}}}]), \
+             io:format(\"ready~n\"), {{ok, _}} = gen_tcp:accept(L), halt().",
+            path.display()
+        ))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut ready = String::new();
+    BufReader::new(erts.stdout.take().unwrap())
+        .read_line(&mut ready)
+        .unwrap();
+    assert_eq!(ready, "ready\n");
+    let output = Command::new(env!("CARGO_BIN_EXE_pbeam"))
+        .args(["pbeam_boot", "start", "gen_tcp_local", "peer", "--root"])
+        .arg(otp_root())
+        .args(["--", GEN_TCP_LOCAL])
+        .args(BOOT_MODULES.map(pinned_beam_path))
+        .arg(boot_beam())
+        .env("PBEAM_LOCAL_PATH", &path)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    erts.wait().unwrap();
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "true\n",
+        "{output:?}"
+    );
+}

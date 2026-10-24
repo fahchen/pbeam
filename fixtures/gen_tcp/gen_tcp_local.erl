@@ -1,5 +1,5 @@
 -module(gen_tcp_local).
--export([main/0]).
+-export([main/0, peer/0]).
 
 %% Print the results of the `local` family at the file name in the
 %% environment variable PBEAM_LOCAL_PATH: a transfer, a connect to a name
@@ -51,3 +51,10 @@ abstract() ->
     ok = gen_tcp:close(C),
     ok = gen_tcp:close(L),
     Result.
+
+%% Print whether the peer name of a connect to the file name in
+%% PBEAM_LOCAL_PATH, where another runtime listens, is that file name.
+peer() ->
+    Path = os:getenv("PBEAM_LOCAL_PATH"),
+    {ok, C} = gen_tcp:connect({local, Path}, 0, [binary]),
+    io:format("~w~n", [inet:peername(C) =:= {ok, {local, list_to_binary(Path)}}]).

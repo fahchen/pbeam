@@ -520,6 +520,11 @@ impl Inet {
         let Some(socket) = &self.socket else {
             return error_reply("ebadf");
         };
+        if self.family == AF_LOCAL {
+            return reply(local_name(socket, nix::sys::socket::getsockname), |name| {
+                [&[OK][..], &name].concat()
+            });
+        }
         reply(socket.local_addr(), |address| {
             [&[OK][..], &address_bytes(&address)].concat()
         })
@@ -531,6 +536,11 @@ impl Inet {
         let (State::Connected, Some(socket)) = (self.state, &self.socket) else {
             return error_reply("enotconn");
         };
+        if self.family == AF_LOCAL {
+            return reply(local_name(socket, nix::sys::socket::getpeername), |name| {
+                [&[OK][..], &name].concat()
+            });
+        }
         reply(socket.peer_addr(), |address| {
             [&[OK][..], &address_bytes(&address)].concat()
         })
@@ -1155,29 +1165,43 @@ fn local_address(n: u8, name: &[u8]) -> Result<SockAddr, Vec<u8>> {
     Ok(SockAddr::unix(std::ffi::OsStr::from_bytes(name)).expect("a name that fits sun_path"))
 }
 
-/// Return `[1, P1, P0, A, B, C, D]` of an IPv4 address, `[2, P1, P0, A1,
-/// ..., A16]` of an IPv6 address, and `[5, N, B1, ..., BN]` of a `local`
-/// address, as `inet_get_address` gives them (inet_drv.c:4890-4936). The
-/// name of a `local` address ends at its first zero byte, except a Linux
-/// abstract name, which starts with a zero byte; an unnamed address gives
-/// the empty name.
-fn address_bytes(address: &SockAddr) -> Vec<u8> {
-    use std::os::unix::ffi::OsStrExt;
-    let Some(address) = address.as_socket() else {
-        let name: Vec<u8> = match (address.as_pathname(), address.as_abstract_namespace()) {
-            (Some(path), _) => path
-                .as_os_str()
-                .as_bytes()
-                .iter()
-                .copied()
-                .take_while(|&byte| byte != 0)
-                .collect(),
-            (None, Some(name)) => [&[0][..], name].concat(),
-            (None, None) => Vec::new(),
-        };
-        let length = u8::try_from(name.len()).expect("a name that fits sun_path");
-        return [&[AF_LOCAL, length][..], &name].concat();
+/// Return `[5, N, B1, ..., BN]` of the `local` address that `get` reads
+/// from `socket`, as `inet_get_address` gives it (inet_drv.c:4915-4936):
+/// the name ends at its first zero byte, except a Linux abstract name,
+/// which starts with a zero byte, and an unnamed address gives the empty
+/// name. `nix` keeps each byte of the length that the host gives, which
+/// on macOS has no terminating zero byte for a name that ERTS binds
+/// (inet_drv.c:4772).
+fn local_name(
+    socket: &Socket,
+    get: fn(std::os::fd::RawFd) -> nix::Result<nix::sys::socket::UnixAddr>,
+) -> io::Result<Vec<u8>> {
+    use std::os::{fd::AsRawFd, unix::ffi::OsStrExt};
+    let address = get(socket.as_raw_fd())?;
+    #[cfg(target_os = "linux")]
+    let abstract_name = address.as_abstract();
+    #[cfg(not(target_os = "linux"))]
+    let abstract_name: Option<&[u8]> = None;
+    let name: Vec<u8> = match (address.path(), abstract_name) {
+        (Some(path), _) => path
+            .as_os_str()
+            .as_bytes()
+            .iter()
+            .copied()
+            .take_while(|&byte| byte != 0)
+            .collect(),
+        (None, Some(name)) => [&[0][..], name].concat(),
+        (None, None) => Vec::new(),
     };
+    let length = u8::try_from(name.len()).expect("a name that fits sun_path");
+    Ok([&[AF_LOCAL, length][..], &name].concat())
+}
+
+/// Return `[1, P1, P0, A, B, C, D]` of an IPv4 address and `[2, P1, P0,
+/// A1, ..., A16]` of an IPv6 address, as `inet_get_address` gives them
+/// (inet_drv.c:4890-4913).
+fn address_bytes(address: &SockAddr) -> Vec<u8> {
+    let address = address.as_socket().expect("an IP socket");
     let (family, ip) = match address {
         std::net::SocketAddr::V4(address) => (AF_INET, address.ip().octets().to_vec()),
         std::net::SocketAddr::V6(address) => (AF_INET6, address.ip().octets().to_vec()),
