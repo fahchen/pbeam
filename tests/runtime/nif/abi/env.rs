@@ -11,7 +11,7 @@ fn gives_a_runtime_error_for_a_new_atom_when_the_atom_table_is_full() {
     while atoms.put(&format!("pbeam_full_{index}")).is_ok() {
         index += 1;
     }
-    let mut env = Env::new(&atoms, &[]);
+    let mut env = Env::new(&atoms, None, &[]);
     assert_eq!(env.make_atom(b"pbeam_new"), NON_VALUE);
     let Err(failure) = env.finish(NON_VALUE) else {
         panic!("the call did not fail");

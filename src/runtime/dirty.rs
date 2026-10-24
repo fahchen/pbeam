@@ -50,7 +50,7 @@ use super::{
     interpreter::BifResult,
     nif::abi,
     process::Priority,
-    scheduler::{Scheduler, run_queue::RunQueue},
+    scheduler::{Scheduler, node::Node, run_queue::RunQueue},
 };
 use crate::{
     error::{BeamError, error},
@@ -153,6 +153,10 @@ pub(super) enum Work {
         library: Arc<abi::Library>,
         /// The atom table of the process of the call.
         atoms: Arc<AtomTable>,
+        /// The node of the process of the call.
+        node: Arc<Node>,
+        /// The process of the call.
+        process: ProcessId,
         /// The index of the function in the functions of the library.
         index: usize,
         /// The arguments of the call.
@@ -183,9 +187,18 @@ impl Work {
             Work::Shared {
                 library,
                 atoms,
+                node,
+                process,
                 index,
                 arguments,
-            } => Output::Native(library.functions()[index].call(&atoms, &arguments)),
+            } => {
+                let caller = abi::Caller {
+                    process,
+                    atoms: &atoms,
+                    node: &node,
+                };
+                Output::Shared(library.functions()[index].call(caller, &arguments))
+            }
         }
     }
 }
@@ -200,6 +213,8 @@ pub(super) enum Output {
     Host(Finish),
     /// The result of an extension binding.
     Native(Result<NativeResult, BeamError>),
+    /// The end of a function of a NIF shared library.
+    Shared(abi::Called),
 }
 
 /// One call for a dirty thread.

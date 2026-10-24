@@ -21,15 +21,16 @@ use std::ffi::{CStr, c_char, c_double, c_int, c_long, c_uint, c_void};
 use std::sync::Arc;
 
 use super::Handle;
-use super::layout::{ErlNifBinary, NifTerm};
+use super::layout::{ErlNifBinary, ErlNifPid, NifTerm};
 use super::resource::{self, DtorFn, ResourceType};
+use super::{mutex, process};
 use crate::AtomTable;
 use crate::BeamError;
 use crate::Term;
 use crate::error::error;
 use crate::runtime::NativeResult;
 use crate::runtime::interpreter::bif::iodata_bytes;
-use crate::term::MAX_ATOM_CHARACTERS;
+use crate::term::{MAX_ATOM_CHARACTERS, ProcessId};
 
 /// `THE_NON_VALUE`: the handle that no term has.
 const NON_VALUE: NifTerm = 0;
@@ -78,6 +79,16 @@ static EXPORTS: Exports = Exports {
     keep_resource: enif_keep_resource,
     make_resource: enif_make_resource,
     get_resource: enif_get_resource,
+    alloc_env: process::enif_alloc_env,
+    free_env: process::enif_free_env,
+    self_pid: process::enif_self,
+    get_local_pid: process::enif_get_local_pid,
+    is_process_alive: process::enif_is_process_alive,
+    send: process::enif_send,
+    mutex_create: mutex::enif_mutex_create,
+    mutex_destroy: mutex::enif_mutex_destroy,
+    mutex_lock: mutex::enif_mutex_lock,
+    mutex_unlock: mutex::enif_mutex_unlock,
 };
 
 /// The type of [`EXPORTS`]: one field for each exported function.
@@ -124,6 +135,16 @@ struct Exports {
     make_resource: unsafe extern "C" fn(*mut Env, *mut c_void) -> NifTerm,
     get_resource:
         unsafe extern "C" fn(*mut Env, NifTerm, *const ResourceType, *mut *mut c_void) -> c_int,
+    alloc_env: extern "C" fn() -> *mut Env,
+    free_env: unsafe extern "C" fn(*mut Env),
+    self_pid: unsafe extern "C" fn(*mut Env, *mut ErlNifPid) -> *mut ErlNifPid,
+    get_local_pid: unsafe extern "C" fn(*mut Env, NifTerm, *mut ErlNifPid) -> c_int,
+    is_process_alive: unsafe extern "C" fn(*mut Env, *const ErlNifPid) -> c_int,
+    send: unsafe extern "C" fn(*mut Env, *const ErlNifPid, *mut Env, NifTerm) -> c_int,
+    mutex_create: extern "C" fn(*mut c_char) -> *mut c_void,
+    mutex_destroy: unsafe extern "C" fn(*mut c_void),
+    mutex_lock: unsafe extern "C" fn(*mut c_void),
+    mutex_unlock: unsafe extern "C" fn(*mut c_void),
 }
 
 /// The term of one handle of an [`Env`].
@@ -145,6 +166,9 @@ enum Slot {
 pub(crate) struct Env {
     /// The atom table of the process of the call.
     atoms: Arc<AtomTable>,
+    /// The process of the call, or `None` for an env with no process: an
+    /// env of `enif_alloc_env` or of a destructor.
+    process: Option<ProcessId>,
     /// The term of each handle, in handle order.
     slots: Vec<Slot>,
     /// The reason of `enif_raise_exception`, or `None`.
@@ -184,12 +208,17 @@ impl Env {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let env = Env::new(&[Term::Integer(1)]);
+    /// let env = Env::new(&atoms, Some(caller), &[Term::Integer(1)]);
     /// assert_eq!(env.handles(), [1]);
     /// ```
-    pub(super) fn new(atoms: &Arc<AtomTable>, arguments: &[Term]) -> Self {
+    pub(super) fn new(
+        atoms: &Arc<AtomTable>,
+        process: Option<ProcessId>,
+        arguments: &[Term],
+    ) -> Self {
         Self {
             atoms: Arc::clone(atoms),
+            process,
             slots: arguments.iter().cloned().map(Slot::Term).collect(),
             exception: None,
             unsupported: None,
@@ -199,12 +228,22 @@ impl Env {
         }
     }
 
-    /// Return the env of the load callback of the library `library`, with
-    /// the load info `info` as the handle 1.
-    pub(super) fn load(atoms: &Arc<AtomTable>, info: &Term, library: &Arc<Handle>) -> Self {
-        let mut env = Self::new(atoms, std::slice::from_ref(info));
+    /// Return the env of the load callback of the library `library` in the
+    /// process `process`, with the load info `info` as the handle 1.
+    pub(super) fn load(
+        atoms: &Arc<AtomTable>,
+        process: ProcessId,
+        info: &Term,
+        library: &Arc<Handle>,
+    ) -> Self {
+        let mut env = Self::new(atoms, Some(process), std::slice::from_ref(info));
         env.library = Some(Arc::clone(library));
         env
+    }
+
+    /// Return the process of the env, or `None` for an env with no process.
+    pub(super) fn process(&self) -> Option<ProcessId> {
+        self.process
     }
 
     /// Return the handles of the arguments, the `argv` of the call.
@@ -227,7 +266,7 @@ impl Env {
     /// Return the term of `handle`, or `None` for `THE_NON_VALUE` and for a
     /// handle that no term of the env has. The term of a binary of
     /// `enif_make_new_binary` has the bytes that the NIF wrote so far.
-    fn get(&self, handle: NifTerm) -> Option<Term> {
+    pub(super) fn get(&self, handle: NifTerm) -> Option<Term> {
         self.slot(handle).map(|slot| match slot {
             Slot::Term(term) => term.clone(),
             Slot::Buffer(bytes) => Term::binary(bytes.clone()),
@@ -386,7 +425,7 @@ fn byte_of(element: &Term) -> Option<u8> {
 /// or load callback, which is alive and has no other reference while the
 /// call runs. The C API allows an `enif_*` call only with the env of the
 /// current call (`erl_nif.h`, "ErlNifEnv").
-unsafe fn env<'a>(env: *mut Env) -> &'a mut Env {
+pub(super) unsafe fn env<'a>(env: *mut Env) -> &'a mut Env {
     // SAFETY: the caller gives a valid and unique `Env`, as the function
     // documents.
     unsafe { &mut *env }

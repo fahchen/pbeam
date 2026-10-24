@@ -4,7 +4,7 @@ use std::process::Command;
 use super::*;
 
 /// The C program that prints the size of `ERL_NIF_TERM`, `ErlNifFunc`,
-/// `ErlNifEntry`, and `ErlNifBinary`, and the offset of each field, one value for each line.
+/// `ErlNifEntry`, `ErlNifBinary`, and `ErlNifPid`, and the offset of each field, one value for each line.
 const PROGRAM: &str = r#"
 #include <stddef.h>
 #include <stdio.h>
@@ -37,6 +37,7 @@ int main(void)
     printf("%zu\n", offsetof(ErlNifBinary, data));
     printf("%zu\n", offsetof(ErlNifBinary, ref_bin));
     printf("%zu\n", offsetof(ErlNifBinary, __spare__));
+    printf("%zu\n", sizeof(ErlNifPid));
     return 0;
 }
 "#;
@@ -96,6 +97,7 @@ fn mirrors_the_layout_of_the_vendored_erl_nif_header() {
             offset_of!(ErlNifBinary, data),
             offset_of!(ErlNifBinary, ref_bin),
             offset_of!(ErlNifBinary, spare),
+            size_of::<ErlNifPid>(),
         ]
     );
 }

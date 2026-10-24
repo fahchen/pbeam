@@ -192,6 +192,10 @@ name = "nif_resources"
 path = "tests/integration/nif_resources.rs"
 
 [[test]]
+name = "nif_messages"
+path = "tests/integration/nif_messages.rs"
+
+[[test]]
 name = "extension_library"
 path = "tests/integration/extension_library.rs"
 
