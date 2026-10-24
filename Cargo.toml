@@ -822,3 +822,7 @@ path = "tests/integration/chksum.rs"
 [[test]]
 name = "net"
 path = "tests/integration/net.rs"
+
+[[test]]
+name = "erts_debug_size"
+path = "tests/integration/erts_debug_size.rs"

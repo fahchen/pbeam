@@ -2007,3 +2007,90 @@ pub(super) fn term_to_string(atoms: &AtomTable, term: &Term, limit: &Term) -> Bi
         text.into_iter().map(|byte| Term::Integer(i64::from(byte))),
     ))
 }
+
+/// Return the ERTS name of the kind of `term`, as
+/// `erts_internal:term_type/1` does (`erl_map.c:3336-3417`). PBeam does
+/// not keep the ERTS form of a binary (heap, reference-counted, or
+/// sub-binary), so a binary and a native record raise an unsupported error
+/// (`docs/erts-differences.md`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(term_type(&atoms, &Term::Nil)?, Value(Term::static_atom("nil")));
+/// ```
+pub(super) fn term_type(atoms: &AtomTable, term: &Term) -> Result<BifResult, BeamError> {
+    let name = match term {
+        Term::Cons(_) => "list",
+        Term::Tuple(_) => "tuple",
+        Term::Fun(fun) => match fun.target() {
+            Target::Local(_) => "fun",
+            Target::External { .. } => "export",
+        },
+        Term::Map(map) if map.is_hashmap() => "hashmap",
+        Term::Map(_) => "flatmap",
+        Term::Integer(_) if term.small_integer().is_some() => "fixnum",
+        Term::Integer(_) | Term::BigInt(_) => "bignum",
+        Term::Reference(_) => "reference",
+        Term::Float(_) => "hfloat",
+        Term::Pid(_) => "pid",
+        Term::Port(_) => "port",
+        Term::Atom(_) => "atom",
+        Term::Nil => "nil",
+        Term::Binary(_) | Term::Record(_) | Term::MatchContext(_) => {
+            return Err(error(
+                "erts_internal:term_type/1 cannot name the ERTS form of a binary or a native record"
+                    .to_owned(),
+            ));
+        }
+    };
+    Ok(Value(Term::Atom(atoms.put(name)?)))
+}
+
+/// Return the key tuple of a flatmap, as
+/// `erts_internal:map_to_tuple_keys/1` does (`erl_map.c:3318-3328`): a
+/// hashmap raises `error:badarg`, and another term raises
+/// `error:{badmap, Term}`. The empty map gives the empty tuple. PBeam keeps
+/// no key tuple, and ERTS shares one key tuple between flatmaps, so a new
+/// tuple would give a wrong `erts_debug:size/1`: a flatmap with keys stops
+/// the run with an unsupported error (`docs/erts-differences.md`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(map_to_tuple_keys(&Term::Map(Map::new()))?, Value(Term::tuple(vec![])));
+/// ```
+pub(super) fn map_to_tuple_keys(term: &Term) -> Result<BifResult, BeamError> {
+    let Term::Map(map) = term else {
+        return Ok(maps::error_with("badmap", term));
+    };
+    match map.flat_pairs() {
+        Some([]) => Ok(Value(Term::tuple(vec![]))),
+        Some(_) => Err(error(
+            "erts_internal:map_to_tuple_keys/1 cannot give the shared key tuple of a flatmap"
+                .to_owned(),
+        )),
+        None => Ok(BifResult::badarg()),
+    }
+}
+
+/// Return whether `left` and `right` are one ERTS term word, as
+/// `erts_debug:same/2` does (`beam_debug.c:65-68`). Two equal copies of a
+/// term that ERTS boxes and PBeam does not, such as a float, stop the run
+/// with an unsupported error, because PBeam cannot tell them apart
+/// (`docs/erts-differences.md`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(erts_debug_same(&Term::Nil, &Term::Nil)?, Value(Term::static_atom("true")));
+/// ```
+pub(super) fn erts_debug_same(left: &Term, right: &Term) -> Result<BifResult, BeamError> {
+    match left.same_object(right) {
+        Some(same) => Ok(Value(Term::static_atom(if same { "true" } else { "false" }))),
+        None => Err(error(
+            "erts_debug:same/2 cannot tell two equal copies of a float, a reference, or a 64-bit bignum apart"
+                .to_owned(),
+        )),
+    }
+}
