@@ -219,7 +219,7 @@ fn chunk_end(
 /// Return a runtime error when the references of the run are used up.
 pub(super) fn finish(
     context: &mut BifContext<'_>,
-    (table, id): (&Term, Reference),
+    table: &Term,
     spec: &MatchSpec,
     chunk: i64,
     reverse: bool,
@@ -234,7 +234,7 @@ pub(super) fn finish(
             return Ok(program);
         }
         let program = context.scheduler.make_magic_ref()?;
-        (context.scheduler.ets.exclusive()).remember_program(id, program, spec.clone());
+        (context.scheduler.ets.exclusive()).remember_program(program, spec.clone());
         Ok::<_, BeamError>(program)
     };
     let continuation = |last, end, program, accum, got| {
@@ -524,7 +524,7 @@ pub(super) fn select_delete_next(
 /// Return a runtime error when the references of the run are used up.
 pub(super) fn delete_finish(
     context: &mut BifContext<'_>,
-    (table, id): (&Term, Reference),
+    table: &Term,
     spec: &MatchSpec,
     program: Option<Reference>,
     (turn, reductions): (DeleteTurn, i64),
@@ -541,7 +541,7 @@ pub(super) fn delete_finish(
         Some(program) => program,
         None => {
             let program = context.scheduler.make_magic_ref()?;
-            (context.scheduler.ets.exclusive()).remember_program(id, program, spec.clone());
+            (context.scheduler.ets.exclusive()).remember_program(program, spec.clone());
             program
         }
     };
