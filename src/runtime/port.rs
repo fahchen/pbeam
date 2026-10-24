@@ -1,7 +1,7 @@
 //! The ports of the node, as the ERTS port table (`erl_ptab.c`) holds the
 //! ports of the spawn driver (`sys/unix/sys_drivers.c`). The scheduler
 //! keeps them as the `Ports` value of its `Resources`, and all processes of
-//! a run share them. PBeam has `spawn_executable` ports and `tcp_inet` and `udp_inet`
+//! a run share them. PBeam has spawn ports, fd ports, and `tcp_inet` and `udp_inet`
 //! driver ports (see [`inet`]).
 
 pub(super) mod inet;
@@ -13,7 +13,7 @@ use std::{
 };
 
 use super::{
-    host::spawn::Child,
+    host::spawn::{Child, Fds},
     process::MonitorLinkTree,
     scheduler::poll::{Direction, NodePoll},
 };
@@ -95,7 +95,8 @@ pub(super) struct Port {
 /// The driver of a port and the data of the driver.
 #[derive(Debug)]
 pub(super) enum Driver {
-    /// A port of `open_port({spawn_executable, Name}, Settings)`.
+    /// A port of `open_port({spawn_executable, Name}, Settings)`, of
+    /// `{spawn, Command}`, or of `{fd, In, Out}`.
     Spawn(Spawn),
     /// A port of `open_port({spawn_driver, "tcp_inet"}, [binary])` or of
     /// `open_port({spawn_driver, "udp_inet"}, [binary])`.
@@ -124,11 +125,57 @@ pub(super) struct Spawn {
     /// (`ERTS_PORT_SFLG_LINEBUF_IO`, `erl_bif_port.c:1139-1142`), or `None`
     /// without them.
     pub(super) lines: Option<Lines>,
-    /// The started program and the parent ends of its pipes. Dropping the
-    /// port closes the pipes.
-    pub(super) child: Child,
+    /// The started program and the parent ends of its pipes, or the fds of
+    /// an fd port.
+    pub(super) program: Program,
     /// The state of the output pipe of the child.
     pub(super) input: Input,
+}
+
+/// What a port of the spawn driver or of the fd driver reads and writes.
+#[derive(Debug)]
+pub(super) enum Program {
+    /// A started program. Dropping the port closes its pipes.
+    Child(Child),
+    /// The fds of `open_port({fd, In, Out}, Settings)`. Dropping the port
+    /// does not close them, as `fd_stop` does not
+    /// (`sys_drivers.c:1002-1027`).
+    Fds(Fds),
+}
+
+impl Program {
+    /// Return the started program, or `None` for an fd port.
+    pub(super) fn child(&self) -> Option<&Child> {
+        match self {
+            Program::Child(child) => Some(child),
+            Program::Fds(_) => None,
+        }
+    }
+
+    /// Return the fd that the port reads.
+    pub(super) fn output_fd(&self) -> c_int {
+        match self {
+            Program::Child(child) => child.output_fd(),
+            Program::Fds(fds) => fds.input,
+        }
+    }
+
+    /// Read the fd of [`Program::output_fd`] with one `read` of at most
+    /// 64 KiB, as `ready_input` does (`sys_drivers.c:1336-1347`).
+    pub(super) fn read_output(&self) -> Result<Vec<u8>, c_int> {
+        match self {
+            Program::Child(child) => child.read_output(),
+            Program::Fds(fds) => fds.read(),
+        }
+    }
+
+    /// Write all bytes of `bytes` to the fd that the port writes.
+    pub(super) fn write_input(&self, bytes: &[u8]) -> Result<(), c_int> {
+        match self {
+            Program::Child(child) => child.write_input(bytes),
+            Program::Fds(fds) => fds.write(bytes),
+        }
+    }
 }
 
 /// The state of the output pipe of a spawn port, which the port reads.
@@ -441,8 +488,8 @@ impl Port {
     fn wait_fd(&self) -> Option<c_int> {
         match &self.driver {
             Driver::Spawn(spawn) => match spawn.input {
-                Input::Open => Some(spawn.child.output_fd()),
-                Input::Status => Some(spawn.child.status_fd()),
+                Input::Open => Some(spawn.program.output_fd()),
+                Input::Status => spawn.program.child().map(Child::status_fd),
                 Input::Ended => None,
             },
             Driver::Inet(inet) => inet
@@ -671,17 +718,27 @@ pub(super) fn inet_port(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let (id, event) = read(&handles, fd).unwrap();
+/// let (id, event) = read(&handles, fd, Some(port)).unwrap();
 /// ```
-pub(super) fn read(handles: &[(PortId, PortCell)], fd: c_int) -> Option<Read<'_>> {
+///
+/// Only the port `reader`, which the poll waits to read `fd` for, reads
+/// it: two fd ports can read the same fd, and the last `driver_select`
+/// takes the fd from the first port (`erl_check_io.c:1080-1085`, `1711-1719`).
+pub(super) fn read(
+    handles: &[(PortId, PortCell)],
+    fd: c_int,
+    reader: Option<PortId>,
+) -> Option<Read<'_>> {
     served(handles)
+        .filter(|&(id, _)| Some(id) == reader)
         .find_map(|(id, mut slot)| {
             let port = slot.as_mut()?;
             let owner = port.owner;
             let event = match &mut port.driver {
                 Driver::Spawn(spawn)
-                    if (spawn.input == Input::Open && spawn.child.output_fd() == fd)
-                        || (spawn.input == Input::Status && spawn.child.status_fd() == fd) =>
+                    if (spawn.input == Input::Open && spawn.program.output_fd() == fd)
+                        || (spawn.input == Input::Status
+                            && spawn.program.child().map(Child::status_fd) == Some(fd)) =>
                 {
                     read_spawn(spawn, &mut port.input)
                 }
@@ -702,10 +759,22 @@ pub(super) type Read<'a> = (PortId, ProcessId, PortEvent, PortGuard<'a>);
 /// to `input`.
 fn read_spawn(spawn: &mut Spawn, input: &mut u64) -> Option<PortEvent> {
     if spawn.input == Input::Status {
-        let status = spawn.child.read_status();
+        let child = spawn.program.child()?;
+        let status = child.read_status();
         return Some(PortEvent::ExitStatus(status, spawn.end_of_file()));
     }
-    let bytes = spawn.child.read_output().ok()?;
+    let bytes = match spawn.program.read_output() {
+        Ok(bytes) => bytes,
+        // A read that fails with an errno other than `EINTR` and `EAGAIN`
+        // stops the read select, and the port stays open
+        // (`sys_drivers.c:1339-1342`, `1211-1214`).
+        Err(errno) => {
+            if errno != libc::EINTR && errno != libc::EAGAIN {
+                spawn.input = Input::Ended;
+            }
+            return None;
+        }
+    };
     if bytes.is_empty() && spawn.exit_status {
         spawn.input = Input::Status;
         return None;
@@ -717,3 +786,7 @@ fn read_spawn(spawn: &mut Spawn, input: &mut u64) -> Option<PortEvent> {
     let messages = spawn.messages(packets);
     (!messages.is_empty()).then_some(PortEvent::Data(messages))
 }
+
+#[cfg(test)]
+#[path = "../../tests/runtime/port.rs"]
+mod tests;

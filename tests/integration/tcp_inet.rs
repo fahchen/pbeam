@@ -239,12 +239,12 @@ fn stops_the_run_for_each_tcp_inet_part_that_is_not_implemented() {
             "list",
             "unsupported open_port/2 settings of an inet driver port other than [binary]",
         ),
-        ("inet6", "unsupported tcp_inet family 2"),
+        ("local", "unsupported tcp_inet family 5"),
         ("mptcp", "unsupported tcp_inet protocol 4"),
-        ("any", "unsupported tcp_inet bind address family 3"),
+        ("bind_local", "unsupported tcp_inet bind address family 5"),
         (
-            "connect_any",
-            "unsupported tcp_inet connect address family 3",
+            "connect_local",
+            "unsupported tcp_inet connect address family 5",
         ),
         ("dontroute", "unsupported tcp_inet option 2"),
         ("recvttl", "unsupported tcp_inet option recvttl true"),
@@ -413,9 +413,9 @@ fn delivers_datagrams_to_the_owner_of_an_active_udp_inet_port_as_pinned_erts() {
     // `packet_inet_input` (inet_drv.c:15361-15588) sends `{udp, S, Address,
     // Port, Data}` for `true`, `once`, and `{active, N}`, which ends with
     // `{udp_passive, S}` (inet_drv.c:1551-1560, 4215-4239); `SETOPTS` adds
-    // the count of `{active, N}` (inet_drv.c:6968-7000), and
+    // the count of `{active, N}` (inet_drv.c:6968-7000), read after the queued datagram arrives so the count does not depend on timing, and
     // `read_packets` below 1 gives `einval` (inet_drv.c:7138-7148).
-    let expected = "[[{udp,socket,{127,0,0,1},true,<<97>>},{udp,socket,{127,0,0,1},true,<<98>>}],[{udp,socket,{127,0,0,1},true,[99]},none,{ok,[{active,false}]}],[{ok,[{active,2}]},{udp,socket,{127,0,0,1},true,[100]},ok,{udp,socket,{127,0,0,1},true,[101]},{udp_passive,socket},none,{ok,[{active,false}]}],[ok,{udp_passive,socket},{ok,[{active,false}]}],[ok,{error,einval},{ok,[{active,32767}]},ok,{ok,[{active,false}]},{udp_passive,socket}],[none,true],[{ok,[{read_packets,5}]},{error,einval},ok,{ok,[{read_packets,1}]}],[{udp,socket,{127,0,0,1},true,[103]},{udp,socket,{127,0,0,1},true,[104]},{udp,socket,{127,0,0,1},true,[105]},none]]";
+    let expected = "[[{udp,socket,{127,0,0,1},true,<<97>>},{udp,socket,{127,0,0,1},true,<<98>>}],[{udp,socket,{127,0,0,1},true,[99]},none,{ok,[{active,false}]}],[{udp,socket,{127,0,0,1},true,[100]},{ok,[{active,1}]},ok,{udp,socket,{127,0,0,1},true,[101]},{udp_passive,socket},none,{ok,[{active,false}]}],[ok,{udp_passive,socket},{ok,[{active,false}]}],[ok,{error,einval},{ok,[{active,32767}]},ok,{ok,[{active,false}]},{udp_passive,socket}],[none,true],[{ok,[{read_packets,5}]},{error,einval},ok,{ok,[{read_packets,1}]}],[{udp,socket,{127,0,0,1},true,[103]},{udp,socket,{127,0,0,1},true,[104]},{udp,socket,{127,0,0,1},true,[105]},none]]";
     assert_eq!(erts_text("udp_probe", "active"), expected, "ERTS");
     assert_eq!(pbeam_text("udp_probe", "active"), expected, "PBeam");
 }

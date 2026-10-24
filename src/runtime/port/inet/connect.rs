@@ -1,4 +1,4 @@
-//! `INET_REQ_CONNECT` of an IPv4 `tcp_inet` socket: the connect without a
+//! `INET_REQ_CONNECT` of a `tcp_inet` socket: the connect without a
 //! wait, and its end when the socket is ready for write or the timer ends
 //! (inet_drv.c:12064-12141, 12569-12580, 14242-14288).
 
@@ -28,7 +28,7 @@ impl Inet {
     ///
     /// # Errors
     ///
-    /// An address family other than `inet` that PBeam does not run.
+    /// The address family `local`, which PBeam does not run.
     pub(super) fn connect(
         &mut self,
         request: &[u8],
@@ -55,7 +55,7 @@ impl Inet {
         let socket = self.socket.as_ref().expect("an open port has a socket");
         // A connect that the host ends at once waits for the write select
         // too: see row "tcp_inet ports" of `docs/erts-differences.md`.
-        let started = socket.connect(&remote.into()).or_else(|failure| {
+        let started = socket.connect(&remote).or_else(|failure| {
             (failure.raw_os_error() == Some(libc::EINPROGRESS))
                 .then_some(())
                 .ok_or(failure)

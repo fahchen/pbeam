@@ -8,26 +8,36 @@ mod common;
 const NET_PROBE: &[u8] = include_bytes!("../../fixtures/net/net_probe.beam");
 
 /// Load the probe with the pinned `prim_net`, whose `on_load/0` loads the
-/// static `net` NIF library, the pinned `net`, and the modules of the probe.
+/// static `net` NIF library, the pinned `net`, the pinned `prim_socket` and
+/// `socket_registry`, whose socket address encoding and protocol table
+/// `prim_net` reads, and the modules of the probe.
 fn program() -> BeamProgram {
-    let modules: Vec<Vec<u8>> = ["prim_net", "net", "maps", "lists"]
-        .into_iter()
-        .map(common::pinned_beam)
-        .collect();
+    let modules: Vec<Vec<u8>> = [
+        "socket_registry",
+        "prim_socket",
+        "prim_net",
+        "net",
+        "maps",
+        "lists",
+        "binary",
+    ]
+    .into_iter()
+    .map(common::pinned_beam)
+    .collect();
     let mut beams: Vec<&[u8]> = modules.iter().map(Vec::as_slice).collect();
     beams.push(NET_PROBE);
     BeamProgram::load(&beams).unwrap()
 }
 
 #[test]
-fn gives_the_info_the_command_and_the_host_name_as_the_pinned_erts() {
+fn gives_the_info_the_command_the_host_name_and_the_lookups_as_the_pinned_erts() {
     let output = Command::new("erl")
         .args([
             "-noshell",
             "-pa",
             "fixtures/net",
             "-eval",
-            "io:format(\"~s\", [binary:encode_hex(net_probe:text())]), halt().",
+            "io:format(\"~s\", [net_probe:text()]), halt().",
         ])
         .output()
         .unwrap();
@@ -39,13 +49,12 @@ fn gives_the_info_the_command_and_the_host_name_as_the_pinned_erts() {
     let Term::Binary(text) = &term else {
         panic!("the probe gives a binary");
     };
-    let hex: String = text
-        .bytes()
-        .unwrap()
-        .iter()
-        .map(|byte| format!("{byte:02X}"))
-        .collect();
-    assert_eq!(hex.as_bytes(), output.stdout);
+    let text = String::from_utf8(text.bytes().unwrap().to_vec()).unwrap();
+    let reference = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(text.lines().count(), reference.lines().count());
+    for (index, (line, expected)) in text.lines().zip(reference.lines()).enumerate() {
+        assert_eq!(line, expected, "case {index}");
+    }
 }
 
 #[test]
