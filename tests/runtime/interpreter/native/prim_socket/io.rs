@@ -117,6 +117,28 @@ fn stops_the_run_at_recv_flags_and_a_length_above_the_ssize_t_range() {
 }
 
 #[test]
+fn gives_invalid_state_for_a_send_during_a_connect() {
+    // `essio_send` refuses a send while a connect waits
+    // (unix_socket_syncio.c:3012-3013). A loopback connect of a fixture can
+    // end before the send, on Linux at once, so a unit test builds the
+    // state.
+    let mut scheduler = scheduler();
+    let owner = scheduler.current_process().id;
+    let (_, socket) = resource(&mut scheduler, |state| {
+        state.connector = Some((owner, Term::Reference(Reference(0))));
+    });
+    let reference = Term::Reference(scheduler.make_ref().unwrap());
+    let result = send(
+        &mut scheduler,
+        &socket,
+        &Term::binary(vec![]),
+        &Term::Integer(0),
+        &reference,
+    );
+    assert_eq!(printed(&scheduler, result), "{error,{invalid,state}}");
+}
+
+#[test]
 fn counts_a_failed_send_and_releases_the_current_writer() {
     // `send_check_fail` counts `write_fails` and releases the current
     // writer for each errno but `EINVAL` (unix_socket_syncio.c:6998-7033).
