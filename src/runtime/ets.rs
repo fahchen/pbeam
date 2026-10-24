@@ -2479,9 +2479,6 @@ impl Table {
     /// chains, so the objects of one segment go in the turn that frees it
     /// (`db_free_table_continue_hash`, `erl_db_hash.c:3140-3149`).
     fn free_segments_objects(&mut self, index: usize) {
-        if let Some(order) = &mut self.order {
-            order.clear();
-        }
         let first = match index {
             0 => 0,
             later => FIRST_SEGMENT_SLOTS + (later - 1) * SEGMENT_SLOTS,
