@@ -348,10 +348,6 @@ fn stops_the_run_for_each_udp_inet_part_that_is_not_implemented() {
             "disconnect",
             "unsupported udp_inet request CONNECT without an address",
         ),
-        (
-            "reconnect",
-            "unsupported failed udp_inet connect of a connected socket",
-        ),
         ("inet6", "unsupported udp_inet output address family 2"),
         (
             "ancillary",
@@ -434,9 +430,36 @@ fn connects_a_udp_inet_port_as_pinned_erts() {
     // gives it (inet_drv.c:11272-11300), and a send of a connected socket
     // ignores its address (inet_drv.c:15142-15182); `any` and `loopback`
     // take only the port (inet_drv.c:4817-4844).
-    let expected = "[{error,enotconn},ok,{ok,{{127,0,0,1},true}},ok,{ok,{{127,0,0,1},true,<<104,105>>}},{ok,{{127,0,0,1},true,<<112,101,101,114>>}},{error,timeout},[{ok,{{127,0,0,1},true,<<116,111>>}},{error,timeout}],{error,exbadport},[ok,{ok,{{127,0,0,1},true}}],[[0,101,105,110,118,97,108],[0,101,105,110,118,97,108],[0,101,97,102,110,111,115,117,112,112,111,114,116],[0,101,105,110,118,97,108],[0,101,120,98,97,100,112,111,114,116]],[ok,{ok,{{127,0,0,1},true,<<108>>}},{error,einval},{error,einval}]]";
+    let broadcast = if cfg!(target_os = "linux") {
+        "{error,eacces}"
+    } else {
+        "ok"
+    };
+    let expected = "[{error,enotconn},ok,{ok,{{127,0,0,1},true}},ok,{ok,{{127,0,0,1},true,<<104,105>>}},{ok,{{127,0,0,1},true,<<112,101,101,114>>}},{error,timeout},[{ok,{{127,0,0,1},true,<<116,111>>}},{error,timeout}],{error,exbadport},BROADCAST,[[0,101,105,110,118,97,108],[0,101,105,110,118,97,108],[0,101,97,102,110,111,115,117,112,112,111,114,116],[0,101,105,110,118,97,108],[0,101,120,98,97,100,112,111,114,116]],[ok,{ok,{{127,0,0,1},true,<<108>>}},{error,einval},{error,einval}]]"
+        .replace("BROADCAST", broadcast);
     assert_eq!(erts_text("udp_probe", "connect"), expected, "ERTS");
     assert_eq!(pbeam_text("udp_probe", "connect"), expected, "PBeam");
+}
+
+#[test]
+fn reconnects_a_udp_inet_port_as_pinned_erts_or_stops_on_linux() {
+    // `CONNECT` of a connected socket dissolves the association first
+    // (inet_drv.c:14819-14836); xnu does it in each connect, and Linux needs
+    // an `AF_UNSPEC` connect, which safe Rust cannot make.
+    if cfg!(target_os = "linux") {
+        let error = load()
+            .execute("udp_probe", "reconnect", &[])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("unsupported udp_inet connect of a connected socket"),
+            "{error}"
+        );
+        return;
+    }
+    let expected = "[ok,{error,eaddrnotavail},{error,enotconn},ok,{ok,{{127,0,0,1},true}},ok]";
+    assert_eq!(erts_text("udp_probe", "reconnect"), expected, "ERTS");
+    assert_eq!(pbeam_text("udp_probe", "reconnect"), expected, "PBeam");
 }
 
 #[test]

@@ -35,15 +35,17 @@ impl Inet {
     /// and the address gives the errors of `inet_set_faddress`. The connect
     /// sets the default peer at once, so `PEER` gives the peer and a send
     /// ignores its address. A failed connect gives the errno, and the socket
-    /// is not connected.
+    /// is not connected. xnu dissolves the association of a connected
+    /// datagram socket before each connect, as `inet_drv.c` does with an
+    /// `AF_UNSPEC` connect (inet_drv.c:14819-14836).
     ///
     /// # Errors
     ///
     /// The request without an address, which dissolves the association,
-    /// and a failed connect of a connected socket: both need a connect to
-    /// an `AF_UNSPEC` address (inet_drv.c:14803-14806, 14832-14836), which
-    /// safe Rust cannot make. The `any`, `loopback`, `inet6`, and `local`
-    /// address tags.
+    /// and on Linux a connect of a connected socket, which dissolves it
+    /// first: both need a connect to an `AF_UNSPEC` address
+    /// (inet_drv.c:14803-14806, 14819-14828), which safe Rust cannot make.
+    /// The `any`, `loopback`, `inet6`, and `local` address tags.
     pub(super) fn datagram_connect(&mut self, request: &[u8]) -> Result<Vec<u8>, BeamError> {
         if self.state == State::Closed {
             return Ok(error_reply("exbadport"));
@@ -57,16 +59,21 @@ impl Inet {
             Ok(remote) => remote,
             Err(reply) => return Ok(reply),
         };
+        if cfg!(target_os = "linux") && self.state == State::Connected {
+            return Err(error(
+                "unsupported udp_inet connect of a connected socket: see \"udp_inet ports\" in docs/erts-differences.md",
+            ));
+        }
         let socket = self.socket.as_ref().expect("an open port has a socket");
         match socket.connect(&remote.into()) {
             Ok(()) => {
                 self.state = State::Connected;
                 Ok(vec![OK])
             }
-            Err(_) if self.state == State::Connected => Err(error(
-                "unsupported failed udp_inet connect of a connected socket: see \"udp_inet ports\" in docs/erts-differences.md",
-            )),
-            Err(failure) => Ok(errno_reply(&failure)),
+            Err(failure) => {
+                self.state = State::Open;
+                Ok(errno_reply(&failure))
+            }
         }
     }
 

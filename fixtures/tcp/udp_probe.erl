@@ -1,5 +1,5 @@
 -module(udp_probe).
--export([active/0, active_options/0, connect/0, host_name/0, open/0, passive/0, port_zero/0, refused_active/0, refused_passive/0, truncate/0, unsupported/1]).
+-export([active/0, active_options/0, connect/0, host_name/0, open/0, passive/0, port_zero/0, reconnect/0, refused_active/0, refused_passive/0, truncate/0, unsupported/1]).
 
 %% The requests of the udp_inet driver that inet_config:set_hostname/0
 %% sends through inet_udp:open(0, []), inet:gethostname/1, and
@@ -124,15 +124,6 @@ unsupported(short_count) ->
 unsupported(disconnect) ->
     {ok, S} = udp(),
     control(S, 3, []);
-unsupported(reconnect) ->
-    %% Linux rejects a connect to the broadcast address without
-    %% SO_BROADCAST, and xnu a connect to the port 0.
-    {ok, S} = udp(),
-    ok = prim_inet:connect(S, {127, 0, 0, 1}, 9),
-    ok = case prim_inet:connect(S, {255, 255, 255, 255}, 9) of
-             ok -> prim_inet:connect(S, {127, 0, 0, 1}, 0);
-             Error -> Error
-         end;
 unsupported(accept) ->
     P = open_port({spawn_driver, "udp_inet"}, [binary]),
     [1] = control(P, 1, [1, 2, 2]),
@@ -230,7 +221,8 @@ port_zero() ->
 %% (inet_drv.c:14710-14842, 15142-15182): PEER before and after the
 %% connect, a send without an address, a receive from the peer only, a
 %% send to another address that goes to the peer, BIND of a connected
-%% socket, the errors of CONNECT, and a send to {loopback, Port}.
+%% socket, a connect to the broadcast address, which Linux rejects without
+%% SO_BROADCAST, the errors of CONNECT, and a send to {loopback, Port}.
 connect() ->
     Lo = {127, 0, 0, 1},
     [{A, PA}, {B, PB}, {C, PC}] = [bound() || _ <- [a, b, c]],
@@ -246,14 +238,15 @@ connect() ->
     ok = prim_inet:sendto(A, Lo, PC, <<"to">>),
     ToPeer = [sender(prim_inet:recvfrom(B, 0, 1000), PA), prim_inet:recvfrom(C, 0, 50)],
     Bind = prim_inet:bind(A, {0, 0, 0, 0}, 0),
-    Again = [prim_inet:connect(A, Lo, PC), sender(prim_inet:peername(A), PC)],
+    {E, _} = bound(),
+    Broadcast = prim_inet:connect(E, {255, 255, 255, 255}, 9),
     Unopened = open_port({spawn_driver, "udp_inet"}, [binary]),
     Errors = [control(A, 3, [0]), control(A, 3, [0, 0, 0, 0, 1]), control(A, 3, [0, 0, 0, 0, 9, 0]),
               control(A, 3, [0, 0, 0, 0, 1, 0, 1]), control(Unopened, 3, [0, 0, 0, 0, 1, 0, 1, 127, 0, 0, 1])],
     {D, PD} = bound(),
     Loopback = [prim_inet:sendto(D, {loopback, PD}, [], <<"l">>), sender(prim_inet:recvfrom(D, 0, 1000), PD),
                 command(D, [3, 0]), command(D, [4, 0, 1, 0, 0, 0])],
-    [NotConnected, Connect, Peer, Sent, Got, FromPeer, Filtered, ToPeer, Bind, Again, Errors, Loopback].
+    [NotConnected, Connect, Peer, Sent, Got, FromPeer, Filtered, ToPeer, Bind, Broadcast, Errors, Loopback].
 
 %% A send of a connected socket to a closed port: the ICMP error gives
 %% econnrefused to the next receive of a passive socket, and
@@ -280,3 +273,14 @@ bound() ->
     {ok, S} = udp(),
     {ok, {_, P}} = prim_inet:sockname(S),
     {S, P}.
+
+%% CONNECT of a connected socket, which dissolves the association first
+%% (inet_drv.c:14819-14836): a connect to the broadcast address, a failed
+%% connect to the port 0, which xnu rejects, and a connect after it.
+reconnect() ->
+    {S, _} = bound(),
+    {B, PB} = bound(),
+    ok = prim_inet:connect(S, {127, 0, 0, 1}, 9),
+    [prim_inet:connect(S, {255, 255, 255, 255}, 9), prim_inet:connect(S, {127, 0, 0, 1}, 0),
+     prim_inet:peername(S), prim_inet:connect(S, {127, 0, 0, 1}, PB), sender(prim_inet:peername(S), PB),
+     prim_inet:close(B)].
