@@ -81,3 +81,22 @@ fn gives_the_error_of_a_failed_read_to_the_owner_of_an_active_socket() {
         vec![Event::DatagramError("econnrefused".to_owned())]
     );
 }
+
+#[test]
+fn reads_nothing_at_once_when_a_connected_socket_becomes_active() {
+    // `{active, once}` of a connected `udp_inet` socket only replies, so a
+    // datagram in the socket is not read for a receive that waits; the
+    // poll gives it to the owner (inet_drv.c:4335-4357).
+    let caller = crate::term::ProcessId(1);
+    let mut port = Inet::new(SocketType::Datagram);
+    port.control(0x03f1_a301, &[1, 2, 2], caller).unwrap();
+    let request = [0, 0, 0, 0, 1, 0, 9, 127, 0, 0, 1];
+    assert_eq!(
+        port.control(0x03f1_a303, &request, caller).unwrap(),
+        Control::Reply(vec![1])
+    );
+    assert_eq!(
+        port.control(0x03f1_a307, &[22, 0, 0, 0, 2], caller).unwrap(),
+        Control::Reply(vec![1])
+    );
+}

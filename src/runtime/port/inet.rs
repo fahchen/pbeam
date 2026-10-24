@@ -708,12 +708,18 @@ impl Inet {
     /// Return the result of a `SETOPTS` with the reply `reply` that changed
     /// the option `active` from `old`: [`Control::Active`] when a connected
     /// socket became active or a socket whose connection ended is active,
-    /// else the reply (inet_drv.c:7001-7011, 7949-7981). PBeam runs no
+    /// else the reply (inet_drv.c:7001-7011, 7949-7981). A connected
+    /// `udp_inet` socket gives the reply, so a receive that waits does not
+    /// read for the owner (inet_drv.c:4335-4357). PBeam runs no
     /// `{active, N}`, so only `once` reads.
     fn set_active_result(&self, old: i32, reply: Vec<u8>) -> Control {
         let ended = self.stream.ended && self.active != 0;
         if reply != [OK]
-            || !ended && (old != 0 || self.active == 0 || self.state != State::Connected)
+            || !ended
+                && (old != 0
+                    || self.active == 0
+                    || self.state != State::Connected
+                    || self.socket_type != SocketType::Stream)
         {
             return Control::Reply(reply);
         }
