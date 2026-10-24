@@ -1327,7 +1327,7 @@ pub(super) fn exit(
     id: &Term,
     reason: &Term,
 ) -> Result<BifResult, BeamError> {
-    send_exit(context, id, reason, "erlang:exit/2")
+    send_exit(context, id, reason)
 }
 
 /// Run `erlang:exit(Id, Reason, Options)` as ERTS `exit_3` (`bif.c:1877-1880`)
@@ -1368,16 +1368,15 @@ pub(super) fn exit_3(
     if !valid {
         return Ok(BifResult::badopt());
     }
-    send_exit(context, id, reason, "erlang:exit/3")
+    send_exit(context, id, reason)
 }
 
-/// Send the exit signal of `erlang:exit/2,3`; `name` names the BIF in the
-/// runtime error of a port.
+/// Send the exit signal of `erlang:exit/2,3`. A port closes with the
+/// reason (see [`erts_internal::port_exit`]).
 fn send_exit(
     context: &mut BifContext<'_>,
     id: &Term,
     reason: &Term,
-    name: &str,
 ) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
     let caller = scheduler.current_process_mut();
@@ -1405,7 +1404,7 @@ fn send_exit(
         }
     }
     let Some(target) = target else {
-        return Err(unsupported_port(name));
+        return erts_internal::port_exit(scheduler, id, reason);
     };
     if let Some(denied) = boot_denial(scheduler, target)? {
         return Ok(denied);
@@ -4632,13 +4631,11 @@ pub(in crate::runtime::interpreter) fn send(
     to: &Term,
     message: Term,
 ) -> Result<BifResult, BeamError> {
-    Ok(
-        match deliver_to(scheduler, to, message.clone(), "erlang:send/2")? {
-            Ok(Sent::Local) => local_send_result(scheduler, message),
-            Ok(Sent::NoConnect) => Value(message),
-            Err(raise) => raise,
-        },
-    )
+    Ok(match deliver_to(scheduler, to, message.clone())? {
+        Ok(Sent::Local) => local_send_result(scheduler, message),
+        Ok(Sent::NoConnect) => Value(message),
+        Err(raise) => raise,
+    })
 }
 
 /// Run `erlang:send(To, Message, Options)` as ERTS `send_3`
@@ -4695,14 +4692,12 @@ pub(super) fn send3(
             _ => return Ok(BifResult::badopt()),
         }
     }
-    Ok(
-        match deliver_to(scheduler, to, message.clone(), "erlang:send/3")? {
-            Ok(Sent::Local) => local_send_result(scheduler, Term::static_atom("ok")),
-            Ok(Sent::NoConnect) if !connect => Value(Term::static_atom("noconnect")),
-            Ok(Sent::NoConnect) => Value(Term::static_atom("ok")),
-            Err(raise) => raise,
-        },
-    )
+    Ok(match deliver_to(scheduler, to, message.clone())? {
+        Ok(Sent::Local) => local_send_result(scheduler, Term::static_atom("ok")),
+        Ok(Sent::NoConnect) if !connect => Value(Term::static_atom("noconnect")),
+        Ok(Sent::NoConnect) => Value(Term::static_atom("ok")),
+        Err(raise) => raise,
+    })
 }
 
 /// The reductions of a local send: `erl_send` and `send_3` use them with
@@ -4784,8 +4779,8 @@ enum Destination<'a> {
     NodeName(&'a Atom),
     /// `{Name, Node}` with another node, as an atom.
     Remote(&'a Atom),
-    /// A port.
-    Port,
+    /// A local port.
+    Port(crate::term::PortId),
 }
 
 /// Return the destination of `to`, or `None` for a term that `do_send`
@@ -4808,7 +4803,7 @@ fn destination(to: &Term) -> Option<Destination<'_>> {
         Term::Pid(pid) => Destination::Pid(*pid),
         Term::Reference(reference) => Destination::Alias(*reference),
         Term::Atom(name) => Destination::Name(name),
-        Term::Port(_) => Destination::Port,
+        Term::Port(id) => Destination::Port(*id),
         Term::Tuple(elements) => match elements.as_ref() {
             [Term::Atom(name), node @ Term::Atom(_)] if *node == local_node() => {
                 Destination::NodeName(name)
@@ -4821,7 +4816,7 @@ fn destination(to: &Term) -> Option<Destination<'_>> {
 }
 
 /// Give `message` to the process that `to` names, as ERTS `do_send`
-/// (`bif.c:2458-2695`) does, for `bif`, the BIF name of a runtime error.
+/// (`bif.c:2458-2695`) does.
 /// This is the one send path of the `send` instruction, `erlang:send/2`,
 /// and `erlang:send/3`. Return `Err` with the exception to raise.
 ///
@@ -4843,6 +4838,8 @@ fn destination(to: &Term) -> Option<Destination<'_>> {
 ///   which drops it when the alias is not active
 ///   (`erl_proc_sig_queue.c:6009-6075`; see
 ///   [`Scheduler::send_alias_message`]).
+/// - A local port runs the message as a port signal (see
+///   [`erts_internal::port_bang`]).
 /// - An atom gives the message to its registered process. A name that no
 ///   process has raises `badarg`. PBeam registers no port.
 /// - `{Name, Node}` with the local node gives the message to the registered
@@ -4856,22 +4853,21 @@ fn destination(to: &Term) -> Option<Destination<'_>> {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(matches!(deliver_to(scheduler, &Term::Pid(pid), ok.clone(), "erlang:send/2")?, Ok(Sent::Local)));
+/// assert!(matches!(deliver_to(scheduler, &Term::Pid(pid), ok.clone())?, Ok(Sent::Local)));
 /// let remote = Term::tuple(vec![Term::static_atom("name"), Term::static_atom("a@b")]);
-/// assert!(matches!(deliver_to(scheduler, &remote, ok.clone(), "erlang:send/2")?, Ok(Sent::NoConnect)));
-/// assert!(deliver_to(scheduler, &Term::static_atom("nobody"), ok, "erlang:send/2")?.is_err());
+/// assert!(matches!(deliver_to(scheduler, &remote, ok.clone())?, Ok(Sent::NoConnect)));
+/// assert!(deliver_to(scheduler, &Term::static_atom("nobody"), ok)?.is_err());
 /// ```
 ///
 /// # Errors
 ///
-/// A port after the check returns a runtime error that names `bif`. A new
+/// A port signal gives the errors of [`erts_internal::port_bang`]. A new
 /// `capability_denied` atom in a full atom table gives the error of
 /// `AtomTable::put`.
 fn deliver_to(
     scheduler: &mut Scheduler,
     to: &Term,
     message: Term,
-    bif: &str,
 ) -> Result<Result<Sent, BifResult>, BeamError> {
     let Some(destination) = destination(to) else {
         return Ok(Err(BifResult::badarg()));
@@ -4897,7 +4893,12 @@ fn deliver_to(
             scheduler.send_to_remote_node(node);
             return Ok(Ok(Sent::NoConnect));
         }
-        Destination::Port => return Err(unsupported_port(bif)),
+        Destination::Port(id) => {
+            return Ok(match erts_internal::port_bang(scheduler, id, &message)? {
+                Some(denied) => Err(denied),
+                None => Ok(Sent::Local),
+            });
+        }
     };
     if let Some(target) = target {
         if let Some(denied) = io_service::send_denial(scheduler, target, &message)? {
@@ -6565,8 +6566,9 @@ pub(super) fn pre_loaded(scheduler: &mut Scheduler) -> Result<BifResult, BeamErr
 /// (`erl_bif_info.c:5918-5945`, `5986-6030`) do. A `Module` that is not an
 /// atom or that names no loaded module raises `badarg`. The key `module`
 /// returns `Module`, `md5` the MD5 of the module, `functions` the functions
-/// in code order, and
-/// `nifs` the functions of its NIF shared library or `[]`. A term that is
+/// in code order, `nifs` the functions of its NIF shared library or `[]`,
+/// `attributes` and `compile` the terms of the `Attr` and `CInf` chunks or
+/// `[]`, `native_addresses` `[]`, and `native` `false`. A term that is
 /// not a key of `get_module_info/3`
 /// (`md5`, `exports`, `functions`, `nifs`, `attributes`, `compile`,
 /// `native_addresses`, `native`, or `module`) raises `badarg`. The caller
@@ -6586,9 +6588,10 @@ pub(super) fn pre_loaded(scheduler: &mut Scheduler) -> Result<BifResult, BeamErr
 ///
 /// # Errors
 ///
-/// The keys `exports`, `attributes`, `compile`, `native_addresses`, and
-/// `native` are
-/// the runtime error `erlang:get_module_info/2 key K is not implemented`.
+/// The key `exports` is the runtime error
+/// `erlang:get_module_info/2 key exports is not implemented`. A chunk term
+/// that PBeam cannot hold gives the runtime error of
+/// `erlang:binary_to_term/2`.
 /// The key `nifs` of a module with a linked static or extension library is
 /// a runtime error. A new
 /// `capability_denied` atom in a full atom table gives the error of
@@ -6617,9 +6620,7 @@ const MODULE_INFO_MISSING_KEY: &str = "exports";
 /// name, as for `erlang:get_module_info/2`.
 ///
 /// PBeam cannot give the key `exports`, which needs the order of the ERTS
-/// export table, and the keys `attributes` and `compile`, which need the
-/// chunks of the beam file that the loader does not keep (row "Module
-/// information" of `docs/erts-differences.md`). Thus the call of a loaded
+/// export table (row "Module information" of `docs/erts-differences.md`). Thus the call of a loaded
 /// module stops the run with the runtime error
 /// `erlang:get_module_info/1 key exports is not implemented`, as
 /// `erlang:get_module_info/2` stops at a key that it does not implement.
@@ -6655,7 +6656,7 @@ pub(super) fn get_module_info_1(
 }
 
 /// Run the key of `erlang:get_module_info/2` that `bif` names, for the
-/// runtime error of a key that PBeam does not implement yet.
+/// runtime error of the key `exports`, which PBeam does not implement.
 fn get_module_info_key(
     context: &mut BifContext<'_>,
     module: &Term,
@@ -6724,16 +6725,29 @@ fn get_module_info_key(
             .map(|function| (function.name.as_str(), function.arity))
             .rev();
         function_pairs(context, pairs)
-    } else if key.is_one_of(&[
-        "exports",
-        "attributes",
-        "compile",
-        "native_addresses",
-        "native",
-    ]) {
+    } else if key.is_static("attributes") || key.is_static("compile") {
+        // `attributes_for_module` and `compilation_info_for_module`
+        // (`erl_bif_info.c:5864-5909`) decode the chunk that the loader
+        // checked (`jit/asm_load.c:1080-1111`), and give `[]` for a module
+        // without the chunk.
+        let chunk = if key.is_static("attributes") {
+            &code.attributes
+        } else {
+            &code.compile_info
+        };
+        if chunk.is_empty() {
+            return Ok(Value(Term::nil()));
+        }
+        super::term::binary_to_term(context, &Term::binary(chunk.clone()), &Term::nil())
+    } else if key.is_static("native_addresses") {
+        // `native_addresses` (`erl_bif_info.c:5814-5820`).
+        Ok(Value(Term::nil()))
+    } else if key.is_static("native") {
+        // `has_native` (`erl_bif_info.c:5807-5812`).
+        Ok(Value(Term::static_atom("false")))
+    } else if key.is_static("exports") {
         Err(error(format!(
-            "erlang:{bif} key {} is not implemented",
-            context.scheduler.atoms.name_of(key)
+            "erlang:{bif} key exports is not implemented"
         )))
     } else {
         Ok(BifResult::badarg())

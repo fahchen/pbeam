@@ -899,6 +899,20 @@ fn closes_a_port_with_linger_zero_and_queued_output_as_pinned_erts() {
 }
 
 #[test]
+fn replies_to_a_close_message_when_the_flushed_port_terminates_as_pinned_erts() {
+    // `{Pid, close}` sets `ERTS_PORT_SFLG_SEND_CLOSED`, and
+    // `terminate_port` sends `{Port, closed}` after the queue is written
+    // (io.c:3713-3719, 3753-3758).
+    let expected = "[true,waiting,closed,[['EXIT',port,normal]]]";
+    for (name, (text, _)) in ["ERTS", "PBeam"]
+        .into_iter()
+        .zip(client_runs("tcp_close", "message_close"))
+    {
+        assert_eq!(text, expected, "{name}");
+    }
+}
+
+#[test]
 fn delivers_each_read_in_active_mode_as_pinned_erts() {
     let expected =
         "[ok,{tcp,<<120>>},{tcp,<<121>>},{ok,[{active,true}]},[none,{ok,<<122>>}],{tcp,[119]},[]]";

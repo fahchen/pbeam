@@ -81,6 +81,10 @@ pub(super) struct Port {
     /// erl_bif_port.c:157-160; `link_opt`, bif.c:192-196). The driver sends
     /// no message (io.c:6212-6227).
     pub(super) closing: bool,
+    /// Send `{Port, closed}` to the owner when the port terminates: a
+    /// `{Pid, close}` message closed it (`ERTS_PORT_SFLG_SEND_CLOSED`,
+    /// io.c:3713-3719).
+    pub(super) send_closed: bool,
     /// The scheduler that opened the port and serves its I/O: its poll
     /// waits for the fds of the port. The port itself is in the node port
     /// table, so a BIF of any scheduler reads and changes it.
