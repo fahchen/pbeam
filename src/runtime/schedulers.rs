@@ -209,10 +209,8 @@ pub(in crate::runtime) type CpuIds = [i32; 6];
 /// (`erl_misc_utils.c:841-1031`) reads it from `/sys/devices/system`. An
 /// empty list means that ERTS reads no topology. PBeam reads it once, when
 /// `BeamProgram::boot` starts the node, and keeps it, as ERTS keeps the
-/// topology that it reads when the node starts (`erl_cpu_topology.c:1686-1703`). ERTS takes the configured
-/// processors from `sysconf(_SC_NPROCESSORS_CONF)`, which the C library
-/// counts from the `cpuN` entries of `/sys/devices/system/cpu`, and the
-/// processors online from `/sys/devices/system/cpu/online`.
+/// topology that it reads when the node starts (`erl_cpu_topology.c:1686-1703`). The configured and online counts come
+/// from `sysconf`, as in ERTS.
 #[cfg(target_os = "linux")]
 pub(in crate::runtime) fn cpu_topology() -> &'static [CpuIds] {
     static TOPOLOGY: std::sync::OnceLock<Vec<CpuIds>> = std::sync::OnceLock::new();
@@ -222,10 +220,19 @@ pub(in crate::runtime) fn cpu_topology() -> &'static [CpuIds] {
 /// Read the processor topology of the host (see [`cpu_topology`]).
 #[cfg(target_os = "linux")]
 fn read_host_topology() -> Vec<CpuIds> {
+    use nix::unistd::{SysconfVar, sysconf};
+    // `erl_misc_utils.c:297-306`, `erl_misc_utils.c:330-331`: an error
+    // gives 0, and the C cast to `int` truncates.
+    let count = |var| {
+        sysconf(var)
+            .ok()
+            .flatten()
+            .map_or(0, |count| (count as i32).max(0) as usize)
+    };
+    let configured = count(SysconfVar::_NPROCESSORS_CONF);
+    let online = count(SysconfVar::_NPROCESSORS_ONLN).min(configured);
     let root = std::path::Path::new("/sys/devices/system");
-    let configured = numbered_entries(&root.join("cpu"), "cpu").map_or(0, |cpus| cpus.len());
-    let online = cpu_list(&std::fs::read_to_string(root.join("cpu/online")).unwrap_or_default());
-    processor_order(read_topology(root, configured, online.len()))
+    processor_order(read_topology(root, configured, online))
 }
 
 /// Sort `topology` by processor, node, processor node, core, and thread, as
