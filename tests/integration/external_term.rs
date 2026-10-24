@@ -237,15 +237,11 @@ fn raises_badarg_as_pinned_erts() {
         Term::list_from(std::iter::repeat_n(badarg, 19))
     );
 
-    // A term that PBeam cannot hold stops the run with a runtime error.
-    let error = program
+    // RECORD_EXT decodes: the pinned ERTS gives `#m:r{}`.
+    let record = program
         .execute("external_term_probe", "decode_record", &[])
-        .unwrap_err()
-        .to_string();
-    assert!(
-        error.starts_with("unsupported erlang:binary_to_term/1,2"),
-        "{error}"
-    );
+        .unwrap();
+    assert!(matches!(record, Term::Record(_)), "{record:?}");
 }
 
 const FUN_PROBE: &[u8] = include_bytes!("../../fixtures/external_term/fun_ext_probe.beam");
