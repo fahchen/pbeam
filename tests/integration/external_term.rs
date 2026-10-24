@@ -241,7 +241,7 @@ fn raises_badarg_as_pinned_erts() {
     let record = program
         .execute("external_term_probe", "decode_record", &[])
         .unwrap();
-    assert!(matches!(record, Term::Record(_)), "{record:?}");
+    assert!(matches!(record.term, Term::Record(_)), "{record:?}");
 }
 
 const FUN_PROBE: &[u8] = include_bytes!("../../fixtures/external_term/fun_ext_probe.beam");
