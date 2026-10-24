@@ -1,4 +1,4 @@
-use std::process::Command;
+use std::{io::Write, os::fd::AsRawFd, process::Command};
 
 use pbeam_runtime::{AtomTable, BeamProgram, Term};
 
@@ -253,6 +253,83 @@ fn gives_the_port_name_before_the_first_byte_0_as_pinned_erts() {
     assert_runs("nul_name()", "[47,98,105,110,47,115,104]");
 }
 
+/// Return the `~w` text of `port_probe:fd/3` with the input fd `input`
+/// and the output fd `output`, which give the port name `"input/output"`.
+fn fd_result(input: i32, output: i32) -> String {
+    let name: Vec<String> = format!("{input}/{output}")
+        .bytes()
+        .map(|byte| byte.to_string())
+        .collect();
+    format!(
+        "{{[<<104,101,108,108,111>>,eof],[{{name,[{}]}},{{input,5}},{{output,4}},{{os_pid,undefined}}],true,undefined,<<98,121,101>>,normal,undefined,[badarg,badarg,badarg,badarg,einval,einval,einval,badarg,badarg]}}",
+        name.join(",")
+    )
+}
+
+#[test]
+fn opens_an_fd_port_as_pinned_erts() {
+    // `{fd, In, Out}` names the port "In/Out" (erl_bif_port.c:1067-1081),
+    // and the port does not close its fds (sys_drivers.c:1002-1027), so the
+    // second port writes to the same output fd. The ERTS run gets pipes as
+    // its fds 3 and 4 and a file as its fd 5.
+    let directory = std::env::temp_dir().join(format!("pbeam-fd-port-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let erts_output = directory.join("erts");
+    let script = format!(
+        "printf hello | {{ printf bye | erl +S 1 -noshell -kernel logger_level none -pa fixtures/port -eval 'io:format(\"~w~n\", [port_probe:fd(3, 4, 5)]), halt().' 4<&0 0</dev/null ; }} 3<&0 5>'{}'",
+        erts_output.display()
+    );
+    let reference = Command::new("sh").args(["-c", &script]).output().unwrap();
+    assert!(reference.status.success(), "{reference:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&reference.stdout),
+        format!("{}\n", fd_result(3, 5))
+    );
+    assert_eq!(std::fs::read(&erts_output).unwrap(), b"pingpong");
+
+    let (first, mut first_writer) = std::io::pipe().unwrap();
+    let (second, mut second_writer) = std::io::pipe().unwrap();
+    first_writer.write_all(b"hello").unwrap();
+    second_writer.write_all(b"bye").unwrap();
+    drop((first_writer, second_writer));
+    let pbeam_output = directory.join("pbeam");
+    let output = std::fs::File::create(&pbeam_output).unwrap();
+    let fds = [first.as_raw_fd(), second.as_raw_fd(), output.as_raw_fd()];
+    let program = load();
+    let args: Vec<_> = fds
+        .iter()
+        .map(|&fd| program.host_term(Term::Integer(fd.into())))
+        .collect();
+    let result = program.execute("port_probe", "fd", &args).unwrap();
+    assert_eq!(
+        text(&result.term, result.atoms()),
+        fd_result(fds[0], fds[2])
+    );
+    assert_eq!(std::fs::read(&pbeam_output).unwrap(), b"pingpong");
+    std::fs::remove_dir_all(&directory).unwrap();
+}
+
+#[test]
+fn gives_the_fd_to_the_last_fd_port_as_pinned_erts() {
+    // The last `driver_select` of a read fd takes it from the port that
+    // selected it before (erl_check_io.c:1080-1085, 1711-1719).
+    let expected = "{[<<104,105>>,eof],none,true,true}";
+    let script = "printf hi | erl +S 1 -noshell -kernel logger_level none -pa fixtures/port -eval 'io:format(\"~w~n\", [port_probe:fd_steal(3, 1)]), halt().' 3<&0 0</dev/null";
+    let reference = Command::new("sh").args(["-c", script]).output().unwrap();
+    assert!(reference.status.success(), "{reference:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&reference.stdout),
+        format!("{expected}\n")
+    );
+    let (input, mut writer) = std::io::pipe().unwrap();
+    writer.write_all(b"hi").unwrap();
+    drop(writer);
+    let program = load();
+    let args = [input.as_raw_fd(), 1].map(|fd| program.host_term(Term::Integer(fd.into())));
+    let result = program.execute("port_probe", "fd_steal", &args).unwrap();
+    assert_eq!(text(&result.term, result.atoms()), expected);
+}
+
 #[test]
 fn monitors_a_port_as_pinned_erts() {
     // A port that closes sends `{'DOWN', Ref, port, Port, Reason}` with its
@@ -261,6 +338,16 @@ fn monitors_a_port_as_pinned_erts() {
     assert_runs(
         "monitor()",
         "[normal,noproc,boom,normal,[{'EXIT',port,normal},{'EXIT',port,normal}]]",
+    );
+}
+
+#[test]
+fn opens_a_port_on_an_fd_that_is_not_open_as_pinned_erts() {
+    // `fd_start` checks only `sys_max_files()` (sys_drivers.c:822-824): the
+    // port opens, and its write fails with `ebadf` (sys_drivers.c:1180-1184).
+    assert_runs(
+        "fd_closed()",
+        "[[],true,[{'EXIT',port,ebadf}],undefined,{error,einval}]",
     );
 }
 
@@ -278,7 +365,10 @@ fn stops_the_run_for_each_port_part_that_is_not_implemented() {
             "empty_line",
             "unsupported open_port/2 option {line, L} whose low 32 bits are not positive",
         ),
-        ("fd", "unsupported open_port/2 port kind fd"),
+        (
+            "fd_list",
+            "unsupported open_port/2 without the binary option",
+        ),
         (
             "exec",
             "unsupported open_port/2 of a program that posix_spawn does not start: eacces",

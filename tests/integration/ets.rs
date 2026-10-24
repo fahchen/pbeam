@@ -566,13 +566,6 @@ fn rejects_tables_that_pbeam_cannot_model() {
             "expected {message}, got {error}"
         );
     }
-    // ets:match/1 reads the continuation of ets:match/3, and PBeam does not
-    // run it yet.
-    let case = Term::Atom(program.atom("match_1").unwrap());
-    let error = program
-        .execute("ets_probe", "unsupported", &[program.host_term(case)])
-        .unwrap_err();
-    assert_eq!(error.to_string(), "unresolved external MFA ets:match/1");
 }
 
 #[test]
@@ -694,6 +687,7 @@ fn runs_the_select_and_iteration_bifs_as_pinned_erts() {
     for function in [
         "select",
         "match_object",
+        "match_continue",
         "iterate",
         "update_element",
         "info_items",

@@ -30,6 +30,8 @@ const TCP_ACTIVE: &[u8] = include_bytes!("../../fixtures/tcp/tcp_active.beam");
 
 const TCP_CLOSE: &[u8] = include_bytes!("../../fixtures/tcp/tcp_close.beam");
 
+const TCP_LOCAL: &[u8] = include_bytes!("../../fixtures/tcp/tcp_local.beam");
+
 /// The pinned OTP modules that the probes call: `erlang` has
 /// `open_port/2`, `port_control/3`, `port_close/1`, and `port_info/1`,
 /// which call the `erts_internal` port BIFs, and `prim_inet` makes the
@@ -105,6 +107,7 @@ fn load() -> BeamProgram {
         TCP_TRANSFER,
         TCP_ACTIVE,
         TCP_CLOSE,
+        TCP_LOCAL,
     ];
     all.extend(beams.iter().map(Vec::as_slice));
     BeamProgram::load(&all).unwrap()
@@ -239,13 +242,7 @@ fn stops_the_run_for_each_tcp_inet_part_that_is_not_implemented() {
             "list",
             "unsupported open_port/2 settings of an inet driver port other than [binary]",
         ),
-        ("local", "unsupported tcp_inet family 5"),
         ("mptcp", "unsupported tcp_inet protocol 4"),
-        ("bind_local", "unsupported tcp_inet bind address family 5"),
-        (
-            "connect_local",
-            "unsupported tcp_inet connect address family 5",
-        ),
         ("dontroute", "unsupported tcp_inet option 2"),
         ("recvttl", "unsupported tcp_inet option recvttl true"),
         // ERTS keeps the time of `{linger, {false, 5}}` (inet_drv.c:7362-7370).
@@ -343,7 +340,12 @@ fn stops_the_run_for_each_udp_inet_part_that_is_not_implemented() {
         ("stream", "unsupported udp_inet type 1"),
         ("seqpacket", "unsupported udp_inet type 3"),
         ("sctp", "unsupported udp_inet protocol 3"),
+        ("local", "unsupported udp_inet family 5"),
         ("accept", "unsupported udp_inet request 26"),
+        (
+            "disconnect",
+            "unsupported udp_inet request CONNECT without an address",
+        ),
         ("inet6", "unsupported udp_inet output address family 2"),
         (
             "ancillary",
@@ -418,6 +420,81 @@ fn delivers_datagrams_to_the_owner_of_an_active_udp_inet_port_as_pinned_erts() {
     let expected = "[[{udp,socket,{127,0,0,1},true,<<97>>},{udp,socket,{127,0,0,1},true,<<98>>}],[{udp,socket,{127,0,0,1},true,[99]},none,{ok,[{active,false}]}],[{udp,socket,{127,0,0,1},true,[100]},{ok,[{active,1}]},ok,{udp,socket,{127,0,0,1},true,[101]},{udp_passive,socket},none,{ok,[{active,false}]}],[ok,{udp_passive,socket},{ok,[{active,false}]}],[ok,{error,einval},{ok,[{active,32767}]},ok,{ok,[{active,false}]},{udp_passive,socket}],[none,true],[{ok,[{read_packets,5}]},{error,einval},ok,{ok,[{read_packets,1}]}],[{udp,socket,{127,0,0,1},true,[103]},{udp,socket,{127,0,0,1},true,[104]},{udp,socket,{127,0,0,1},true,[105]},none]]";
     assert_eq!(erts_text("udp_probe", "active"), expected, "ERTS");
     assert_eq!(pbeam_text("udp_probe", "active"), expected, "PBeam");
+}
+
+#[test]
+fn connects_a_udp_inet_port_as_pinned_erts() {
+    // `CONNECT` sets the default peer (inet_drv.c:14710-14842), `PEER`
+    // gives it (inet_drv.c:11272-11300), and a send of a connected socket
+    // ignores its address (inet_drv.c:15142-15182); `any` and `loopback`
+    // take only the port (inet_drv.c:4817-4844).
+    let expected = "[{error,enotconn},ok,{ok,{{127,0,0,1},true}},ok,{ok,{{127,0,0,1},true,<<104,105>>}},{ok,{{127,0,0,1},true,<<112,101,101,114>>}},{error,timeout},[{ok,{{127,0,0,1},true,<<116,111>>}},{error,timeout}],{error,exbadport},[[0,101,105,110,118,97,108],[0,101,105,110,118,97,108],[0,101,97,102,110,111,115,117,112,112,111,114,116],[0,101,105,110,118,97,108],[0,101,120,98,97,100,112,111,114,116]],[ok,{ok,{{127,0,0,1},true,<<108>>}},{error,einval},{error,einval}]]";
+    assert_eq!(erts_text("udp_probe", "connect"), expected, "ERTS");
+    assert_eq!(pbeam_text("udp_probe", "connect"), expected, "PBeam");
+}
+
+#[test]
+fn reconnects_a_udp_inet_port_as_pinned_erts_or_stops_on_linux() {
+    // `CONNECT` of a connected socket dissolves the association first
+    // (inet_drv.c:14819-14836); xnu does it in each connect, and Linux needs
+    // an `AF_UNSPEC` connect, which safe Rust cannot make, also after a
+    // failed connect (inet_drv.c:14832-14836).
+    if cfg!(target_os = "linux") {
+        let program = load();
+        let error = program
+            .execute("udp_probe", "reconnect", &[])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("unsupported udp_inet connect of a connected socket"),
+            "{error}"
+        );
+        let argument = Term::Atom(program.atom("failed_connect").unwrap());
+        let error = program
+            .execute("udp_probe", "unsupported", &[program.host_term(argument)])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("unsupported failed udp_inet connect"),
+            "{error}"
+        );
+        return;
+    }
+    let expected = "[ok,{error,eaddrnotavail},{error,enotconn},ok,{ok,{{127,0,0,1},true}},ok]";
+    assert_eq!(erts_text("udp_probe", "reconnect"), expected, "ERTS");
+    assert_eq!(pbeam_text("udp_probe", "reconnect"), expected, "PBeam");
+}
+
+#[test]
+fn gives_a_datagram_to_the_owner_of_a_connected_active_udp_inet_port_as_pinned_erts() {
+    // An active socket sends each datagram to its owner, also with a
+    // receive that waits (`packet_reply_binary_data`,
+    // inet_drv.c:4335-4357).
+    let expected = "[{udp,<<119>>},none]"; // The waiter end differs: #1246.
+    assert_eq!(erts_text("udp_probe", "active_waiter"), expected, "ERTS");
+    assert_eq!(pbeam_text("udp_probe", "active_waiter"), expected, "PBeam");
+}
+
+#[test]
+fn gives_econnrefused_on_a_connected_udp_inet_port_as_pinned_erts() {
+    // A read error goes to the receive of a passive socket and to the
+    // owner of an active socket as `{udp_error, S, Reason}`
+    // (inet_drv.c:15473-15489).
+    for (function, expected) in [
+        ("refused_passive", "{error,econnrefused}"),
+        ("refused_active", "{udp_error,socket,econnrefused}"),
+    ] {
+        assert_eq!(
+            erts_text("udp_probe", function),
+            expected,
+            "ERTS {function}"
+        );
+        assert_eq!(
+            pbeam_text("udp_probe", function),
+            expected,
+            "PBeam {function}"
+        );
+    }
 }
 
 /// A client of the test: it reads `"Port Count"` from the file `path` and
@@ -954,4 +1031,16 @@ fn gives_the_reply_bytes_of_each_connect_check_as_pinned_erts() {
             "[[0,101,120,98,97,100,112,111,114,116],[[0,101,105,110,118,97,108],[0,101,105,110,118,97,108],[0,101,97,102,110,111,115,117,112,112,111,114,116],[0,101,105,110,118,97,108]],{listen}]"
         ),
     );
+}
+
+#[test]
+fn gives_the_bind_errors_of_a_local_socket_as_pinned_erts() {
+    // `OPEN` with the TCP protocol makes the socket with the protocol 0
+    // (inet_drv.c:5167). `BIND` has no `any` or `loopback` of `AF_UNIX`
+    // (inet_drv.c:4822-4872), and fails for a short or long name
+    // (inet_drv.c:4750-4768).
+    let einval = "[0,101,105,110,118,97,108]";
+    let expected = format!("[[1],{einval},{einval},{einval},{einval}]");
+    assert_eq!(erts_text("tcp_local", "control"), expected);
+    assert_eq!(pbeam_text("tcp_local", "control"), expected);
 }

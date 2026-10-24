@@ -16,6 +16,8 @@ nix = { version = "0.31.3", default-features = false, features = [
   "feature",
   "fs",
   "hostname",
+  "resource",
+  "socket",
 ] }
 num-bigint = "0.5"
 num-integer = "0.1"
@@ -822,3 +824,7 @@ path = "tests/integration/chksum.rs"
 [[test]]
 name = "net"
 path = "tests/integration/net.rs"
+
+[[test]]
+name = "erts_debug_size"
+path = "tests/integration/erts_debug_size.rs"

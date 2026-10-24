@@ -187,6 +187,14 @@ impl NodePoll {
         }
     }
 
+    /// Return the port that the poll waits to read `fd` for: the port that
+    /// registered `fd` last.
+    pub(in crate::runtime) fn reader(&self, fd: c_int) -> Option<PortId> {
+        self.fds()
+            .get(&(fd, Direction::Read))
+            .map(|&(_, port)| port)
+    }
+
     /// Return true when the thread waits on an fd for the scheduler
     /// `index`, or holds a ready fd for it.
     pub(in crate::runtime) fn serves(&self, index: usize) -> bool {
