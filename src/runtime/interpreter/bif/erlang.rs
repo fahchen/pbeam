@@ -17,6 +17,8 @@ use crate::runtime::process::{InitialCall, OTHER_PROCESS_INFO_ITEMS};
 use crate::runtime::process::{LinkId, ProcessState};
 use crate::runtime::scheduler::PTAB_SIZE;
 use crate::runtime::scheduler::{AliasMode, CONTEXT_REDS, Flushed, MonitorOptions, MonitorTarget};
+#[cfg(target_os = "linux")]
+use crate::runtime::schedulers::cpu_topology;
 use crate::runtime::schedulers::{Schedulers, logical_processors_available};
 use crate::runtime::signal::Signal;
 use crate::runtime::time::{self, TimeValue};
@@ -3355,6 +3357,28 @@ pub(super) fn system_info(scheduler: &mut Scheduler, item: &Term) -> Result<BifR
         #[cfg(not(target_os = "linux"))]
         Term::Atom(atom) if atoms.name_of(atom) == "cpu_topology" => {
             Ok(Value(Term::static_atom("undefined")))
+        }
+        // The topology that ERTS reads from `/sys/devices/system`, or
+        // `undefined` when it reads none or `verify_topology` rejects it
+        // (`erl_cpu_topology.c:1690-1703`, `bld_topology_term`,
+        // `erl_cpu_topology.c:1515-1543`).
+        #[cfg(target_os = "linux")]
+        Term::Atom(atom) if atoms.name_of(atom) == "cpu_topology" => {
+            let cpus: Vec<Term> = cpu_topology()
+                .into_iter()
+                .map(|ids| {
+                    let mut elements = vec![Term::static_atom("cpu")];
+                    elements.extend(ids.map(|id| Term::Integer(i64::from(id))));
+                    Term::tuple(elements)
+                })
+                .collect();
+            Ok(Value(
+                if !cpus.is_empty() && valid_cpu_topology(cpus.iter()) {
+                    Term::list_from(cpus)
+                } else {
+                    Term::static_atom("undefined")
+                },
+            ))
         }
         // `erl_bif_info.c:3212-3221`. The count is never 0, so the item is
         // never `unknown`.
