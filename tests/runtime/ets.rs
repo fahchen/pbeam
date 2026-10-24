@@ -814,9 +814,10 @@ fn shrinks_after_a_select_delete() {
 }
 
 #[test]
-fn drops_the_match_programs_of_a_deleted_table() {
+fn keeps_the_match_programs_of_a_deleted_table() {
     // An `ets:select/1` continuation holds a compiled program under a
-    // reference. The delete of its table drops the program.
+    // reference. The program outlives the table, as an ERTS magic binary
+    // lives with its reference (`erl_db_util.h:617-619`).
     let atoms = test_atom_table();
     let mut tables = EtsTables::default();
     tables.create(
@@ -825,10 +826,9 @@ fn drops_the_match_programs_of_a_deleted_table() {
         Table::new(ProcessId(0), Access::Public, 1, TableType::Set),
     );
     let spec = super::pattern::MatchSpec::compile(&atoms, &Term::nil()).unwrap();
-    tables.remember_program(Reference(0), Reference(1), spec);
-    assert!(tables.program(Reference(1)).is_some());
+    tables.remember_program(Reference(1), spec);
     tables.delete_table(Reference(0), ProcessId(0));
-    assert!(tables.program(Reference(1)).is_none());
+    assert!(tables.program(Reference(1)).is_some());
 
     tables.create(
         Reference(2),
@@ -836,13 +836,13 @@ fn drops_the_match_programs_of_a_deleted_table() {
         Table::new(ProcessId(5), Access::Public, 1, TableType::Set),
     );
     let spec = super::pattern::MatchSpec::compile(&atoms, &Term::nil()).unwrap();
-    tables.remember_program(Reference(2), Reference(3), spec);
+    tables.remember_program(Reference(3), spec);
     assert!(
         tables
             .delete_owned(ProcessId(5), 1000, |_| false, &mut Vec::new())
             .is_some()
     );
-    assert!(tables.program(Reference(3)).is_none());
+    assert!(tables.program(Reference(3)).is_some());
 }
 
 #[test]
@@ -1768,16 +1768,6 @@ fn keeps_no_result_for_an_insert_of_a_dead_process() {
     tables.put_result(ProcessId(1), Term::Integer(2));
     assert_eq!(tables.take_result(ProcessId(1)), Some(Term::Integer(2)));
     assert!(tables.take_result(ProcessId(1)).is_none());
-}
-
-#[test]
-fn keeps_no_program_of_a_deleted_table() {
-    // A select of another scheduler can end after the delete of its table.
-    let atoms = test_atom_table();
-    let mut tables = EtsTables::default();
-    let spec = super::pattern::MatchSpec::compile(&atoms, &Term::nil()).expect("an empty spec");
-    tables.remember_program(Reference(0), Reference(1), spec);
-    assert!(tables.program(Reference(1)).is_none());
 }
 
 #[test]

@@ -116,9 +116,11 @@ pub(super) struct EtsTables {
     /// The compiled match specification of each `ets:select/1`
     /// continuation, by the reference that the continuation holds in place
     /// of the ERTS magic reference (`ets_db_make_match_prog_ref`,
-    /// `erl_db_hash.c:2103`, `2229`). Each entry also holds the table
-    /// reference, so the delete of the table drops its programs.
-    programs: HashMap<Reference, (Reference, pattern::MatchSpec)>,
+    /// `erl_db_hash.c:2103`, `2229`). A program outlives its table, as the
+    /// magic binary lives with the reference (`erl_db_util.h:617-619`).
+    /// PBeam keeps each program until the run ends: see "ETS tables" in
+    /// `docs/erts-differences.md`.
+    programs: HashMap<Reference, pattern::MatchSpec>,
     /// The result of each list insert that another process completed, by
     /// the process that started it, which reads it in its next turn
     /// (`erl_db.c:2142-2150`, `2232-2244`). The starter can run on another
@@ -868,7 +870,7 @@ impl EtsTables {
     }
 
     /// Remember the compiled match specification `spec` under the reference
-    /// `program` of a continuation of the table `table`, as ERTS keeps the
+    /// `program` of a continuation, as ERTS keeps the
     /// compiled program in a magic reference (`erl_db_hash.c:2103`,
     /// `2229`).
     ///
@@ -877,25 +879,15 @@ impl EtsTables {
     /// ```rust,ignore
     /// let mut tables = EtsTables::default();
     /// let spec = MatchSpec::compile(&atoms, &Term::nil()).unwrap();
-    /// tables.remember_program(Reference(0), Reference(1), spec);
+    /// tables.remember_program(Reference(1), spec);
     /// assert!(tables.program(Reference(1)).is_some());
     /// ```
-    pub(super) fn remember_program(
-        &mut self,
-        table: Reference,
-        program: Reference,
-        spec: pattern::MatchSpec,
-    ) {
-        // A process of another scheduler can delete the table after the
-        // walk released its locks; the delete dropped the programs of the
-        // table, so a program of a deleted table is not kept.
-        if self.tables.contains_key(&table) {
-            self.programs.insert(program, (table, spec));
-        }
+    pub(super) fn remember_program(&mut self, program: Reference, spec: pattern::MatchSpec) {
+        self.programs.insert(program, spec);
     }
 
     /// Return the compiled match specification of the continuation program
-    /// `program`, or `None` when no continuation of a live table holds it.
+    /// `program`, or `None` when no continuation holds it.
     ///
     /// # Examples
     ///
@@ -903,7 +895,7 @@ impl EtsTables {
     /// assert!(EtsTables::default().program(Reference(0)).is_none());
     /// ```
     pub(super) fn program(&self, program: Reference) -> Option<&pattern::MatchSpec> {
-        self.programs.get(&program).map(|(_, spec)| spec)
+        self.programs.get(&program)
     }
 
     /// Return the live table with the reference `id`, with no access
@@ -1139,7 +1131,6 @@ impl EtsTables {
                 table.fixed_by.clear();
                 self.forget_fixations(id, &fixers, owner);
                 self.names.retain(|_, named| *named != id);
-                self.programs.retain(|_, (table, _)| *table != id);
                 self.freeing.insert(id, Freeing::new(table));
             }
             reds = self.free_table(id, reds)?;
@@ -1217,7 +1208,6 @@ impl EtsTables {
             .unwrap_or_else(PoisonError::into_inner);
         self.deleted.insert(id);
         self.names.retain(|_, named| *named != id);
-        self.programs.retain(|_, (table, _)| *table != id);
         if table.owner != caller {
             table.owner = caller;
             table.owned = self.save_owned();
