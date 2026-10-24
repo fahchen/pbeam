@@ -3423,6 +3423,20 @@ pub(super) fn system_info(scheduler: &mut Scheduler, item: &Term) -> Result<BifR
         Term::Atom(atom) if atoms.name_of(atom) == "delayed_node_table_gc" => {
             Ok(Value(Term::Integer(60)))
         }
+        // `erts_print_system_version` (`erl_bif_info.c:492-523`) with the
+        // format of the pinned build (`erl_bif_info.c:92-160`): no release
+        // candidate, a source build, the scheduler counts, the default
+        // async thread count 1 (`erl_init.c:873-876`), and the JIT tag
+        // (`configure.ac:3216-3225`). PBeam rejects `+A` and does not read
+        // `ERL_THREAD_POOL_SIZE`.
+        Term::Atom(atom) if atoms.name_of(atom) == "system_version" => {
+            Ok(Value(charlist(&system_version(
+                schedulers,
+                online,
+                schedulers.min(host_count()),
+                online.min(host_count()),
+            ))))
+        }
         // `erl_bif_info.c:2780-2783` takes each tuple to `info_1_tuple`, and
         // `erl_bif_info.c:3633` rejects each other term that the chain does
         // not name.
@@ -3439,6 +3453,26 @@ pub(super) fn system_info(scheduler: &mut Scheduler, item: &Term) -> Result<BifR
         ))),
         _ => Ok(BifResult::badarg()),
     }
+}
+
+/// The JIT tag of the pinned build: the x86 JIT uses the native stack, and
+/// the ARM JIT does not (`configure.ac:3216-3225`, `erl_bif_info.c:115-121`).
+#[cfg(target_arch = "x86_64")]
+const JIT_TAG: &str = " [jit:ns]";
+#[cfg(target_arch = "aarch64")]
+const JIT_TAG: &str = " [jit]";
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+const JIT_TAG: &str = "";
+
+/// The text of `erlang:system_info(system_version)`
+/// (`erl_bif_info.c:92-160`, `erl_bif_info.c:492-523`).
+fn system_version(schedulers: i64, online: i64, dirty_cpu: i64, dirty_cpu_online: i64) -> String {
+    format!(
+        "Erlang/OTP {} [erts-{ERTS_VERSION}] [source] [{}-bit] [smp:{schedulers}:{online}] \
+         [ds:{dirty_cpu}:{dirty_cpu_online}:{DIRTY_IO_THREADS}] [async-threads:1]{JIT_TAG}\n",
+        env!("PBEAM_OTP_RELEASE"),
+        usize::BITS,
+    )
 }
 
 /// The ERTS version of the pinned OTP, `VSN` of `erts/vsn.mk:23`, which
