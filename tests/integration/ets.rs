@@ -552,6 +552,10 @@ fn rejects_tables_that_pbeam_cannot_model() {
         ("keypos_new", "insert_new/2 in a table with key position 0"),
         ("index", "lookup_element/4 index 4294967296 with position 0"),
         (
+            "count_changed",
+            "select_count/2 on a table that changed while the count trapped",
+        ),
+        (
             "match_changed",
             "match/2,3 or ets:select/2,3 on a table that changed while the match trapped",
         ),
@@ -706,6 +710,18 @@ fn runs_the_select_and_iteration_bifs_as_pinned_erts() {
     ] {
         assert_probe_matches_erts(&program, function);
     }
+}
+
+#[test]
+fn runs_select_count_slot_and_rename_as_pinned_erts() {
+    // `ets_probe:rename_slot_count/0`: `ets:select_count/2`, `ets:slot/2`,
+    // and `ets:rename/2` on each table type, with the access and `badarg`
+    // cases of erl_db.c:2444-2547, 3739-3760, and 4096-4137.
+    let beams = ["erlang", "ets", "lists"].map(pinned_beam);
+    let mut modules: Vec<&[u8]> = beams.iter().map(Vec::as_slice).collect();
+    modules.push(ETS_PROBE);
+    let program = BeamProgram::load(&modules).unwrap();
+    assert_probe_matches_erts(&program, "rename_slot_count");
 }
 
 #[test]

@@ -1098,6 +1098,22 @@ impl BeamProgram {
             let fields = (table, last, least, *program, *count);
             return ets::select_delete_trap(&mut BifContext { scheduler }, &arguments, fields);
         }
+        if let (
+            "ets",
+            "select_count_trap",
+            [
+                table,
+                spec,
+                position,
+                end,
+                Term::Integer(got),
+                Term::Integer(writes),
+            ],
+        ) = (module, function, arguments.as_slice())
+        {
+            let resume = Some((position, end, *got, *writes));
+            return ets::select_count_trap(&mut BifContext { scheduler }, table, spec, resume);
+        }
         if let ("ets", "info", [table, item]) = (module, function, arguments.as_slice()) {
             let mut context = BifContext { scheduler };
             return ets::info(&mut context, table, item);
