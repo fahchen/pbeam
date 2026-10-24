@@ -182,6 +182,18 @@ fn domain_term(scheduler: &mut Scheduler, domain: i32) -> Result<Term, BeamError
     named(scheduler, &names, domain)
 }
 
+/// Return the domain of `esock_decode_domain` (`socket_util.c:2180-2214`):
+/// the number of a domain atom, or an `int`.
+fn decode_domain(scheduler: &Scheduler, domain: &Term) -> Option<i32> {
+    match atom_name(scheduler, domain) {
+        Some("inet") => Some(libc::AF_INET),
+        Some("inet6") => Some(libc::AF_INET6),
+        Some("local") => Some(libc::AF_UNIX),
+        Some("unspec") => Some(libc::AF_UNSPEC),
+        _ => int(domain),
+    }
+}
+
 /// Return the type term of `kind`, as `esock_encode_type` does
 /// (`socket_util.c:2420-2452`).
 fn type_term(scheduler: &mut Scheduler, kind: i32) -> Result<Term, BeamError> {
@@ -329,15 +341,8 @@ pub(super) fn open_4(
         let range = Term::tuple(vec![atom(scheduler, "integer_range")?, protocol.clone()]);
         return Ok(invalid(range));
     };
-    let domain = match atom_name(scheduler, domain) {
-        Some("inet") => libc::AF_INET,
-        Some("inet6") => libc::AF_INET6,
-        Some("local") => libc::AF_UNIX,
-        Some("unspec") => libc::AF_UNSPEC,
-        _ => match int(domain) {
-            Some(domain) => domain,
-            None => return Ok(invalid(atom(scheduler, "domain")?)),
-        },
+    let Some(domain) = decode_domain(scheduler, domain) else {
+        return Ok(invalid(atom(scheduler, "domain")?));
     };
     let kind = match atom_name(scheduler, kind) {
         Some("stream") => libc::SOCK_STREAM,
