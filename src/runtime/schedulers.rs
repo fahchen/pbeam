@@ -207,9 +207,9 @@ pub(in crate::runtime) type CpuIds = [i32; 6];
 
 /// Return the processor topology of the host, as `read_topology`
 /// (`erl_misc_utils.c:841-1031`) reads it from `/sys/devices/system`. An
-/// empty list means that ERTS reads no topology. PBeam reads it once, at
-/// the first call, and keeps it, as ERTS keeps the topology that it reads
-/// when the node starts (`erl_cpu_topology.c:1686-1703`). ERTS takes the configured
+/// empty list means that ERTS reads no topology. PBeam reads it once, when
+/// `BeamProgram::boot` starts the node, and keeps it, as ERTS keeps the
+/// topology that it reads when the node starts (`erl_cpu_topology.c:1686-1703`). ERTS takes the configured
 /// processors from `sysconf(_SC_NPROCESSORS_CONF)`, which the C library
 /// counts from the `cpuN` entries of `/sys/devices/system/cpu`, and the
 /// processors online from `/sys/devices/system/cpu/online`.
