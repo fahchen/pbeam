@@ -573,7 +573,7 @@ fn gives_undefined_for_an_empty_detected_topology() {
     // (`erl_cpu_topology.c:1515-1543`). The Linux CI runner has a
     // topology, so this unit test gives an empty one.
     assert!(matches!(
-        detected_topology(&[]),
+        &detected_topology(&[]),
         Term::Atom(atom) if atom.is_static("undefined")
     ));
 }
