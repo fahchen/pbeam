@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::sync::Arc;
 
-use super::{KeyOrder, Locate, Probe};
+use super::{KeyOrder, Locate, OrderKey, Probe};
 use crate::term::{AtomTable, Reference, Term};
 
 fn order(keys: &[Term]) -> (Arc<AtomTable>, KeyOrder) {
@@ -74,4 +74,19 @@ fn makes_the_order_stale_at_a_key_with_no_order() {
 fn never_reads_the_key_of_a_probe() {
     let probe = Probe::new(|_: &Term| Ok(Ordering::Less));
     let _ = Locate::term(&probe);
+}
+
+#[test]
+fn compares_keys_and_probes_with_equality_and_partial_order() {
+    let atoms = Arc::new(AtomTable::new());
+    let key = |term| OrderKey {
+        term,
+        atoms: Arc::clone(&atoms),
+    };
+    let (one, float) = (key(Term::Integer(1)), key(Term::Float(1.0)));
+    assert!(one == float);
+    assert_eq!(one.partial_cmp(&float), Some(Ordering::Equal));
+    let (left, right): (&dyn Locate, &dyn Locate) = (&one, &float);
+    assert!(left == right);
+    assert_eq!(left.partial_cmp(right), Some(Ordering::Equal));
 }
