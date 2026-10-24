@@ -694,6 +694,7 @@ fn runs_the_select_and_iteration_bifs_as_pinned_erts() {
     for function in [
         "select",
         "match_object",
+        "match_continue",
         "iterate",
         "update_element",
         "info_items",
