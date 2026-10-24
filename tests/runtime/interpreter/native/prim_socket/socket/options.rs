@@ -87,3 +87,17 @@ fn gives_invalid_data_size_for_a_binary_value_spec_of_4_gib() {
     ]);
     assert_eq!(value, Term::tuple(vec![Term::static_atom("error"), reason]));
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn stops_at_a_control_message_that_ip_pktoptions_does_not_give() {
+    // The Linux kernel gives only `IP_PKTINFO`, `IP_TTL`, and `IP_TOS` for
+    // `IP_PKTOPTIONS` (net/ipv4/ip_sockglue.c), so no fixture reaches
+    // another control message.
+    let scheduler = &mut Scheduler::new(AtomTable::new());
+    let mut buffer = 20_usize.to_ne_bytes().to_vec();
+    buffer.extend(libc::IPPROTO_IP.to_ne_bytes());
+    buffer.extend(libc::IP_RECVTTL.to_ne_bytes());
+    buffer.extend([0; 8]);
+    assert!(pktoptions(scheduler, &buffer).is_err());
+}
