@@ -2,7 +2,8 @@
 -compile(nowarn_deprecated_catch).
 -behaviour(application).
 -behaviour(supervisor).
--export([main/0, main/1, lookup/0, gethost/0, supports/0, socket/0, start/2, stop/1, init/1]).
+-export([main/0, main/1, lookup/0, gethost/0, supports/0, socket/0, socket_select/0,
+         socket_acceptors/0, socket_connect_invalid/0, socket_cancel_recv/0, start/2, stop/1, init/1]).
 
 %% `erl -noshell -boot start_clean -pa fixtures/boot -s kernel_boot_probe
 %% main -kernel logger_level warning` runs main/0 in the boot process of init after the boot script
@@ -193,6 +194,165 @@ socket() ->
                     [strip(E) || E <- OpenErrors], [strip(E) || E <- Badargs],
                     maps:get(counters, socket:info())}),
     init:stop().
+
+%% `erl -noshell -boot start_clean -pa fixtures/boot -s kernel_boot_probe
+%% socket_select -kernel logger_level warning` runs socket_select/0. It
+%% connects, listens, accepts, and cancels with socket:connect/2,3,
+%% socket:listen/1,2, socket:accept/1,2, and socket:cancel/2, with
+%% timeouts, nowait, and the select and abort messages. It replaces each
+%% reference with an atom, and displays only the results that are the same
+%% on Linux and macOS.
+socket_select() ->
+    process_flag(trap_exit, true),
+    Parent = self(),
+    {ok, L} = socket:open(inet, stream, tcp),
+    {_, LRef} = L,
+    ok = socket:bind(L, #{family => inet, addr => loopback, port => 0}),
+    {ok, #{port := Port}} = socket:sockname(L),
+    Addr = #{family => inet, addr => loopback, port => Port},
+    Listen = [socket:listen(L), maps:get(rstates, socket:info(L)), socket:accept(L, 0)],
+    {select, {select_info, accept, H1}} = socket:accept(L, nowait),
+    Accepting = [maps:get(rstates, socket:info(L)), quiet(),
+                 masked(socket:cancel(L, {select_info, accept, make_ref()}))],
+    {ok, C} = socket:open(inet, stream, tcp),
+    {_, CRef} = C,
+    {select, {select_info, connect, CH}} = socket:connect(C, Addr, nowait),
+    Connecting = maps:get(wstates, socket:info(C)),
+    Other = fun(F) -> spawn(fun() -> Parent ! {other, catch F()} end),
+                      receive {other, R} -> strip(R) end end,
+    Others = [Other(fun() -> socket:connect(C, Addr) end),
+              Other(fun() -> prim_socket:connect(CRef) end),
+              masked(socket:cancel(C, {select_info, connect, make_ref()}))],
+    Selected = [receive {'$socket', L, select, H1} -> accept_select after 5000 -> none end,
+                receive {'$socket', C, select, CH} -> connect_select after 5000 -> none end],
+    {ok, A} = socket:accept(L, H1),
+    Connected = [socket:connect(C), strip(catch socket:connect(C)), socket:connect(C, Addr),
+                 maps:get(wstates, socket:info(C)), maps:get(rstates, socket:info(L))],
+    AInfo = maps:with([owner, rstates, wstates, domain, type, protocol], socket:info(A)),
+    Accepted = [maps:get(owner, AInfo) =:= self(), maps:remove(owner, AInfo),
+                lists:member(A, socket:which_sockets())],
+    {select, {select_info, accept, H2}} = socket:accept(L, nowait),
+    Cancel = [socket:cancel(L, {select_info, accept, H2}),
+              masked(socket:cancel(L, {select_info, accept, H2})),
+              maps:get(rstates, socket:info(L))],
+    {select, {select_info, accept, H3}} = socket:accept(L, nowait),
+    {select, {select_info, accept, H4}} = socket:accept(L, nowait),
+    Again = [receive {'$socket', L, abort, {H3, Why}} -> Why after 0 -> none end,
+             receive {'$socket', L, select, H3} -> stale after 0 -> none end],
+    {ok, D} = socket:open(inet, stream, tcp),
+    ok = socket:connect(D, Addr),
+    Sent = [receive {'$socket', L, select, H4} -> accept_select after 5000 -> none end,
+            socket:cancel(L, {select_info, accept, H4}), element(1, socket:accept(L, 0))],
+    {ok, E} = socket:open(inet, stream, tcp),
+    {select, {select_info, connect, EH}} = socket:connect(E, Addr, nowait),
+    EConnect = [receive {'$socket', E, select, EH} -> connect_select after 5000 -> none end,
+                socket:cancel(E, {select_info, connect, EH}), element(1, socket:accept(L, 0))],
+    {select, {select_info, accept, H5}} = socket:accept(L, nowait),
+    ok = socket:close(E),
+    ok = socket:close(L),
+    Closed = [receive {'$socket', L, abort, {H5, Reason}} -> Reason after 0 -> none end,
+              socket:accept(L, 0), socket:listen(L), socket:connect(L, Addr),
+              socket:cancel(L, {select_info, accept, make_ref()}),
+              socket:cancel(L, {select_info, connect, make_ref()}),
+              prim_socket:cancel(LRef, foo, make_ref())],
+    {ok, R} = socket:open(inet, stream, tcp),
+    ok = socket:bind(R, #{family => inet, addr => loopback, port => 0}),
+    {ok, #{port := RPort}} = socket:sockname(R),
+    ok = socket:close(R),
+    {ok, F} = socket:open(inet, stream, tcp),
+    {_, FRef} = F,
+    {ok, G} = socket:open(inet, dgram, udp),
+    {_, GRef} = G,
+    Errors = [socket:connect(F, Addr#{port := RPort}), socket:accept(F, 0),
+              socket:listen(G),
+              strip(catch prim_socket:connect(FRef)),
+              strip(catch prim_socket:connect(FRef, foo, Addr)),
+              strip(catch prim_socket:connect(FRef, make_ref(), [Addr])),
+              prim_socket:listen(GRef, 1 bsl 40), prim_socket:listen(GRef, 1 bsl 70),
+              strip(catch prim_socket:listen(GRef, foo)),
+              strip(catch prim_socket:cancel(GRef, foo, make_ref())),
+              strip(catch prim_socket:cancel(GRef, 1, make_ref())),
+              strip(catch prim_socket:cancel(GRef, connect, foo))],
+    Badargs = [strip(catch prim_socket:connect(make_ref())),
+               strip(catch prim_socket:listen(make_ref(), 5)),
+               strip(catch prim_socket:accept(make_ref(), make_ref())),
+               strip(catch prim_socket:cancel(make_ref(), accept, make_ref()))],
+    {ok, U} = socket:open(local, stream),
+    Path = list_to_binary("/tmp/pbeam_select_probe_" ++ os:getpid()),
+    _ = file:delete(Path),
+    ok = socket:bind(U, #{family => local, path => Path}),
+    ok = socket:listen(U),
+    {ok, V} = socket:open(local, stream),
+    {ok, W} = socket:open(local, stream),
+    Local = [socket:connect(V, #{family => local, path => Path}),
+             socket:connect(W, #{family => local, path => <<Path/binary, "x">>}),
+             element(1, socket:accept(U))],
+    _ = file:delete(Path),
+    {ok, K} = socket:open(inet, stream, tcp),
+    ok = socket:bind(K, #{family => inet, addr => loopback, port => 0}),
+    ok = socket:listen(K),
+    {ok, Addr2} = socket:sockname(K),
+    {Acceptor, AMon} = spawn_monitor(fun() -> Parent ! {acceptor, socket:accept(K, nowait)},
+                                              receive stop -> ok end end),
+    receive {acceptor, {select, _}} -> ok end,
+    Waiting = maps:get(rstates, socket:info(K)),
+    exit(Acceptor, kill),
+    receive {'DOWN', AMon, process, Acceptor, killed} -> ok end,
+    Down = [maps:get(rstates, socket:info(K)), element(1, socket:accept(K, nowait))],
+    {ok, C2} = socket:open(inet, stream, tcp),
+    {Connector, CMon} = spawn_monitor(fun() -> Parent ! {connector, socket:connect(C2, Addr2, nowait)},
+                                               receive stop -> ok end end),
+    receive {connector, {select, _}} -> ok end,
+    ConnectorWaiting = maps:get(wstates, socket:info(C2)),
+    exit(Connector, kill),
+    receive {'DOWN', CMon, process, Connector, killed} -> ok end,
+    ConnectorDown = [ConnectorWaiting, maps:get(wstates, socket:info(C2))],
+    {Owner, OMon} = spawn_monitor(fun() -> {ok, O} = socket:open(inet, stream, tcp),
+                                           ok = socket:bind(O, #{family => inet, addr => loopback, port => 0}),
+                                           ok = socket:listen(O),
+                                           Parent ! {owner, O}, receive stop -> ok end end),
+    O = receive {owner, Sock} -> Sock end,
+    {select, {select_info, accept, OH}} = socket:accept(O, nowait),
+    exit(Owner, kill),
+    receive {'DOWN', OMon, process, Owner, killed} -> ok end,
+    OwnerDown = [receive {'$socket', O, abort, {OH, OReason}} -> OReason after 1000 -> none end,
+                 maps:get(rstates, socket:info(O))],
+    erlang:display({socket_select, Listen, Accepting, Connecting, Others, Selected, Connected,
+                    Accepted, Cancel, Again, Sent, EConnect, Closed, Errors, Badargs, Local, Waiting, Down,
+                    ConnectorDown, OwnerDown}),
+    init:stop().
+
+%% `-s kernel_boot_probe socket_acceptors` calls socket:accept/2 from a
+%% second process while the first process waits on the listen socket.
+socket_acceptors() ->
+    {ok, L} = socket:open(inet, stream, tcp),
+    ok = socket:bind(L, #{family => inet, addr => loopback, port => 0}),
+    ok = socket:listen(L),
+    {select, _} = socket:accept(L, nowait),
+    Parent = self(),
+    spawn(fun() -> Parent ! socket:accept(L, nowait) end),
+    receive Result -> erlang:display(Result) end,
+    init:stop().
+
+%% `-s kernel_boot_probe socket_connect_invalid` connects to an address
+%% that the NIF does not decode.
+socket_connect_invalid() ->
+    {ok, S} = socket:open(inet, stream, tcp),
+    erlang:display(socket:connect(S, #{family => inet, addr => {1, 2, 3}})),
+    init:stop().
+
+%% `-s kernel_boot_probe socket_cancel_recv` cancels a recv.
+socket_cancel_recv() ->
+    {ok, {_, Ref}} = socket:open(inet, stream, tcp),
+    erlang:display(prim_socket:cancel(Ref, recv, make_ref())),
+    init:stop().
+
+quiet() ->
+    receive Message -> Message after 50 -> quiet end.
+
+masked({error, {invalid, {select_info, Tag, Ref}}}) when is_reference(Ref) ->
+    {error, {invalid, {select_info, Tag, ref}}};
+masked(Other) -> Other.
 
 native_socket({ok, S}) ->
     Info = maps:with([domain, type, protocol], socket:info(S)),

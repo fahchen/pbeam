@@ -1815,6 +1815,42 @@ impl Table {
         true
     }
 
+    /// Read each live object of the chain of the bucket `bucket` in chain
+    /// order, and store the object that `replace` gives for it in its place,
+    /// as `select_replace_on_match_res` (`erl_db_hash.c:2819-2846`) does.
+    /// The caller makes sure that each new object keeps the key. Return the
+    /// number of objects read and the number of objects replaced.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let (read, replaced) = table.replace_chain(0, |object| Some(object.to_vec()));
+    /// assert_eq!(read, replaced);
+    /// ```
+    pub(super) fn replace_chain(
+        &mut self,
+        bucket: usize,
+        mut replace: impl FnMut(&[Term]) -> Option<Vec<Term>>,
+    ) -> (i64, i64) {
+        let slots: Vec<usize> = self
+            .chain_keys(bucket)
+            .flat_map(|node| links(node, &self.older))
+            .collect();
+        let (mut read, mut replaced) = (0, 0);
+        for slot in slots {
+            if self.is_deleted(slot) {
+                continue;
+            }
+            read += 1;
+            if let Some(object) = replace(self.object_of(slot)) {
+                self.objects[slot] = Some(object);
+                self.writes += 1;
+                replaced += 1;
+            }
+        }
+        (read, replaced)
+    }
+
     /// Return the next key after `key` in the order of a hash table, as
     /// `db_next_hash` (`erl_db_hash.c:1147-1200`) gives it: the key of the
     /// next live object in the chain of the bucket, then the chain of each

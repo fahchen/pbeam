@@ -5,7 +5,9 @@
 //! PBeam binds `nif_supports/0,1` (see `supports`), which the node boot
 //! calls in `prim_socket:init/0` (`prim_socket.erl:184-204`), and
 //! `nif_info/0,1`, `nif_open/4`, `nif_bind/2`, `nif_sockname/1`,
-//! `nif_close/1`, and `nif_finalize_close/1` (see `socket`). A call of each
+//! `nif_close/1`, and `nif_finalize_close/1` (see `socket`), and
+//! `nif_connect/1,3`, `nif_listen/2`, `nif_accept/2`, and `nif_cancel/3`
+//! (see `select`). A call of each
 //! other function of the table stops the run with the runtime error of the
 //! static library (`Library::unbound_fails`).
 
@@ -14,6 +16,7 @@ use crate::runtime::resources::lock;
 use crate::runtime::sockets::Sockets;
 
 mod atoms;
+mod select;
 mod socket;
 mod supports;
 
@@ -26,16 +29,48 @@ mod supports;
 /// ```
 pub(super) const BINDINGS: &[Binding] = &[
     Binding {
+        name: "nif_accept",
+        arity: 2,
+        job: Job::Normal,
+        run: |scheduler, arguments| select::accept(scheduler, &arguments[0], &arguments[1]),
+    },
+    Binding {
         name: "nif_bind",
         arity: 2,
         job: Job::Normal,
         run: |scheduler, arguments| socket::bind_2(scheduler, &arguments[0], &arguments[1]),
     },
     Binding {
+        name: "nif_cancel",
+        arity: 3,
+        job: Job::Normal,
+        run: |scheduler, arguments| {
+            select::cancel(scheduler, &arguments[0], &arguments[1], &arguments[2])
+        },
+    },
+    Binding {
         name: "nif_close",
         arity: 1,
         job: Job::Normal,
-        run: |scheduler, arguments| Ok(socket::close(scheduler, &arguments[0])),
+        run: |scheduler, arguments| socket::close(scheduler, &arguments[0]),
+    },
+    Binding {
+        name: "nif_connect",
+        arity: 1,
+        job: Job::Normal,
+        run: |scheduler, arguments| select::connect(scheduler, &arguments[0], None),
+    },
+    Binding {
+        name: "nif_connect",
+        arity: 3,
+        job: Job::Normal,
+        run: |scheduler, arguments| {
+            select::connect(
+                scheduler,
+                &arguments[0],
+                Some((&arguments[1], &arguments[2])),
+            )
+        },
     },
     Binding {
         name: "nif_finalize_close",
@@ -54,6 +89,12 @@ pub(super) const BINDINGS: &[Binding] = &[
         arity: 1,
         job: Job::Normal,
         run: |scheduler, arguments| socket::info_1(scheduler, &arguments[0]),
+    },
+    Binding {
+        name: "nif_listen",
+        arity: 2,
+        job: Job::Normal,
+        run: |scheduler, arguments| select::listen(scheduler, &arguments[0], &arguments[1]),
     },
     Binding {
         name: "nif_open",

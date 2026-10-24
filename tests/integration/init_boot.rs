@@ -32,6 +32,9 @@ const SYSTEM_PROCESS_PROBE: &[u8] = include_bytes!("../../fixtures/boot/system_p
 /// arguments of the probe.
 const ISOLATED: &str = "PBEAM_INIT_BOOT_ISOLATED";
 
+/// The runtime error text that `isolated_kernel_boot_error` expects.
+const ISOLATED_ERROR: &str = "PBEAM_INIT_BOOT_ISOLATED_ERROR";
+
 /// The pinned modules that the boot runs before the probe: `erl_init` and
 /// the modules that `erl_init:start/2` and `init` call
 /// (erl_init.erl:35-50; init.erl:586-596, 1164-1358).
@@ -397,6 +400,85 @@ fn opens_binds_and_closes_sockets_at_the_kernel_boot_as_pinned_erts() {
         "{reference}"
     );
     assert_eq!(node, reference, "PBeam");
+}
+
+#[test]
+fn connects_listens_accepts_and_cancels_sockets_with_select_messages_as_pinned_erts() {
+    // `kernel_boot_probe:socket_select/0` runs `socket:connect/2,3`,
+    // `socket:listen/1,2`, `socket:accept/1,2`, and `socket:cancel/2` with
+    // timeouts and `nowait` on the NIFs `nif_connect/1,3`, `nif_listen/2`,
+    // `nif_accept/2`, and `nif_cancel/3` (prim_socket_nif.c:6027-6360,
+    // 13895-14165; unix_socket_syncio.c:2008-2168, 2379-2878, 4967-5132),
+    // the select messages of the poll thread (prim_socket_nif.c:17640-17760),
+    // the abort messages of a second accept, a close, and an owner exit
+    // (unix_socket_syncio.c:2643-2737, 4600-4730), and the exit of an
+    // acceptor (unix_socket_syncio.c:10583-10608).
+    let (reference, status, node) = run_kernel_boot("socket_select", false, &["{socket_select,"]);
+    assert_eq!(status, Some(0), "ERTS");
+    assert!(
+        reference.starts_with("{socket_select,[ok,[bound,listening],{error,timeout}],"),
+        "{reference}"
+    );
+    assert_eq!(node, reference, "PBeam");
+}
+
+#[test]
+fn stops_the_run_at_the_socket_calls_that_pbeam_does_not_support() {
+    // PBeam has no acceptor queue (`essio_accept_accepting_other`,
+    // unix_socket_syncio.c:2746-2757) and no reader. ERTS connects with an
+    // address that it did not decode (prim_socket_nif.c:6122-6143). These
+    // calls stop the run with a runtime error (row "NIF stubs").
+    for (probe, text) in [
+        (
+            "socket_acceptors",
+            "prim_socket:nif_accept/2: a second acceptor process is not supported",
+        ),
+        (
+            "socket_connect_invalid",
+            "prim_socket:nif_connect/3: an address that does not decode is not supported",
+        ),
+        (
+            "socket_cancel_recv",
+            "prim_socket:nif_cancel/3: the operation recv is not supported",
+        ),
+    ] {
+        let child = Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "isolated_kernel_boot_error",
+                "--include-ignored",
+                "--quiet",
+            ])
+            .env(ISOLATED, probe)
+            .env(ISOLATED_ERROR, text)
+            .envs(KERNEL_BOOT_ENVIRONMENT)
+            .env_remove(KERNEL_BOOT_INETRC.0)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            child.status.success(),
+            "{probe}: {}",
+            String::from_utf8_lossy(&child.stdout)
+        );
+    }
+}
+
+/// The child side of
+/// `stops_the_run_at_the_socket_calls_that_pbeam_does_not_support`: boot the
+/// node with the `-s` argument of [`ISOLATED`], and expect the runtime
+/// error that contains the text of [`ISOLATED_ERROR`].
+#[test]
+#[ignore = "the kernel boot tests run it in a child process"]
+fn isolated_kernel_boot_error() {
+    let arguments = env::var(ISOLATED).expect("run it through its parent test");
+    let text = env::var(ISOLATED_ERROR).expect("run it through its parent test");
+    let flags = kernel_boot_flags(&arguments);
+    let flags = flags.iter().map(String::as_bytes).collect::<Vec<_>>();
+    let esock = ESOCK_MODULES.map(pinned_beam);
+    let esock = esock.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    let error = boot_node(&esock, &flags).unwrap_err().to_string();
+    assert!(error.contains(&text), "{error}");
 }
 
 /// The pinned modules of the socket NIF libraries, which the pinned ERTS
