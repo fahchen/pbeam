@@ -374,11 +374,7 @@ fn stops_the_run_for_each_port_part_that_is_not_implemented() {
             "unsupported open_port/2 of a program that posix_spawn does not start: eacces",
         ),
         ("force", "unsupported erlang:port_command/3 options"),
-        ("exit", "unsupported erlang:exit/2 with a port"),
         ("register", "unsupported erlang:register/2 with a port"),
-        ("send", "unsupported erlang:send/2 with a port"),
-        ("send_options", "unsupported erlang:send/3 with a port"),
-        ("bang", "unsupported erlang:send/2 with a port"),
     ] {
         let argument = Term::Atom(program.atom(case).unwrap());
         let error = program
@@ -397,8 +393,10 @@ fn charges_the_port_bifs_as_pinned_erts() {
     // `close` of an own port then handles the `EXIT` signal of the port
     // before it returns (erl_bif_port.c:419-429). The ERTS run gives the
     // measured processes a large heap, so that no garbage collection
-    // occurs.
-    let expected = "[{open,3},{command,41},{info,41},{info_closed,1},{close,43},{close_other,41}]";
+    // occurs. An exit signal or a close message to a port uses
+    // `CONTEXT_REDS/100`, and a connect message `CONTEXT_REDS/200`
+    // (erl_port.h:370-371).
+    let expected = "[{open,3},{command,41},{info,41},{info_closed,1},{close,43},{close_other,41},{exit,41},{message_close,41},{message_connect,21}]";
     let reference = Command::new("erl")
         .args([
             "+S",
@@ -421,4 +419,21 @@ fn charges_the_port_bifs_as_pinned_erts() {
         .execute("port_probe", "costs", &[program.host_term(Term::nil())])
         .unwrap();
     assert_eq!(text(&result.term, result.atoms()), expected);
+}
+
+#[test]
+fn runs_port_signals_by_message_exit_and_port_call_as_pinned_erts() {
+    // `Port ! {Owner, Op}` from each process (io.c:3974-4015): a command
+    // writes, a close gives the link exit `normal` and then `{Port,
+    // closed}` (io.c:2182-2198, 3876-3882), and a connect gives `{Port,
+    // connected}` and no link (io.c:2341-2351). Each other message and a
+    // pid that is not the owner send `badsig` (io.c:1246-1254). `exit/2`
+    // closes the port with each reason, also `normal` from another process
+    // (bif.c:1774-1797, io.c:3854, 3876-3879). `port_call/2,3` raise
+    // `badarg`: the spawn driver has no `call` (sys_drivers.c:246,
+    // io.c:4473-4474).
+    assert_runs(
+        "signals()",
+        "[[{port,{data,<<104,105>>}}],[{port,{data,<<97,98>>}}],ok,[{port,{data,<<115>>}}],[[{'EXIT',port,normal},{port,closed}],undefined],[],[[[[{'EXIT',port,badsig}],true],[{'EXIT',port,normal}]],[[[{'EXIT',port,badsig}],true],[{'EXIT',port,normal}]],[[[{'EXIT',port,badsig}],true],[{'EXIT',port,normal}]],[[[{'EXIT',port,badsig}],true],[{'EXIT',port,normal}]],[[[{'EXIT',port,badsig}],true],[{'EXIT',port,normal}]],[[[{'EXIT',port,badsig}],true],[{'EXIT',port,normal}]],[[[{'EXIT',port,badsig}],true],[{'EXIT',port,normal}]],[[[{'EXIT',port,badsig}],true],[{'EXIT',port,normal}]],[[[{'EXIT',port,badsig}],true],[{'EXIT',port,normal}]]],[{port,connected}],[true,true,true,[{'EXIT',port,normal}]],[[true,[{'EXIT',port,normal}],undefined],[true,[{'EXIT',port,killed}],undefined],[true,[{'EXIT',port,boom}],undefined]],[[{'EXIT',port,normal}],undefined,true],[{error,badarg},{error,badarg}],[{'EXIT',port,normal}]]",
+    );
 }

@@ -401,7 +401,7 @@ bifs! {
     erts_internal:notify_breakpoint_hit/3 => unsupported,
     erts_internal:open_port/2 as ErtsInternalOpenPort2 => |cx, [name, settings]| erts_internal::open_port(cx, name, settings),
     erts_internal:perf_counter_unit/0 as ErtsInternalPerfCounterUnit0 => |_, []| Ok(Value(Term::Integer(time::PERF_COUNTER_UNIT))),
-    erts_internal:port_call/3 => unsupported,
+    erts_internal:port_call/3 as ErtsInternalPortCall3 => |cx, [port, operation, _data]| erts_internal::port_call(cx.scheduler, port, operation),
     erts_internal:port_close/1 as ErtsInternalPortClose1 => |cx, [port]| erts_internal::port_close(cx, port),
     erts_internal:port_command/3 as ErtsInternalPortCommand3 => |cx, [port, data, options]| erts_internal::port_command(cx, port, data, options),
     erts_internal:port_connect/2 as ErtsInternalPortConnect2 => |cx, [port, pid]| erts_internal::port_connect(cx, port, pid),

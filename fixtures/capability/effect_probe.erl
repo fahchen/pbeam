@@ -19,6 +19,13 @@
     port_info/0,
     port_info2/0,
     port_connect/0,
+    port_send/0,
+    port_send_close/0,
+    port_send3/0,
+    port_send3_close/0,
+    port_exit/0,
+    port_exit3/0,
+    port_call/0,
     port_badargs/0,
     port_control/0,
     port_set_data/0,
@@ -156,6 +163,37 @@ port_info2() ->
 port_connect() ->
     Port = cat(),
     attempt(fun() -> erlang:port_connect(Port, self()) end).
+
+%% A message and an exit signal to a port (io.c:3974-4015, bif.c:1774-1797).
+port_send() ->
+    Port = cat(),
+    attempt(fun() -> erlang:send(Port, {self(), {command, <<"x">>}}) end).
+
+port_send_close() ->
+    Port = cat(),
+    attempt(fun() -> erlang:send(Port, {self(), close}) end).
+
+port_send3() ->
+    Port = cat(),
+    attempt(fun() -> erlang:send(Port, {self(), {command, <<"x">>}}, []) end).
+
+port_send3_close() ->
+    Port = cat(),
+    attempt(fun() -> erlang:send(Port, {self(), close}, []) end).
+
+port_exit() ->
+    Port = cat(),
+    attempt(fun() -> exit(Port, normal) end).
+
+port_exit3() ->
+    Port = cat(),
+    attempt(fun() -> exit(Port, normal, []) end).
+
+%% A port of the spawn driver has no call, so a permitted call raises
+%% badarg (io.c:4473-4474).
+port_call() ->
+    Port = cat(),
+    attempt(fun() -> erlang:port_call(Port, 1, x) end).
 
 %% A port of the spawn driver has no control, so a permitted call raises
 %% badarg (io.c:4029-4030).
