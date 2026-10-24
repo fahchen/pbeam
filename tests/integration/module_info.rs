@@ -5,6 +5,8 @@ use pbeam_runtime::{AtomTable, BeamProgram, Term};
 const MODULE_INFO_PROBE: &[u8] =
     include_bytes!("../../fixtures/module_info/module_info_probe.beam");
 const MODULE_INFO_KEYS: &[u8] = include_bytes!("../../fixtures/module_info/module_info_keys.beam");
+const MODULE_INFO_CHUNKS: &[u8] =
+    include_bytes!("../../fixtures/module_info/module_info_chunks.beam");
 
 /// `module_info_keys:main()` on the pinned ERTS, as `io:format("~w")`
 /// prints it.
@@ -136,18 +138,132 @@ fn gives_functions_nifs_and_md5_as_pinned_erts() {
     );
 }
 
+/// Return `beam` with each chunk that `drop` names removed, and with the
+/// size of the `FOR1` form updated. Each chunk has a 4-byte name, a 4-byte
+/// size, and data padded to 4 bytes.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let stripped = without_chunks(beam, &[b"Attr"]);
+/// ```
+fn without_chunks(beam: &[u8], drop: &[&[u8; 4]]) -> Vec<u8> {
+    let mut body = b"BEAM".to_vec();
+    let mut pos = 12;
+    while pos < beam.len() {
+        let size = u32::from_be_bytes(beam[pos + 4..pos + 8].try_into().unwrap()) as usize;
+        let end = pos + 8 + size.next_multiple_of(4);
+        if !drop.iter().any(|name| beam[pos..pos + 4] == name[..]) {
+            body.extend_from_slice(&beam[pos..end]);
+        }
+        pos = end;
+    }
+    let mut out = b"FOR1".to_vec();
+    out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    out.extend(body);
+    out
+}
+
+/// Return `beam` with the chunk `CInf` replaced by `data`, which is 4 bytes
+/// long.
+fn with_compile_info(beam: &[u8], data: &[u8; 4]) -> Vec<u8> {
+    let mut out = without_chunks(beam, &[b"CInf"]);
+    out.extend_from_slice(b"CInf\0\0\0\x04");
+    out.extend_from_slice(data);
+    let size = (out.len() - 8) as u32;
+    out[4..8].copy_from_slice(&size.to_be_bytes());
+    out
+}
+
+/// Return the output of `module_info_chunks:main()` on the pinned ERTS, as
+/// `io:format("~w")` prints it, after `prepare` loads the module.
+fn erts_chunks(prepare: &str) -> String {
+    let reference = Command::new("erl")
+        .args([
+            "-noshell",
+            "-pa",
+            "fixtures/module_info",
+            "-eval",
+            &format!("{prepare} io:format(\"~w~n\", [module_info_chunks:main()]), halt()."),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        reference.status.success() && reference.stderr.is_empty(),
+        "{reference:?}"
+    );
+    String::from_utf8(reference.stdout).unwrap()
+}
+
 #[test]
-fn stops_get_module_info_for_a_key_that_pbeam_does_not_implement() {
-    // ERTS returns the attributes of the `Attr` chunk
-    // (erl_bif_info.c:5864-5885). PBeam does not keep the chunk (row
-    // "Module information" of docs/erts-differences.md).
-    let program = BeamProgram::load(&[MODULE_INFO_PROBE]).unwrap();
-    let failure = program
-        .execute("module_info_probe", "attributes", &[])
+fn gives_attributes_compile_native_addresses_and_native_as_pinned_erts() {
+    // `attributes_for_module` and `compilation_info_for_module` decode the
+    // `Attr` and `CInf` chunks, `native_addresses` gives `[]`, and
+    // `has_native` gives `false` (erl_bif_info.c:5807-5909). The `CInf`
+    // term holds the source path of the host that compiled the fixture, so
+    // the ERTS output is the reference for that part.
+    let program = BeamProgram::load(&[MODULE_INFO_CHUNKS]).unwrap();
+    let result = program.execute("module_info_chunks", "main", &[]).unwrap();
+    let text = text(&result.term, result.atoms());
+    assert!(
+        text.starts_with(
+            "[[{vsn,[1]},{probe_attribute,[{key,<<118,97,108,117,101>>},-3]}],\
+             [{version,"
+        ),
+        "{text}"
+    );
+    assert!(text.ends_with("]}],[],false]"), "{text}");
+    assert_eq!(erts_chunks(""), format!("{text}\n"));
+}
+
+#[test]
+fn gives_empty_attributes_and_compile_for_a_module_without_the_chunks() {
+    // A module without the `Attr` or `CInf` chunk has no attribute or
+    // compile pointer, so both keys give `[]` (erl_bif_info.c:5871-5872,
+    // 5894-5895, jit/asm_load.c:1080, 1096). `beam_lib:strip/1` removes
+    // both chunks for the ERTS reference.
+    let stripped = without_chunks(MODULE_INFO_CHUNKS, &[b"Attr", b"CInf"]);
+    let program = BeamProgram::load(&[&stripped]).unwrap();
+    let result = program.execute("module_info_chunks", "main", &[]).unwrap();
+    assert_eq!(text(&result.term, result.atoms()), "[[],[],[],false]");
+    assert_eq!(
+        erts_chunks(
+            "{ok, F} = file:read_file(\"fixtures/module_info/module_info_chunks.beam\"), {ok, {M, B}} = beam_lib:strip(F), \
+             {module, M} = code:load_binary(M, \"stripped\", B),"
+        ),
+        "[[],[],[],false]\n"
+    );
+}
+
+#[test]
+fn refuses_a_compile_chunk_that_is_not_an_external_term() {
+    // The ERTS loader refuses the module with `badfile` when the `CInf`
+    // chunk is not one valid external term (jit/asm_load.c:1096-1111): a
+    // first byte that is not 131, or a term that ends early.
+    let failure = BeamProgram::load(&[&with_compile_info(MODULE_INFO_CHUNKS, b"\0\0\0\0")])
         .unwrap_err()
         .to_string();
     assert!(
-        failure.contains("erlang:get_module_info/2 key attributes is not implemented"),
+        failure.contains("the BEAM compile information chunk is not an external term"),
+        "{failure}"
+    );
+    assert!(
+        BeamProgram::load(&[&with_compile_info(MODULE_INFO_CHUNKS, b"\x83\x68\x02\x6a")]).is_err()
+    );
+}
+
+#[test]
+fn stops_get_module_info_for_the_key_exports() {
+    // ERTS returns the exports in the order of the export table
+    // (erl_bif_info.c:5822-5862). PBeam does not keep that order (row
+    // "Module information" of docs/erts-differences.md).
+    let program = BeamProgram::load(&[MODULE_INFO_PROBE]).unwrap();
+    let failure = program
+        .execute("module_info_probe", "exports", &[])
+        .unwrap_err()
+        .to_string();
+    assert!(
+        failure.contains("erlang:get_module_info/2 key exports is not implemented"),
         "{failure}"
     );
 }

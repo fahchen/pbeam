@@ -93,6 +93,36 @@ pub(crate) fn native_declarations(attr: &[u8]) -> Result<Vec<(String, u32)>, Bea
     Ok(declarations)
 }
 
+/// Check that the `CInf` chunk `compile_info` holds one term of the
+/// external term format with a valid encoding, as the ERTS loader refuses
+/// another chunk with `badfile` (`jit/asm_load.c:1096-1111`). A chunk of no
+/// bytes is not read at all, as in ERTS (`jit/asm_load.c:1096`). Bytes after
+/// the term are ignored, as for the `Attr` chunk.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// check_compile_info(&[131, 106])?;
+/// assert!(check_compile_info(&[0]).is_err());
+/// ```
+///
+/// # Errors
+///
+/// A payload that is not one valid external term gives an error. The tag
+/// `LOCAL_EXT` gives an error, as for [`native_declarations`].
+pub(crate) fn check_compile_info(compile_info: &[u8]) -> Result<(), BeamError> {
+    if compile_info.is_empty() {
+        return Ok(());
+    }
+    let mut cursor = Cursor::new(compile_info);
+    if cursor.byte()? != VERSION_MAGIC {
+        return Err(error(
+            "the BEAM compile information chunk is not an external term",
+        ));
+    }
+    cursor.skip_term()
+}
+
 /// The read position of one external term.
 struct Cursor<'a> {
     /// The input bytes.
