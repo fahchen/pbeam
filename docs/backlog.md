@@ -97,6 +97,13 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** when a long-running workload shows memory growth from repeated select continuations, pattern compiles, or atomics.
 - **Source:** PR #1245 (#1096) and its Codex P2 finding.
 
+### Give the exports key of module_info in the ERTS export table order
+
+- **Now:** `erlang:get_module_info/2` stops the run with a runtime error for the key `exports`, and `erlang:get_module_info/1`, which `Module:module_info/0` calls, stops at that key. ERTS gives the exports in the order of its export table, where an entry that an import, an `apply`, or a call made before the load of the module keeps its earlier place (`erl_bif_info.c:5822-5862`).
+- **Option:** a node-wide export index and on-demand loading that matches ERTS, as the [design options of #1227](https://github.com/fahchen/pbeam/issues/1227#issuecomment-6380029298) describe.
+- **Trigger:** when a workload reads `module_info(exports)` or `module_info/0`.
+- **Source:** #1227 (closed as not planned) and #1068.
+
 ### Keep the parts of a chunked binary when the md5 walk traps
 
 - **Now:** `erlang:md5/1` reads a binary with `Binary::byte_runs` up to its byte budget, and a walk that does not finish makes the remainder with `Binary::bits`, which joins the parts of a binary that an append built. A large chunked binary therefore costs a copy in the turn that traps. The "md5 binary remainder" row of `docs/erts-differences.md` records this.
