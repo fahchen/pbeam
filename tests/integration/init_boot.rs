@@ -478,6 +478,24 @@ fn sets_and_gets_the_raw_and_native_socket_options_as_pinned_erts() {
 }
 
 #[test]
+fn sets_msfilter_and_gets_pktoptions_as_pinned_erts() {
+    // `kernel_boot_probe:sockopt_pkt/0` runs `esock_setopt_msfilter` and
+    // `esock_getopt_pktoptions` with the control message encoders of
+    // `cmsgLevelIP` (prim_socket_nif.c:8602-8695, 13255-13405, 14176-14215,
+    // 14335-14387, 14453-14490). Only Linux has the two options, so the test
+    // compares the two runs on the host.
+    let (reference, status, node) = run_kernel_boot("sockopt_pkt", false, &["{sockopt_pkt,"]);
+    assert_eq!(status, Some(0), "ERTS");
+    assert!(
+        reference.starts_with("{sockopt_pkt,[{error,"),
+        "{reference}"
+    );
+    #[cfg(target_os = "linux")]
+    assert!(reference.contains("{type,pktinfo}"), "{reference}");
+    assert_eq!(node, reference, "PBeam");
+}
+
+#[test]
 fn sets_and_gets_the_otp_socket_options_and_linger_as_pinned_erts() {
     // `kernel_boot_probe:sockopt_otp/0` runs the handlers of
     // `esock_setopt_otp` and `esock_getopt_otp`
