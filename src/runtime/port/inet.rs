@@ -53,6 +53,7 @@ mod stream;
 
 use std::{collections::VecDeque, ffi::c_int, io, os::fd::AsRawFd, time::Duration};
 
+use nix::sys::socket::{getsockopt, setsockopt, sockopt};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::{
@@ -192,6 +193,10 @@ pub(in crate::runtime) struct Inet {
     send_timeout_close: i32,
     /// The option `delay_send` (`TCP_ADDF_DELAY_SEND`): false at the start.
     delay_send: bool,
+    /// Whether a `SETOPTS` set the option `buffer` (`INET_FLG_BUFFER_SET`),
+    /// after which `recbuf` does not change `buffer`. An accepted socket
+    /// starts without it (inet_drv.c:14457).
+    buffer_set: bool,
     /// The next async reference (`op_ref`, inet_drv.c:1549, 10937).
     op_ref: u16,
     /// The callers that wait for a connection, in arrival order.
@@ -271,6 +276,7 @@ impl Inet {
             send_timeout: -1,
             send_timeout_close: 0,
             delay_send: false,
+            buffer_set: false,
             op_ref: 0,
             acceptors: VecDeque::new(),
             stream: Box::new(Stream::new(stream::BUFFER)),
@@ -662,6 +668,15 @@ impl Inet {
     /// and adds 1 to `passive`, the number of `{udp_passive, S}` messages
     /// (inet_drv.c:6974-7000). `read_packets` below 1 gives `einval`
     /// (inet_drv.c:7138-7148).
+    ///
+    /// `buffer` below 1 becomes 1 and stops the change of `buffer` by
+    /// `recbuf` (inet_drv.c:6958-6966). Before that, `recbuf` above
+    /// `buffer` sets `buffer` to it, also when the `setsockopt` fails, and a
+    /// `recbuf` above 65536 on a `udp_inet` port sets `buffer` to 65536
+    /// (inet_drv.c:7321-7360). A failed `setsockopt` of `dontroute`,
+    /// `broadcast`, `sndbuf`, `recbuf`, `multicast_ttl`, and
+    /// `multicast_loop` does not fail the request (inet_drv.c:7293-7360,
+    /// 7571-7587, 7923-7942).
     fn set_options(
         &mut self,
         mut request: &[u8],
@@ -714,6 +729,38 @@ impl Inet {
                     }
                     true
                 }
+                20 => {
+                    self.stream.buffer = value.max(1) as usize;
+                    self.buffer_set = true;
+                    true
+                }
+                2 => self.set_socket(libc::SO_DONTROUTE, false, |socket| {
+                    setsockopt(socket, sockopt::DontRoute, &(value != 0)).map_err(io::Error::from)
+                }),
+                4 => self.set_socket(libc::SO_BROADCAST, false, |socket| {
+                    socket.set_broadcast(value != 0)
+                }),
+                6 => self.set_socket(libc::SO_SNDBUF, false, |socket| {
+                    socket.set_send_buffer_size(value as usize)
+                }),
+                7 => {
+                    if !self.buffer_set {
+                        if value > MAX_UDP_BUFFER && self.socket_type == SocketType::Datagram {
+                            self.stream.buffer = MAX_UDP_BUFFER as usize;
+                        } else if i64::from(value) > self.stream.buffer as i64 {
+                            self.stream.buffer = value as usize;
+                        }
+                    }
+                    self.set_socket(libc::SO_RCVBUF, false, |socket| {
+                        socket.set_recv_buffer_size(value as usize)
+                    })
+                }
+                12 => self.set_socket(libc::IP_MULTICAST_TTL, false, |socket| {
+                    socket.set_multicast_ttl_v4(value as u32)
+                }),
+                13 => self.set_socket(libc::IP_MULTICAST_LOOP, false, |socket| {
+                    socket.set_multicast_loop_v4(value != 0)
+                }),
                 0 => self.set_socket(libc::SO_REUSEADDR, false, |socket| {
                     socket.set_reuse_address(value != 0)
                 }),
@@ -846,6 +893,11 @@ impl Inet {
                     .and_then(|socket| get(socket).ok())
                     .map(|value| value as i32)
             };
+            let size = |get: fn(&Socket) -> io::Result<usize>| {
+                socket
+                    .and_then(|socket| get(socket).ok())
+                    .map(|value| value as i32)
+            };
             let value = match option {
                 24 => Some(self.mode),
                 22 if self.active == 3 => {
@@ -860,6 +912,15 @@ impl Inet {
                 }
                 22 => Some(self.active),
                 33 if self.socket_type == SocketType::Datagram => Some(self.read_packets),
+                20 => Some(self.stream.buffer as i32),
+                2 => socket
+                    .and_then(|socket| getsockopt(socket, sockopt::DontRoute).ok())
+                    .map(|on| getsockopt_value(on, libc::SO_DONTROUTE)),
+                4 => flag(Socket::broadcast, libc::SO_BROADCAST),
+                6 => size(Socket::send_buffer_size),
+                7 => size(Socket::recv_buffer_size),
+                12 => integer(Socket::multicast_ttl_v4),
+                13 => flag(Socket::multicast_loop_v4, 1),
                 30 => self.has_stream_socket().then_some(self.send_timeout),
                 35 => self.has_stream_socket().then_some(self.send_timeout_close),
                 31 => self
@@ -917,6 +978,10 @@ impl Inet {
 }
 
 /// The runtime error of `{active, N}`.
+/// The `buffer` that `recbuf` sets on a `udp_inet` port at most
+/// (`INET_UDP_THEORETICAL_MAX_MTU`, inet_drv.c:1059).
+const MAX_UDP_BUFFER: i32 = 1 << 16;
+
 const ACTIVE_N: &str = "unsupported tcp_inet option active with a count: see \"tcp_inet ports\" in docs/erts-differences.md";
 
 /// The runtime error of `{recvttl, true}`: `socket2` has no `IP_RECVTTL`

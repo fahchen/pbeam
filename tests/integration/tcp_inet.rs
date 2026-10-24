@@ -243,7 +243,7 @@ fn stops_the_run_for_each_tcp_inet_part_that_is_not_implemented() {
             "unsupported open_port/2 settings of an inet driver port other than [binary]",
         ),
         ("mptcp", "unsupported tcp_inet protocol 4"),
-        ("dontroute", "unsupported tcp_inet option 2"),
+        ("oobinline", "unsupported tcp_inet option 5"),
         ("recvttl", "unsupported tcp_inet option recvttl true"),
         // ERTS keeps the time of `{linger, {false, 5}}` (inet_drv.c:7362-7370).
         (
@@ -254,7 +254,7 @@ fn stops_the_run_for_each_tcp_inet_part_that_is_not_implemented() {
             "active_n",
             "unsupported tcp_inet option active with a count",
         ),
-        ("getopt", "unsupported tcp_inet option 2"),
+        ("getopt", "unsupported tcp_inet option 5"),
         // ERTS replies `[]` and sets the exit state of the port
         // (sys_drivers.c:731-756).
         (
@@ -1072,4 +1072,23 @@ fn gives_the_bind_errors_of_a_local_socket_as_pinned_erts() {
     let expected = format!("[[1],{einval},{einval},{einval},{einval}]");
     assert_eq!(erts_text("tcp_local", "control"), expected);
     assert_eq!(pbeam_text("tcp_local", "control"), expected);
+}
+
+#[test]
+fn sets_and_gets_the_udp_inet_socket_options_as_pinned_erts() {
+    // `inet_set_opts` and `inet_fill_opts` (inet_drv.c:6958-6966,
+    // 7293-7360, 7571-7587, 9156-9163, 9432-9446, 9487-9495). xnu and Linux
+    // reject a `multicast_ttl` above 255 with `EINVAL`, which the driver
+    // ignores.
+    let expected = "{{ok,[{broadcast,false},{dontroute,false},{multicast_ttl,1},{multicast_loop,true},{buffer,9216}]},ok,{ok,[{broadcast,true},{dontroute,true},{multicast_ttl,255},{multicast_loop,false},{buffer,9216}]},ok,255,true,[{10000,true},{65536,true},{1,true},{1,true}]}";
+    assert_eq!(erts_text("udp_probe", "options"), expected, "ERTS");
+    assert_eq!(pbeam_text("udp_probe", "options"), expected, "PBeam");
+}
+
+#[test]
+fn sets_the_buffer_of_a_tcp_inet_port_from_recbuf_as_pinned_erts() {
+    // A stream socket has no limit of 65536 (inet_drv.c:7333-7359).
+    let expected = "{{100000,true},{100,true}}";
+    assert_eq!(erts_text("udp_probe", "stream_buffer"), expected, "ERTS");
+    assert_eq!(pbeam_text("udp_probe", "stream_buffer"), expected, "PBeam");
 }
