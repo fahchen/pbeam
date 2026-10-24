@@ -1,6 +1,6 @@
 -module(time_probe).
 -export([monotonic/0, system/0, units/0, convert/0, perf_counter/0, posix/0,
-         local_badarg/0, local/0, local_check/0, leap_check/0,
+         local_badarg/0, local/0, local_utc/0, local_check/0, leap_check/0,
          wall_time/0, wall_time_on/0, wall_time_order/0, wall_time_reds/0,
          clock/0, time_offset_units/0, timestamp/0, perf/0, pid/0, pid_value/0,
          environment/0, clock_utc/0, clock_jst/0, leap_local/0,
@@ -325,6 +325,24 @@ leap_check() ->
                      {{2026,1,15},{12,0,0}} -> <<"posix2time\n">>;
                      {{2026,1,15},{11,59,33}} -> <<"localtime_r\n">>
                  end).
+
+%% Print the UTC time of each local time and `IsDst` flag in the host time
+%% zone (bif.c:3936-3968, erl_time_sup.c:1735-1795): winter and summer, a
+%% local time that does not exist and one that occurs twice in the US and
+%% the EU, years before 1970 and far in the future, and the terms that
+%% raise `badarg`.
+local_utc() ->
+    Dates = [{{2026,1,15},{7,0,0}}, {{2026,7,15},{7,0,0}}, {{2026,3,8},{2,30,0}},
+             {{2026,11,1},{1,30,0}}, {{2026,3,29},{1,30,0}}, {{2026,10,25},{1,30,0}},
+             {{1950,1,1},{0,0,0}}, {{1902,1,1},{0,0,0}}, {{1969,12,31},{23,59,59}},
+             {{2100,7,1},{0,0,0}}, {{2400,2,29},{12,0,0}}],
+    Bad = [{{1901,12,31},{23,59,59}}, {{2026,2,29},{0,0,0}}, {{2026,1,1},{24,0,0}},
+           {{2026,1,1},{0,60,0}}, {{2026,1,1},{0,0,60}}, {{2026,13,1},{0,0,0}},
+           {{2026,1,1},{0,0}}, {2026,1,1}, foo],
+    io:format("~w~n", [[catch_error(fun() -> erlang:localtime_to_universaltime(id(D), id(F)) end)
+                         || D <- Dates ++ Bad, F <- [true, false, undefined]]
+                       ++ [catch_error(fun() -> erlang:localtime_to_universaltime(id(D), id(F)) end)
+                           || D <- [{{2026,1,15},{7,0,0}}, foo], F <- [foo, 1, nil]]]).
 
 posix_seconds() ->
     [catch_error(fun() -> erlang:universaltime_to_posixtime(id(T)) end)
