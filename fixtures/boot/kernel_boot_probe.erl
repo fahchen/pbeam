@@ -2,7 +2,7 @@
 -compile(nowarn_deprecated_catch).
 -behaviour(application).
 -behaviour(supervisor).
--export([main/0, main/1, lookup/0, gethost/0, supports/0, socket/0, start/2, stop/1, init/1]).
+-export([main/0, main/1, lookup/0, gethost/0, supports/0, socket/0, sockopt/0, start/2, stop/1, init/1]).
 
 %% `erl -noshell -boot start_clean -pa fixtures/boot -s kernel_boot_probe
 %% main -kernel logger_level warning` runs main/0 in the boot process of init after the boot script
@@ -192,6 +192,57 @@ socket() ->
                     Unlisted, Local, BindErrors, BindMore, TypeB, BindMore6, Native, Abstract,
                     [strip(E) || E <- OpenErrors], [strip(E) || E <- Badargs],
                     maps:get(counters, socket:info())}),
+    init:stop().
+
+%% `erl -noshell -boot start_clean -pa fixtures/boot -s kernel_boot_probe
+%% sockopt -kernel logger_level warning` runs sockopt/0. It sets and gets
+%% socket options with socket:setopt/3 and socket:getopt/2,3, binds
+%% sockets to the atoms any, loopback, and broadcast, and displays the
+%% results and the error returns.
+sockopt() ->
+    process_flag(trap_exit, true),
+    {ok, S} = socket:open(inet, stream, tcp),
+    {_, Ref} = S,
+    Bools = [[socket:setopt(S, O, true), socket:getopt(S, O), socket:setopt(S, O, false),
+              socket:getopt(S, O), socket:setopt(S, O, 1)]
+             || O <- [{socket, broadcast}, {socket, keepalive}, {socket, reuseaddr},
+                      {socket, reuseport}, {socket, oobinline}, {socket, dontroute},
+                      {tcp, nodelay}]],
+    Ints = [[socket:setopt(S, O, V), socket:getopt(S, O), socket:setopt(S, O, foo),
+             socket:setopt(S, O, 1 bsl 40)]
+            || {O, V} <- [{{tcp, keepcnt}, 5}, {{tcp, keepintvl}, 7}, {{ip, ttl}, 33},
+                          {{socket, rcvbuf}, 8192}, {{socket, sndbuf}, 8192}]],
+    {_, MRef} = spawn_monitor(fun() -> exit(socket:setopt(S, {otp, meta}, x)) end),
+    NotOwner = receive {'DOWN', MRef, process, _, Reply} -> Reply end,
+    Otp = [socket:getopt(S, {socket, type}), socket:getopt(S, {socket, acceptconn}),
+           socket:setopt(S, {socket, type}, 1), socket:getopt(S, {otp, domain}),
+           socket:getopt(S, {otp, use_registry}), socket:getopt(S, {otp, meta}),
+           socket:setopt(S, {otp, meta}, {a, b}), socket:getopt(S, {otp, meta}), NotOwner,
+           socket:setopt(S, {otp, use_registry}, false), socket:setopt(S, {otp, use_registry}, true),
+           prim_socket:getopt(Ref, {socket, 12345}, 1),
+           catch socket:setopt_native(S, {1 bsl 40, 1}, 1),
+           catch socket:getopt_native(S, {6, 1 bsl 40}, integer),
+           catch prim_socket:setopt(foo, {socket, broadcast}, true),
+           catch prim_socket:getopt(foo, {socket, broadcast})],
+    ok = socket:close(S),
+    Closed = [socket:getopt(S, {socket, type}), socket:setopt(S, {socket, reuseaddr}, true),
+              socket:getopt(S, {otp, domain}), socket:getopt(S, {otp, meta}),
+              socket:setopt(S, {otp, meta}, x), socket:setopt(S, {otp, use_registry}, true),
+              socket:getopt(S, {otp, use_registry})],
+    {ok, D} = socket:open(inet, dgram, #{use_registry => false}),
+    Registry = [lists:member(D, socket:which_sockets()), socket:getopt(D, {otp, use_registry}),
+                socket:setopt(D, {otp, use_registry}, true), socket:getopt(D, {otp, use_registry}),
+                lists:member(D, socket:which_sockets())],
+    ok = socket:close(D),
+    Bind = fun(Domain, Addr) ->
+                   {ok, B} = socket:open(Domain, dgram),
+                   R = socket:bind(B, Addr),
+                   ok = socket:close(B),
+                   R
+           end,
+    Binds = [Bind(inet, any), Bind(inet, loopback), Bind(inet, broadcast), Bind(inet6, any),
+             Bind(inet6, loopback)],
+    erlang:display({sockopt, Bools, Ints, [strip(E) || E <- Otp], Closed, Registry, Binds}),
     init:stop().
 
 native_socket({ok, S}) ->

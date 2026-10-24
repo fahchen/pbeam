@@ -463,7 +463,7 @@ const AMBIENT: &[&str] = &[
 /// `effect_probe:ambient/0` also calls each entry once. `null_read/0` and
 /// `buffer/0` call the `prim_buffer` entries, and `buffer/0` calls
 /// `peek_head/1` and `copying_read/2` through `prim_buffer:read/2`.
-const LATER: [&str; 36] = [
+const LATER: [&str; 39] = [
     "prim_buffer:copying_read/2",
     "prim_buffer:find_byte_index/2",
     "prim_buffer:new/0",
@@ -496,9 +496,12 @@ const LATER: [&str; 36] = [
     "prim_socket:nif_bind/2",
     "prim_socket:nif_close/1",
     "prim_socket:nif_finalize_close/1",
+    "prim_socket:nif_getopt/3",
+    "prim_socket:nif_getopt/5",
     "prim_socket:nif_info/0",
     "prim_socket:nif_info/1",
     "prim_socket:nif_open/4",
+    "prim_socket:nif_setopt/5",
     "prim_socket:nif_sockname/1",
 ];
 
@@ -1353,6 +1356,30 @@ fn stops_the_run_for_a_socket_bind_to_a_native_family() {
             error.starts_with("unsupported prim_socket sockaddr of the family unspec"),
             "{error}"
         );
+    }
+}
+
+#[test]
+fn stops_the_run_for_a_socket_option_form_without_a_handler() {
+    // PBeam sets and gets only the options that the safe `nix` and
+    // `socket2` APIs type. A native value or value spec, another option of
+    // the host or of the level `otp`, and a negative integer value stop the
+    // run (row "NIF stubs" of docs/erts-differences.md).
+    let expected = [
+        "unsupported prim_socket native option value",
+        "unsupported prim_socket native value spec",
+        "unsupported prim_socket option (\"socket\", \"debug\")",
+        "unsupported prim_socket option (\"socket\", \"debug\")",
+        "unsupported prim_socket negative value of an unsigned option",
+        "unsupported prim_socket option {otp, 1001}",
+        "unsupported prim_socket option {otp, 1001}",
+    ];
+    for (case, expected) in (1..).zip(expected) {
+        let error = program()
+            .execute("effect_probe", &format!("socket_option_{case}"), &[])
+            .unwrap_err()
+            .to_string();
+        assert!(error.starts_with(expected), "{case}: {error}");
     }
 }
 

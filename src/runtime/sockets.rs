@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use socket2::Socket;
 
-use crate::term::{ProcessId, Reference};
+use crate::term::{ProcessId, Reference, Term};
 
 /// The state `ESOCK_STATE_BOUND` of a read or write state (`prim_socket_nif.c:4829-4890`).
 pub(super) const BOUND: u32 = 1 << 0;
@@ -166,6 +166,8 @@ pub(super) struct SocketState {
     pub(super) write: u32,
     /// Whether the socket registry knows the socket.
     pub(super) registered: bool,
+    /// The value of the option `{otp, meta}`, as `meta.ref`.
+    pub(super) meta: Term,
 }
 
 #[cfg(test)]

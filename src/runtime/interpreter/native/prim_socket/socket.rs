@@ -1,5 +1,6 @@
 //! The bindings of `prim_socket:nif_info/0,1`, `nif_open/4`, `nif_bind/2`,
-//! `nif_sockname/1`, `nif_close/1`, and `nif_finalize_close/1`
+//! `nif_sockname/1`, `nif_close/1`, and `nif_finalize_close/1`, and of
+//! `nif_setopt/5` and `nif_getopt/3,5` (see `options`)
 //! (`prim_socket_nif.c`), with the Unix I/O backend `unix_essio`
 //! (`unix_socket_syncio.c`).
 //!
@@ -15,6 +16,8 @@ use std::sync::{Arc, Mutex};
 
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
+mod options;
+
 use super::supports::atom;
 use super::*;
 use crate::runtime::port::inet::errno_name;
@@ -22,6 +25,7 @@ use crate::runtime::resources::lock;
 use crate::runtime::signal::Signal;
 use crate::runtime::sockets::{BOUND, CLOSED, CLOSING, SocketState, Sockets};
 use crate::term::{AtomTable, ProcessId, Reference};
+pub(super) use options::{getopt_3, getopt_5, setopt_5};
 
 /// The size of `sun_path` of `struct sockaddr_un` on the host.
 #[cfg(target_vendor = "apple")]
@@ -374,6 +378,7 @@ pub(super) fn open_4(
                 read: 0,
                 write: 0,
                 registered,
+                meta: Term::static_atom("undefined"),
             },
         );
         sockets.registry

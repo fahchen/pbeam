@@ -5,7 +5,8 @@
 //! PBeam binds `nif_supports/0,1` (see `supports`), which the node boot
 //! calls in `prim_socket:init/0` (`prim_socket.erl:184-204`), and
 //! `nif_info/0,1`, `nif_open/4`, `nif_bind/2`, `nif_sockname/1`,
-//! `nif_close/1`, and `nif_finalize_close/1` (see `socket`). A call of each
+//! `nif_close/1`, `nif_finalize_close/1`, `nif_setopt/5`, and
+//! `nif_getopt/3,5` (see `socket`). A call of each
 //! other function of the table stops the run with the runtime error of the
 //! static library (`Library::unbound_fails`).
 
@@ -44,6 +45,18 @@ pub(super) const BINDINGS: &[Binding] = &[
         run: |scheduler, arguments| socket::finalize_close(scheduler, &arguments[0]),
     },
     Binding {
+        name: "nif_getopt",
+        arity: 3,
+        job: Job::Normal,
+        run: socket::getopt_3,
+    },
+    Binding {
+        name: "nif_getopt",
+        arity: 5,
+        job: Job::Normal,
+        run: socket::getopt_5,
+    },
+    Binding {
         name: "nif_info",
         arity: 0,
         job: Job::Normal,
@@ -68,6 +81,12 @@ pub(super) const BINDINGS: &[Binding] = &[
                 &arguments[3],
             )
         },
+    },
+    Binding {
+        name: "nif_setopt",
+        arity: 5,
+        job: Job::Normal,
+        run: socket::setopt_5,
     },
     Binding {
         name: "nif_sockname",
