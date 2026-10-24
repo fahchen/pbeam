@@ -1825,9 +1825,6 @@ impl Decoder<'_> {
             .ok_or(DecodeError::Badarg)
     }
 
-    /// Decode an atom of `length` bytes in Latin-1 or UTF-8, as
-    /// `dec_term_atom_common` (`external.c:4525-4548`) does. The `safe`
-    /// option takes only an atom that the run has.
     /// Decode an atom of a `RECORD_EXT` header. Each other tag is `badarg`
     /// (`dec_atom`, `external.c:5300-5318`).
     fn header_atom(&mut self, tag: u8) -> Result<crate::term::Atom, DecodeError> {
@@ -1844,6 +1841,9 @@ impl Decoder<'_> {
         }
     }
 
+    /// Decode an atom of `length` bytes in Latin-1 or UTF-8, as
+    /// `dec_term_atom_common` (`external.c:4525-4548`) does. The `safe`
+    /// option takes only an atom that the run has.
     fn atom(&mut self, length: usize, latin1: bool) -> Result<crate::term::Atom, DecodeError> {
         let bytes = self.take(length)?;
         let name = if latin1 {

@@ -85,10 +85,10 @@ check(F) ->
     catch Class:Reason -> {Class, Reason}
     end.
 
-%% A term that PBeam cannot hold gives a runtime error. The bytes are a
-%% well-formed `RECORD_EXT` of the record `m:r` with no fields.
+%% Decode a `RECORD_EXT` of the record `m:r` with no fields. The name
+%% atom uses `ATOM_UTF8_EXT` (118), with a 2-byte length.
 decode_record() ->
-    binary_to_term(<<131, 67, 0, 0, 0, 0, 1, 119, 1, "m", 119, 1, "r">>).
+    binary_to_term(<<131, 67, 0, 0, 0, 0, 1, 119, 1, "m", 118, 0, 1, "r">>).
 
 %% The pinned ERTS gives a pid of node 'a@b'.
 decode_remote_pid() ->
