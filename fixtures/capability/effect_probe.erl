@@ -7,8 +7,7 @@
     socket_open_netns/0,
     socket_bind_unspec/0,
     socket_bind_family_number/0,
-    socket_option_1/0, socket_option_2/0, socket_option_3/0, socket_option_4/0,
-    socket_option_5/0,
+    socket_option_1/0, socket_option_2/0, socket_option_3/0,
     spawn/0,
     spawn_system_process/0,
     spawn_link/0,
@@ -1169,9 +1168,6 @@ socket_bind_family_number() ->
 socket_option_1() -> prim_socket:setopt(option_socket(), {otp, debug}, true).
 socket_option_2() -> prim_socket:setopt(option_socket(), {otp, select_read}, true).
 socket_option_3() -> prim_socket:setopt(option_socket(), {otp, rcvbuf}, {2, 50}).
-%% Only Linux has {ip, msfilter} and {ip, pktoptions}.
-socket_option_4() -> prim_socket:setopt(option_socket(), {ip, msfilter}, 1).
-socket_option_5() -> prim_socket:getopt(option_socket(), {ip, pktoptions}).
 
 option_socket() ->
     ok = prim_socket:init(),
