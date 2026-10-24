@@ -445,12 +445,13 @@ impl Inet {
         let &[family, kind, protocol] = request else {
             return Ok(error_reply("einval"));
         };
-        // A `tcp_inet` port takes IPv6 and `local` (inet_drv.c:11969-11984).
+        // `tcp_inet` and `udp_inet` take IPv6, and `tcp_inet` takes `local`
+        // (inet_drv.c:11969-11984, 14585-14595).
         let domain = match family {
             AF_INET => Domain::IPV4,
-            AF_INET6 if self.socket_type == SocketType::Stream => Domain::IPV6,
+            AF_INET6 => Domain::IPV6,
             AF_LOCAL if self.socket_type == SocketType::Stream => Domain::UNIX,
-            2 | 5 => return Err(self.unsupported("family", family)),
+            5 => return Err(self.unsupported("family", family)),
             _ => return Ok(error_reply("eafnosupport")),
         };
         let (socket_type, protocol) = match self.socket_type {
