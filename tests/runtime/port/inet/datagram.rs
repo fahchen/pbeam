@@ -96,7 +96,8 @@ fn reads_nothing_at_once_when_a_connected_socket_becomes_active() {
         Control::Reply(vec![1])
     );
     assert_eq!(
-        port.control(0x03f1_a307, &[22, 0, 0, 0, 2], caller).unwrap(),
+        port.control(0x03f1_a307, &[22, 0, 0, 0, 2], caller)
+            .unwrap(),
         Control::Reply(vec![1])
     );
 }
