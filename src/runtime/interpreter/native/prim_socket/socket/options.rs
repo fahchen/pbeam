@@ -279,7 +279,19 @@ fn setopt_native(
         (Some(bytes), _, _) => bytes,
         (None, Some(integer), _) => integer.to_ne_bytes().to_vec(),
         (None, None, Some(flag)) => i32::from(flag).to_ne_bytes().to_vec(),
-        (None, None, None) => return Ok(invalid(atom(scheduler, "value")?)),
+        // `esock_make_error_invalid` gives `{error, {invalid, value}}`
+        // (`prim_socket_nif.c:8455`, `socket_util.c:3303-3308`), which
+        // `prim_socket:setopt_common/4` does not rewrite.
+        (None, None, None) => {
+            let reason = Term::tuple(vec![
+                Term::static_atom("invalid"),
+                atom(scheduler, "value")?,
+            ]);
+            return Ok(BifResult::Value(Term::tuple(vec![
+                Term::static_atom("error"),
+                reason,
+            ])));
+        }
     };
     let result = keep_tos_and_priority(host, opt, || raw_set(host, level, opt, bytes.as_slice()));
     host_result(scheduler, result.map(|()| None))
