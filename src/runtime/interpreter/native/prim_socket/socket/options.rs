@@ -279,19 +279,9 @@ fn setopt_native(
         (Some(bytes), _, _) => bytes,
         (None, Some(integer), _) => integer.to_ne_bytes().to_vec(),
         (None, None, Some(flag)) => i32::from(flag).to_ne_bytes().to_vec(),
-        // `esock_make_error_invalid` gives `{error, {invalid, value}}`
-        // (`prim_socket_nif.c:8455`, `socket_util.c:3303-3308`), which
-        // `prim_socket:setopt_common/4` does not rewrite.
-        (None, None, None) => {
-            let reason = Term::tuple(vec![
-                Term::static_atom("invalid"),
-                atom(scheduler, "value")?,
-            ]);
-            return Ok(BifResult::Value(Term::tuple(vec![
-                Term::static_atom("error"),
-                reason,
-            ])));
-        }
+        // `prim_socket:setopt_common/4` does not rewrite the error of
+        // `esock_make_error_invalid` (`prim_socket_nif.c:8455`).
+        (None, None, None) => return error_invalid(scheduler, "value"),
     };
     let result = keep_tos_and_priority(host, opt, || raw_set(host, level, opt, bytes.as_slice()));
     host_result(scheduler, result.map(|()| None))
@@ -1017,6 +1007,12 @@ fn getopt_native(
         (None, Some("boolean"), _) => {
             raw_int(host, level, opt).map(|value| Some(boolean(value != 0)))
         }
+        // `esock_getopt_bin_opt` gives `{error, {invalid, data_size}}` for
+        // a size that a `socklen_t` cannot hold
+        // (`prim_socket_nif.c:13187-13189`).
+        (None, _, Some(bytes)) if libc::socklen_t::try_from(bytes.len()).is_err() => {
+            return error_invalid(scheduler, "data_size");
+        }
         (None, _, Some(bytes)) => raw_get(host, level, opt, Some(bytes.to_vec())).map(binary),
         (None, _, None) => return Ok(invalid(atom(scheduler, "value")?)),
     };
@@ -1204,13 +1200,10 @@ fn size_term(size: usize) -> Term {
     Term::from_bigint(size.into())
 }
 
-/// Return `{error, {invalid, not_owner}}` of `esock_make_error_invalid`
-/// (`prim_socket_nif.c:8075-8079`).
-fn not_owner(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
-    let reason = Term::tuple(vec![
-        Term::static_atom("invalid"),
-        atom(scheduler, "not_owner")?,
-    ]);
+/// Return `{error, {invalid, Reason}}` of `esock_make_error_invalid`
+/// (`socket_util.c:3303-3308`).
+fn error_invalid(scheduler: &mut Scheduler, reason: &str) -> Result<BifResult, BeamError> {
+    let reason = Term::tuple(vec![Term::static_atom("invalid"), atom(scheduler, reason)?]);
     Ok(BifResult::Value(Term::tuple(vec![
         Term::static_atom("error"),
         reason,
@@ -1262,7 +1255,7 @@ fn setopt_otp(
         }
         OTP_CTRL_PROC => {
             if socket.owner != Some(scheduler.current_process().id) {
-                return not_owner(scheduler);
+                return error_invalid(scheduler, "not_owner");
             }
             let Term::Pid(owner) = value else {
                 return invalid_value(scheduler);
@@ -1312,7 +1305,7 @@ fn setopt_otp(
         }
         OTP_META => {
             if socket.owner != Some(scheduler.current_process().id) {
-                return not_owner(scheduler);
+                return error_invalid(scheduler, "not_owner");
             }
             socket.meta = value.clone();
             ok

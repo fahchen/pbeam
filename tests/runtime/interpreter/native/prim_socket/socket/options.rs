@@ -66,3 +66,24 @@ fn raises_invalid_for_an_otp_option_number_without_a_getter() {
         Term::tuple(vec![Term::static_atom("invalid"), what])
     );
 }
+
+#[test]
+fn gives_invalid_data_size_for_a_binary_value_spec_of_4_gib() {
+    // `esock_getopt_bin_opt` gives `{error, {invalid, data_size}}` for a
+    // binary value spec that a `socklen_t` cannot hold
+    // (prim_socket_nif.c:13187-13189). A fixture cannot make the binary
+    // without writing 4 GiB; the zero pages of this one stay unused.
+    let scheduler = &mut Scheduler::new(AtomTable::new());
+    let host = Socket::new(socket2::Domain::IPV4, socket2::Type::DGRAM, None).unwrap();
+    let spec = Term::binary(vec![0; 1 << 32]);
+    let Ok(BifResult::Value(value)) =
+        getopt_native(scheduler, &host, libc::SOL_SOCKET, libc::SO_TYPE, &spec)
+    else {
+        panic!("no value");
+    };
+    let reason = Term::tuple(vec![
+        Term::static_atom("invalid"),
+        atom(scheduler, "data_size").unwrap(),
+    ]);
+    assert_eq!(value, Term::tuple(vec![Term::static_atom("error"), reason]));
+}
