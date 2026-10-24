@@ -10,10 +10,10 @@ use crate::runtime::{
     host::{
         errno::errno_id,
         filename_encoding, gethost,
-        spawn::{self, SpawnError, Streams},
+        spawn::{self, Fds, SpawnError, Streams},
     },
     port::{
-        self, Driver, Input, Lines, Packets, Port, PortCell, Spawn,
+        self, Driver, Input, Lines, Packets, Port, PortCell, Program, Spawn,
         inet::{Control, Event, Inet, OK, Output, SocketType},
     },
     signal::Signal,
@@ -278,8 +278,9 @@ struct PortSettings {
 ///
 /// # Errors
 ///
-/// An option that ERTS accepts and PBeam does not support, the port kind
-/// `fd`, `{line, L}` whose low 32 bits are not positive, and a failed `posix_spawn`
+/// An option that ERTS accepts and PBeam does not support, an fd that is
+/// not open, `{line, L}` whose low 32 bits are not positive, and a failed
+/// `posix_spawn`
 /// return a runtime error. A new atom in a full atom table gives the error
 /// of `AtomTable::put`.
 pub(super) fn open_port(
@@ -290,29 +291,30 @@ pub(super) fn open_port(
     let Some(settings) = port_settings(&context.scheduler.atoms, settings)? else {
         return Ok(Value(Term::static_atom("badopt")));
     };
-    let (path, args, is_command) =
-        match (port_name(&context.scheduler.atoms, name)?, &settings.args) {
-            (Some(PortName::Executable(path)), args) => {
-                (path, args.clone().unwrap_or_default(), false)
+    let (path, args, is_command) = match (port_name(&context.scheduler.atoms, name), &settings.args)
+    {
+        (Some(PortName::Executable(path)), args) => (path, args.clone().unwrap_or_default(), false),
+        // An argument vector only with `spawn_executable`
+        // (`erl_bif_port.c:1086-1092`).
+        (Some(_), Some(_)) | (None, _) => return Ok(Value(Term::static_atom("badarg"))),
+        (Some(PortName::Driver(driver)), None) => {
+            return open_driver_port(context, driver, &settings);
+        }
+        (Some(PortName::Fd(input, output)), None) => {
+            return open_fd_port(context, input, output, &settings);
+        }
+        (Some(PortName::Command(command)), None) => {
+            // The first word of the command names a driver, or the spawn
+            // driver runs the command (`io.c:599-622`).
+            if matches!(
+                first_word(&command),
+                b"tcp_inet" | b"udp_inet" | b"ram_file_drv" | b"fd"
+            ) {
+                return open_driver_port(context, command, &settings);
             }
-            // An argument vector only with `spawn_executable`
-            // (`erl_bif_port.c:1086-1092`).
-            (Some(_), Some(_)) | (None, _) => return Ok(Value(Term::static_atom("badarg"))),
-            (Some(PortName::Driver(driver)), None) => {
-                return open_driver_port(context, driver, &settings);
-            }
-            (Some(PortName::Command(command)), None) => {
-                // The first word of the command names a driver, or the spawn
-                // driver runs the command (`io.c:599-622`).
-                if matches!(
-                    first_word(&command),
-                    b"tcp_inet" | b"udp_inet" | b"ram_file_drv" | b"fd"
-                ) {
-                    return open_driver_port(context, command, &settings);
-                }
-                (command, Vec::new(), true)
-            }
-        };
+            (command, Vec::new(), true)
+        }
+    };
     let scheduler = &mut *context.scheduler;
     // The check uses the port name, which the later port operations check.
     let check = denial(
@@ -350,7 +352,7 @@ pub(super) fn open_port(
         packets: Packets::new(settings.packet),
         binary: settings.binary,
         lines,
-        child,
+        program: Program::Child(child),
         input: Input::Open,
     };
     let port = scheduler.open_port(path, Driver::Spawn(spawn))?;
@@ -447,6 +449,84 @@ fn open_driver_port(
 /// `erts_open_driver` looks up for `spawn` and `spawn_driver` (`io.c:599-622`).
 fn first_word(name: &[u8]) -> &[u8] {
     name.split(|&byte| byte == b' ').next().unwrap_or_default()
+}
+
+/// Open the port of `{fd, In, Out}` with the settings `settings`, as
+/// `open_port` and `fd_start` do (`erl_bif_port.c:1067-1081`, `1100-1102`;
+/// `sys_drivers.c:817-980`): the port reads `In` and writes `Out`, its name
+/// is `"In/Out"`, and it is owned by and linked to the caller. The fd
+/// driver has no init ack (`sys_drivers.c:277`), so the BIF returns the
+/// port. `exit_status` gives the atom `badarg`. ERTS keeps each fd as a
+/// `Uint` (`erl_bif_port.c:1074-1075`), and `fd_start` fails with `einval`
+/// for an fd at or above the `int` maximum number of files
+/// (`sys_drivers.c:822-824`, `sys.c:119`), so a negative fd or an fd above
+/// `i32::MAX` gives the atom `einval`. The port does not close its fds
+/// (`sys_drivers.c:1002-1027`).
+///
+/// # Errors
+///
+/// A port without `binary` and an fd that is not open return a runtime
+/// error: ERTS opens a port on an fd that is not open and is below its
+/// maximum number of files. A new atom in a full atom table gives the error
+/// of `AtomTable::put`.
+fn open_fd_port(
+    context: &mut BifContext<'_>,
+    input: i64,
+    output: i64,
+    settings: &PortSettings,
+) -> Result<BifResult, BeamError> {
+    if settings.exit_status {
+        return Ok(Value(Term::static_atom("badarg")));
+    }
+    if !settings.binary {
+        return Err(error(
+            "unsupported open_port/2 without the binary option: see \"Ports\" in docs/erts-differences.md",
+        ));
+    }
+    let (Ok(input), Ok(output)) = (i32::try_from(input as u64), i32::try_from(output as u64))
+    else {
+        return Ok(Value(Term::static_atom("einval")));
+    };
+    // `fd_start` refuses an fd at or above `sys_max_files()`, the soft
+    // `RLIMIT_NOFILE` (sys_drivers.c:822-824), which `open_port` gives as
+    // `einval`.
+    let max = nix::sys::resource::getrlimit(nix::sys::resource::Resource::RLIMIT_NOFILE)
+        .map_or(u64::MAX, |(soft, _)| soft);
+    if input as u64 >= max || output as u64 >= max {
+        return Ok(Value(Term::static_atom("einval")));
+    }
+    // ERTS opens a port on an fd that is not open: the select of the input
+    // fails without a message, and a write fails with `ebadf`. An fd that
+    // is not open has no entry in the fd directory of the process
+    // (`/dev/fd`, which is `/proc/self/fd` on Linux).
+    let closed = |fd| std::fs::symlink_metadata(format!("/dev/fd/{fd}")).is_err();
+    let port_input = if closed(input) {
+        Input::Ended
+    } else {
+        Input::Open
+    };
+    let name = format!("{input}/{output}").into_bytes();
+    let scheduler = &mut *context.scheduler;
+    let check = denial(
+        scheduler,
+        CapabilityKind::Port,
+        Operation::Spawn,
+        Some(&name),
+    );
+    if let Some(denied) = check? {
+        return Ok(denied);
+    }
+    let spawn = Spawn {
+        exit_status: false,
+        soft_eof: settings.eof,
+        packets: Packets::new(settings.packet),
+        binary: true,
+        lines: settings.line.map(line_size).transpose()?,
+        program: Program::Fds(Fds { input, output }),
+        input: port_input,
+    };
+    let port = scheduler.open_port(name, Driver::Spawn(spawn))?;
+    Ok(Value(Term::Port(port)))
 }
 
 /// Read the settings of `open_port/2` in order, as `open_port` does
@@ -618,41 +698,41 @@ enum PortName {
     Driver(Vec<u8>),
     /// The native bytes of the command of `{spawn, Command}`.
     Command(Vec<u8>),
+    /// The small integers `In` and `Out` of `{fd, In, Out}`.
+    Fd(i64, i64),
 }
 
-/// Return the name of `{spawn_executable, Name}` or `{spawn_driver,
-/// Name}`, or `None` for the `badarg` of ERTS: a term that is not a tuple
-/// with a first element that ERTS accepts, a tuple of another size, and a
-/// name that is not a file name without `[]` (`erl_bif_port.c:1033-1067`).
+/// Return the name of `{spawn_executable, Name}`, `{spawn_driver, Name}`,
+/// `{spawn, Command}`, or `{fd, In, Out}`, or `None` for the `badarg` of
+/// ERTS: a term that is not a tuple with a first element that ERTS
+/// accepts, a tuple of another size, a name that is not a file name without
+/// `[]`, and an fd that is not a small integer (`erl_bif_port.c:1033-1084`).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let name = Term::tuple(vec![Term::static_atom("spawn_executable"), Term::binary(b"/bin/sh".to_vec())]);
-/// assert_eq!(port_name(&atoms, &name)?, Some(PortName::Executable(b"/bin/sh".to_vec())));
+/// assert_eq!(port_name(&atoms, &name), Some(PortName::Executable(b"/bin/sh".to_vec())));
 /// ```
-///
-/// # Errors
-///
-/// The port kind `fd` returns a runtime error.
-fn port_name(atoms: &AtomTable, name: &Term) -> Result<Option<PortName>, BeamError> {
+fn port_name(atoms: &AtomTable, name: &Term) -> Option<PortName> {
     let Term::Tuple(elements) = name else {
-        return Ok(None);
+        return None;
     };
     match elements.as_ref() {
         [Term::Atom(kind), name] if kind.is_static("spawn_executable") => {
-            Ok(native_name(atoms, name, false).map(PortName::Executable))
+            native_name(atoms, name, false).map(PortName::Executable)
         }
         [Term::Atom(kind), name] if kind.is_static("spawn_driver") => {
-            Ok(native_name(atoms, name, false).map(PortName::Driver))
+            native_name(atoms, name, false).map(PortName::Driver)
         }
         [Term::Atom(kind), name] if kind.is_static("spawn") => {
-            Ok(native_name(atoms, name, false).map(PortName::Command))
+            native_name(atoms, name, false).map(PortName::Command)
         }
-        [Term::Atom(kind), ..] if kind.is_static("fd") => Err(error(
-            "unsupported open_port/2 port kind fd: see \"Ports\" in docs/erts-differences.md",
-        )),
-        _ => Ok(None),
+        [Term::Atom(kind), input, output] if kind.is_static("fd") => input
+            .small_integer()
+            .zip(output.small_integer())
+            .map(|(input, output)| PortName::Fd(input, output)),
+        _ => None,
     }
 }
 
@@ -826,7 +906,7 @@ pub(super) fn port_command(
     // (`sys_drivers.c:1153-1158`).
     let size = bytes.len() as u64;
     let written = spawn.packets.frame(bytes).ok_or(libc::EINVAL);
-    let written = written.and_then(|framed| spawn.child.write_input(&framed));
+    let written = written.and_then(|framed| spawn.program.write_input(&framed));
     if written.is_ok() {
         port_state.output += size;
     }
@@ -1127,7 +1207,10 @@ fn port_item(id: PortId, port: &Port, name: &str) -> Result<Term, BeamError> {
         "output" => Term::Integer(port.output.try_into().expect("an output count below 2^63")),
         // The last item, `os_pid`.
         _ => match &port.driver {
-            Driver::Spawn(spawn) => Term::Integer(spawn.child.os_pid.into()),
+            Driver::Spawn(spawn) => match spawn.program.child() {
+                Some(child) => Term::Integer(child.os_pid.into()),
+                None => Term::static_atom("undefined"),
+            },
             Driver::Inet(_) => Term::static_atom("undefined"),
         },
     };
@@ -1923,4 +2006,91 @@ pub(super) fn term_to_string(atoms: &AtomTable, term: &Term, limit: &Term) -> Bi
     Value(Term::list_from(
         text.into_iter().map(|byte| Term::Integer(i64::from(byte))),
     ))
+}
+
+/// Return the ERTS name of the kind of `term`, as
+/// `erts_internal:term_type/1` does (`erl_map.c:3336-3417`). PBeam does
+/// not keep the ERTS form of a binary (heap, reference-counted, or
+/// sub-binary), so a binary and a native record raise an unsupported error
+/// (`docs/erts-differences.md`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(term_type(&atoms, &Term::Nil)?, Value(Term::static_atom("nil")));
+/// ```
+pub(super) fn term_type(atoms: &AtomTable, term: &Term) -> Result<BifResult, BeamError> {
+    let name = match term {
+        Term::Cons(_) => "list",
+        Term::Tuple(_) => "tuple",
+        Term::Fun(fun) => match fun.target() {
+            Target::Local(_) => "fun",
+            Target::External { .. } => "export",
+        },
+        Term::Map(map) if map.is_hashmap() => "hashmap",
+        Term::Map(_) => "flatmap",
+        Term::Integer(_) if term.small_integer().is_some() => "fixnum",
+        Term::Integer(_) | Term::BigInt(_) => "bignum",
+        Term::Reference(_) => "reference",
+        Term::Float(_) => "hfloat",
+        Term::Pid(_) => "pid",
+        Term::Port(_) => "port",
+        Term::Atom(_) => "atom",
+        Term::Nil => "nil",
+        Term::Binary(_) | Term::Record(_) | Term::MatchContext(_) => {
+            return Err(error(
+                "erts_internal:term_type/1 cannot name the ERTS form of a binary or a native record"
+                    .to_owned(),
+            ));
+        }
+    };
+    Ok(Value(Term::Atom(atoms.put(name)?)))
+}
+
+/// Return the key tuple of a flatmap, as
+/// `erts_internal:map_to_tuple_keys/1` does (`erl_map.c:3318-3328`): a
+/// hashmap raises `error:badarg`, and another term raises
+/// `error:{badmap, Term}`. The empty map gives the empty tuple. PBeam keeps
+/// no key tuple, and ERTS shares one key tuple between flatmaps, so a new
+/// tuple would give a wrong `erts_debug:size/1`: a flatmap with keys stops
+/// the run with an unsupported error (`docs/erts-differences.md`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(map_to_tuple_keys(&Term::Map(Map::new()))?, Value(Term::tuple(vec![])));
+/// ```
+pub(super) fn map_to_tuple_keys(term: &Term) -> Result<BifResult, BeamError> {
+    let Term::Map(map) = term else {
+        return Ok(maps::error_with("badmap", term));
+    };
+    match map.flat_pairs() {
+        Some([]) => Ok(Value(Term::tuple(vec![]))),
+        Some(_) => Err(error(
+            "erts_internal:map_to_tuple_keys/1 cannot give the shared key tuple of a flatmap"
+                .to_owned(),
+        )),
+        None => Ok(BifResult::badarg()),
+    }
+}
+
+/// Return whether `left` and `right` are one ERTS term word, as
+/// `erts_debug:same/2` does (`beam_debug.c:65-68`). Two equal copies of a
+/// term that ERTS boxes and PBeam does not, such as a float, stop the run
+/// with an unsupported error, because PBeam cannot tell them apart
+/// (`docs/erts-differences.md`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(erts_debug_same(&Term::Nil, &Term::Nil)?, Value(Term::static_atom("true")));
+/// ```
+pub(super) fn erts_debug_same(left: &Term, right: &Term) -> Result<BifResult, BeamError> {
+    match left.same_object(right) {
+        Some(same) => Ok(Value(Term::static_atom(if same { "true" } else { "false" }))),
+        None => Err(error(
+            "erts_debug:same/2 cannot tell two equal copies of a float, a reference, or a 64-bit bignum apart"
+                .to_owned(),
+        )),
+    }
 }

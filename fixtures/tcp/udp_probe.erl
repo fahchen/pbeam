@@ -1,5 +1,5 @@
 -module(udp_probe).
--export([active/0, active_options/0, host_name/0, open/0, passive/0, port_zero/0, truncate/0, unsupported/1]).
+-export([active/0, active_options/0, connect/0, host_name/0, open/0, passive/0, port_zero/0, reconnect/0, active_waiter/0, refused_active/0, refused_passive/0, truncate/0, unsupported/1]).
 
 %% The requests of the udp_inet driver that inet_config:set_hostname/0
 %% sends through inet_udp:open(0, []), inet:gethostname/1, and
@@ -121,6 +121,13 @@ unsupported(ancillary) ->
 unsupported(short_count) ->
     {ok, S} = udp(),
     control(S, 7, [22, 0, 0, 0, 3]);
+unsupported(disconnect) ->
+    {ok, S} = udp(),
+    control(S, 3, []);
+unsupported(failed_connect) ->
+    %% Linux rejects a connect to the broadcast address without SO_BROADCAST.
+    {ok, S} = udp(),
+    prim_inet:connect(S, {255, 255, 255, 255}, 9);
 unsupported(accept) ->
     P = open_port({spawn_driver, "udp_inet"}, [binary]),
     [1] = control(P, 1, [1, 2, 2]),
@@ -141,6 +148,7 @@ command(S, Bytes) ->
 %% The sender of a received datagram as {Address, true} when it is the
 %% port Port, because the numbers of ERTS and PBeam differ.
 sender({ok, {Address, Port, Data}}, Port) -> {ok, {Address, true, Data}};
+sender({ok, {Address, Port}}, Port) -> {ok, {Address, true}};
 sender(Other, _) -> Other.
 
 %% The calls of gen_udp:send/4 and gen_udp:recv/2,3, which inet_udp gives
@@ -210,3 +218,87 @@ udp() ->
 port_zero() ->
     {ok, S} = udp(),
     prim_inet:sendto(S, {127, 0, 0, 1}, 0, <<"x">>).
+
+%% gen_udp:connect/3 and gen_udp:send/2, which inet_udp gives to
+%% prim_inet:connect/3 and prim_inet:sendto/4 with {any, 0}
+%% (inet_udp.erl:90-98), on passive sockets on 127.0.0.1
+%% (inet_drv.c:14710-14842, 15142-15182): PEER before and after the
+%% connect, a send without an address, a receive from the peer only, a
+%% send to another address that goes to the peer, BIND of a connected
+%% socket, the errors of CONNECT, and a send to {loopback, Port}.
+connect() ->
+    Lo = {127, 0, 0, 1},
+    [{A, PA}, {B, PB}, {C, PC}] = [bound() || _ <- [a, b, c]],
+    NotConnected = prim_inet:peername(A),
+    Connect = prim_inet:connect(A, Lo, PB),
+    Peer = sender(prim_inet:peername(A), PB),
+    Sent = prim_inet:sendto(A, {any, 0}, [], <<"hi">>),
+    Got = sender(prim_inet:recvfrom(B, 0, 1000), PA),
+    ok = prim_inet:sendto(C, Lo, PA, <<"other">>),
+    ok = prim_inet:sendto(B, Lo, PA, <<"peer">>),
+    FromPeer = sender(prim_inet:recvfrom(A, 0, 1000), PB),
+    Filtered = prim_inet:recvfrom(A, 0, 50),
+    ok = prim_inet:sendto(A, Lo, PC, <<"to">>),
+    ToPeer = [sender(prim_inet:recvfrom(B, 0, 1000), PA), prim_inet:recvfrom(C, 0, 50)],
+    Bind = prim_inet:bind(A, {0, 0, 0, 0}, 0),
+    Unopened = open_port({spawn_driver, "udp_inet"}, [binary]),
+    Errors = [control(A, 3, [0]), control(A, 3, [0, 0, 0, 0, 1]), control(A, 3, [0, 0, 0, 0, 9, 0]),
+              control(A, 3, [0, 0, 0, 0, 1, 0, 1]), control(Unopened, 3, [0, 0, 0, 0, 1, 0, 1, 127, 0, 0, 1])],
+    {D, PD} = bound(),
+    Loopback = [prim_inet:sendto(D, {loopback, PD}, [], <<"l">>), sender(prim_inet:recvfrom(D, 0, 1000), PD),
+                command(D, [3, 0]), command(D, [4, 0, 1, 0, 0, 0])],
+    [NotConnected, Connect, Peer, Sent, Got, FromPeer, Filtered, ToPeer, Bind, Errors, Loopback].
+
+%% A send of a connected socket to a closed port: the ICMP error gives
+%% econnrefused to the next receive of a passive socket, and
+%% {udp_error, S, econnrefused} to the owner of an active socket
+%% (inet_drv.c:15473-15489).
+refused_passive() -> refused(false).
+
+refused_active() -> refused(true).
+
+refused(Active) ->
+    {ok, S} = udp(),
+    {Closed, P} = bound(),
+    ok = prim_inet:close(Closed),
+    ok = prim_inet:connect(S, {127, 0, 0, 1}, P),
+    ok = prim_inet:sendto(S, {any, 0}, [], <<"x">>),
+    ok = prim_inet:setopts(S, [{active, Active}]),
+    case Active of
+        false -> prim_inet:recvfrom(S, 0, 1000);
+        true -> receive {udp_error, S, Reason} -> {udp_error, socket, Reason} after 1000 -> none end
+    end.
+
+%% A passive socket of udp/0 and its port.
+bound() ->
+    {ok, S} = udp(),
+    {ok, {_, P}} = prim_inet:sockname(S),
+    {S, P}.
+
+%% CONNECT of a connected socket, which dissolves the association first
+%% (inet_drv.c:14819-14836): a connect to the broadcast address, a failed
+%% connect to the port 0, which xnu rejects, and a connect after it.
+reconnect() ->
+    {S, _} = bound(),
+    {B, PB} = bound(),
+    ok = prim_inet:connect(S, {127, 0, 0, 1}, 9),
+    [prim_inet:connect(S, {255, 255, 255, 255}, 9), prim_inet:connect(S, {127, 0, 0, 1}, 0),
+     prim_inet:peername(S), prim_inet:connect(S, {127, 0, 0, 1}, PB), sender(prim_inet:peername(S), PB),
+     prim_inet:close(B)].
+
+%% A connected passive socket with a receive that waits becomes active
+%% once, and a datagram of the peer comes: the socket gives it to the owner,
+%% because it is active (inet_drv.c:4335-4357). The waiter does not get
+%% it; its end differs on PBeam (#1246).
+active_waiter() ->
+    {S, PS} = bound(),
+    {B, PB} = bound(),
+    ok = prim_inet:connect(S, {127, 0, 0, 1}, PB),
+    Self = self(),
+    spawn(fun() -> Self ! {waiter, prim_inet:recvfrom(S, 0, 300)} end),
+    timer:sleep(50),
+    ok = prim_inet:setopts(S, [{active, once}]),
+    ok = prim_inet:sendto(B, {127, 0, 0, 1}, PS, <<"w">>),
+    Owner = receive {udp, S, _, _, Data} -> {udp, Data} after 500 -> none end,
+    Waiter = receive {waiter, {ok, _} = W} -> W after 0 -> none end,
+    [Owner, Waiter].

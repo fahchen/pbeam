@@ -780,7 +780,7 @@ pub(super) fn values(
 /// let BifResult::Raise { reason, .. } = error_with("badmap", &test_atom("foo")) else { panic!() };
 /// assert_eq!(reason, Term::tuple(vec![test_atom("badmap"), test_atom("foo")]));
 /// ```
-fn error_with(tag: &str, term: &Term) -> BifResult {
+pub(super) fn error_with(tag: &str, term: &Term) -> BifResult {
     BifResult::Raise {
         class: ExceptionClass::Error,
         reason: Term::tuple(vec![Term::static_atom(tag), term.clone()]),

@@ -648,7 +648,8 @@ ambient() ->
         attempt(fun() -> prim_net:get_adapters_addresses(#{}) end),
         attempt(fun() -> prim_net:get_if_entry(#{}) end),
         attempt(fun() -> prim_net:get_interface_info(#{}) end),
-        attempt(fun() -> prim_net:get_ip_address_table(#{}) end)
+        attempt(fun() -> prim_net:get_ip_address_table(#{}) end),
+        erts_internal:term_type(id(a))
     ].
 
 %% Each metadata probe makes a temporary file, so `write_file_info/3`
@@ -1028,7 +1029,8 @@ executables() ->
         attempt(fun() -> erlang:port_close(Port) end),
         attempt(fun() -> erlang:open_port({spawn_executable, <<"/bin/cat">>}, [binary]) end),
         attempt(fun() -> erlang:open_port({spawn_executable, "/bin/sh"}, [binary]) end),
-        attempt(fun() -> erlang:open_port({spawn_executable, "/bin/../bin/cat"}, [binary]) end)
+        attempt(fun() -> erlang:open_port({spawn_executable, "/bin/../bin/cat"}, [binary]) end),
+        attempt(fun() -> erlang:open_port({fd, 1, 2}, [binary]) end)
     ].
 
 %% The `signals` constraint of `signal`. SIG_DFL is the start disposition

@@ -417,6 +417,48 @@ impl Term {
         }
     }
 
+    /// Return whether `self` and `other` are the same ERTS term word, as
+    /// `erts_debug:same/2` tests (`beam_debug.c:65-68`): an equal immediate,
+    /// or one shared container. ERTS boxes a float, a reference, and an
+    /// integer from 2^59 to 2^63 - 1 and from -(2^63) to -(2^59) - 1, but
+    /// PBeam does not, so it cannot tell two equal copies of one of them
+    /// apart: return `None` for them (`docs/erts-differences.md`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let list = Term::list_from([Term::Integer(1)]);
+    /// assert_eq!(list.same_object(&list.clone()), Some(true));
+    /// assert_eq!(Term::Float(1.5).same_object(&Term::Float(1.5)), None);
+    /// ```
+    pub(crate) fn same_object(&self, other: &Term) -> Option<bool> {
+        Some(match (self, other) {
+            (Term::Binary(left), Term::Binary(right)) => left.same_view(right),
+            (Term::BigInt(left), Term::BigInt(right)) => Arc::ptr_eq(left, right),
+            (Term::Cons(left), Term::Cons(right)) => left.same_cell(right),
+            // The empty tuple is one global literal (`copy.c:130-140`).
+            (Term::Tuple(left), Term::Tuple(right)) => {
+                left.same_array(right) || (left.is_empty() && right.is_empty())
+            }
+            (Term::Map(left), Term::Map(right)) => left.same_form(right),
+            (Term::Record(left), Term::Record(right)) => left.same_thing(right),
+            // ERTS keeps one external fun literal in the export entry of a
+            // function, so two external funs of it are one term word
+            // (`export.h:60-62`).
+            (Term::Fun(left), Term::Fun(right)) => match (left.target(), right.target()) {
+                (Target::External { .. }, Target::External { .. }) => {
+                    left.target() == right.target()
+                }
+                _ => left.same_thing(right),
+            },
+            (Term::Float(_) | Term::Reference(_), _) if self == other => return None,
+            (Term::Integer(_), _) if self == other && self.small_integer().is_none() => {
+                return None;
+            }
+            _ => self == other,
+        })
+    }
+
     /// Return the value of an integer in the ERTS small-integer range,
     /// -(2^59) to 2^59 - 1, as the ERTS checks `is_small` and `signed_val`
     /// do. Return `None` for any other term. ERTS stores a larger integer as
