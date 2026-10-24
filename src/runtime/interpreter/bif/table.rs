@@ -475,7 +475,7 @@ bifs! {
     ets:select/2 as EtsSelect2 => |cx, [table, spec]| ets::select(cx, table, spec, None, false),
     ets:select/3 as EtsSelect3 => |cx, [table, spec, limit]| ets::select(cx, table, spec, Some(limit), false),
     ets:select_count/2 as EtsSelectCount2 => |cx, [table, spec]| ets::select_count(cx, table, spec),
-    ets:select_replace/2 => unsupported,
+    ets:select_replace/2 as EtsSelectReplace2 => |cx, [table, spec]| ets::select_replace(cx, table, spec),
     ets:select_reverse/1 as EtsSelectReverse1 => |cx, [continuation]| ets::select_continue(cx, continuation, "select_reverse"),
     ets:select_reverse/2 as EtsSelectReverse2 => |cx, [table, spec]| ets::select(cx, table, spec, None, true),
     ets:select_reverse/3 as EtsSelectReverse3 => |cx, [table, spec, limit]| ets::select(cx, table, spec, Some(limit), true),
