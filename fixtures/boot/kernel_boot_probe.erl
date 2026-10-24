@@ -833,7 +833,8 @@ sockopt_raw() ->
     Addrform = [socket:setopt(A6, {ipv6, addrform}, V) || V <- [inet, 2, foo]]
         ++ [socket:getopt(A6, {ipv6, addrform})],
     N = {socket, case os:type() of {unix, linux} -> 8; _ -> 16#1002 end},
-    Native = [socket:setopt_native(U, N, V) || V <- [65536, true, <<70000:32/native>>, <<1:3>>, foo, 1 bsl 40]]
+    Native = [socket:setopt_native(U, N, V) || V <- [65536, true, <<70000:32/native>>, <<1:3>>, foo, 1 bsl 40,
+                                                       [0, 0, 1, 0], [], [108 | 111], [<<0, 0>>, 2, 0]]]
         ++ [socket:getopt_native(U, N, V) || V <- [integer, boolean, 4, 2, 0, <<0:32>>, <<>>, foo, 1 bsl 40]]
         ++ [socket:setopt_native(T, {6, 1}, true), socket:getopt_native(T, {6, 1}, integer),
             socket:getopt_native(U, {socket, 9999}, integer), socket:getopt_native(U, {socket, 9999}, 4),

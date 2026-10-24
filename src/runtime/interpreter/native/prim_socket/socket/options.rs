@@ -265,7 +265,8 @@ pub(in crate::runtime::interpreter::native::prim_socket) fn setopt_5(
 
 /// Set the option `opt` at the level `level` of `host` to a native value,
 /// as `esock_setopt_native` does (`prim_socket_nif.c:8444-8456`): the
-/// bytes of a binary, or the C `int` of an integer or a boolean.
+/// bytes of iodata (`GET_BIN` is `enif_inspect_iolist_as_binary`,
+/// `socket_int.h:880-881`), or the C `int` of an integer or a boolean.
 fn setopt_native(
     scheduler: &mut Scheduler,
     host: &Socket,
@@ -273,12 +274,9 @@ fn setopt_native(
     opt: i32,
     value: &Term,
 ) -> Result<BifResult, BeamError> {
-    let bytes = match (
-        value.binary_bytes(),
-        int(value),
-        decode_bool(scheduler, value),
-    ) {
-        (Some(bytes), _, _) => bytes.to_vec(),
+    let iodata = crate::runtime::interpreter::bif::iodata_bytes(value);
+    let bytes = match (iodata, int(value), decode_bool(scheduler, value)) {
+        (Some(bytes), _, _) => bytes,
         (None, Some(integer), _) => integer.to_ne_bytes().to_vec(),
         (None, None, Some(flag)) => i32::from(flag).to_ne_bytes().to_vec(),
         (None, None, None) => return Ok(invalid(atom(scheduler, "value")?)),
