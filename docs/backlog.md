@@ -90,6 +90,13 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ## Runtime
 
+### Free magic-reference resources when the last reference term is dropped
+
+- **Now:** the compiled programs of ETS select continuations, the compiled binary patterns, and the atomics and counters arrays stay until the run ends, where ERTS frees each one with the last reference term (`erl_db_util.h:617-619`). A `Reference` term is a plain `u64`, so PBeam cannot see when the last term goes.
+- **Option:** reference terms that own an `Arc` to the resource, so the drop of the last term frees it. This is an architectural change to `Term`, which must stay 16 bytes.
+- **Trigger:** when a long-running workload shows memory growth from repeated select continuations, pattern compiles, or atomics.
+- **Source:** PR #1245 (#1096) and its Codex P2 finding.
+
 ### Keep the parts of a chunked binary when the md5 walk traps
 
 - **Now:** `erlang:md5/1` reads a binary with `Binary::byte_runs` up to its byte budget, and a walk that does not finish makes the remainder with `Binary::bits`, which joins the parts of a binary that an append built. A large chunked binary therefore costs a copy in the turn that traps. The "md5 binary remainder" row of `docs/erts-differences.md` records this.
