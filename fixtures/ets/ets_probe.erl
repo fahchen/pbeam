@@ -1341,6 +1341,15 @@ rename_slot_count() ->
                    true = ets:delete(D),
                    receive {count, R} -> {is_pid(C), R} end
                end || Ty <- [set, ordered_set]],
+              begin
+                  ets_probe_counted = ets:new(ets_probe_counted, [named_table, public]),
+                  true = ets:insert(ets_probe_counted, [{I} || I <- lists:seq(1, 2500)]),
+                  Parent2 = self(),
+                  spawn(fun() -> Parent2 ! {counted, ets:select_count(ets_probe_counted, [{'_', [], [true]}])} end),
+                  erlang:yield(),
+                  ets_probe_moved = ets:rename(ets_probe_counted, ets_probe_moved),
+                  receive {counted, Counted} -> ets:delete(ets_probe_moved), Counted end
+              end,
               ets:slot(Big, 1024), ets:slot(Big, 2048),
               ets:rename(N, ets_probe_named2), ets:info(ets_probe_named2, name),
               catch_cause(fun() -> ets:info(ets_probe_named, name) end),

@@ -3363,6 +3363,12 @@ pub(super) fn select_count_trap(
         return Ok(BifResult::badarg());
     };
     let writes = found.writes() as i64;
+    // The continuation keeps the table identifier, as ERTS does, so a
+    // rename while the count traps does not change it.
+    let id = ets
+        .id(atoms, table)
+        .map_or_else(|| table.clone(), Term::Reference);
+    let tree = found.table_type() == TableType::OrderedSet;
     if resume.is_some_and(|(_, _, _, before)| before != writes) {
         // ponytail: ERTS fixes the table; see "ETS tables" in docs/erts-differences.md.
         return Err(error(
@@ -3370,7 +3376,7 @@ pub(super) fn select_count_trap(
         ));
     }
     let got = resume.map_or(0, |(_, _, got, _)| got);
-    let (count, reductions, trap) = if found.table_type() == TableType::OrderedSet {
+    let (count, reductions, trap) = if tree {
         let resume = resume.map(|(last, end, _, _)| (last, end));
         tree::count(atoms, &found, &compiled, resume, got)?
     } else {
@@ -3414,15 +3420,21 @@ pub(super) fn select_count_trap(
     drop(found);
     drop(ets);
     let process = context.scheduler.current_process_mut();
-    let Some((position, end)) = trap else {
+    // A hash count uses all reductions when it traps (`on_simple_trap`),
+    // and a tree count charges the objects that it read
+    // (`erl_db_tree.c:1765`).
+    if trap.is_none() || tree {
         process.bump_reductions(i32::try_from(reductions).unwrap_or(i32::MAX));
+    } else {
+        process.bump_all_reductions();
+    }
+    let Some((position, end)) = trap else {
         return Ok(Value(Term::Integer(count)));
     };
-    process.bump_all_reductions();
     Ok(BifResult::TrapBif {
         module: "ets",
         function: "select_count_trap",
-        arguments: count_arguments(table, spec, (&position, &end, count, writes)),
+        arguments: count_arguments(&id, spec, (&position, &end, count, writes)),
     })
 }
 
