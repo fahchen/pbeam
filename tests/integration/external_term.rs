@@ -482,8 +482,9 @@ fn runs_term_to_iovec_and_external_size_2_as_pinned_erts() {
     // of `term_to_binary/2` without a list (`external.c:2495-2502`), and
     // `external_size/2` ignores the compression (`external.c:2220-2246`).
     // A payload element refers to its source binary (`external.c:3958`),
-    // and an element of more than 64 bytes between payloads refers to all
-    // those bytes (`external.c:2585-2587`).
+    // and an element between payloads refers to all those bytes
+    // (`external.c:2585-2587`). An element of at most 64 bytes is a
+    // sub-binary of that off-heap binary too (`external.c:2689-2719`).
     let program = load();
     let ok = |value: bool| atom(&program, if value { "true" } else { "false" });
     let badarg = Term::tuple(vec![atom(&program, "error"), atom(&program, "badarg")]);
@@ -493,6 +494,15 @@ fn runs_term_to_iovec_and_external_size_2_as_pinned_erts() {
         Term::list_from([154, 100, 154].map(Term::Integer)),
         Term::Integer(100),
         Term::Integer(101),
+        Term::list_from(vec![pair(7, 8), pair(64, 65), pair(1, 8)]),
+        Term::list_from(vec![pair(13, 13)]),
+        Term::list_from(vec![
+            pair(8, 16),
+            pair(100, 100),
+            pair(8, 16),
+            pair(100, 100),
+        ]),
+        Term::list_from(vec![pair(6, 16), pair(10, 16), pair(100, 100)]),
     ]);
     let expected = Term::tuple(vec![
         referenced,

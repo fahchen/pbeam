@@ -104,6 +104,14 @@ pub(super) enum Signal {
         /// The reference of the file resource.
         file: Reference,
     },
+    /// `ERTS_SIG_Q_OP_MONITOR` of a resource monitor: `essio_open_with_protocol`
+    /// monitors the caller of `prim_socket:nif_open/4` as the owner of the
+    /// socket (`unix_socket_syncio.c:1785-1788`). At exit it closes the
+    /// socket when it is still open (`unix_socket_syncio.c:9735-9750`).
+    SocketMonitor {
+        /// The reference of the socket resource.
+        socket: Reference,
+    },
     /// `ERTS_SIG_Q_OP_LINK` from a port: `erlang:port_connect/2` linked
     /// the port `port` to the receiver (io.c:2355-2380). The receiver adds
     /// the link unless it has one; the cost is 0. At exit it gives a link
@@ -345,6 +353,7 @@ impl Signal {
             }
             | Signal::TtyMonitor { tty: _ }
             | Signal::FileMonitor { file: _ }
+            | Signal::SocketMonitor { socket: _ }
             | Signal::PortLink { port: _ }
             | Signal::PortUnlink { port: _ }
             | Signal::PortMonitor {

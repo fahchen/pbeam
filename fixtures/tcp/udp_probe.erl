@@ -1,5 +1,5 @@
 -module(udp_probe).
--export([active/0, active_options/0, connect/0, host_name/0, open/0, passive/0, port_zero/0, reconnect/0, active_waiter/0, refused_active/0, refused_passive/0, truncate/0, unsupported/1]).
+-export([active/0, active_options/0, connect/0, host_name/0, inet6/0, open/0, passive/0, port_zero/0, reconnect/0, active_waiter/0, refused_active/0, refused_passive/0, truncate/0, unsupported/1]).
 
 %% The requests of the udp_inet driver that inet_config:set_hostname/0
 %% sends through inet_udp:open(0, []), inet:gethostname/1, and
@@ -110,9 +110,6 @@ unsupported(stream) -> open_with([1, 1, 0]);
 unsupported(seqpacket) -> open_with([1, 3, 0]);
 unsupported(sctp) -> open_with([1, 2, 3]);
 unsupported(local) -> open_with([5, 2, 0]);
-unsupported(inet6) ->
-    {ok, S} = udp(),
-    command(S, [2, 0, 1 | lists:duplicate(16, 0)] ++ [0, 0, 0, 0]);
 unsupported(recvtos) ->
     {ok, S} = udp(),
     prim_inet:setopts(S, [{recvtos, true}]);
@@ -303,3 +300,27 @@ active_waiter() ->
     Owner = receive {udp, S, _, _, Data} -> {udp, Data} after 500 -> none end,
     Waiter = receive {waiter, {ok, _} = W} -> W after 0 -> none end,
     [Owner, Waiter].
+
+%% An IPv6 socket (INET_AF_INET6, inet_drv.c:14585-14595) on ::1: the
+%% name, a send and a receive (inet_set_address, inet_drv.c:4726-4745;
+%% inet_get_address, inet_drv.c:4905-4913), a send to the tag loopback
+%% (inet_drv.c:4846-4868), ipv6_v6only (inet_drv.c:7806-7823), and a bind
+%% to the tags any and loopback (inet_drv.c:4817-4875).
+inet6() ->
+    Lo = {0, 0, 0, 0, 0, 0, 0, 1},
+    {ok, S} = prim_inet:open(udp, inet6, dgram),
+    ok = prim_inet:setopts(S, [binary, {active, false}]),
+    {ok, P} = prim_inet:bind(S, Lo, 0),
+    Name = prim_inet:sockname(S) =:= {ok, {Lo, P}},
+    Sent = prim_inet:sendto(S, Lo, P, <<"hi">>),
+    Data = sender(prim_inet:recvfrom(S, 0, 1000), P),
+    Tag = command(S, [4, P bsr 8, P band 255, 0, 0, 0, 0, $l]),
+    Looped = sender(prim_inet:recvfrom(S, 0, 1000), P),
+    Only = prim_inet:getopts(S, [ipv6_v6only]),
+    Tags = [begin
+                {ok, R} = prim_inet:open(udp, inet6, dgram),
+                [1 | _] = erlang:port_control(R, ?MAGIC + 6, [T, 0, 0]),
+                {ok, {Addr, _}} = prim_inet:sockname(R),
+                {Addr, prim_inet:getopts(R, [ipv6_v6only])}
+            end || T <- [3, 4]],
+    [Name, Sent, Data, Tag, Looped, Only, Tags].

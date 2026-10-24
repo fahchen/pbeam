@@ -346,7 +346,6 @@ fn stops_the_run_for_each_udp_inet_part_that_is_not_implemented() {
             "disconnect",
             "unsupported udp_inet request CONNECT without an address",
         ),
-        ("inet6", "unsupported udp_inet output address family 2"),
         (
             "ancillary",
             "unsupported udp_inet output with ancillary data",
@@ -364,6 +363,22 @@ fn stops_the_run_for_each_udp_inet_part_that_is_not_implemented() {
             .to_string();
         assert!(error.starts_with(message), "{case}: {error}");
     }
+}
+
+#[test]
+fn runs_an_ipv6_udp_inet_port_as_pinned_erts() {
+    // `OPEN` with `inet6` (inet_drv.c:14585-14595), a send and a receive on
+    // `::1` (inet_drv.c:4726-4745, 4905-4913), a send to the tag
+    // `loopback` and a bind to the tags `any` and `loopback`
+    // (inet_drv.c:4817-4875). Both runtimes read `ipv6_v6only` from the
+    // kernel (inet_drv.c:7806-7823). Linux sets it on a bind to a specific
+    // IPv6 address such as `::1` (net/ipv6/af_inet6.c, `__inet6_bind`);
+    // macOS leaves it off.
+    let only = cfg!(target_os = "linux").to_string();
+    let expected = "[true,ok,{ok,{{0,0,0,0,0,0,0,1},true,<<104,105>>}},ok,{ok,{{0,0,0,0,0,0,0,1},true,<<108>>}},{ok,[{ipv6_v6only,ONLY}]},[{{0,0,0,0,0,0,0,0},{ok,[{ipv6_v6only,false}]}},{{0,0,0,0,0,0,0,1},{ok,[{ipv6_v6only,ONLY}]}}]]"
+        .replace("ONLY", &only);
+    assert_eq!(erts_text("udp_probe", "inet6"), expected, "ERTS");
+    assert_eq!(pbeam_text("udp_probe", "inet6"), expected, "PBeam");
 }
 
 #[test]
@@ -878,6 +893,20 @@ fn closes_a_port_with_linger_zero_and_queued_output_as_pinned_erts() {
     for (name, (text, _)) in ["ERTS", "PBeam"]
         .into_iter()
         .zip(client_runs("tcp_close", "linger_zero"))
+    {
+        assert_eq!(text, expected, "{name}");
+    }
+}
+
+#[test]
+fn replies_to_a_close_message_when_the_flushed_port_terminates_as_pinned_erts() {
+    // `{Pid, close}` sets `ERTS_PORT_SFLG_SEND_CLOSED`, and
+    // `terminate_port` sends `{Port, closed}` after the queue is written
+    // (io.c:3713-3719, 3753-3758).
+    let expected = "[true,waiting,closed,[['EXIT',port,normal]]]";
+    for (name, (text, _)) in ["ERTS", "PBeam"]
+        .into_iter()
+        .zip(client_runs("tcp_close", "message_close"))
     {
         assert_eq!(text, expected, "{name}");
     }

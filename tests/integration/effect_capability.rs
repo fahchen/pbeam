@@ -35,9 +35,16 @@ const INVENTORY: &str = include_str!("../../docs/effect-inventory.md");
 /// Each capability of the column "Capability" of the effect inventory, as
 /// `(entry, kind:operation)`, with the `effect_probe` function that calls
 /// the entry once.
-const PROBES: [(&str, &str, &str); 67] = [
+const PROBES: [(&str, &str, &str); 74] = [
     ("erlang:exit/2", "process:exit_other", "exit_other"),
     ("erlang:exit/3", "process:exit_other", "exit_other3"),
+    ("erlang:exit/2", "port:close", "port_exit"),
+    ("erlang:exit/3", "port:close", "port_exit3"),
+    ("erlang:send/2", "port:command", "port_send"),
+    ("erlang:send/2", "port:close", "port_send_close"),
+    ("erlang:send/3", "port:command", "port_send3"),
+    ("erlang:send/3", "port:close", "port_send3_close"),
+    ("erts_internal:port_call/3", "port:command", "port_call"),
     ("erlang:delete_module/1", "code:load", "delete_module"),
     ("erlang:link/1", "process:link", "link"),
     ("erlang:monitor/2", "process:monitor", "monitor2"),
@@ -404,13 +411,17 @@ const AMBIENT: &[&str] = &[
     "ets:next_lookup/2",
     "ets:prev/2",
     "ets:prev_lookup/2",
+    "ets:rename/2",
     "ets:select/1",
     "ets:select/2",
     "ets:select/3",
+    "ets:select_count/2",
+    "ets:select_replace/2",
     "ets:select_reverse/1",
     "ets:select_reverse/2",
     "ets:select_reverse/3",
     "ets:safe_fixtable/2",
+    "ets:slot/2",
     "ets:update_counter/3",
     "ets:update_counter/4",
     "ets:update_element/3",
@@ -426,11 +437,19 @@ const AMBIENT: &[&str] = &[
     "prim_file:internal_native2name/1",
     "prim_file:read_info_nif/2",
     "prim_net:nif_command/1",
+    "prim_net:nif_get_adapters_addresses/1",
+    "prim_net:nif_get_if_entry/1",
+    "prim_net:nif_get_interface_info/1",
+    "prim_net:nif_get_ip_address_table/1",
     "prim_net:nif_getaddrinfo/3",
     "prim_net:nif_gethostname/0",
+    "prim_net:nif_getifaddrs/1",
     "prim_net:nif_getnameinfo/2",
     "prim_net:nif_getservbyname/2",
     "prim_net:nif_getservbyport/2",
+    "prim_net:nif_if_index2name/1",
+    "prim_net:nif_if_name2index/1",
+    "prim_net:nif_if_names/0",
     "prim_net:nif_info/0",
     "prim_socket:nif_supports/0",
     "prim_socket:nif_supports/1",
@@ -445,7 +464,7 @@ const AMBIENT: &[&str] = &[
 /// `effect_probe:ambient/0` also calls each entry once. `null_read/0` and
 /// `buffer/0` call the `prim_buffer` entries, and `buffer/0` calls
 /// `peek_head/1` and `copying_read/2` through `prim_buffer:read/2`.
-const LATER: [&str; 29] = [
+const LATER: [&str; 41] = [
     "prim_buffer:copying_read/2",
     "prim_buffer:find_byte_index/2",
     "prim_buffer:new/0",
@@ -475,6 +494,18 @@ const LATER: [&str; 29] = [
     "prim_file:set_permissions_nif/2",
     "prim_file:set_time_nif/4",
     "prim_file:write_nif/2",
+    "prim_socket:nif_accept/2",
+    "prim_socket:nif_bind/2",
+    "prim_socket:nif_cancel/3",
+    "prim_socket:nif_close/1",
+    "prim_socket:nif_connect/1",
+    "prim_socket:nif_connect/3",
+    "prim_socket:nif_finalize_close/1",
+    "prim_socket:nif_info/0",
+    "prim_socket:nif_info/1",
+    "prim_socket:nif_listen/2",
+    "prim_socket:nif_open/4",
+    "prim_socket:nif_sockname/1",
 ];
 
 /// Return the entry and the cell of the column "Capability" of each row of
@@ -617,7 +648,7 @@ fn calls_each_ambient_and_later_entry_with_no_capability() {
     // The root process holds no capability, so no policy can permit the
     // calls: each `ambient` and `later` entry has no check.
     let program = program();
-    let expected = "[true,true,false,true,true,true,integer,integer,integer,integer,integer,date_time,date_time,unix,nonode@nohost,nonode@nohost,[],[nonode@nohost],1,true,{error,badarg},{arity,1},1,{error,badfile},{error,badarg},false,false,true,effect_probe_ambient_atom,effect_probe_ambient_binary,effect_probe_ambient_binary,effect_probe_ambient_atom,ok,[bm,{1,1}],ac,re_pattern,effect_probe_ambient,true,false,[{key,value}],value,value,true,true,[{key,value}],true,true,set,true,15,eot,eot,first,first_lookup,last,last_lookup,eot,eot,[{key,value}],eot,[{key,value}],eot,true,true,0,2,reference,true,atom,2,ok,1,error,ok,error,ok,error,[ok,{ok,0},ok],[eof,ok],[11,<<48,49>>,{ok,8},9,ok,0,<<120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120>>,acquired,ok],none,false,{error,notsup},ok,false,reference,ok,1,ok,48,8,8,ok,integer,integer,timestamp,date,time,date_time,date_time,timestamp,integer,timestamp,integer,integer,{error,enotsup},error,error,error,error,error,error,error,ok,ok,ok,true,true,true,true,9,9,true,true,false,true,true,true,true,true,true,{error,badarg},true,[],ok,false,ok,ok,error,{ok,80},{ok,[104,116,116,112]},atom]";
+    let expected = "[true,true,false,true,true,true,integer,integer,integer,integer,integer,date_time,date_time,unix,nonode@nohost,nonode@nohost,[],[nonode@nohost],1,true,{error,badarg},{arity,1},1,{error,badfile},{error,badarg},false,false,true,effect_probe_ambient_atom,effect_probe_ambient_binary,effect_probe_ambient_binary,effect_probe_ambient_atom,ok,[bm,{1,1}],ac,re_pattern,effect_probe_ambient,true,false,[{key,value}],value,value,true,true,[{key,value}],true,true,set,true,15,eot,eot,first,first_lookup,last,last_lookup,eot,eot,[{key,value}],eot,[{key,value}],1,1,true,true,eot,true,true,0,2,reference,true,atom,2,ok,1,error,ok,error,ok,error,[ok,{ok,0},ok],[eof,ok],[11,<<48,49>>,{ok,8},9,ok,0,<<120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120,120>>,acquired,ok],none,false,{error,notsup},ok,false,reference,ok,1,ok,48,8,8,ok,integer,integer,timestamp,date,time,date_time,date_time,timestamp,integer,timestamp,integer,integer,{error,enotsup},error,error,error,error,error,error,error,ok,ok,ok,true,true,true,true,9,9,true,true,false,true,true,true,true,true,true,{error,badarg},true,[],ok,false,ok,ok,error,{ok,80},{ok,[104,116,116,112]},ok,error,error,{error,notsup},{error,notsup},{error,notsup},{error,notsup},atom]";
     assert_eq!(run_text(&program, "ambient", &Grants(vec![])), expected);
     assert_eq!(erts_with_stand_in("ambient"), format!("{expected}\n"));
 }
@@ -1295,4 +1326,55 @@ fn compares_the_program_name_of_a_port_for_its_information() {
         run(&program, "inspect_names", &AllowAll),
         atoms(&program, &["ok", "denied"])
     );
+}
+
+#[test]
+fn stops_the_run_for_a_socket_open_by_a_runtime_process_in_a_run_with_a_policy() {
+    // No capability permits a network effect yet (M6 is postponed), so
+    // `prim_socket:nif_open/4` stops the run, as an inet port does (row
+    // "NIF stubs" of docs/erts-differences.md).
+    let error = program()
+        .execute_with_policy("effect_probe", "socket_open", &[], &Grants(vec![]))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.starts_with("unsupported prim_socket:nif_open/4 in a run with a policy"),
+        "{error}"
+    );
+}
+
+#[test]
+fn stops_the_run_for_a_socket_bind_to_a_native_family() {
+    // ERTS decodes a `sockaddr` of the family `unspec` or of a family number
+    // as a native `sockaddr` (socket_util.c:484-548) and gives
+    // `{error, einval}` for these maps. PBeam does not decode a native
+    // `sockaddr` and stops the run (row "NIF stubs" of
+    // docs/erts-differences.md).
+    for function in ["socket_bind_unspec", "socket_bind_family_number"] {
+        let error = program()
+            .execute("effect_probe", function, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("unsupported prim_socket sockaddr of the family unspec"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn stops_the_run_for_a_socket_open_with_netns_on_linux_and_ignores_it_on_macos() {
+    // ERTS on Linux enters the network namespace of `netns` before
+    // `socket(2)` (unix_socket_syncio.c:1729-1745), and PBeam stops the run.
+    // The macOS build has no `HAVE_SETNS` and ignores the option.
+    let result = program().execute("effect_probe", "socket_open_netns", &[]);
+    if cfg!(target_os = "linux") {
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.starts_with("prim_socket:nif_open/4 option netns is not supported"),
+            "{error}"
+        );
+    } else {
+        result.unwrap();
+    }
 }

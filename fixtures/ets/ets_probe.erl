@@ -5,7 +5,7 @@
          delete_order/0, deleter/2,
          insert_new/0, unsupported/1, insert_all/2, ping/1, busy/0, busy_insert/2,
          busy_helper/2,
-         own/2, write/1, select/0, match_object/0, match_continue/0, iterate/0,
+         own/2, write/1, select/0, match_object/0, match_continue/0, rename_slot_count/0, select_replace/0, iterate/0,
          update_element/0, info_items/0, delete_all/0, select_reductions/0, first/0,
          private_owner/1, ordered_set/0, ordered_set_reductions/0, take/0,
          walk/0, walk_alias/1,
@@ -602,6 +602,16 @@ unsupported(Case) ->
             true = ets:insert(T, [{I} || I <- seq(5000)]),
             spawn(?MODULE, write, [T]) ! go,
             ets:match(T, '$1');
+        count_changed ->
+            T = ets:new(ets_probe, [public]),
+            true = ets:insert(T, [{I} || I <- seq(5000)]),
+            spawn(?MODULE, write, [T]) ! go,
+            ets:select_count(T, [{'_', [], [true]}]);
+        replace_changed ->
+            T = ets:new(ets_probe, [public]),
+            true = ets:insert(T, [{I} || I <- seq(5000)]),
+            spawn(?MODULE, write, [T]) ! go,
+            ets:select_replace(T, [{'_', [], ['$_']}]);
         delete_inserting ->
             T = ets:new(ets_probe, [public]),
             spawn(?MODULE, insert_all, [T, [{I} || I <- seq(400000)]]),
@@ -1281,6 +1291,200 @@ match_continue() ->
      catch_error(fun() -> ets:match(bad) end),
      catch_error(fun() -> ets:match_object({bad}) end),
      catch_error(fun() -> ets:match_object(ets_probe_missing, '_', 1) end)].
+
+%% ets:select_count/2, ets:slot/2, and ets:rename/2 on each table type
+%% (erl_db.c:2444-2547, 3739-3760, 4096-4137; erl_db_hash.c:1733-1759,
+%% 2491-2553; erl_db_tree.c:1139-1188, 1690-1765).
+rename_slot_count() ->
+    Type = fun(Ty) ->
+                   T = ets:new(ets_probe, [Ty]),
+                   true = ets:insert(T, [{K, V} || K <- [3, 1, 2, b, a], V <- [x, y]]),
+                   [ets:select_count(T, [{{'$1', y}, [], [true]}]),
+                    ets:select_count(T, [{{3, '_'}, [], [true]}]),
+                    ets:select_count(T, [{{z, y}, [], [true]}]),
+                    ets:select_count(T, [{x, [], [true]}]),
+                    ets:select_count(T, [{{'$1', '$2'}, [], ['$2']}]),
+                    ets:select_count(T, [{{'$1', '_'}, [{is_atom, '$1'}], [true]}, {x, [], [true]}]),
+                    ets:select_count(T, [{{1.0, '_'}, [], [true]}]),
+                    ets:select_count(T, [{{1, '_'}, [], [true]}]),
+                    ets:select_count(T, [{{[a | '_'], '_'}, [], [true]}]),
+                    catch_cause(fun() -> ets:select_count(T, [{bad}]) end),
+                    catch_cause(fun() -> ets:select_count(T, bad) end),
+                    [catch_cause(fun() -> ets:slot(T, S) end) || S <- [0, 1, 4, 5, 6, -1, a, id(1) bsl 64]],
+                    [X || S <- lists:seq(0, 255), X <- [catch_cause(fun() -> ets:slot(T, S) end)], is_list(X), X =/= []],
+                    catch_cause(fun() -> ets:slot(T, 256) end),
+                    catch_cause(fun() -> ets:slot(T, 257) end),
+                    ets:rename(T, ets_probe_renamed) =:= T,
+                    ets:info(T, name),
+                    catch_cause(fun() -> ets:rename(T, 1) end)]
+           end,
+    Big = ets:new(ets_probe, []),
+    true = ets:insert(Big, [{I} || I <- lists:seq(1, 3000)]),
+    N = ets:new(ets_probe_named, [named_table, public]),
+    O = ets:new(ets_probe_other, [named_table]),
+    Self = self(),
+    Pid = spawn(fun() ->
+                        Self ! {ets:new(ets_probe, []), ets:new(ets_probe, [private])},
+                        receive stop -> ok end
+                end),
+    {Protected, Private} = receive {_, _} = Tables -> Tables end,
+    Result = [Type(set), Type(bag), Type(duplicate_bag), Type(ordered_set),
+              ets:select_count(Big, [{{'$1'}, [{'>', '$1', 1000}], [true]}]),
+              [begin
+                   L = ets:new(ets_probe, [Ty, public]),
+                   true = ets:insert(L, [{I, I rem 3} || I <- lists:seq(1, 2500)]),
+                   [ets:select_count(L, [{{'_', 0}, [], [true]}]),
+                    ets:select_count(L, [{{'$1', '_'}, [{'>', '$1', 1200}], [true]}]),
+                    ets:select_count(L, [{{'_', '_'}, [], [true]}])]
+               end || Ty <- [set, bag, duplicate_bag, ordered_set]],
+              [begin
+                   D = ets:new(ets_probe, [Ty, public]),
+                   true = ets:insert(D, [{I} || I <- lists:seq(1, 2500)]),
+                   Parent = self(),
+                   C = spawn(fun() -> Parent ! {count, catch_cause(fun() -> ets:select_count(D, [{'_', [], [true]}]) end)} end),
+                   erlang:yield(),
+                   true = ets:delete(D),
+                   receive {count, R} -> {is_pid(C), R} end
+               end || Ty <- [set, ordered_set]],
+              begin
+                  ets_probe_counted = ets:new(ets_probe_counted, [named_table, public]),
+                  true = ets:insert(ets_probe_counted, [{I} || I <- lists:seq(1, 2500)]),
+                  Parent2 = self(),
+                  spawn(fun() -> Parent2 ! {counted, ets:select_count(ets_probe_counted, [{'_', [], [true]}])} end),
+                  erlang:yield(),
+                  ets_probe_moved = ets:rename(ets_probe_counted, ets_probe_moved),
+                  receive {counted, Counted} -> ets:delete(ets_probe_moved), Counted end
+              end,
+              ets:slot(Big, 1024), ets:slot(Big, 2048),
+              ets:rename(N, ets_probe_named2), ets:info(ets_probe_named2, name),
+              catch_cause(fun() -> ets:info(ets_probe_named, name) end),
+              catch_cause(fun() -> ets:rename(ets_probe_named2, ets_probe_other) end),
+              catch_cause(fun() -> ets:rename(ets_probe_named2, ets_probe_named2) end),
+              ets:rename(ets:whereis(ets_probe_named2), ets_probe_named3),
+              catch_cause(fun() -> ets:rename(ets_probe_missing, a) end),
+              catch_cause(fun() -> ets:rename(ets_probe_missing, 1) end),
+              catch_cause(fun() -> ets:rename(1, a) end),
+              catch_cause(fun() -> ets:rename(Protected, a) end),
+              catch_cause(fun() -> ets:rename(Protected, 1) end),
+              ets:slot(Protected, 0), ets:select_count(Protected, []),
+              catch_cause(fun() -> ets:slot(Private, 0) end),
+              catch_cause(fun() -> ets:select_count(Private, []) end),
+              catch_cause(fun() -> ets:select_count(ets_probe_missing, []) end),
+              catch_cause(fun() -> ets:slot(ets_probe_missing, 0) end)],
+    Pid ! stop,
+    ets:delete(O),
+    ets:delete(ets_probe_named3),
+    Result.
+
+%% Return the error, its reason, and the error_info cause of the first
+%% stack frame, or none.
+select_replace() ->
+    Type = fun(Ty) ->
+                   T = ets:new(ets_probe, [Ty]),
+                   true = ets:insert(T, [{K, V} || K <- [3, 1, 2, b, a], V <- [x, y]]),
+                   [catch_cause(fun() -> ets:select_replace(T, [{{'$1', y}, [{is_integer, '$1'}], [{{'$1', z}}]}]) end),
+                    lists:sort(ets:tab2list(T)),
+                    catch_cause(fun() -> ets:select_replace(T, [{{3, '$2'}, [], [{{3, '$2'}}]}]) end),
+                    catch_cause(fun() -> ets:select_replace(T, [{{'$1', '_'}, [], [{{2, q}}]}]) end),
+                    catch_cause(fun() -> ets:select_replace(T, [{{1, '_'}, [], [{{1.0, q}}]}]) end),
+                    catch_cause(fun() -> ets:select_replace(T, [{'$1', [], [ok]}]) end),
+                    catch_cause(fun() -> ets:select_replace(T, [{'$1', [], ['$_']}]) end),
+                    catch_cause(fun() -> ets:select_replace(T, [{{a, '_'}, [], [{{a, w}}]}, {'_', [], [false]}]) end),
+                    catch_cause(fun() -> ets:select_replace(T, [{{z, '_'}, [], [{{z, w}}]}]) end),
+                    catch_cause(fun() -> ets:select_replace(T, [{{b, '$1'}, [], [{{b, '$1', extra}}]}]) end),
+                    [catch_cause(fun() -> ets:select_replace(T, [S]) end)
+                     || S <- [{x, [], ['$_']},
+                              {{'$1', '_'}, [], [{const, {'$1', c}}]},
+                              {{'$0', '_'}, [], [{const, {'$0', c}}]},
+                              {{'$01', '_'}, [], [{const, {'$01', c}}]},
+                              {{'_', '_'}, [], [{{'_', c}}]},
+                              {{'$$', '_'}, [], [{{'$$', c}}]},
+                              {{'$_', '_'}, [], [{{'$_', c}}]},
+                              {{a, '_'}, [], [{const, {a, c}}]},
+                              {{{a, [b | c], 1.5}, '_'}, [], [{{{{a, [b | c], 1.5}}, c}}]},
+                              {{{a, b}, '_'}, [], [{{{const, {a, b}}, c}}]},
+                              {{{a, b}, '_'}, [], [{{{a, b}, c}}]},
+                              {{{a, b}, '_'}, [], [{{{{a, b, c}}, c}}]},
+                              {{a, '_'}, [], [{{{{a}}, c}}]},
+                              {{[a], '_'}, [], [{{[a], c}}]},
+                              {{[a], '_'}, [], [{{a, c}}]},
+                              {{#{a => 1}, '_'}, [], [{{#{a => 1}, c}}]},
+                              {{a, '_'}, [], [{{{element, 1, '$_'}, c}}]},
+                              {{a, '_'}, [], [{{{element, 2, '$_'}, c}}]},
+                              {{a, '_'}, [], [{{{element, 1, '$$'}, c}}]},
+                              {{a, '_'}, [], [{{{element, 1, '$_', x}, c}}]},
+                              {{a, '_'}, [], [{const, {{element, 1, '$_'}, c}}]},
+                              {{a, '_'}, [], [{{a}, c}]},
+                              {{a, '_'}, [], [{{}}]},
+                              {{a, '_'}, [], [x]},
+                              {{a, '_'}, [], ['$_' | x]},
+                              {{a, '_'}, [], x},
+                              {{a, '_'}, [], [{{a, c}}, {{a, d}}]},
+                              {{a, '_'}, []},
+                              {{a, '_'}, bad, ['$_']},
+                              {'$1', [], [{{a, c}}]},
+                              {{a, '_'}, [], [{{[a], c}}]},
+                              x]],
+                    catch_cause(fun() -> ets:select_replace(T, [{{a, '_'}, [], ['$_']} | x]) end),
+                    catch_cause(fun() -> ets:select_replace(T, [{bad}]) end),                    catch_cause(fun() -> ets:select_replace(T, [{bad}]) end),
+                    catch_cause(fun() -> ets:select_replace(T, bad) end),
+                    lists:sort(ets:tab2list(T))]
+           end,
+    Big = ets:new(ets_probe, [public]),
+    true = ets:insert(Big, [{I, 0} || I <- lists:seq(1, 3000)]),
+    BigTree = ets:new(ets_probe, [ordered_set, public]),
+    true = ets:insert(BigTree, [{I, 0} || I <- lists:seq(1, 3000)]),
+    Self = self(),
+    Pid = spawn(fun() ->
+                        Self ! {ets:new(ets_probe, []), ets:new(ets_probe, [public])},
+                        receive stop -> ok end
+                end),
+    {Protected, Public} = receive {_, _} = Tables -> Tables end,
+    Result = [Type(set), Type(ordered_set), Type(bag), Type(duplicate_bag),
+              [ets:select_replace(B, [{{'$1', 0}, [{'>', '$1', 1000}], [{{'$1', 1}}]}]) || B <- [Big, BigTree]],
+              [ets:select_count(B, [{{'_', 1}, [], [true]}]) || B <- [Big, BigTree]],
+              [begin
+                   D = ets:new(ets_probe, [Ty, public]),
+                   true = ets:insert(D, [{I} || I <- lists:seq(1, 2500)]),
+                   Parent = self(),
+                   C = spawn(fun() -> Parent ! {replaced, catch_cause(fun() -> ets:select_replace(D, [{'_', [], ['$_']}]) end)} end),
+                   erlang:yield(),
+                   true = ets:delete(D),
+                   receive {replaced, R} -> {is_pid(C), R} end
+               end || Ty <- [set, ordered_set]],
+              begin
+                  ets_probe_replaced = ets:new(ets_probe_replaced, [named_table, public]),
+                  true = ets:insert(ets_probe_replaced, [{I} || I <- lists:seq(1, 2500)]),
+                  Parent2 = self(),
+                  spawn(fun() -> Parent2 ! {replaced, ets:select_replace(ets_probe_replaced, [{{'$1'}, [], [{{'$1'}}]}])} end),
+                  erlang:yield(),
+                  ets_probe_moved = ets:rename(ets_probe_replaced, ets_probe_moved),
+                  receive {replaced, Replaced} -> ets:delete(ets_probe_moved), Replaced end
+              end,
+              begin
+                  F = ets:new(ets_probe, [public]),
+                  true = ets:insert(F, [{1, a}, {2, b}]),
+                  true = ets:safe_fixtable(F, true),
+                  true = ets:delete(F, 1),
+                  Fixed = ets:select_replace(F, [{{'$1', '_'}, [], [{{'$1', c}}]}]),
+                  true = ets:safe_fixtable(F, false),
+                  {Fixed, ets:tab2list(F)}
+              end,
+              catch_cause(fun() -> ets:select_replace(Protected, [{'_', [], ['$_']}]) end),
+              catch_cause(fun() -> ets:select_replace(Public, [{'_', [], ['$_']}]) end),
+              catch_cause(fun() -> ets:select_replace(no_such_table, [{'_', [], ['$_']}]) end)],
+    Pid ! stop,
+    Result.
+
+catch_cause(Fun) ->
+    try Fun()
+    catch error:Reason:Stack ->
+            [{_, _, _, Info} | _] = Stack,
+            case Info of
+                [{error_info, #{cause := Cause}} | _] -> {error, Reason, Cause};
+                _ -> {error, Reason, none}
+            end
+    end.
 
 match_chunks('$end_of_table') -> [eot];
 match_chunks({L, C}) -> [lists:sort(L) | match_chunks(ets:match(C))].

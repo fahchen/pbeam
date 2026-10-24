@@ -3,12 +3,21 @@
 //! `prim_socket:on_load/1` loads (`prim_socket.erl:137-182`).
 //!
 //! PBeam binds `nif_supports/0,1` (see `supports`), which the node boot
-//! calls in `prim_socket:init/0` (`prim_socket.erl:184-204`). A call of
-//! each other function of the table stops the run with the runtime error of
-//! the static library (`Library::unbound_fails`).
+//! calls in `prim_socket:init/0` (`prim_socket.erl:184-204`), and
+//! `nif_info/0,1`, `nif_open/4`, `nif_bind/2`, `nif_sockname/1`,
+//! `nif_close/1`, and `nif_finalize_close/1` (see `socket`), and
+//! `nif_connect/1,3`, `nif_listen/2`, `nif_accept/2`, and `nif_cancel/3`
+//! (see `select`). A call of each
+//! other function of the table stops the run with the runtime error of the
+//! static library (`Library::unbound_fails`).
 
 use super::*;
+use crate::runtime::resources::lock;
+use crate::runtime::sockets::Sockets;
 
+mod atoms;
+mod select;
+mod socket;
 mod supports;
 
 /// The bindings of the `prim_socket` library.
@@ -19,6 +28,94 @@ mod supports;
 /// assert_eq!((BINDINGS[0].name, BINDINGS[0].arity), ("nif_supports", 0));
 /// ```
 pub(super) const BINDINGS: &[Binding] = &[
+    Binding {
+        name: "nif_accept",
+        arity: 2,
+        job: Job::Normal,
+        run: |scheduler, arguments| select::accept(scheduler, &arguments[0], &arguments[1]),
+    },
+    Binding {
+        name: "nif_bind",
+        arity: 2,
+        job: Job::Normal,
+        run: |scheduler, arguments| socket::bind_2(scheduler, &arguments[0], &arguments[1]),
+    },
+    Binding {
+        name: "nif_cancel",
+        arity: 3,
+        job: Job::Normal,
+        run: |scheduler, arguments| {
+            select::cancel(scheduler, &arguments[0], &arguments[1], &arguments[2])
+        },
+    },
+    Binding {
+        name: "nif_close",
+        arity: 1,
+        job: Job::Normal,
+        run: |scheduler, arguments| socket::close(scheduler, &arguments[0]),
+    },
+    Binding {
+        name: "nif_connect",
+        arity: 1,
+        job: Job::Normal,
+        run: |scheduler, arguments| select::connect(scheduler, &arguments[0], None),
+    },
+    Binding {
+        name: "nif_connect",
+        arity: 3,
+        job: Job::Normal,
+        run: |scheduler, arguments| {
+            select::connect(
+                scheduler,
+                &arguments[0],
+                Some((&arguments[1], &arguments[2])),
+            )
+        },
+    },
+    Binding {
+        name: "nif_finalize_close",
+        arity: 1,
+        job: Job::Normal,
+        run: |scheduler, arguments| socket::finalize_close(scheduler, &arguments[0]),
+    },
+    Binding {
+        name: "nif_info",
+        arity: 0,
+        job: Job::Normal,
+        run: |scheduler, _| socket::info_0(scheduler),
+    },
+    Binding {
+        name: "nif_info",
+        arity: 1,
+        job: Job::Normal,
+        run: |scheduler, arguments| socket::info_1(scheduler, &arguments[0]),
+    },
+    Binding {
+        name: "nif_listen",
+        arity: 2,
+        job: Job::Normal,
+        run: |scheduler, arguments| select::listen(scheduler, &arguments[0], &arguments[1]),
+    },
+    Binding {
+        name: "nif_open",
+        arity: 4,
+        job: Job::Normal,
+        run: |scheduler, arguments| {
+            socket::open_4(
+                scheduler,
+                &arguments[0],
+                &arguments[1],
+                &arguments[2],
+                &arguments[3],
+            )
+        },
+    },
+    Binding {
+        name: "nif_sockname",
+        arity: 1,
+        job: Job::Normal,
+        run: |scheduler, arguments| socket::sockname(scheduler, &arguments[0]),
+    },
     Binding {
         name: "nif_supports",
         arity: 0,
@@ -94,22 +191,35 @@ pub(super) const FUNCTIONS: [(&str, u32); 40] = [
 /// the ERTS `on_load` does (`prim_socket_nif.c:18785-19202`), and return
 /// its veto. A load info that is not a map with a local pid under the key
 /// `registry` gives the veto 1 (`prim_socket_nif.c:18862-18867`,
-/// `socket_util.c:2958-2971`). Each other load info gives 0. ERTS also
+/// `socket_util.c:2958-2971`). Each other load info gives 0 and keeps the
+/// pid as the socket registry, as `data.regPid`. ERTS also
 /// gives the veto 1 when it cannot start its I/O backend or make its
 /// resource type (`prim_socket_nif.c:19161-19164`, `19180-19201`); PBeam
 /// starts no backend and makes no resource type, so it has no such veto.
-/// `atoms` is the atom table of the run: a map key `registry` exists only
-/// when the atom is in it.
+/// A map key `registry` exists only when the atom is in the atom table of
+/// the run.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(load(&Term::Integer(0), &atoms), 1);
+/// assert_eq!(load(&Term::Integer(0), &scheduler), 1);
 /// ```
-pub(super) fn load(load_info: &Term, atoms: &AtomTable) -> i32 {
-    let registry = match (load_info, atoms.get("registry")) {
+pub(super) fn load(load_info: &Term, scheduler: &Scheduler) -> i32 {
+    // ERTS makes its atoms before it reads the load info
+    // (`prim_socket_nif.c:18842-18857`). The atom indexes set the key order
+    // of the maps of `nif_info/0,1`. A full atom table stops ERTS here; in
+    // PBeam the first use of a missing atom gives the error of
+    // `AtomTable::put`.
+    for name in atoms::LOAD_ATOMS {
+        let _ = scheduler.atoms.put(name);
+    }
+    let registry = match (load_info, scheduler.atoms.get("registry")) {
         (Term::Map(map), Some(key)) => map.get(&Term::Atom(key)),
         _ => None,
     };
-    i32::from(!matches!(registry, Some(Term::Pid(_))))
+    let Some(Term::Pid(registry)) = registry else {
+        return 1;
+    };
+    lock(&scheduler.node().resources.kind::<Sockets>()).registry = Some(*registry);
+    0
 }
