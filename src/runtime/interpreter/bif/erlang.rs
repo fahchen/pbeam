@@ -3964,6 +3964,37 @@ pub(super) fn universaltime_to_localtime(date: &Term) -> BifResult {
         .map_or_else(BifResult::badarg, |local| Value(date_time(local)))
 }
 
+/// Run `erlang:localtime_to_universaltime(Localtime, IsDst)`: return the UTC
+/// date and time of a local date and time in the host time zone, as ERTS
+/// `localtime_to_universaltime_2` (`bif.c:3936-3968`) does. `IsDst` is
+/// `true`, `false`, or `undefined` for the `tm_isdst` 1, 0, or -1 of
+/// `mktime`; each other term raises `badarg` first. A term that
+/// [`time::time_to_parts`] does not read, a value out of the range of
+/// `local_to_univ` (`erl_time_sup.c:1744-1754`), and a failed C library
+/// call ([`host::clock::local_to_univ`]) raise `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let triple = |a, b, c| Term::tuple(vec![Term::Integer(a), Term::Integer(b), Term::Integer(c)]);
+/// // TZ=EST5EDT,M3.2.0,M11.1.0: {{2026,1,15},{12,0,0}}
+/// let date = Term::tuple(vec![triple(2026, 1, 15), triple(7, 0, 0)]);
+/// assert!(matches!(localtime_to_universaltime(&date, &Term::static_atom("false")), BifResult::Value(_)));
+/// assert!(matches!(localtime_to_universaltime(&date, &Term::nil()), BifResult::Raise { .. }));
+/// ```
+pub(super) fn localtime_to_universaltime(date: &Term, dst: &Term) -> BifResult {
+    let Some(isdst) = [("true", 1), ("false", 0), ("undefined", -1)]
+        .into_iter()
+        .find_map(|(name, isdst)| (*dst == Term::static_atom(name)).then_some(isdst))
+    else {
+        return BifResult::badarg();
+    };
+    time::time_to_parts(date)
+        .filter(|&date| time::in_range(date, time::BASEYEAR))
+        .and_then(|date| host::clock::local_to_univ(date, isdst))
+        .map_or_else(BifResult::badarg, |utc| Value(date_time(utc)))
+}
+
 /// Run `erlang:universaltime_to_posixtime(Universaltime)`: return the POSIX
 /// seconds of a UTC date and time, as ERTS `universaltime_to_posixtime_1`
 /// (`bif.c:4001-4021`) does with `univ_to_seconds`

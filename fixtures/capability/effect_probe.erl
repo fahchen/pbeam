@@ -476,6 +476,7 @@ ambient() ->
         integer(erlang:system_time()),
         integer(erlang:system_time(second)),
         date_time(erlang:universaltime_to_localtime({{2026, 10, 11}, {12, 0, 0}})),
+        date_time(erlang:localtime_to_universaltime({{2026, 10, 11}, {12, 0, 0}}, undefined)),
         element(1, erlang:system_info(os_type)),
         erlang:node(),
         erlang:node(Self),

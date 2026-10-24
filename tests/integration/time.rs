@@ -620,3 +620,36 @@ fn gives_increasing_now_values_as_pinned_erts() {
     );
     assert_eq!(reference("now"), b"[true,true,true,true,true]\n");
 }
+
+#[test]
+fn gives_the_utc_time_of_a_local_time_as_pinned_erts() {
+    // `erlang:localtime_to_universaltime/2` calls `tzset`, `mktime`,
+    // `time2posix` on macOS, and `gmtime_r` (`erl_time_sup.c:1735-1795`).
+    // The `mktime` rules for `tm_isdst` and for a local time that does not
+    // exist or occurs twice belong to the C library, so each zone compares
+    // PBeam with the ERTS of the same host. `fixtures/time/leap_utc` adds
+    // leap seconds; a zone without daylight saving time uses `tm_isdst` 0
+    // (`erl_time_sup.c:1764-1769`).
+    let leap = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/time/leap_utc");
+    for tz in [
+        "EST5EDT,M3.2.0,M11.1.0",
+        "America/New_York",
+        "Europe/London",
+        "Australia/Sydney",
+        "UTC",
+        leap,
+    ] {
+        let [(_, erts), (_, pbeam)] = run_with_time_zone("local_utc", tz);
+        assert_printed(&format!("ERTS {tz}"), &erts, &erts.stdout);
+        assert_printed(&format!("PBeam {tz}"), &pbeam, &erts.stdout);
+    }
+    // UTC has no daylight saving time, so each flag gives the same time on
+    // each host.
+    let [_, (_, pbeam)] = run_with_time_zone("local_utc", "UTC");
+    let utc = String::from_utf8(pbeam.stdout).unwrap();
+    assert!(utc.starts_with(
+        "[{{2026,1,15},{7,0,0}},{{2026,1,15},{7,0,0}},{{2026,1,15},{7,0,0}},{{2026,7,15},{7,0,0}},"
+    ));
+    assert!(utc.ends_with("{error,badarg},{error,badarg}]\n"));
+    assert_eq!(utc.matches("{error,badarg}").count(), 9 * 3 + 6);
+}
