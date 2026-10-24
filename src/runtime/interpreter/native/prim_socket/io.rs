@@ -672,12 +672,15 @@ pub(super) fn recvfrom(
 /// Return whether the kernel gives the source address of a receive with
 /// `flags` other than 0 on the socket of `state` each time, or never: always
 /// on an inet or inet6 socket that is not a stream socket, and never on an
-/// inet or inet6 stream socket. The safe `recvmsg` of nix reads an address
-/// that it does not initialize when the kernel gives one of length 0, as on
-/// a local socket of an unbound peer, or with `MSG_ERRQUEUE` on Linux, so
-/// these receives are not supported (row "NIF stubs").
+/// inet or inet6 TCP stream socket (the protocol 0 is TCP on macOS, which
+/// has no `SO_PROTOCOL`). The safe `recvmsg` of nix reads an address that it
+/// does not initialize when the kernel gives one of length 0, as on a local
+/// socket of an unbound peer, on another stream protocol such as MPTCP, or
+/// with `MSG_ERRQUEUE` on Linux, so these receives are not supported (row
+/// "NIF stubs"). Another stream protocol such as SCTP gives an address.
 fn flagged_source_known(state: &SocketState, flags: i32) -> bool {
-    matches!(state.domain, libc::AF_INET | libc::AF_INET6) && !errqueue(flags)
+    let tcp = state.kind != libc::SOCK_STREAM || matches!(state.protocol, 0 | libc::IPPROTO_TCP);
+    matches!(state.domain, libc::AF_INET | libc::AF_INET6) && tcp && !errqueue(flags)
 }
 
 /// Return whether `flags` hold the flag `MSG_ERRQUEUE` of Linux.
@@ -694,7 +697,7 @@ fn errqueue(_flags: i32) -> bool {
 
 /// Receive one message with `flags` other than 0 into `buffer`, as the
 /// `recvfrom(2)` of `essio_recvfrom` does (`unix_socket_syncio.c:3925-3927`),
-/// with `recvmsg(2)`: the stream socket gives no address, and another socket
+/// with `recvmsg(2)`: the TCP stream socket gives no address, and another socket
 /// gives the address of the sender (see [`flagged_source_known`]).
 fn recv_flagged(
     state: &SocketState,
