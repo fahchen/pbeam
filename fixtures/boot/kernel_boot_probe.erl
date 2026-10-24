@@ -210,7 +210,7 @@ sockopt() ->
                       {socket, reuseport}, {socket, oobinline}, {socket, dontroute},
                       {tcp, nodelay}]],
     Ints = [[socket:setopt(S, O, V), socket:getopt(S, O), socket:setopt(S, O, foo),
-             socket:setopt(S, O, 1 bsl 40)]
+             socket:setopt(S, O, 1 bsl 40), socket:setopt(S, O, -1)]
             || {O, V} <- [{{tcp, keepcnt}, 5}, {{tcp, keepintvl}, 7}, {{ip, ttl}, 33},
                           {{socket, rcvbuf}, 8192}, {{socket, sndbuf}, 8192}]],
     {_, MRef} = spawn_monitor(fun() -> exit(socket:setopt(S, {otp, meta}, x)) end),

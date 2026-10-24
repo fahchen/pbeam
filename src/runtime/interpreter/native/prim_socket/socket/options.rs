@@ -6,8 +6,7 @@
 //! PBeam sets and gets a host option through the safe `nix` and `socket2`
 //! APIs, which have one typed call for each option. So PBeam has a handler
 //! only for the options of [`get_host`] and [`set_host`]. Each other option
-//! of the host, a native value or value spec, and a negative value of an
-//! option that `nix` or `socket2` types as unsigned stop the run with a
+//! of the host and a native value or value spec stop the run with a
 //! runtime error (row "NIF stubs" of `docs/erts-differences.md`).
 
 use nix::sys::socket::{getsockopt, setsockopt, sockopt};
@@ -143,9 +142,6 @@ pub(in crate::runtime::interpreter::native::prim_socket) fn setopt_5(
     let Some(decoded) = decoded else {
         return Ok(invalid(atom(scheduler, "value")?));
     };
-    if decoded < 0 {
-        return Err(unsupported("negative value of an unsigned option"));
-    }
     let host = socket
         .socket
         .as_ref()
@@ -179,11 +175,14 @@ fn get_form_only(name: (&str, &str)) -> bool {
 /// Set the host option `name` of `host` to `value`, as
 /// `esock_setopt_level_opt` and `socket_setopt` do
 /// (`prim_socket_nif.c:11384-11395`, `11422-11481`). Each option of the
-/// form [`Form::Int`] has an unsigned type in `nix` or `socket2`, and the
-/// caller gives it no negative value.
+/// form [`Form::Int`] has an unsigned type in `nix` or `socket2`, and a
+/// negative value reaches the host as the same C `int` as on ERTS.
 fn set_host(host: &Socket, name: (&str, &str), value: i32) -> io::Result<()> {
     let flag = value != 0;
-    let count = value.unsigned_abs();
+    // The safe APIs pass these values on as a C `int` (`nix` `SetUsize`
+    // casts with `as c_int`, `socket2::set_ttl_v4` casts the `u32`), so the
+    // bit-identical casts below give the host the `int` that ERTS gives.
+    let count = value as u32;
     keep_tos_and_priority(host, || {
         let result = match name {
             ("socket", "broadcast") => setsockopt(host, sockopt::Broadcast, &flag),
@@ -192,8 +191,8 @@ fn set_host(host: &Socket, name: (&str, &str), value: i32) -> io::Result<()> {
             ("socket", "reuseport") => setsockopt(host, sockopt::ReusePort, &flag),
             ("socket", "oobinline") => setsockopt(host, sockopt::OobInline, &flag),
             ("socket", "dontroute") => setsockopt(host, sockopt::DontRoute, &flag),
-            ("socket", "rcvbuf") => setsockopt(host, sockopt::RcvBuf, &(count as usize)),
-            ("socket", "sndbuf") => setsockopt(host, sockopt::SndBuf, &(count as usize)),
+            ("socket", "rcvbuf") => setsockopt(host, sockopt::RcvBuf, &(value as usize)),
+            ("socket", "sndbuf") => setsockopt(host, sockopt::SndBuf, &(value as usize)),
             ("tcp", "nodelay") => setsockopt(host, sockopt::TcpNoDelay, &flag),
             ("tcp", "keepcnt") => setsockopt(host, sockopt::TcpKeepCount, &count),
             ("tcp", "keepintvl") => setsockopt(host, sockopt::TcpKeepInterval, &count),
@@ -214,10 +213,10 @@ fn set_host(host: &Socket, name: (&str, &str), value: i32) -> io::Result<()> {
 #[cfg(target_os = "linux")]
 fn keep_tos_and_priority(host: &Socket, set: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
     let priority = getsockopt(host, sockopt::Priority);
-    let tos = getsockopt(host, sockopt::IpTos);
+    let tos = getsockopt(host, sockopt::Ipv4Tos);
     set()?;
     if let Ok(tos) = tos {
-        setsockopt(host, sockopt::IpTos, &tos)?;
+        setsockopt(host, sockopt::Ipv4Tos, &tos)?;
     }
     if let Ok(priority) = priority {
         setsockopt(host, sockopt::Priority, &priority).or_else(|failure| match failure {
