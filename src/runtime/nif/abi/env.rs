@@ -17,19 +17,26 @@
 //! undefined `enif_*` symbols of a library to them (`build.rs` adds the
 //! export of the `enif_*` symbols to the link of each executable).
 
-use std::ffi::{c_char, c_int, c_uint};
+use std::ffi::{CStr, c_char, c_double, c_int, c_long, c_uint, c_void};
+use std::sync::Arc;
 
 use super::layout::{ErlNifBinary, NifTerm};
+use crate::AtomTable;
 use crate::BeamError;
 use crate::Term;
 use crate::error::error;
 use crate::runtime::NativeResult;
+use crate::runtime::interpreter::bif::iodata_bytes;
+use crate::term::MAX_ATOM_CHARACTERS;
 
 /// `THE_NON_VALUE`: the handle that no term has.
 const NON_VALUE: NifTerm = 0;
 
 /// `ERL_NIF_LATIN1` of `ErlNifCharEncoding` (`erl_nif.h:195-198`).
 const LATIN1: c_int = 1;
+
+/// `ERL_NIF_UTF8` of `ErlNifCharEncoding` (`erl_nif.h:195-198`).
+const UTF8: c_int = 2;
 
 /// The exported `enif_*` functions. The linker removes a function that no
 /// code of the executable refers to, and a NIF library refers to it only
@@ -43,6 +50,26 @@ static EXPORTS: Exports = Exports {
     make_int: enif_make_int,
     make_new_binary: enif_make_new_binary,
     make_badarg: enif_make_badarg,
+    alloc: enif_alloc,
+    realloc: enif_realloc,
+    free: enif_free,
+    alloc_binary: enif_alloc_binary,
+    release_binary: enif_release_binary,
+    make_binary: enif_make_binary,
+    inspect_iolist_as_binary: enif_inspect_iolist_as_binary,
+    get_atom: enif_get_atom,
+    get_double: enif_get_double,
+    get_long: enif_get_long,
+    get_list_cell: enif_get_list_cell,
+    get_list_length: enif_get_list_length,
+    make_atom: enif_make_atom,
+    make_double: enif_make_double,
+    make_long: enif_make_long,
+    make_list: enif_make_list,
+    make_list_cell: enif_make_list_cell,
+    make_list_from_array: enif_make_list_from_array,
+    make_tuple: enif_make_tuple,
+    raise_exception: enif_raise_exception,
 };
 
 /// The type of [`EXPORTS`]: one field for each exported function.
@@ -55,6 +82,26 @@ struct Exports {
     make_int: unsafe extern "C" fn(*mut Env, c_int) -> NifTerm,
     make_new_binary: unsafe extern "C" fn(*mut Env, usize, *mut NifTerm) -> *mut u8,
     make_badarg: unsafe extern "C" fn(*mut Env) -> NifTerm,
+    alloc: unsafe extern "C" fn(usize) -> *mut c_void,
+    realloc: unsafe extern "C" fn(*mut c_void, usize) -> *mut c_void,
+    free: unsafe extern "C" fn(*mut c_void),
+    alloc_binary: unsafe extern "C" fn(usize, *mut ErlNifBinary) -> c_int,
+    release_binary: unsafe extern "C" fn(*mut ErlNifBinary),
+    make_binary: unsafe extern "C" fn(*mut Env, *mut ErlNifBinary) -> NifTerm,
+    inspect_iolist_as_binary: unsafe extern "C" fn(*mut Env, NifTerm, *mut ErlNifBinary) -> c_int,
+    get_atom: unsafe extern "C" fn(*mut Env, NifTerm, *mut c_char, c_uint, c_int) -> c_int,
+    get_double: unsafe extern "C" fn(*mut Env, NifTerm, *mut c_double) -> c_int,
+    get_long: unsafe extern "C" fn(*mut Env, NifTerm, *mut c_long) -> c_int,
+    get_list_cell: unsafe extern "C" fn(*mut Env, NifTerm, *mut NifTerm, *mut NifTerm) -> c_int,
+    get_list_length: unsafe extern "C" fn(*mut Env, NifTerm, *mut c_uint) -> c_int,
+    make_atom: unsafe extern "C" fn(*mut Env, *const c_char) -> NifTerm,
+    make_double: unsafe extern "C" fn(*mut Env, c_double) -> NifTerm,
+    make_long: unsafe extern "C" fn(*mut Env, c_long) -> NifTerm,
+    make_list: unsafe extern "C" fn(*mut Env, c_uint, ...) -> NifTerm,
+    make_list_cell: unsafe extern "C" fn(*mut Env, NifTerm, NifTerm) -> NifTerm,
+    make_list_from_array: unsafe extern "C" fn(*mut Env, *const NifTerm, c_uint) -> NifTerm,
+    make_tuple: unsafe extern "C" fn(*mut Env, c_uint, ...) -> NifTerm,
+    raise_exception: unsafe extern "C" fn(*mut Env, NifTerm) -> NifTerm,
 }
 
 /// The term of one handle of an [`Env`].
@@ -69,17 +116,40 @@ enum Slot {
 }
 
 /// The env of one NIF call or one load callback: the terms of its handles,
-/// the exception of `enif_make_badarg`, and the first call of a part of the
+/// the exception of `enif_raise_exception`, and the first call of a part of the
 /// C API that PBeam does not support yet. The C code gets it as an opaque
 /// `ErlNifEnv*`.
 #[derive(Debug)]
 pub(crate) struct Env {
+    /// The atom table of the process of the call.
+    atoms: Arc<AtomTable>,
     /// The term of each handle, in handle order.
     slots: Vec<Slot>,
-    /// The reason of `enif_make_badarg`, or `None`.
+    /// The reason of `enif_raise_exception`, or `None`.
     exception: Option<Term>,
-    /// The text of the first unsupported call, or `None`.
+    /// The text of the first unsupported call or of the first broken
+    /// contract that PBeam detects, or `None`.
     unsupported: Option<String>,
+    /// The bytes of each iolist of `enif_inspect_iolist_as_binary`, which
+    /// the NIF can read until the call returns, as ERTS keeps them in the
+    /// temporary objects of the env (`erl_nif.c:1401`).
+    copies: Vec<Vec<u8>>,
+    /// The address of each block of `enif_alloc_binary` that
+    /// `enif_make_binary` took. The NIF can read the bytes until the call
+    /// returns (`erl_nif.c:1708-1714`), so drop frees the blocks.
+    taken: Vec<usize>,
+}
+
+impl Drop for Env {
+    fn drop(&mut self) {
+        for &address in &self.taken {
+            // SAFETY: each address is the `ref_bin` of a block of
+            // `enif_alloc_binary`, which `malloc` gave, and
+            // `enif_make_binary` took its ownership from the NIF, so no
+            // other code frees it.
+            unsafe { libc::free(std::ptr::with_exposed_provenance_mut(address)) };
+        }
+    }
 }
 
 impl Env {
@@ -92,11 +162,14 @@ impl Env {
     /// let env = Env::new(&[Term::Integer(1)]);
     /// assert_eq!(env.handles(), [1]);
     /// ```
-    pub(super) fn new(arguments: &[Term]) -> Self {
+    pub(super) fn new(atoms: &Arc<AtomTable>, arguments: &[Term]) -> Self {
         Self {
+            atoms: Arc::clone(atoms),
             slots: arguments.iter().cloned().map(Slot::Term).collect(),
             exception: None,
             unsupported: None,
+            copies: Vec::new(),
+            taken: Vec::new(),
         }
     }
 
@@ -127,8 +200,61 @@ impl Env {
         })
     }
 
+    /// Return the term of `handle` for a constructor of a term. A handle
+    /// that no term of the env has breaks the C API contract, and ERTS
+    /// makes an undefined term (`ASSERT_IN_ENV`, `erl_nif.c:2154`): the
+    /// call gives a runtime error, and the function uses `[]`.
+    fn term(&mut self, handle: NifTerm) -> Term {
+        self.get(handle).unwrap_or_else(|| {
+            self.unsupported.get_or_insert_with(|| {
+                format!("the NIF used the term {handle:#x}, which no enif call of the call made")
+            });
+            Term::Nil
+        })
+    }
+
+    /// Add the term `term` and return its handle.
+    fn make(&mut self, term: Term) -> NifTerm {
+        self.put(Slot::Term(term))
+    }
+
+    /// Return the atom of the C string `name`, as `enif_make_atom` makes it
+    /// with the Latin-1 encoding (`erl_nif.c:2080-2114`): each byte is one
+    /// character, and a name of more than 255 characters raises
+    /// `error:badarg` and gives `THE_NON_VALUE` (`atom.c:271-277`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let handle = env.make_atom(b"\xe9t\xe9");
+    /// assert_eq!(env.get(handle), Some(Term::Atom(atoms.put("été").unwrap())));
+    /// ```
+    fn make_atom(&mut self, name: &[u8]) -> NifTerm {
+        if name.len() > MAX_ATOM_CHARACTERS {
+            return self.raise(Term::static_atom("badarg"));
+        }
+        let name: String = name.iter().copied().map(char::from).collect();
+        match self.atoms.put(&name) {
+            Ok(atom) => self.make(Term::Atom(atom)),
+            // ERTS stops the node when the atom table is full
+            // (`index.c:86-91`); PBeam gives a runtime error.
+            Err(failure) => {
+                self.unsupported.get_or_insert(failure.to_string());
+                NON_VALUE
+            }
+        }
+    }
+
+    /// Raise `error:Reason` when the NIF returns and return
+    /// `THE_NON_VALUE`, as `enif_raise_exception` does: a later call
+    /// replaces the reason (`erl_nif.c:1796-1801`).
+    fn raise(&mut self, reason: Term) -> NifTerm {
+        self.exception = Some(reason);
+        NON_VALUE
+    }
+
     /// Return the result of a NIF that returned `handle`, as ERTS gives it
-    /// after the call: after `enif_make_badarg`, the call raises the
+    /// after the call: after `enif_raise_exception`, the call raises the
     /// exception for each handle (`erl_nif.c:1791-1801`,
     /// `beam_jit_common.cpp:650-652`), and else the handle is the value of
     /// the call.
@@ -423,6 +549,494 @@ pub unsafe extern "C" fn enif_make_new_binary(
 pub unsafe extern "C" fn enif_make_badarg(env_pointer: *mut Env) -> NifTerm {
     // SAFETY: the C API gives the env of the current call.
     let env = unsafe { env(env_pointer) };
-    env.exception = Some(Term::static_atom("badarg"));
-    NON_VALUE
+    env.raise(Term::static_atom("badarg"))
 }
+
+/// `ERL_NIF_TERM enif_raise_exception(ErlNifEnv*, ERL_NIF_TERM)`: raise
+/// `error:Reason` when the NIF returns, and return `THE_NON_VALUE`
+/// (`erl_nif.c:1796-1801`).
+///
+/// # Safety
+///
+/// `env` is the env of the current call, as the C API requires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn enif_raise_exception(env_pointer: *mut Env, reason: NifTerm) -> NifTerm {
+    // SAFETY: the C API gives the env of the current call.
+    let env = unsafe { env(env_pointer) };
+    let reason = env.term(reason);
+    env.raise(reason)
+}
+
+/// `void* enif_alloc(size_t)`: return a block of `size` bytes of the C
+/// heap, or NULL when the heap has no block of that size, as
+/// `erts_alloc_fnf` does (`erl_nif.c:614-617`).
+///
+/// # Safety
+///
+/// The C API has no precondition. `enif_free` frees the block.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn enif_alloc(size: usize) -> *mut c_void {
+    // SAFETY: `malloc` accepts each size and gives NULL on failure.
+    unsafe { libc::malloc(size) }
+}
+
+/// `void* enif_realloc(void*, size_t)`: return the block `ptr` resized to
+/// `size` bytes, or NULL and keep `ptr` when the heap has no block of that
+/// size (`erl_nif.c:619-622`).
+///
+/// # Safety
+///
+/// `ptr` is NULL or a block of `enif_alloc` or `enif_realloc` that the
+/// NIF did not free, as the C API requires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn enif_realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
+    // SAFETY: the caller gives NULL or a live block of `malloc`.
+    unsafe { libc::realloc(ptr, size) }
+}
+
+/// `void enif_free(void*)`: free a block of `enif_alloc` or `enif_realloc`
+/// (`erl_nif.c:624-627`).
+///
+/// # Safety
+///
+/// `ptr` is NULL or a block of `enif_alloc` or `enif_realloc` that the
+/// NIF did not free, as the C API requires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn enif_free(ptr: *mut c_void) {
+    // SAFETY: the caller gives NULL or a live block of `malloc`.
+    unsafe { libc::free(ptr) }
+}
+
+/// `int enif_alloc_binary(size_t, ErlNifBinary*)`: write a new block of
+/// `size` bytes to `bin` and return 1, or return 0 when the heap has no
+/// block of that size (`erl_nif.c:1409-1422`). The `ref_bin` of the block
+/// is its address, which is never NULL, so `enif_release_binary` and
+/// `enif_make_binary` know that the NIF owns it.
+///
+/// # Safety
+///
+/// `bin` points to a writable `ErlNifBinary`, as the C API requires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn enif_alloc_binary(size: usize, bin: *mut ErlNifBinary) -> c_int {
+    // SAFETY: `malloc` accepts each size and gives NULL on failure. A block
+    // of 1 byte for a binary of 0 bytes gives an address that is not NULL.
+    let data = unsafe { libc::malloc(size.max(1)) };
+    if data.is_null() {
+        return 0;
+    }
+    // SAFETY: the C API requires that `bin` points to a writable
+    // `ErlNifBinary`.
+    unsafe {
+        (&raw mut (*bin).size).write(size);
+        (&raw mut (*bin).data).write(data.cast());
+        (&raw mut (*bin).ref_bin).write(data);
+    }
+    1
+}
+
+/// `void enif_release_binary(ErlNifBinary*)`: free the block of a binary
+/// of `enif_alloc_binary` that the NIF owns, and do nothing for a binary
+/// with no `ref_bin`, such as one of `enif_inspect_binary`
+/// (`erl_nif.c:1451-1461`). ERTS does not change the fields.
+///
+/// # Safety
+///
+/// `bin` points to an `ErlNifBinary` of `enif_alloc_binary` that the NIF
+/// owns, or one with a NULL `ref_bin`, as the C API requires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn enif_release_binary(bin: *mut ErlNifBinary) {
+    // SAFETY: the C API requires that `bin` points to an `ErlNifBinary`.
+    // A `ref_bin` that is not NULL is a live block of `malloc` of
+    // `enif_alloc_binary`, and `free` of NULL does nothing.
+    unsafe { libc::free((*bin).ref_bin) }
+}
+
+/// `ERL_NIF_TERM enif_make_binary(ErlNifEnv*, ErlNifBinary*)`: return the
+/// binary of the `size` bytes at `data` (`erl_nif.c:1698-1757`). For a
+/// block of `enif_alloc_binary`, the env takes the block from the NIF and
+/// sets `ref_bin` to NULL; the NIF can read the bytes until the call
+/// returns, as in ERTS. For another binary, the term is a copy of the
+/// bytes.
+///
+/// # Safety
+///
+/// `env` is the env of the current call, and `bin` points to an
+/// `ErlNifBinary` of `enif_alloc_binary` that the NIF owns, of
+/// `enif_inspect_binary`, or of `enif_inspect_iolist_as_binary`, whose
+/// `size` bytes at `data` are readable, as the C API requires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn enif_make_binary(
+    env_pointer: *mut Env,
+    bin: *mut ErlNifBinary,
+) -> NifTerm {
+    // SAFETY: the C API gives the env of the current call.
+    let env = unsafe { env(env_pointer) };
+    // SAFETY: the C API requires that `bin` points to an `ErlNifBinary`
+    // with `size` readable bytes at `data`.
+    let (bytes, block) = unsafe {
+        let bytes = std::slice::from_raw_parts((*bin).data, (*bin).size).to_vec();
+        (bytes, (*bin).ref_bin)
+    };
+    if !block.is_null() {
+        env.taken.push(block.expose_provenance());
+        // SAFETY: as above, `bin` points to a writable `ErlNifBinary`.
+        unsafe { (&raw mut (*bin).ref_bin).write(std::ptr::null_mut()) };
+    }
+    env.make(Term::binary(bytes))
+}
+
+/// `int enif_inspect_iolist_as_binary(ErlNifEnv*, ERL_NIF_TERM,
+/// ErlNifBinary*)`: write the bytes of the iodata `term` to `bin` and
+/// return 1, or return 0 when the term is not iodata
+/// (`erl_nif.c:1385-1407`). A bitstring gives the result of
+/// [`enif_inspect_binary`]. The bytes of an iolist are a copy that the env
+/// keeps until the call returns, and `ref_bin` is NULL.
+///
+/// # Safety
+///
+/// `env` is the env of the current call, and `bin` points to a writable
+/// `ErlNifBinary`, as the C API requires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn enif_inspect_iolist_as_binary(
+    env_pointer: *mut Env,
+    term: NifTerm,
+    bin: *mut ErlNifBinary,
+) -> c_int {
+    // SAFETY: the C API gives the env of the current call.
+    let env = unsafe { env(env_pointer) };
+    if matches!(
+        env.slot(term),
+        Some(Slot::Buffer(_) | Slot::Term(Term::Binary(_)))
+    ) {
+        // SAFETY: the caller gives the env and the `bin` of this call.
+        return unsafe { enif_inspect_binary(env_pointer, term, bin) };
+    }
+    let Some(bytes) = env.get(term).as_ref().and_then(iodata_bytes) else {
+        return 0;
+    };
+    // The heap bytes of a vector do not move when the vector moves into
+    // the env, so the address stays valid until the env drops.
+    let (data, size) = (bytes.as_ptr(), bytes.len());
+    env.copies.push(bytes);
+    // SAFETY: the C API requires that `bin` points to a writable
+    // `ErlNifBinary`. The C API allows the NIF to read the bytes only in
+    // the call and not to write them (`erl_nif.c:1405`).
+    unsafe {
+        (&raw mut (*bin).size).write(size);
+        (&raw mut (*bin).data).write(data.cast_mut());
+        (&raw mut (*bin).ref_bin).write(std::ptr::null_mut());
+    }
+    1
+}
+
+/// Return the bytes of the atom name `name` in `encoding` with no NUL
+/// byte, or `None` for the Latin-1 encoding of a name with a character
+/// above 255, whose `latin1_chars` is -1 in ERTS, and for an encoding
+/// that is neither `ERL_NIF_LATIN1` nor `ERL_NIF_UTF8`
+/// (`erl_nif.c:1820-1840`).
+fn atom_bytes(name: &str, encoding: c_int) -> Option<Vec<u8>> {
+    match encoding {
+        LATIN1 => name.chars().map(|char| u8::try_from(char).ok()).collect(),
+        UTF8 => Some(name.as_bytes().to_vec()),
+        _ => None,
+    }
+}
+
+/// `int enif_get_atom(ErlNifEnv*, ERL_NIF_TERM, char*, unsigned,
+/// ErlNifCharEncoding)`: write the name of the atom `atom` in `encoding`
+/// and a NUL byte to `buf`, and return the number of bytes with the NUL
+/// byte (`erl_nif.c:1810-1841`). A term that is not an atom, a name that
+/// does not fit with its NUL byte, also in a buffer of 0 bytes, the Latin-1
+/// encoding of a name with a character above 255, and another encoding
+/// give 0 and write no byte.
+///
+/// # Safety
+///
+/// `env` is the env of the current call, and `buf` points to `len`
+/// writable bytes, as the C API requires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn enif_get_atom(
+    env_pointer: *mut Env,
+    atom: NifTerm,
+    buf: *mut c_char,
+    len: c_uint,
+    encoding: c_int,
+) -> c_int {
+    // SAFETY: the C API gives the env of the current call.
+    let env = unsafe { env(env_pointer) };
+    let bytes = env.get(atom).and_then(|term| match &term {
+        Term::Atom(atom) => atom_bytes(env.atoms.name_of(atom), encoding),
+        _ => None,
+    });
+    let Some(mut bytes) = bytes else {
+        return 0;
+    };
+    bytes.push(0);
+    // A name has at most 1020 bytes, so the count fits in a C `int`.
+    let count = c_int::try_from(bytes.len()).unwrap_or(c_int::MAX);
+    if count.cast_unsigned() > len {
+        return 0;
+    }
+    // SAFETY: the C API requires that `buf` points to `len` writable
+    // bytes, and the bytes are at most `len`.
+    unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf.cast::<u8>(), bytes.len()) };
+    count
+}
+
+/// `int enif_get_double(ErlNifEnv*, ERL_NIF_TERM, double*)`: write the
+/// float `term` to `dp` and return 1, or return 0 when the term is not a
+/// float (`erl_nif.c:1924-1933`).
+///
+/// # Safety
+///
+/// `env` is the env of the current call, and `dp` points to a writable C
+/// `double`, as the C API requires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn enif_get_double(
+    env_pointer: *mut Env,
+    term: NifTerm,
+    dp: *mut c_double,
+) -> c_int {
+    // SAFETY: the C API gives the env of the current call.
+    let env = unsafe { env(env_pointer) };
+    let Some(Term::Float(value)) = env.get(term) else {
+        return 0;
+    };
+    // SAFETY: the C API requires that `dp` points to a writable C `double`.
+    unsafe { dp.write(value) };
+    1
+}
+
+/// `int enif_get_long(ErlNifEnv*, ERL_NIF_TERM, long*)`: write the integer
+/// of `term` to `ip` and return 1, or return 0 when the term is not an
+/// integer in the C `long` range, the signed 64-bit range of each PBeam
+/// host (`erl_nif.c:1875-1891`). An integer outside that range is a
+/// `Term::BigInt`.
+///
+/// # Safety
+///
+/// `env` is the env of the current call, and `ip` points to a writable C
+/// `long`, as the C API requires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn enif_get_long(
+    env_pointer: *mut Env,
+    term: NifTerm,
+    ip: *mut c_long,
+) -> c_int {
+    // SAFETY: the C API gives the env of the current call.
+    let env = unsafe { env(env_pointer) };
+    let Some(Term::Integer(value)) = env.get(term) else {
+        return 0;
+    };
+    // SAFETY: the C API requires that `ip` points to a writable C `long`.
+    unsafe { ip.write(value) };
+    1
+}
+
+/// `int enif_get_list_cell(ErlNifEnv*, ERL_NIF_TERM, ERL_NIF_TERM*,
+/// ERL_NIF_TERM*)`: write the head and the tail of the list cell `term` to
+/// `head` and `tail` and return 1, or return 0 when the term is not a list
+/// cell (`erl_nif.c:1971-1979`).
+///
+/// # Safety
+///
+/// `env` is the env of the current call, and `head` and `tail` point to
+/// writable `ERL_NIF_TERM`s, as the C API requires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn enif_get_list_cell(
+    env_pointer: *mut Env,
+    term: NifTerm,
+    head: *mut NifTerm,
+    tail: *mut NifTerm,
+) -> c_int {
+    // SAFETY: the C API gives the env of the current call.
+    let env = unsafe { env(env_pointer) };
+    let cell = env.get(term).and_then(|list| {
+        let mut elements = list.list_iter()?;
+        let first = elements.next()?.clone();
+        Some((first, elements.rest().clone()))
+    });
+    let Some((first, rest)) = cell else {
+        return 0;
+    };
+    let (first, rest) = (env.make(first), env.make(rest));
+    // SAFETY: the C API requires that `head` and `tail` point to writable
+    // `ERL_NIF_TERM`s.
+    unsafe {
+        head.write(first);
+        tail.write(rest);
+    }
+    1
+}
+
+/// `int enif_get_list_length(ErlNifEnv*, ERL_NIF_TERM, unsigned*)`: write
+/// the length of the proper list `term` to `len` and return 1, or return 0
+/// for another term and for a length above the C `unsigned` range
+/// (`erl_nif.c:1981-1991`).
+///
+/// # Safety
+///
+/// `env` is the env of the current call, and `len` points to a writable C
+/// `unsigned`, as the C API requires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn enif_get_list_length(
+    env_pointer: *mut Env,
+    term: NifTerm,
+    len: *mut c_uint,
+) -> c_int {
+    // SAFETY: the C API gives the env of the current call.
+    let env = unsafe { env(env_pointer) };
+    let length = env.get(term).and_then(|list| {
+        let count = list.proper_list()?.count();
+        c_uint::try_from(count).ok()
+    });
+    let Some(length) = length else {
+        return 0;
+    };
+    // SAFETY: the C API requires that `len` points to a writable C
+    // `unsigned`.
+    unsafe { len.write(length) };
+    1
+}
+
+/// `ERL_NIF_TERM enif_make_atom(ErlNifEnv*, const char*)`: return the
+/// atom of the C string `name` in the Latin-1 encoding, or raise
+/// `error:badarg` (`erl_nif.c:2080-2092`, [`Env::make_atom`]).
+///
+/// # Safety
+///
+/// `env` is the env of the current call, and `name` is a C string, as the
+/// C API requires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn enif_make_atom(env_pointer: *mut Env, name: *const c_char) -> NifTerm {
+    // SAFETY: the C API gives the env of the current call.
+    let env = unsafe { env(env_pointer) };
+    // SAFETY: the C API requires that `name` is a C string.
+    let name = unsafe { CStr::from_ptr(name) };
+    env.make_atom(name.to_bytes())
+}
+
+/// `ERL_NIF_TERM enif_make_double(ErlNifEnv*, double)`: return the float
+/// `d`, or raise `error:badarg` for an infinity and a NaN
+/// (`erl_nif.c:2067-2078`).
+///
+/// # Safety
+///
+/// `env` is the env of the current call, as the C API requires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn enif_make_double(env_pointer: *mut Env, d: c_double) -> NifTerm {
+    // SAFETY: the C API gives the env of the current call.
+    let env = unsafe { env(env_pointer) };
+    if !d.is_finite() {
+        return env.raise(Term::static_atom("badarg"));
+    }
+    env.make(Term::Float(d))
+}
+
+/// `ERL_NIF_TERM enif_make_long(ErlNifEnv*, long)`: return the integer
+/// `i` (`erl_nif.c:2013-2030`).
+///
+/// # Safety
+///
+/// `env` is the env of the current call, as the C API requires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn enif_make_long(env_pointer: *mut Env, i: c_long) -> NifTerm {
+    // SAFETY: the C API gives the env of the current call.
+    let env = unsafe { env(env_pointer) };
+    env.make(Term::Integer(i))
+}
+
+/// `ERL_NIF_TERM enif_make_list(ErlNifEnv*, unsigned, ...)`: return the
+/// list of the `cnt` terms of the variable arguments
+/// (`erl_nif.c:2195-2222`).
+///
+/// # Safety
+///
+/// `env` is the env of the current call, and the call has `cnt` variable
+/// arguments of the type `ERL_NIF_TERM`, as the C API requires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn enif_make_list(
+    env_pointer: *mut Env,
+    cnt: c_uint,
+    mut args: ...
+) -> NifTerm {
+    // SAFETY: the C API gives the env of the current call.
+    let env = unsafe { env(env_pointer) };
+    // SAFETY: the C API requires `cnt` variable arguments of the type
+    // `ERL_NIF_TERM`.
+    let handles: Vec<NifTerm> = (0..cnt).map(|_| unsafe { args.next_arg() }).collect();
+    let elements: Vec<Term> = handles.into_iter().map(|handle| env.term(handle)).collect();
+    env.make(Term::list_from(elements))
+}
+
+/// `ERL_NIF_TERM enif_make_list_cell(ErlNifEnv*, ERL_NIF_TERM,
+/// ERL_NIF_TERM)`: return the list cell `[car | cdr]`
+/// (`erl_nif.c:2183-2193`).
+///
+/// # Safety
+///
+/// `env` is the env of the current call, as the C API requires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn enif_make_list_cell(
+    env_pointer: *mut Env,
+    car: NifTerm,
+    cdr: NifTerm,
+) -> NifTerm {
+    // SAFETY: the C API gives the env of the current call.
+    let env = unsafe { env(env_pointer) };
+    let (car, cdr) = (env.term(car), env.term(cdr));
+    env.make(Term::cons(car, cdr))
+}
+
+/// `ERL_NIF_TERM enif_make_list_from_array(ErlNifEnv*, const
+/// ERL_NIF_TERM[], unsigned)`: return the list of the `cnt` terms of `arr`
+/// (`erl_nif.c:2224-2244`). A list of 0 terms reads no handle, so `arr`
+/// can be NULL then, as in ERTS.
+///
+/// # Safety
+///
+/// `env` is the env of the current call, and `arr` points to `cnt`
+/// readable `ERL_NIF_TERM`s, as the C API requires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn enif_make_list_from_array(
+    env_pointer: *mut Env,
+    arr: *const NifTerm,
+    cnt: c_uint,
+) -> NifTerm {
+    // SAFETY: the C API gives the env of the current call.
+    let env = unsafe { env(env_pointer) };
+    // SAFETY: the C API requires that `arr` points to `cnt` readable
+    // `ERL_NIF_TERM`s; the walk reads no handle for 0 terms.
+    let handles: Vec<NifTerm> = (0..cnt as usize)
+        .map(|index| unsafe { arr.add(index).read() })
+        .collect();
+    let elements: Vec<Term> = handles.into_iter().map(|handle| env.term(handle)).collect();
+    env.make(Term::list_from(elements))
+}
+
+/// `ERL_NIF_TERM enif_make_tuple(ErlNifEnv*, unsigned, ...)`: return the
+/// tuple of the `cnt` terms of the variable arguments
+/// (`erl_nif.c:2138-2160`).
+///
+/// # Safety
+///
+/// `env` is the env of the current call, and the call has `cnt` variable
+/// arguments of the type `ERL_NIF_TERM`, as the C API requires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn enif_make_tuple(
+    env_pointer: *mut Env,
+    cnt: c_uint,
+    mut args: ...
+) -> NifTerm {
+    // SAFETY: the C API gives the env of the current call.
+    let env = unsafe { env(env_pointer) };
+    // SAFETY: the C API requires `cnt` variable arguments of the type
+    // `ERL_NIF_TERM`.
+    let handles: Vec<NifTerm> = (0..cnt).map(|_| unsafe { args.next_arg() }).collect();
+    let elements: Vec<Term> = handles.into_iter().map(|handle| env.term(handle)).collect();
+    env.make(Term::tuple(elements))
+}
+
+#[cfg(test)]
+#[path = "../../../../tests/runtime/nif/abi/env.rs"]
+mod tests;

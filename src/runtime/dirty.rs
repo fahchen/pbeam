@@ -54,7 +54,7 @@ use super::{
 };
 use crate::{
     error::{BeamError, error},
-    term::{ProcessId, Term},
+    term::{AtomTable, ProcessId, Term},
 };
 
 /// The number of dirty IO threads, as the default number of ERTS dirty IO
@@ -151,6 +151,8 @@ pub(super) enum Work {
     Shared {
         /// The library of the function.
         library: Arc<abi::Library>,
+        /// The atom table of the process of the call.
+        atoms: Arc<AtomTable>,
         /// The index of the function in the functions of the library.
         index: usize,
         /// The arguments of the call.
@@ -180,9 +182,10 @@ impl Work {
             } => Output::Native(function(&mut NifContext::dirty(), &arguments)),
             Work::Shared {
                 library,
+                atoms,
                 index,
                 arguments,
-            } => Output::Native(library.functions()[index].call(&arguments)),
+            } => Output::Native(library.functions()[index].call(&atoms, &arguments)),
         }
     }
 }
