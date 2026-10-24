@@ -2731,19 +2731,19 @@ fn a_close_message_after_a_connect_or_a_close_on_another_scheduler_changes_nothi
     // The close checks the owner and the `CLOSING` state under the port
     // lock, as the close signal does (io.c:2182-2198, 3870-3874).
     let (mut scheduler, owner, port, _peer) = tcp_port();
+    // A close message from a process that no longer owns the port sends
+    // `badsig` to the owner (io.c:2182-2184).
     let other = ProcessId(owner.0 + 1);
-    scheduler.node.with_port(port, |port| port.owner = other);
-    assert!(!scheduler.close_port_replying(port, owner));
+    assert!(!scheduler.processes[&owner].mailbox.has_control_signals());
+    assert!(!scheduler.close_port_replying(port, other));
+    assert!(scheduler.processes[&owner].mailbox.has_control_signals());
     assert!(
         scheduler
             .node
             .with_port(port, |port| port.closing)
             .is_some()
     );
-    scheduler.node.with_port(port, |port| {
-        port.owner = owner;
-        port.closing = true;
-    });
+    scheduler.node.with_port(port, |port| port.closing = true);
     assert!(!scheduler.close_port_replying(port, owner));
     assert_eq!(
         scheduler.node.with_port(port, |port| port.send_closed),

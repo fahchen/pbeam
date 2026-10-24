@@ -307,10 +307,25 @@ impl Scheduler {
         let Some(port) = slot.as_mut().and_then(|slot| slot.as_mut()) else {
             return false;
         };
-        // A close of a port in the `CLOSING` state, or of a port that
-        // another process owns now, changes nothing (io.c:2182-2198,
-        // 3870-3874).
-        if (flush && port.closing) || closer.is_some_and(|closer| closer != port.owner) {
+        // A close of a port in the `CLOSING` state changes nothing
+        // (io.c:3870-3874).
+        if flush && port.closing {
+            return false;
+        }
+        // A close message from a process that no longer owns the port sends
+        // the exit signal `badsig` to the owner (io.c:2182-2184).
+        if closer.is_some_and(|closer| closer != port.owner) {
+            let owner = port.owner;
+            drop(slot);
+            let badsig = Signal::Exit {
+                from: LinkId::Port(id),
+                reason: Term::static_atom("badsig"),
+                linked: false,
+                normal_kills: false,
+                alias: None,
+            };
+            // An owner that does not exist drops the signal.
+            let _ = self.send_signal(None, owner, badsig);
             return false;
         }
         let open = !port.closing;
