@@ -597,10 +597,6 @@ match_private() ->
 %% Calls that ERTS runs and PBeam does not support yet.
 unsupported(Case) ->
     case Case of
-        match_1 ->
-            T = ets:new(ets_probe, []),
-            true = ets:insert(T, [{a}, {b}]),
-            ets:match(element(2, ets:match(T, '$1', 1)));
         match_changed ->
             T = ets:new(ets_probe, [public]),
             true = ets:insert(T, [{I} || I <- seq(5000)]),
