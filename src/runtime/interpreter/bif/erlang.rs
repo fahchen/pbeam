@@ -3427,8 +3427,17 @@ pub(super) fn system_info(scheduler: &mut Scheduler, item: &Term) -> Result<BifR
         // format of the pinned build (`erl_bif_info.c:92-160`): no release
         // candidate, a source build, the scheduler counts, the default
         // async thread count 1 (`erl_init.c:873-876`), and the JIT tag
-        // (`configure.ac:3216-3225`). PBeam rejects `+A` and does not read
-        // `ERL_THREAD_POOL_SIZE`.
+        // (`configure.ac:3216-3225`). PBeam rejects `+A` and has no async
+        // threads, so a set `ERL_THREAD_POOL_SIZE` is a runtime error.
+        Term::Atom(atom)
+            if atoms.name_of(atom) == "system_version"
+                && std::env::var_os("ERL_THREAD_POOL_SIZE").is_some() =>
+        {
+            Err(error(
+                "unsupported erlang:system_info(system_version) with ERL_THREAD_POOL_SIZE"
+                    .to_owned(),
+            ))
+        }
         Term::Atom(atom) if atoms.name_of(atom) == "system_version" => {
             Ok(Value(charlist(&system_version(
                 schedulers,

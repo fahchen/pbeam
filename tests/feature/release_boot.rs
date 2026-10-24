@@ -395,6 +395,22 @@ fn gives_the_other_items_of_system_info_and_badarg_as_pinned_erts() {
 }
 
 #[test]
+fn rejects_system_version_with_a_thread_pool_size() {
+    // ERTS reads ERL_THREAD_POOL_SIZE (erl_init.c:873-876); PBeam has no
+    // async threads, so it gives a clear runtime error.
+    let eval = "erlang:system_info(system_version), halt().";
+    let actual = pbeam_erl(
+        &["-noshell", "-eval", eval],
+        &[("ERL_THREAD_POOL_SIZE", "4")],
+    );
+    let stderr = String::from_utf8_lossy(&actual.stderr);
+    assert!(
+        stderr.contains("unsupported erlang:system_info(system_version) with ERL_THREAD_POOL_SIZE"),
+        "{actual:?}"
+    );
+}
+
+#[test]
 fn rejects_a_bad_s_flag_as_pinned_erts() {
     // erl_init.c:1103-1149 writes the error, then the usage text, and
     // exits with status 1.
