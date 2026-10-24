@@ -18,6 +18,8 @@
 
 mod env;
 mod layout;
+mod mutex;
+mod process;
 mod resource;
 
 pub(crate) use resource::Resource;
@@ -29,7 +31,10 @@ use std::sync::Arc;
 use crate::AtomTable;
 use crate::BeamError;
 use crate::Term;
+use crate::error::error;
+use crate::runtime::scheduler::node::Node;
 use crate::runtime::{Job, NativeResult};
+use crate::term::ProcessId;
 use env::Env;
 use layout::{ErlNifEntry, InitFn, LoadFn, NifFn};
 
@@ -55,6 +60,28 @@ pub(crate) enum OpenError {
     /// The NIF version is one that ERTS loads and PBeam does not support:
     /// 2.0 to 2.17, except 2.5.
     Unsupported(i32, i32),
+}
+
+/// The process of a NIF call or a load callback: its id, its atom table,
+/// and its node.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Caller<'a> {
+    /// The calling process.
+    pub(crate) process: ProcessId,
+    /// The atom table of the process.
+    pub(crate) atoms: &'a Arc<AtomTable>,
+    /// The node of the process.
+    pub(crate) node: &'a Arc<Node>,
+}
+
+/// The end of a NIF call: its result and the messages of its `enif_send`
+/// calls, which the scheduler of the caller sends in their order.
+#[derive(Debug)]
+pub(crate) struct Called {
+    /// The result of the call.
+    pub(crate) result: Result<NativeResult, BeamError>,
+    /// The receiver and the term of each message.
+    pub(crate) sends: Vec<(ProcessId, Term)>,
 }
 
 /// A NIF function of a library.
@@ -84,37 +111,40 @@ impl Function {
         }
     }
 
-    /// Call the function with `arguments` on the current thread and return
-    /// its result: a value, or the `error:Reason` of `enif_raise_exception`.
-    /// The atoms of the call are in `atoms`.
+    /// Call the function with `arguments` on the current thread for the
+    /// process `caller` and return its result: a value, or the
+    /// `error:Reason` of `enif_raise_exception`, and its messages.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// // nif_add:add/2 of fixtures/nif/nif_add.c.
     /// let add = &library.functions()[library.position("add", 2).unwrap()];
-    /// assert!(matches!(add.call(&[Term::Integer(1), Term::Integer(2)]), Ok(NativeResult::Value(Term::Integer(3)))));
+    /// assert!(matches!(add.call(caller, &[Term::Integer(1), Term::Integer(2)]).result, Ok(NativeResult::Value(Term::Integer(3)))));
     /// ```
     ///
-    /// # Errors
-    ///
-    /// A NIF that returns a handle that no term of the call has gives a
-    /// runtime error.
-    pub(crate) fn call(
-        &self,
-        atoms: &Arc<AtomTable>,
-        arguments: &[Term],
-    ) -> Result<NativeResult, BeamError> {
-        let mut env = Env::new(atoms, arguments);
+    /// The result is a runtime error for a NIF that returns a handle that no
+    /// term of the call has, and for a broken contract of `enif_send`.
+    pub(crate) fn call(&self, caller: Caller<'_>, arguments: &[Term]) -> Called {
+        let mut env = Env::new(caller.atoms, Some(caller.process), arguments);
         let argv = env.handles();
         // The arity of a BEAM function is at most 255.
         let argc = c_int::try_from(argv.len()).unwrap_or(c_int::MAX);
-        // SAFETY: `fptr` is the function of a library that `open` loaded,
-        // and the library stays open while `self` is alive. The env is
-        // alive and unique for the call, and `argv` holds `argc` handles of
-        // it, as the C API gives a NIF its arguments.
-        let result = unsafe { (self.fptr)(&raw mut env, argc, argv.as_ptr()) };
-        env.finish(result)
+        let (handle, ended) = process::within(caller.atoms, caller.node, || {
+            // SAFETY: `fptr` is the function of a library that `open`
+            // loaded, and the library stays open while `self` is alive. The
+            // env is alive and unique for the call, and `argv` holds `argc`
+            // handles of it, as the C API gives a NIF its arguments.
+            unsafe { (self.fptr)(&raw mut env, argc, argv.as_ptr()) }
+        });
+        let result = match ended.unsupported {
+            Some(text) => Err(error(text)),
+            None => env.finish(handle),
+        };
+        Called {
+            result,
+            sends: ended.sends,
+        }
     }
 }
 
@@ -167,19 +197,21 @@ impl Library {
         self.upgrade
     }
 
-    /// Run the load callback with `info` and the atom table `atoms`, and
-    /// return its veto, or 0 when the
-    /// library has no load callback (`erl_nif.c:4980-4987`).
+    /// Run the load callback with `info` for the process `caller`, and
+    /// return its veto, or 0 when the library has no load callback
+    /// (`erl_nif.c:4980-4987`). The callback runs in no context of
+    /// [`process`], so `enif_alloc_env` gives NULL and `enif_send` gives 0
+    /// in it.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// // The callback of the NIF_ADD_LOAD library returns its load info.
-    /// assert_eq!(library.load(&Term::Integer(7)), 7);
+    /// assert_eq!(library.load(caller, &Term::Integer(7)), 7);
     /// ```
-    pub(crate) fn load(&self, atoms: &Arc<AtomTable>, info: &Term) -> i32 {
+    pub(crate) fn load(&self, caller: Caller<'_>, info: &Term) -> i32 {
         self.load.map_or(0, |load| {
-            let mut env = Env::load(atoms, info, &self.handle);
+            let mut env = Env::load(caller.atoms, caller.process, info, &self.handle);
             // PBeam has no `enif_priv_data` yet, so no call reads the
             // private data of the callback.
             let mut private: *mut c_void = std::ptr::null_mut();

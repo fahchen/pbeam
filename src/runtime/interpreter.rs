@@ -1262,6 +1262,7 @@ impl BeamProgram {
             let result = match output {
                 Output::Written(written) => native::dirty_write_result(&scheduler.atoms, written)?,
                 Output::Native(result) => native::to_bif_result(result?),
+                Output::Shared(called) => native::finish_shared(scheduler, called)?,
                 Output::Host(finish) => finish.run(scheduler)?,
             };
             let outcome = match result {

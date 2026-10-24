@@ -396,13 +396,22 @@ pub(super) fn call(
         // A dirty NIF runs on the dirty pool of its flags, as ERTS
         // schedules it (`static_schedule_dirty_nif`, `erl_nif.c:3437-3477`).
         let job = function.job();
+        let process = scheduler.current_process().id;
         let result = match job {
-            Job::Normal => function
-                .call(&scheduler.atoms, arguments)
-                .map(to_bif_result),
+            Job::Normal => {
+                let caller = abi::Caller {
+                    process,
+                    atoms: &scheduler.atoms,
+                    node: &scheduler.node,
+                };
+                let called = function.call(caller, arguments);
+                finish_shared(scheduler, called)
+            }
             Job::CpuBound | Job::IoBound => Ok(BifResult::Dirty(Work::Shared {
                 library: Arc::clone(&library),
                 atoms: Arc::clone(&scheduler.atoms),
+                node: Arc::clone(&scheduler.node),
+                process,
                 index,
                 arguments: arguments.to_vec(),
             })),
@@ -456,6 +465,30 @@ fn run_extension(
             arguments: arguments.to_vec(),
         })),
     }
+}
+
+/// Send the messages of the NIF call `called` from the current process, in
+/// their order, and return its result. ERTS puts each message into the
+/// queue of its receiver in the `enif_send` call (`erl_nif.c:1080`), and a
+/// process sees its messages only after the NIF returns, so a message of a
+/// NIF on a scheduler arrives in the same order. A message to a process
+/// that exited since the call is dropped, as for a process that exits
+/// after the send.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = finish_shared(&mut scheduler, function.call(caller, &[]));
+/// ```
+pub(super) fn finish_shared(
+    scheduler: &mut Scheduler,
+    called: abi::Called,
+) -> Result<BifResult, BeamError> {
+    let from = scheduler.current_process().id;
+    for (target, term) in called.sends {
+        scheduler.send_message(from, target, term);
+    }
+    called.result.map(to_bif_result)
 }
 
 /// Map the narrow result of an extension binding to the interpreter result.
@@ -802,7 +835,12 @@ fn load_shared(
         let text = "Upgrade not supported by this NIF library.";
         return load_nif_error(&scheduler.atoms, "upgrade", text);
     }
-    let veto = library.load(&scheduler.atoms, &arguments[1]);
+    let loader = abi::Caller {
+        process: scheduler.current_process().id,
+        atoms: &scheduler.atoms,
+        node: &scheduler.node,
+    };
+    let veto = library.load(loader, &arguments[1]);
     if veto != 0 {
         let text = format!("Library load-call unsuccessful ({veto}).");
         return load_nif_error(&scheduler.atoms, "load", &text);
