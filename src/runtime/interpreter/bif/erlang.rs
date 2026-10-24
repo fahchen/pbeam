@@ -1,5 +1,7 @@
 //! Bodies of the `erlang` BIFs that do not fit on one table line.
 
+mod snifs;
+
 use super::BifResult::{Raise, Trap, Value};
 use super::*;
 use crate::beam::code::Instruction;
@@ -3377,27 +3379,9 @@ pub(super) fn system_info(scheduler: &mut Scheduler, item: &Term) -> Result<BifR
             let count = usize::try_from(schedulers).expect("a scheduler count fits");
             Ok(Value(Term::tuple(vec![unbound; count])))
         }
-        // ERTS reads no processor topology on this host
-        // (`erl_misc_utils.c`), so the item is `undefined`
-        // (`erl_bif_info.c:3111-3113`).
-        #[cfg(not(target_os = "linux"))]
+        // `erl_bif_info.c:3111-3113` formats the used topology.
         Term::Atom(atom) if atoms.name_of(atom) == "cpu_topology" => {
-            Ok(Value(Term::static_atom("undefined")))
-        }
-        // The topology that ERTS reads from `/sys/devices/system` when the
-        // node starts, or `undefined` when it reads none or `verify_topology`
-        // rejects it (`erl_cpu_topology.c:1690-1703`). ERTS builds the
-        // `{cpu, ...}` list (`bld_topology_term`,
-        // `erl_cpu_topology.c:1515-1543`) and traps to
-        // `erlang:format_cpu_topology/1` (`erl_bif_info.c:3111-3113`).
-        #[cfg(target_os = "linux")]
-        Term::Atom(atom) if atoms.name_of(atom) == "cpu_topology" => {
-            let detected = detected_topology(cpu_topology());
-            Ok(Trap {
-                module: "erlang",
-                function: "format_cpu_topology",
-                arguments: vec![detected],
-            })
+            Ok(formatted_topology(detected_topology_term()))
         }
         // `erl_bif_info.c:3212-3221`. The count is never 0, so the item is
         // never `unknown`.
@@ -3489,6 +3473,18 @@ pub(super) fn system_info(scheduler: &mut Scheduler, item: &Term) -> Result<BifR
                 online.min(host_count()),
             ))))
         }
+        // `erl_bif_info.c:2890-2898`.
+        Term::Atom(atom) if atoms.name_of(atom) == "snifs" => {
+            let mut entries = Vec::with_capacity(snifs::SNIFS.len());
+            for &(module, function, arity) in snifs::SNIFS {
+                entries.push(Term::tuple(vec![
+                    Term::Atom(atoms.put(module)?),
+                    Term::Atom(atoms.put(function)?),
+                    Term::Integer(i64::from(arity)),
+                ]));
+            }
+            Ok(Value(Term::list_from(entries)))
+        }
         // `erl_bif_info.c:2780-2783` takes each tuple to `info_1_tuple`, and
         // `erl_bif_info.c:3633` rejects each other term that the chain does
         // not name.
@@ -3499,10 +3495,99 @@ pub(super) fn system_info(scheduler: &mut Scheduler, item: &Term) -> Result<BifR
         {
             Ok(BifResult::badarg())
         }
-        Term::Tuple(_) | Term::Atom(_) => Err(error(format!(
+        Term::Tuple(elements) => system_info_tuple(atoms, elements.as_ref(), item),
+        Term::Atom(_) => Err(error(format!(
             "unsupported erlang:system_info/1 argument {}",
             debug_term(item, atoms)
         ))),
+        _ => Ok(BifResult::badarg()),
+    }
+}
+
+/// The detected topology in the internal `{cpu, ...}` form. ERTS reads no
+/// topology on macOS (`erl_misc_utils.c`), so it is `undefined` there.
+#[cfg(not(target_os = "linux"))]
+fn detected_topology_term() -> Term {
+    Term::static_atom("undefined")
+}
+
+/// The detected topology in the internal `{cpu, ...}` form: the topology
+/// that ERTS reads from `/sys/devices/system` when the node starts, or
+/// `undefined` when it reads none or `verify_topology` rejects it
+/// (`erl_cpu_topology.c:1690-1703`, `bld_topology_term`,
+/// `erl_cpu_topology.c:1515-1543`).
+#[cfg(target_os = "linux")]
+fn detected_topology_term() -> Term {
+    detected_topology(cpu_topology())
+}
+
+/// Trap to `erlang:format_cpu_topology/1` with the topology `topology`, as
+/// ERTS does (`erl_bif_info.c:3111-3113`, `erl_bif_info.c:2541-2546`).
+fn formatted_topology(topology: Term) -> BifResult {
+    Trap {
+        module: "erlang",
+        function: "format_cpu_topology",
+        arguments: vec![topology],
+    }
+}
+
+/// Run `erlang:system_info/1` for a tuple item as `info_1_tuple`
+/// (`erl_bif_info.c:2489-2640`). PBeam has no user-defined topology,
+/// because it rejects `system_flag(cpu_topology, _)`, so the used topology
+/// is the detected one (`erl_cpu_topology.c:1557-1589`). The items of the
+/// ERTS memory allocators keep a runtime error.
+fn system_info_tuple(
+    atoms: &AtomTable,
+    elements: &[Term],
+    item: &Term,
+) -> Result<BifResult, BeamError> {
+    let name = |term: &Term| match term {
+        Term::Atom(atom) => atoms.name_of(atom),
+        _ => "",
+    };
+    let unsupported = || {
+        Err(error(format!(
+            "unsupported erlang:system_info/1 argument {}",
+            debug_term(item, atoms)
+        )))
+    };
+    match elements {
+        // `erl_bif_info.c:2520-2527`.
+        [selector, which] if name(selector) == "wordsize" => match name(which) {
+            "internal" | "external" => Ok(Value(Term::Integer(size_of::<usize>() as i64))),
+            _ => Ok(BifResult::badarg()),
+        },
+        // `erl_bif_info.c:2541-2546`, `erl_cpu_topology.c:1619-1638`.
+        [selector, which] if name(selector) == "cpu_topology" => match name(which) {
+            "defined" => Ok(formatted_topology(Term::static_atom("undefined"))),
+            "detected" | "used" => Ok(formatted_topology(detected_topology_term())),
+            _ => Ok(BifResult::badarg()),
+        },
+        // `erl_bif_info.c:2539-2540` returns the internal form. For another
+        // atom ERTS returns a non-value and crashes, so PBeam keeps the
+        // runtime error.
+        [selector, which] if name(selector) == "internal_cpu_topology" => match name(which) {
+            "defined" => Ok(Value(Term::static_atom("undefined"))),
+            "detected" | "used" => Ok(Value(detected_topology_term())),
+            _ => unsupported(),
+        },
+        // `erl_bif_info.c:2547-2556` of a build without Valgrind or ASan.
+        // `test_overflow` reads past an array in ERTS, so PBeam keeps the
+        // runtime error for it.
+        [selector, which] if name(selector) == "memory_checker" => match name(which) {
+            "test_leak" => Ok(Value(Term::static_atom("ok"))),
+            "test_overflow" => unsupported(),
+            _ => Ok(BifResult::badarg()),
+        },
+        // `erl_bif_info.c:2499-2538`: the ERTS memory allocators, which
+        // PBeam does not have.
+        [selector, _] | [selector, _, _]
+            if matches!(name(selector), "allocator" | "allocator_sizes") =>
+        {
+            unsupported()
+        }
+        [selector, _, _] if name(selector) == "memory_internal" => unsupported(),
+        // `erl_bif_info.c:2636-2637`.
         _ => Ok(BifResult::badarg()),
     }
 }
