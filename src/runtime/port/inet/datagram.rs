@@ -64,7 +64,7 @@ impl Inet {
             ));
         }
         let socket = self.socket.as_ref().expect("an open port has a socket");
-        match socket.connect(&remote.into()) {
+        match socket.connect(&remote) {
             Ok(()) => {
                 self.state = State::Connected;
                 Ok(vec![OK])
