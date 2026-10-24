@@ -4,6 +4,7 @@ use super::BifResult::Value;
 use super::erlang::signals_return;
 use super::*;
 use crate::beam::code::PrepareError;
+use crate::runtime::process::LinkId;
 use crate::runtime::scheduler::{Accept, PTAB_SIZE, check_process_code_reply};
 use crate::runtime::{
     capability::{CapabilityKind, Operation},
@@ -879,6 +880,64 @@ pub(super) fn port_command(
     if let Some(denied) = port_denial(scheduler, &port_state.name, Operation::Command)? {
         return Ok(denied);
     }
+    let written = output(scheduler, id, port_state, bytes)?;
+    drop(slot);
+    written.finish(scheduler, id)?;
+    Ok(signals_return(scheduler, port, Term::static_atom("true")))
+}
+
+/// The end of an output to a port that runs after the release of the port
+/// lock (see [`output`]).
+enum Written {
+    /// The output needs nothing more.
+    Done,
+    /// The `tcp_inet` driver sent the bytes and ends its step with the
+    /// exit reason, if any (see `Scheduler::end_step`).
+    Step(Option<Term>),
+    /// A header that is too short fails the port with the reason `einval`
+    /// (`driver_failure_posix`, io.c:7267-7270).
+    Failed,
+    /// The write to the program failed with this `errno`.
+    Errno(i32),
+}
+
+impl Written {
+    /// Run the end of the output to the port `id`: close or fail the port
+    /// for a failed output.
+    ///
+    /// # Errors
+    ///
+    /// A new atom in a full atom table gives the error of `AtomTable::put`.
+    fn finish(self, scheduler: &mut Scheduler, id: PortId) -> Result<(), BeamError> {
+        match self {
+            Written::Done => {}
+            Written::Step(exit) => scheduler.end_step(id, exit),
+            Written::Failed => scheduler.fail_port(id, Term::static_atom("einval")),
+            Written::Errno(errno) => {
+                let reason = Term::Atom(scheduler.atoms.put(&errno_id(errno))?);
+                scheduler.close_port(id, reason);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Write `bytes` to the open port `id` with the state `port_state`, as
+/// `erts_port_output` does (`io.c:1715-2088`): use 40 reductions, write
+/// the bytes to the program or send them on the socket of a `tcp_inet`
+/// port, and add them to the output count. The caller releases the port
+/// lock and then runs [`Written::finish`].
+///
+/// # Errors
+///
+/// An output of a `tcp_inet` port that PBeam does not run returns a
+/// runtime error.
+fn output(
+    scheduler: &mut Scheduler,
+    id: PortId,
+    port_state: &mut Port,
+    bytes: Vec<u8>,
+) -> Result<Written, BeamError> {
     scheduler
         .current_process_mut()
         .bump_reductions(PORT_REDUCTIONS);
@@ -888,18 +947,12 @@ pub(super) fn port_command(
             let caller = scheduler.current_process_mut().id;
             let sent = tcp.send(&bytes, caller, scheduler.local_node_hash())?;
             port_state.output += bytes.len() as u64;
-            // A header that is too short fails the port with the reason
-            // `einval` (`driver_failure_posix`, io.c:7267-7270).
-            let exit = match sent {
-                Output::Sent(events) => Some(scheduler.send_events(id, port_state, events)?),
-                Output::Failed => None,
-            };
-            drop(slot);
-            match exit {
-                Some(exit) => scheduler.end_step(id, exit),
-                None => scheduler.fail_port(id, Term::static_atom("einval")),
-            }
-            return Ok(signals_return(scheduler, port, Term::static_atom("true")));
+            return Ok(match sent {
+                Output::Sent(events) => {
+                    Written::Step(scheduler.send_events(id, port_state, events)?)
+                }
+                Output::Failed => Written::Failed,
+            });
         }
     };
     // A packet that does not fit in its header fails with `EINVAL`
@@ -907,15 +960,13 @@ pub(super) fn port_command(
     let size = bytes.len() as u64;
     let written = spawn.packets.frame(bytes).ok_or(libc::EINVAL);
     let written = written.and_then(|framed| spawn.program.write_input(&framed));
-    if written.is_ok() {
-        port_state.output += size;
-    }
-    drop(slot);
-    if let Err(errno) = written {
-        let reason = Term::Atom(scheduler.atoms.put(&errno_id(errno))?);
-        scheduler.close_port(id, reason);
-    }
-    Ok(signals_return(scheduler, port, Term::static_atom("true")))
+    Ok(match written {
+        Ok(_) => {
+            port_state.output += size;
+            Written::Done
+        }
+        Err(errno) => Written::Errno(errno),
+    })
 }
 
 /// Run `erts_internal:port_close(Port)`, which `erlang:port_close/1` calls,
@@ -962,6 +1013,202 @@ pub(super) fn port_close(
     let closed = scheduler.close_port(id, Term::static_atom("normal"));
     let result = if closed { "true" } else { "badarg" };
     Ok(signals_return(scheduler, port, Term::static_atom(result)))
+}
+
+/// Run `erlang:exit(Port, Reason)` and `erlang:exit/3` for a port, as
+/// `exit_2` and `erts_port_exit` do (`bif.c:1774-1797`,
+/// `io.c:2241-2300`): close the open port `port` with the reason `reason`
+/// from each process, also with `normal` and from a process that is not
+/// its owner (`erts_deliver_port_exit` with `drop_normal` 0,
+/// io.c:3876-3879), and return `true`. The reason `kill` gives the link
+/// exit signal `killed` (io.c:3854). A port that is not open gives `true`.
+/// A caller without a `port` capability with `close` that permits the
+/// program path of the port gets `error:capability_denied`, and the port
+/// stays open.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = port_exit(scheduler, &Term::Port(port), &Term::static_atom("kill"))?;
+/// ```
+///
+/// # Errors
+///
+/// The atom `capability_denied` in a full atom table.
+pub(super) fn port_exit(
+    scheduler: &mut Scheduler,
+    port: &Term,
+    reason: &Term,
+) -> Result<BifResult, BeamError> {
+    let found = found_port(scheduler, port)?;
+    let mut slot = lock_found(&found);
+    if let (Some(port_state), Some(&(id, _))) = (open(&mut slot), found.as_ref()) {
+        if let Some(denied) = port_denial(scheduler, &port_state.name, Operation::Close)? {
+            return Ok(denied);
+        }
+        drop(slot);
+        scheduler.close_port(id, reason.clone());
+    }
+    Ok(Value(Term::static_atom("true")))
+}
+
+/// Run `erts_internal:port_call(Port, Operation, Data)`, which
+/// `erlang:port_call/2,3` calls, as `erts_internal_port_call_3` does
+/// (`erl_bif_port.c:263-320`): give the atom `badarg`, which
+/// `erlang:port_call/3` raises. The spawn driver and the `tcp_inet` driver,
+/// the only drivers of PBeam, have no `call` callback
+/// (`sys_drivers.c:246`, `inet_drv.c:1369`), so `erts_port_call` gives
+/// `ERTS_PORT_OP_BADARG` for each port (`call_driver_call`,
+/// io.c:4473-4474). The result traps to
+/// `erlang:bif_handle_signals_return/2` when the caller has incoming
+/// signals. For a port that is open or in the `CLOSING` state and an
+/// `Operation` from 0 to 2^32 - 1 (erl_bif_port.c:270-276), a caller
+/// without a `port` capability with `command` that permits the program
+/// path of the port gets `error:capability_denied`, as for
+/// `erlang:port_control/3`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = port_call(scheduler, &Term::Port(port), &Term::Integer(1))?;
+/// ```
+///
+/// # Errors
+///
+/// The atom `capability_denied` in a full atom table.
+pub(super) fn port_call(
+    scheduler: &mut Scheduler,
+    port: &Term,
+    operation: &Term,
+) -> Result<BifResult, BeamError> {
+    let valid = operation
+        .small_integer()
+        .is_some_and(|value| u32::try_from(value).is_ok());
+    let found = found_port(scheduler, port)?;
+    let mut slot = lock_found(&found);
+    if let (Some(port_state), true) = (located(&mut slot), valid)
+        && let Some(denied) = port_denial(scheduler, &port_state.name, Operation::Command)?
+    {
+        return Ok(denied);
+    }
+    drop(slot);
+    Ok(signals_return(scheduler, port, Term::static_atom("badarg")))
+}
+
+/// The operation of a message to a port (see [`port_bang`]).
+enum Bang {
+    /// `{Owner, close}`.
+    Close,
+    /// `{Owner, {command, Data}}` with iodata `Data`.
+    Command(Vec<u8>),
+    /// `{Owner, {connect, NewOwner}}`.
+    Connect(ProcessId),
+}
+
+/// Run the message `message` to the open port `id`, which the `send`
+/// instruction, `erlang:send/2`, and `erlang:send/3` give to a port, as
+/// `erts_port_command` does (`io.c:3974-4015`). The pid in the message
+/// must be the owner of the port, also when another process sends it:
+///
+/// - `{Owner, {command, Data}}` writes the bytes of the iodata `Data` as
+///   `erlang:port_command/2` does (`call_driver_output`, io.c:1368-1369).
+/// - `{Owner, close}` closes the port with the reason `normal`, and then
+///   the owner gets `{Port, closed}` after the link exit signal `normal`
+///   (`call_deliver_port_exit`, io.c:2182-2198, `erts_deliver_port_exit`,
+///   io.c:3876-3882).
+/// - `{Owner, {connect, Pid}}` with a local pid makes `Pid` the owner of
+///   the port without a link, and the old owner gets `{Port, connected}`
+///   (`set_port_connected`, io.c:2341-2351).
+///
+/// Each other message, a pid that is not the owner, and `Data` that is not
+/// iodata send the exit signal `badsig` from the port to its owner
+/// (`send_badsig`, io.c:1246-1254). A port that is not open drops the
+/// message. The caller needs a `port` capability with `close` for a close,
+/// and with `command` for the other two operations, that permits the
+/// program path of the port; else the send returns
+/// `error:capability_denied` and the port does nothing. A runtime process
+/// that connects a port to a boot process gets the same denial.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let close = Term::tuple(vec![Term::Pid(owner), Term::static_atom("close")]);
+/// assert!(port_bang(scheduler, port, &close)?.is_none());
+/// ```
+///
+/// # Errors
+///
+/// An output of a `tcp_inet` port that PBeam does not run returns a
+/// runtime error. A new atom in a full atom table gives the error of
+/// `AtomTable::put`.
+pub(super) fn port_bang(
+    scheduler: &mut Scheduler,
+    id: PortId,
+    message: &Term,
+) -> Result<Option<BifResult>, BeamError> {
+    let found = found_port(scheduler, &Term::Port(id))?;
+    let mut slot = lock_found(&found);
+    let Some(port_state) = open(&mut slot) else {
+        return Ok(None);
+    };
+    let owner = port_state.owner;
+    let bang = match message.tuple_elements() {
+        Some([Term::Pid(from), operation]) if *from == owner => match operation {
+            Term::Atom(atom) if atom.is_static("close") => Some(Bang::Close),
+            operation => match operation.tuple_elements() {
+                Some([Term::Atom(atom), data]) if atom.is_static("command") => {
+                    iolist::iodata_bytes(data).map(Bang::Command)
+                }
+                Some([Term::Atom(atom), Term::Pid(pid)]) if atom.is_static("connect") => {
+                    Some(Bang::Connect(*pid))
+                }
+                _ => None,
+            },
+        },
+        _ => None,
+    };
+    let Some(bang) = bang else {
+        drop(slot);
+        let badsig = Signal::Exit {
+            from: LinkId::Port(id),
+            reason: Term::static_atom("badsig"),
+            linked: false,
+            normal_kills: false,
+            alias: None,
+        };
+        // An owner that does not exist drops the signal.
+        let _ = scheduler.send_signal(None, owner, badsig);
+        return Ok(None);
+    };
+    let denied = match bang {
+        Bang::Close => port_denial(scheduler, &port_state.name, Operation::Close)?,
+        Bang::Command(_) => port_denial(scheduler, &port_state.name, Operation::Command)?,
+        Bang::Connect(pid) => connect_denial(scheduler, &port_state.name, pid)?,
+    };
+    if denied.is_some() {
+        return Ok(denied);
+    }
+    let port_term = Term::Port(id);
+    match bang {
+        Bang::Command(bytes) => {
+            let written = output(scheduler, id, port_state, bytes)?;
+            drop(slot);
+            written.finish(scheduler, id)?;
+        }
+        Bang::Close => {
+            drop(slot);
+            scheduler.close_port(id, Term::static_atom("normal"));
+            let closed = Term::tuple(vec![port_term, Term::static_atom("closed")]);
+            scheduler.port_send(owner, closed);
+        }
+        Bang::Connect(pid) => {
+            port_state.owner = pid;
+            drop(slot);
+            let connected = Term::tuple(vec![port_term, Term::static_atom("connected")]);
+            scheduler.port_send(owner, connected);
+        }
+    }
+    Ok(None)
 }
 
 /// The only command that the control of the spawn driver runs
@@ -1314,10 +1561,7 @@ pub(super) fn port_connect(
     let result = match (found.as_ref().zip(name), pid) {
         (Some(((id, _), name)), &Term::Pid(pid)) => {
             let id = *id;
-            // The runtime to boot gate denies a boot process as the new
-            // owner, as for `link/1` and `send/2` (see [`boot_denial`]).
-            let boot = boot_denial(scheduler, pid)?;
-            if let Some(denied) = port_denial(scheduler, &name, Operation::Command)?.or(boot) {
+            if let Some(denied) = connect_denial(scheduler, &name, pid)? {
                 return Ok(denied);
             }
             let connected = scheduler.connect_port(id, pid);
@@ -1331,6 +1575,23 @@ pub(super) fn port_connect(
         _ => Term::static_atom("badarg"),
     };
     Ok(signals_return(scheduler, port, result))
+}
+
+/// Return the denial of a connect of the port with the program path
+/// `name` to `pid`: a caller without a `port` capability with `command`
+/// that permits `name`, and a runtime process that makes the boot process
+/// `pid` the owner, as for `link/1` and `send/2` (see [`boot_denial`]).
+///
+/// # Errors
+///
+/// The atom `capability_denied` in a full atom table.
+fn connect_denial(
+    scheduler: &mut Scheduler,
+    name: &[u8],
+    pid: ProcessId,
+) -> Result<Option<BifResult>, BeamError> {
+    let boot = boot_denial(scheduler, pid)?;
+    Ok(port_denial(scheduler, name, Operation::Command)?.or(boot))
 }
 
 /// The reductions of a port connect (`ERTS_PORT_REDS_CONNECT`,

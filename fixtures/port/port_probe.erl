@@ -1,6 +1,6 @@
 -module(port_probe).
 -export([exit_status/0, output/0, command/0, close/0, owner_exit/0, epipe/0, errors/0,
-         nul_name/0, spawn/0, sigchld_ignored/0, packet/0, packet_errors/0, eof/0, lines/0, monitor/0, fd/3, fd_steal/2, unsupported/1, terminal/0, high_fd/0, fd_closed/0, costs/1, measure/2]).
+         nul_name/0, spawn/0, sigchld_ignored/0, packet/0, packet_errors/0, eof/0, lines/0, monitor/0, fd/3, fd_steal/2, unsupported/1, terminal/0, high_fd/0, fd_closed/0, costs/1, measure/2, signals/0]).
 
 %% Each result replaces a port with the atom port, because the port numbers
 %% of ERTS and PBeam differ.
@@ -480,16 +480,8 @@ unsupported(exec) ->
     open_port({spawn_executable, "/"}, [binary, exit_status]);
 unsupported(force) ->
     port_command(cat(), <<"x">>, [force]);
-unsupported(exit) ->
-    exit(cat(), kill);
 unsupported(register) ->
-    register(port_probe_cat, cat());
-unsupported(send) ->
-    erlang:send(cat(), {self(), close});
-unsupported(send_options) ->
-    erlang:send(cat(), {self(), close}, []);
-unsupported(bang) ->
-    cat() ! {self(), close}.
+    register(port_probe_cat, cat()).
 
 %% A monitor of a port: the DOWN message at port_close/1, noproc for a
 %% port that closed, the exit reason of the owner, and no DOWN message
@@ -523,6 +515,55 @@ down(R, P) ->
 
 cat() ->
     open_port({spawn_executable, sh()}, [binary, {args, ["-c", "cat"]}]).
+
+%% Port signals by message (io.c:3974-4015), by exit/2 (bif.c:1774-1797),
+%% and port_call/3 (erl_bif_port.c:263-320).
+signals() ->
+    process_flag(trap_exit, true),
+    Self = self(),
+    Other = spawn(fun() -> receive stop -> ok end end),
+    Command = cat(),
+    Command ! {Self, {command, <<"hi">>}},
+    Commands = flush(),
+    spawn(fun() -> Command ! {Self, {command, [<<"a">>, $b]}} end),
+    FromOther = flush(),
+    Sent = erlang:send(Command, {Self, {command, <<"s">>}}, [noconnect]),
+    SendMessages = flush(),
+    Command ! {Self, close},
+    Close = [flush(), erlang:port_info(Command)],
+    Command ! {Self, close},
+    Dropped = flush(),
+    Bad = [bad_signal(M) || M <- [bad, {Self, bad}, {Self, {command, bad}}, {Other, close},
+                                  {Other, {command, <<"x">>}}, {Self, {connect, bad}},
+                                  {Other, {connect, Self}}, {Self, {other, x}}, {self, close}]],
+    Connect = cat(),
+    Connect ! {Self, {connect, Other}},
+    Connected = flush(),
+    {connected, Owner} = erlang:port_info(Connect, connected),
+    {links, Links} = process_info(Self, links),
+    ConnectState = [Owner =:= Other, lists:member(Connect, Links), port_close(Connect), flush()],
+    Exits = [exit_port(Reason) || Reason <- [normal, kill, boom]],
+    ByOther = cat(),
+    spawn(fun() -> exit(ByOther, normal) end),
+    OtherExit = [flush(), erlang:port_info(ByOther), exit(ByOther, boom)],
+    Call = cat(),
+    Calls = [catch_error(fun() -> erlang:port_call(Call, 1, x) end),
+             catch_error(fun() -> erlang:port_call(Call, x) end)],
+    port_close(Call),
+    Other ! stop,
+    [Commands, FromOther, Sent, SendMessages, Close, Dropped, Bad, Connected, ConnectState,
+     Exits, OtherExit, Calls, flush()].
+
+bad_signal(Message) ->
+    Port = cat(),
+    Port ! Message,
+    Result = [flush(), is_list(erlang:port_info(Port))],
+    port_close(Port),
+    [Result, flush()].
+
+exit_port(Reason) ->
+    Port = cat(),
+    [exit(Port, Reason), flush(), erlang:port_info(Port)].
 
 catch_error(Fun) ->
     try Fun() catch Class:Reason -> {Class, Reason} end.

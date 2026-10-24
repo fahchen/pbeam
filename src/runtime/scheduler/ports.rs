@@ -565,7 +565,7 @@ impl Scheduler {
     /// `target`, on this scheduler or on another (`erts_port_output`
     /// queues the message of the port to the process, `io.c`). A target
     /// that does not exist drops the message.
-    pub(super) fn port_send(&mut self, target: ProcessId, term: Term) {
+    pub(in crate::runtime) fn port_send(&mut self, target: ProcessId, term: Term) {
         match self.remote_owner(target) {
             Some(index) if !self.processes.contains_key(&target) => {
                 self.node.send_message(index, None, term, target, None);
