@@ -44,7 +44,7 @@ mod unicode;
 mod ycf;
 
 pub(super) use erlang::{PRELOADED, error_info_location, is_function, send};
-pub(super) use iolist::iodata_bytes;
+pub(crate) use iolist::iodata_bytes;
 
 /// What a BIF call does to the calling process.
 #[derive(Debug)]

@@ -21,6 +21,9 @@ mod layout;
 
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 
+use std::sync::Arc;
+
+use crate::AtomTable;
 use crate::BeamError;
 use crate::Term;
 use crate::runtime::{Job, NativeResult};
@@ -79,7 +82,8 @@ impl Function {
     }
 
     /// Call the function with `arguments` on the current thread and return
-    /// its result: a value, or the `error:badarg` of `enif_make_badarg`.
+    /// its result: a value, or the `error:Reason` of `enif_raise_exception`.
+    /// The atoms of the call are in `atoms`.
     ///
     /// # Examples
     ///
@@ -93,8 +97,12 @@ impl Function {
     ///
     /// A NIF that returns a handle that no term of the call has gives a
     /// runtime error.
-    pub(crate) fn call(&self, arguments: &[Term]) -> Result<NativeResult, BeamError> {
-        let mut env = Env::new(arguments);
+    pub(crate) fn call(
+        &self,
+        atoms: &Arc<AtomTable>,
+        arguments: &[Term],
+    ) -> Result<NativeResult, BeamError> {
+        let mut env = Env::new(atoms, arguments);
         let argv = env.handles();
         // The arity of a BEAM function is at most 255.
         let argc = c_int::try_from(argv.len()).unwrap_or(c_int::MAX);
@@ -155,7 +163,8 @@ impl Library {
         self.upgrade
     }
 
-    /// Run the load callback with `info` and return its veto, or 0 when the
+    /// Run the load callback with `info` and the atom table `atoms`, and
+    /// return its veto, or 0 when the
     /// library has no load callback (`erl_nif.c:4980-4987`).
     ///
     /// # Examples
@@ -164,9 +173,9 @@ impl Library {
     /// // The callback of the NIF_ADD_LOAD library returns its load info.
     /// assert_eq!(library.load(&Term::Integer(7)), 7);
     /// ```
-    pub(crate) fn load(&self, info: &Term) -> i32 {
+    pub(crate) fn load(&self, atoms: &Arc<AtomTable>, info: &Term) -> i32 {
         self.load.map_or(0, |load| {
-            let mut env = Env::new(std::slice::from_ref(info));
+            let mut env = Env::new(atoms, std::slice::from_ref(info));
             // PBeam has no `enif_priv_data` yet, so no call reads the
             // private data of the callback.
             let mut private: *mut c_void = std::ptr::null_mut();
