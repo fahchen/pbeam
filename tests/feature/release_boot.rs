@@ -349,14 +349,14 @@ fn scheduler_items_eval() -> String {
          dirty_cpu_schedulers, dirty_cpu_schedulers_online, dirty_io_schedulers, \
          multi_scheduling, multi_scheduling_blockers, normal_multi_scheduling_blockers, \
          scheduler_bindings, scheduler_bind_type, {topology} \
-         logical_processors_available]]]), halt()."
+         logical_processors_available, system_version]]]), halt()."
     )
 }
 
 #[test]
 fn gives_the_scheduler_items_of_system_info_as_pinned_erts() {
     // erl_bif_info.c:2790-2798, 3111-3113, 3212-3221, 3251-3254,
-    // 3337-3348, 3390-3399.
+    // 3337-3348, 3390-3399; system_version: 92-160, 492-523.
     let eval = scheduler_items_eval();
     for value in ["1", "2", "4:2"] {
         let arguments = ["+S", value, "-noshell", "-eval", eval.as_str()];
@@ -390,6 +390,22 @@ fn gives_the_other_items_of_system_info_and_badarg_as_pinned_erts() {
     assert_eq!(
         String::from_utf8_lossy(&actual.stdout),
         String::from_utf8_lossy(&reference.stdout),
+        "{actual:?}"
+    );
+}
+
+#[test]
+fn rejects_system_version_with_a_thread_pool_size() {
+    // ERTS reads ERL_THREAD_POOL_SIZE (erl_init.c:873-876); PBeam has no
+    // async threads, so it gives a clear runtime error.
+    let eval = "erlang:system_info(system_version), halt().";
+    let actual = pbeam_erl(
+        &["-noshell", "-eval", eval],
+        &[("ERL_THREAD_POOL_SIZE", "4")],
+    );
+    let stderr = String::from_utf8_lossy(&actual.stderr);
+    assert!(
+        stderr.contains("unsupported erlang:system_info(system_version) with ERL_THREAD_POOL_SIZE"),
         "{actual:?}"
     );
 }
