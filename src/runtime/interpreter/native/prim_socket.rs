@@ -188,6 +188,14 @@ pub(super) const BINDINGS: &[Binding] = &[
         },
     },
     Binding {
+        name: "nif_sendv",
+        arity: 3,
+        job: Job::Normal,
+        run: |scheduler, arguments| {
+            io::sendv(scheduler, &arguments[0], &arguments[1], &arguments[2])
+        },
+    },
+    Binding {
         name: "nif_setopt",
         arity: 5,
         job: Job::Normal,

@@ -23,7 +23,7 @@ fn stops_the_run_at_a_function_of_a_library_without_bindings() {
             "zstd:get_frame_header_nif/1",
         ),
         ("erl_tracer", "enabled", 3, "erl_tracer:enabled/3"),
-        ("prim_socket", "nif_sendv", 3, "prim_socket:nif_sendv/3"),
+        ("prim_socket", "nif_sendmsg", 5, "prim_socket:nif_sendmsg/5"),
     ] {
         let arguments = vec![program.host_term(Term::Integer(0)); arity];
         let error = program
