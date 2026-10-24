@@ -340,6 +340,7 @@ fn stops_the_run_for_each_udp_inet_part_that_is_not_implemented() {
         ("stream", "unsupported udp_inet type 1"),
         ("seqpacket", "unsupported udp_inet type 3"),
         ("sctp", "unsupported udp_inet protocol 3"),
+        ("local", "unsupported udp_inet family 5"),
         ("accept", "unsupported udp_inet request 26"),
         ("inet6", "unsupported udp_inet output address family 2"),
         (
