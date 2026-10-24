@@ -215,6 +215,19 @@ fn sends_eof_and_keeps_the_port_open_as_pinned_erts() {
 }
 
 #[test]
+fn runs_the_env_arg0_cd_hide_and_parallelism_options_as_pinned_erts() {
+    // erl_bif_port.c:870-919 reads the options, a later `env` replaces an
+    // earlier one, and merge_global_environment (erl_bif_port.c:1170-1211)
+    // applies the changes to the copy of os:putenv/2. `{cd, []}` changes
+    // no directory (erl_bif_port.c:1094-1098). `hide` is for Windows only
+    // (erl_bif_port.c:997-998).
+    assert_runs(
+        "options()",
+        "[{parallelism,true},[{data,<<122,122,32,49,32,117,110,115,101,116,32,117,110,115,101,116,32,107,32,117,110,115,101,116,32,47>>},{exit_status,0}],{parallelism,false},[<<47,10,99,10>>,0],{parallelism,false},true,[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}],[{'EXIT',port,normal},{'EXIT',port,normal},{'EXIT',port,normal},{'EXIT',port,normal},{'EXIT',port,normal}]]",
+    );
+}
+
+#[test]
 fn runs_the_command_of_a_spawn_port_as_pinned_erts() {
     // `{spawn, Command}` runs `sh -c "exec Command"` (sys_drivers.c:474-475,
     // 528-544; erl_child_setup.c:364-366), so `exit 3` after the `exec` of
@@ -359,8 +372,16 @@ fn stops_the_run_for_each_port_part_that_is_not_implemented() {
             "line",
             "unsupported open_port/2 option {line, L} whose low 32 bits are not positive",
         ),
-        ("env", "unsupported open_port/2 option env"),
-        ("hide", "unsupported open_port/2 option hide"),
+        (
+            "cd",
+            "unsupported open_port/2 of a program that posix_spawn does not start: enoent",
+        ),
+        ("in", "unsupported open_port/2 option in"),
+        ("out", "unsupported open_port/2 option out"),
+        (
+            "busy_limits",
+            "unsupported open_port/2 option busy_limits_port",
+        ),
         (
             "empty_line",
             "unsupported open_port/2 option {line, L} whose low 32 bits are not positive",
