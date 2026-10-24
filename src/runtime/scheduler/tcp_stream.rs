@@ -267,12 +267,32 @@ impl Scheduler {
                 Event::ActiveDatagram { address, data } => {
                     // `{udp, S, {A, B, C, D}, Port, Data}` (`load_address`,
                     // inet_drv.c:4124-4158).
-                    // `address` is `[Family, P1, P0, A, B, C, D]`.
-                    let ip = address[3..]
-                        .iter()
-                        .map(|byte| Term::Integer((*byte).into()))
-                        .collect();
-                    let from = Term::Integer(u16::from_be_bytes([address[1], address[2]]).into());
+                    // `address` is `[Family, P1, P0, A, B, C, D]`, or
+                    // `[5, N, B1, ..., BN]` of a `local` address, which
+                    // gives `{local, Name}` and the port 0
+                    // (inet_drv.c:1945-1948).
+                    let (ip, from) = match address.as_slice() {
+                        [5, _, name @ ..] => (
+                            vec![Term::static_atom("local"), Term::binary(name.to_vec())],
+                            Term::Integer(0),
+                        ),
+                        // `[0]`, `AF_UNSPEC`, gives `{unspec, <<>>}` and the
+                        // port 0 (inet_drv.c:1956-1963).
+                        [0] => (
+                            vec![
+                                Term::Atom(self.atoms.put("unspec")?),
+                                Term::binary(Vec::new()),
+                            ],
+                            Term::Integer(0),
+                        ),
+                        _ => (
+                            address[3..]
+                                .iter()
+                                .map(|byte| Term::Integer((*byte).into()))
+                                .collect(),
+                            Term::Integer(u16::from_be_bytes([address[1], address[2]]).into()),
+                        ),
+                    };
                     let message = Term::tuple(vec![
                         Term::Atom(self.atoms.put("udp")?),
                         Term::Port(port),

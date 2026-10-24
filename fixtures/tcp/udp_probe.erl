@@ -109,7 +109,6 @@ open() ->
 unsupported(stream) -> open_with([1, 1, 0]);
 unsupported(seqpacket) -> open_with([1, 3, 0]);
 unsupported(sctp) -> open_with([1, 2, 3]);
-unsupported(local) -> open_with([5, 2, 0]);
 unsupported(recvtos) ->
     {ok, S} = udp(),
     prim_inet:setopts(S, [{recvtos, true}]);
