@@ -156,3 +156,86 @@ fn runs_the_service_lookups_on_a_dirty_io_thread() {
     let result = getservbyport(&Term::Integer(80), &protocol);
     assert!(matches!(result, Ok(BifResult::Dirty(_))));
 }
+
+#[test]
+fn raises_badarg_for_extra_that_is_not_a_map() {
+    // `prim_net:getifaddrs/1` checks the map, so only a direct call
+    // reaches this check (`prim_net_nif.c:1395-1398`).
+    let atoms = AtomTable::new();
+    let result = getifaddrs(&atoms, &Term::Integer(1)).unwrap();
+    assert_eq!(format!("{result:?}"), format!("{:?}", BifResult::badarg()));
+}
+
+#[test]
+fn gives_the_errno_of_a_failed_if_nameindex() {
+    let atoms = AtomTable::new();
+    let BifResult::Value(value) = if_names(&atoms, Err(nix::Error::ENOBUFS)).unwrap() else {
+        panic!("if_names gives a value");
+    };
+    let reason = Term::Atom(atoms.put("enobufs").unwrap());
+    assert_eq!(value, Term::tuple(vec![Term::static_atom("error"), reason]));
+}
+
+#[test]
+fn encodes_each_interface_address_form_as_prim_net_nif() {
+    // A test host has no point-to-point interface and no unknown packet
+    // type, so the probe does not reach these forms
+    // (`prim_net_nif.c:1630-1664`, `socket_util.c:2478-2722`).
+    use nix::{ifaddrs::InterfaceAddress, net::if_::InterfaceFlags, sys::socket::SockaddrStorage};
+    let atoms = AtomTable::new();
+    let inet = |text: &str| {
+        Some(SockaddrStorage::from(
+            text.parse::<std::net::SocketAddr>().unwrap(),
+        ))
+    };
+    let interface = |destination, broadcast| InterfaceAddress {
+        interface_name: "x0".into(),
+        flags: InterfaceFlags::IFF_UP | InterfaceFlags::IFF_POINTOPOINT,
+        address: inet("[::1]:0"),
+        netmask: None,
+        broadcast,
+        destination,
+    };
+    let entries = vec![
+        ifaddrs::entry(interface(inet("10.0.0.1:0"), None))
+            .ok()
+            .unwrap(),
+        ifaddrs::entry(interface(None, inet("10.0.0.255:0")))
+            .ok()
+            .unwrap(),
+        ifaddrs::entry(interface(None, None)).ok().unwrap(),
+        ifaddrs::Entry {
+            name: b"p0".to_vec(),
+            flags: 0,
+            addr: ifaddrs::packet(3, 2, 1, 0, &[9; 8], 6).ok(),
+            netmask: ifaddrs::packet(3, 2, 999, 200, &[9; 8], 8).ok(),
+            extra: None,
+        },
+    ];
+    let BifResult::Value(value) = ifaddrs::result(&atoms, Ok(entries)).unwrap() else {
+        panic!("the result is a value");
+    };
+    let text = format!("{value:?}");
+    let atom = |name: &str| format!("{:?}", Term::Atom(atoms.put(name).unwrap()));
+    for name in [
+        "dstaddr",
+        "broadaddr",
+        "pointopoint",
+        "packet",
+        "ether",
+        "host",
+    ] {
+        assert!(text.contains(&atom(name)), "{name}");
+    }
+    assert!(text.contains("Integer(999)") && text.contains("Integer(200)"));
+    assert!(ifaddrs::packet(3, 2, 1, 0, &[9; 8], 9).is_err());
+    let errno = ifaddrs::result(&atoms, Err(ifaddrs::Failure::Errno(libc::EPERM))).unwrap();
+    assert!(format!("{errno:?}").contains(&atom("eperm")));
+    let failure = ifaddrs::Failure::Unsupported("message");
+    assert_eq!(
+        ifaddrs::result(&atoms, Err(failure))
+            .unwrap_err()
+            .to_string(),
+        "message"
+    );
+}
