@@ -3322,9 +3322,9 @@ impl Table {
         // is within the growth limit (`erl_db_hash.c:3648-3734`).
         let mut splits = 0;
         self.count_lock(hash, size);
-        while self.estimate(hash) > i64::try_from(self.buckets).unwrap_or(i64::MAX)
-            && splits < RESIZE_STEPS
-        {
+        // ERTS compares the signed estimate with the unsigned bucket count,
+        // so an estimate below 0 is a huge value (`erl_db_hash.c:1456-1460`).
+        while self.estimate(hash) as u64 > self.buckets as u64 && splits < RESIZE_STEPS {
             self.split(atoms);
             splits += 1;
         }
