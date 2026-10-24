@@ -605,7 +605,9 @@ fn encode_parts(
                 out.extend_from_slice(&port.0.to_be_bytes());
                 out.extend_from_slice(&0u32.to_be_bytes());
             }
-            Term::Reference(reference) => {
+            // A resource term is its magic reference.
+            Term::Reference(_) | Term::Resource(_) => {
+                let reference = term.reference().unwrap_or(Reference(0));
                 if reference.is_pid_reference() {
                     return Err(error(
                         "unsupported erlang:term_to_binary/1,2 of a pid reference: ERTS writes the monitored pid in the alias reference: see \"External term format\" in docs/erts-differences.md",

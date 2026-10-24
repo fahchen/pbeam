@@ -223,7 +223,7 @@ fn tag(term: &Term) -> u8 {
         Term::Integer(_) | Term::BigInt(_) => 1,
         Term::Float(_) => 2,
         Term::Atom(_) => 3,
-        Term::Reference(_) => 4,
+        Term::Reference(_) | Term::Resource(_) => 4,
         Term::Fun(_) => 5,
         Term::Port(_) => 6,
         Term::Pid(_) => 7,

@@ -1681,7 +1681,7 @@ fn encode_path(elements: Vec<usize>) -> Result<i64, BeamError> {
 /// A binary key hashes with the binary path of `make_internal_hash`. A pid
 /// key hashes with the pid path of `make_internal_hash`, and a port key with
 /// its immediate word (`erl_term_hashing.c:2211-2213`). An ordinary
-/// reference key hashes with the reference path
+/// reference key and a resource key hash with the reference path
 /// (`erl_term_hashing.c`); an alias reference has no comparison order, so
 /// it is not a supported key. A map key hashes with the flatmap or
 /// hashmap path of `make_internal_hash`, and its keys and values must be
@@ -1719,7 +1719,8 @@ fn map_hash(key: &Term) -> Option<u64> {
         | Term::Binary(_)
         | Term::Float(_)
         | Term::Pid(_)
-        | Term::Port(_) => {}
+        | Term::Port(_)
+        | Term::Resource(_) => {}
         Term::Reference(reference) if !reference.is_pid_reference() => {}
         Term::Cons(_) | Term::Tuple(_) | Term::Map(_) | Term::Fun(_) | Term::Record(_) => {
             let mut pending = vec![key];
@@ -1730,7 +1731,8 @@ fn map_hash(key: &Term) -> Option<u64> {
                     | Term::Binary(_)
                     | Term::Float(_)
                     | Term::Pid(_)
-                    | Term::Port(_) => {}
+                    | Term::Port(_)
+                    | Term::Resource(_) => {}
                     Term::Reference(reference) if !reference.is_pid_reference() => {}
                     Term::Cons(cell) => pending.extend([&cell.tail, &cell.head]),
                     Term::Tuple(elements) => pending.extend(elements.iter()),
