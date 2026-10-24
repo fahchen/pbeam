@@ -1202,13 +1202,12 @@ pub(super) fn port_bang(
         Bang::Close => {
             drop(slot);
             // Of two closes on two schedulers, only the first closes the
-            // port and replies (io.c:2179-2180, 3870-3874).
-            if scheduler.close_port(id, Term::static_atom("normal")) {
+            // port and replies, when the port terminates (io.c:2179-2180,
+            // 3713-3719, 3870-3874).
+            if scheduler.close_port_replying(id) {
                 scheduler
                     .current_process_mut()
                     .bump_reductions(PORT_REDUCTIONS);
-                let closed = Term::tuple(vec![port_term, Term::static_atom("closed")]);
-                scheduler.port_send(owner, closed);
             }
         }
         Bang::Connect(pid) => {

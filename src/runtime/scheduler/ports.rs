@@ -81,6 +81,7 @@ impl Scheduler {
             driver,
             monitors: Vec::new(),
             closing: false,
+            send_closed: false,
             scheduler: self.index,
             poll: std::sync::Arc::clone(&self.node.poll),
         };
@@ -242,7 +243,23 @@ impl Scheduler {
     /// scheduler.close_port(port, Term::static_atom("normal"));
     /// ```
     pub(in crate::runtime) fn close_port(&mut self, id: PortId, reason: Term) -> bool {
-        self.exit_port(id, reason, true)
+        self.exit_port(id, reason, true, false)
+    }
+
+    /// Close the open port `id` for a `{Pid, close}` message, as
+    /// [`Self::close_port`] does with the reason `normal`, and send
+    /// `{Port, closed}` to the owner when the port terminates
+    /// (`ERTS_PORT_SFLG_SEND_CLOSED`, io.c:3713-3719, 3753-3758). A port
+    /// that flushes its queue sends it after the flush.
+    /// Return true when this close closed an open port.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.close_port_replying(port);
+    /// ```
+    pub(in crate::runtime) fn close_port_replying(&mut self, id: PortId) -> bool {
+        self.exit_port(id, Term::static_atom("normal"), true, true)
     }
 
     /// Close the open port `id` with the reason `reason` from its driver,
@@ -257,7 +274,7 @@ impl Scheduler {
     /// scheduler.fail_port(port, Term::static_atom("einval"));
     /// ```
     pub(in crate::runtime) fn fail_port(&mut self, id: PortId, reason: Term) {
-        let _ = self.exit_port(id, reason, false);
+        let _ = self.exit_port(id, reason, false, false);
     }
 
     /// Close the open port `id` with the reason `reason` (see
@@ -266,8 +283,9 @@ impl Scheduler {
     /// Return true when this exit closed an open port, false for a port
     /// that closed before or is in the `CLOSING` state, so that one of two
     /// concurrent `erlang:port_close/1` calls gives `badarg`
-    /// (io.c:2241-2290).
-    fn exit_port(&mut self, id: PortId, reason: Term, flush: bool) -> bool {
+    /// (io.c:2241-2290). With `send_closed`, the port that this exit
+    /// closes sends `{Port, closed}` when it terminates.
+    fn exit_port(&mut self, id: PortId, reason: Term, flush: bool, send_closed: bool) -> bool {
         // The port lock comes first. The table lock is taken only after the
         // port lock is released, to remove the port.
         let cell = self.node.port(id);
@@ -278,6 +296,7 @@ impl Scheduler {
             return false;
         };
         let open = !port.closing;
+        port.send_closed |= open && send_closed;
         // `erts_deliver_port_exit` sets `CLOSING` for each queue that holds
         // bytes before `flush_port` (io.c:3939-3948). With `linger {true,
         // 0}`, `tcp_inet_flush` drops the queue and the port terminates with
@@ -513,8 +532,15 @@ impl Scheduler {
     /// scheduler.stop_port(id, port);
     /// ```
     pub(super) fn stop_port(&mut self, id: PortId, port: Port) {
+        let (owner, send_closed) = (port.owner, port.send_closed);
         if let Driver::Inet(tcp) = port.driver {
             self.tcp_stop(id, tcp, !port.closing);
+        }
+        // `terminate_port` sends `{Port, closed}` after the driver stop
+        // (io.c:3746-3758).
+        if send_closed {
+            let closed = Term::tuple(vec![Term::Port(id), Term::static_atom("closed")]);
+            self.port_send(owner, closed);
         }
     }
 
