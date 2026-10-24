@@ -62,6 +62,37 @@ pub(crate) fn host_name() -> Vec<u8> {
     name_bytes(&uname().nodename)
 }
 
+/// Return the `uname` release of the host as the numbers `{Major, Minor,
+/// Build}` of `erlang:system_info(os_version)`, as `os_version` and
+/// `get_number` of `sys/unix/sys.c:838-885` read it: each number is the
+/// `atoi` value of the text before the next dot, and a part that does not
+/// start with a digit gives 0 and does not move past its text.
+pub(crate) fn os_version() -> [i32; 3] {
+    release_numbers(&name_bytes(&uname().release))
+}
+
+/// Return the three numbers of the `uname` release text `release`, as
+/// `get_number` of `sys/unix/sys.c:860-885` reads them.
+fn release_numbers(release: &[u8]) -> [i32; 3] {
+    let mut rest = release;
+    [(); 3].map(|()| {
+        if !rest.first().is_some_and(u8::is_ascii_digit) {
+            return 0;
+        }
+        let (part, after) = match rest.iter().position(|&byte| byte == b'.') {
+            Some(dot) => (&rest[..dot], &rest[dot + 1..]),
+            None => (rest, &rest[rest.len()..]),
+        };
+        rest = after;
+        // `atoi` reads the leading digits into a C `int`.
+        part.iter()
+            .take_while(|byte| byte.is_ascii_digit())
+            .fold(0i32, |value, &digit| {
+                value.wrapping_mul(10).wrapping_add(i32::from(digit - b'0'))
+            })
+    })
+}
+
 /// Return the `uname` names of the host. A failure of `uname` leaves each
 /// name empty.
 fn uname() -> libc::utsname {
@@ -178,3 +209,7 @@ fn read_filename_encoding() -> FilenameEncoding {
         FilenameEncoding::Latin1
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/runtime/host.rs"]
+mod tests;
