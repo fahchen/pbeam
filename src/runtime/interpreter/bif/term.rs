@@ -303,10 +303,14 @@ pub(super) fn term_to_iovec_2(
     let elements: Vec<Term> = pieces
         .into_iter()
         .map(|(range, source)| match source {
-            Some(source) => Term::Binary(source),
+            Some(source) => Term::Binary(source.off_heap()),
             None => {
                 offset += range.len();
-                Term::Binary(common.bits((offset - range.len()) * 8, offset * 8))
+                Term::Binary(
+                    common
+                        .bits((offset - range.len()) * 8, offset * 8)
+                        .off_heap(),
+                )
             }
         })
         .collect();

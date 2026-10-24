@@ -3,6 +3,10 @@
 -include_lib("kernel/include/file.hrl").
 -compile({nowarn_deprecated_function, [{erlang, now, 0}]}).
 -export([
+    socket_open/0,
+    socket_open_netns/0,
+    socket_bind_unspec/0,
+    socket_bind_family_number/0,
     spawn/0,
     spawn_system_process/0,
     spawn_link/0,
@@ -651,6 +655,13 @@ ambient() ->
         element(1, prim_net:getaddrinfo("127.0.0.1", "pbeam-no-such-service")),
         prim_net:getservbyname("http", "tcp"),
         prim_net:getservbyport(80, "tcp"),
+        element(1, prim_net:if_names()),
+        element(1, prim_net:if_name2index("pbeam-no-if")),
+        element(1, prim_net:if_index2name(16#7fffffff)),
+        attempt(fun() -> prim_net:get_adapters_addresses(#{}) end),
+        attempt(fun() -> prim_net:get_if_entry(#{}) end),
+        attempt(fun() -> prim_net:get_interface_info(#{}) end),
+        attempt(fun() -> prim_net:get_ip_address_table(#{}) end),
         erts_internal:term_type(id(a))
     ].
 
@@ -1096,3 +1107,22 @@ badarg(Call) ->
     end.
 
 done() -> ok.
+
+%% prim_socket:open/4 calls nif_open/4, which opens a host socket. In a run
+%% with a policy, PBeam stops the run for an open by a runtime process.
+socket_open() ->
+    prim_socket:open(inet, stream, 0, #{}).
+
+%% prim_socket:open/4 with the option netns. ERTS on Linux enters the
+%% network namespace first, and the macOS build ignores the option.
+socket_bind_unspec() ->
+    {ok, Socket} = prim_socket:open(inet, dgram, 0, #{}),
+    prim_socket:bind(Socket, #{family => unspec}).
+
+socket_bind_family_number() ->
+    {ok, Socket} = prim_socket:open(inet, dgram, 0, #{}),
+    prim_socket:bind(Socket, #{family => 2}).
+
+socket_open_netns() ->
+    {ok, Socket} = prim_socket:open(inet, stream, 0, #{netns => "/var/run/netns/pbeam"}),
+    prim_socket:close(Socket).

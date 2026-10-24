@@ -67,7 +67,7 @@ pub(super) const BINDINGS: &[Binding] = &[
 /// assert_eq!(load(&Term::Integer(1), &atoms), 0);
 /// assert_eq!(load(&Term::Integer(2), &atoms), -1);
 /// ```
-pub(super) fn load(load_info: &Term, _atoms: &AtomTable) -> i32 {
+pub(super) fn load(load_info: &Term, _scheduler: &Scheduler) -> i32 {
     if matches!(load_info, Term::Integer(1)) {
         0
     } else {

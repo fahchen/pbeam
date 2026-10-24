@@ -20,6 +20,7 @@ mod resources;
 mod scheduler;
 mod schedulers;
 mod signal;
+mod sockets;
 mod time;
 mod timer;
 mod tty;

@@ -1,5 +1,5 @@
 -module(net_probe).
--export([main/0, text/0, debug_on/0]).
+-export([main/0, text/0, debug_on/0, ifaddrs_text/0, ifaddrs_debug/0, ifaddrs_netns/0]).
 
 %% The cases of `nif_info/0`, `nif_command/1`, and `nif_gethostname/0` of
 %% the `net` NIF library (`prim_net_nif.c:848-1021`). `main/0` gives one
@@ -11,7 +11,50 @@ main() ->
      {info_debug, call(fun() -> maps:get(debug, prim_net:info()) end)},
      {debug_bad, call(fun() -> prim_net:debug(1) end)},
      {hostname, call(fun() -> element(1, net:gethostname()) end)}
-     | lookups()].
+     | lookups() ++ interfaces()].
+
+%% The cases of `nif_if_name2index/1`, `nif_if_index2name/1`,
+%% `nif_if_names/0`, and the four Windows functions
+%% (`prim_net_nif.c:1914-1950`, `3124-3800`, `4272-4494`). ERTS and PBeam
+%% read the interfaces of one host.
+interfaces() ->
+    {ok, [{Index, Name} | _]} = net:if_names(),
+    [{Name1, call(Fun)} || {Name1, Fun} <-
+        [{if_names, fun() -> net:if_names() end},
+         {if_name, fun() -> net:if_name2index(Name) end},
+         {if_index, fun() -> net:if_index2name(Index) end},
+         {if_name_nul, fun() -> net:if_name2index(Name ++ [0, $x]) end},
+         {if_name_none, fun() -> net:if_name2index("pbeam-no-if") end},
+         {if_name_16, fun() -> net:if_name2index("1234567890123456") end},
+         {if_name_17, fun() -> net:if_name2index("12345678901234567") end},
+         {if_name_wide, fun() -> net:if_name2index([256]) end},
+         {if_name_atom, fun() -> net:if_name2index([a]) end},
+         {if_index_none, fun() -> net:if_index2name(16#7fffffff) end},
+         {if_index_negative, fun() -> net:if_index2name(-1) end},
+         {if_index_big, fun() -> net:if_index2name(1 bsl 32) end},
+         {adapters, fun() -> prim_net:get_adapters_addresses(#{}) end},
+         {if_entry, fun() -> prim_net:get_if_entry(#{}) end},
+         {interface_info, fun() -> prim_net:get_interface_info(#{}) end},
+         {ip_address_table, fun() -> prim_net:get_ip_address_table(#{}) end}]].
+
+%% The cases of `nif_getifaddrs/1` (`prim_net_nif.c:1381-1877`), as
+%% `text/0` writes them. The pinned ERTS on Linux defines `HAVE_SETNS`, so
+%% a `netns` that is not a string raises `badarg` there.
+ifaddrs_text() ->
+    Cases = [call(fun() -> net:getifaddrs() end),
+             call(fun() -> prim_net:getifaddrs(#{debug => false}) end),
+             call(fun() -> prim_net:getifaddrs(#{debug => 1}) end),
+             call(fun() -> prim_net:getifaddrs(#{netns => 1}) end)],
+    iolist_to_binary([[binary:encode_hex(term_to_binary(canonical(Case))), $\n]
+                      || Case <- Cases]).
+
+%% Ask `nif_getifaddrs/1` for its debug trace.
+ifaddrs_debug() ->
+    prim_net:getifaddrs(#{debug => true}).
+
+%% Ask `nif_getifaddrs/1` for the interfaces of a network namespace.
+ifaddrs_netns() ->
+    prim_net:getifaddrs(#{netns => "/var/run/netns/pbeam"}).
 
 %% The cases of `nif_getnameinfo/2`, `nif_getaddrinfo/3`,
 %% `nif_getservbyname/2`, and `nif_getservbyport/2`
