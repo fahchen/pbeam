@@ -427,13 +427,13 @@ pub(super) fn cancel(
             false,
             ACCEPTING,
         ),
-        "send" => (Direction::Write, state.write, &mut state.writer, false, 0),
-        "recv" => (Direction::Read, state.read, &mut state.reader, false, 0),
-        "recvfrom" | "recvmsg" | "recvmmsg" | "sendto" | "sendmsg" | "sendmmsg" | "sendv"
-        | "sendfile" => {
-            return Err(error(format!(
-                "prim_socket:nif_cancel/3: the operation {name} is not supported"
-            )));
+        // Each send and receive operation cancels the current writer or
+        // reader (prim_socket_nif.c:13955-14078).
+        "send" | "sendto" | "sendmsg" | "sendmmsg" | "sendv" | "sendfile" => {
+            (Direction::Write, state.write, &mut state.writer, false, 0)
+        }
+        "recv" | "recvfrom" | "recvmsg" | "recvmmsg" => {
+            (Direction::Read, state.read, &mut state.reader, false, 0)
         }
         _ if state.read & (CLOSING | CLOSED) != 0 => return Ok(closed()),
         _ => return Ok(BifResult::badarg()),

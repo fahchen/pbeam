@@ -125,11 +125,31 @@ pub(super) const BINDINGS: &[Binding] = &[
         },
     },
     Binding {
+        name: "nif_peername",
+        arity: 1,
+        job: Job::Normal,
+        run: |scheduler, arguments| socket::peername(scheduler, &arguments[0]),
+    },
+    Binding {
         name: "nif_recv",
         arity: 4,
         job: Job::Normal,
         run: |scheduler, arguments| {
             io::recv(
+                scheduler,
+                &arguments[0],
+                &arguments[1],
+                &arguments[2],
+                &arguments[3],
+            )
+        },
+    },
+    Binding {
+        name: "nif_recvfrom",
+        arity: 4,
+        job: Job::Normal,
+        run: |scheduler, arguments| {
+            io::recvfrom(
                 scheduler,
                 &arguments[0],
                 &arguments[1],
@@ -153,10 +173,31 @@ pub(super) const BINDINGS: &[Binding] = &[
         },
     },
     Binding {
+        name: "nif_sendto",
+        arity: 5,
+        job: Job::Normal,
+        run: |scheduler, arguments| {
+            io::sendto(
+                scheduler,
+                &arguments[0],
+                &arguments[1],
+                &arguments[2],
+                &arguments[3],
+                &arguments[4],
+            )
+        },
+    },
+    Binding {
         name: "nif_setopt",
         arity: 5,
         job: Job::Normal,
         run: socket::setopt_5,
+    },
+    Binding {
+        name: "nif_shutdown",
+        arity: 2,
+        job: Job::Normal,
+        run: |scheduler, arguments| socket::shutdown(scheduler, &arguments[0], &arguments[1]),
     },
     Binding {
         name: "nif_sockname",

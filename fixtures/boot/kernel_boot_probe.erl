@@ -3,7 +3,7 @@
 -behaviour(application).
 -behaviour(supervisor).
 -export([main/0, main/1, lookup/0, gethost/0, supports/0, socket/0, sockopt/0, socket_select/0, socket_io/0,
-         socket_acceptors/0, socket_connect_invalid/0, socket_cancel_recvfrom/0, start/2, stop/1, init/1]).
+         socket_dgram/0,         socket_acceptors/0, socket_connect_invalid/0, socket_recvfrom_flags/0, start/2, stop/1, init/1]).
 
 %% `erl -noshell -boot start_clean -pa fixtures/boot -s kernel_boot_probe
 %% main -kernel logger_level warning` runs main/0 in the boot process of init after the boot script
@@ -394,10 +394,10 @@ socket_connect_invalid() ->
     erlang:display(socket:connect(S, #{family => inet, addr => {1, 2, 3}})),
     init:stop().
 
-%% `-s kernel_boot_probe socket_cancel_recvfrom` cancels a recvfrom.
-socket_cancel_recvfrom() ->
-    {ok, {_, Ref}} = socket:open(inet, stream, tcp),
-    erlang:display(prim_socket:cancel(Ref, recvfrom, make_ref())),
+%% `-s kernel_boot_probe socket_recvfrom_flags` receives with the flag peek.
+socket_recvfrom_flags() ->
+    {ok, S} = socket:open(inet, dgram, udp),
+    erlang:display(socket:recvfrom(S, 0, [peek], 0)),
     init:stop().
 
 %% `erl -noshell -boot start_clean -pa fixtures/boot -s kernel_boot_probe
@@ -485,6 +485,100 @@ socket_io() ->
     _ = CRef,
     erlang:display({socket_io, Basic, Selected, Cancel, Sent, Partial, Written, Timeout,
                     Counters, Closed, PeerClosed, Errors}),
+    init:stop().
+
+%% `erl -noshell -boot start_clean -pa fixtures/boot -s kernel_boot_probe
+%% socket_dgram -kernel logger_level warning` runs socket_dgram/0. It runs
+%% socket:sendto/3,4,5, socket:recvfrom/1,2,3,4, socket:peername/1, and
+%% socket:shutdown/2 on inet datagram, local datagram, and inet stream
+%% sockets, with timeouts, nowait, cancel, a partial send, the counters of
+%% socket:info/1, and the argument errors. The errno of a shutdown after a
+%% peer shutdown depends on the host, so compare it on one host only.
+socket_dgram() ->
+    Loopback = #{family => inet, addr => loopback, port => 0},
+    {ok, U1} = socket:open(inet, dgram, udp),
+    {ok, U2} = socket:open(inet, dgram, udp),
+    {_, U1Ref} = U1,
+    ok = socket:bind(U1, Loopback),
+    ok = socket:bind(U2, Loopback),
+    {ok, A1} = socket:sockname(U1),
+    {ok, A2} = socket:sockname(U2),
+    From = fun({ok, {Addr, Data}}) -> {ok, {Addr =:= A1, Data}}; (Other) -> Other end,
+    Udp = [socket:peername(U1), socket:sendto(U1, <<"ping">>, A2), From(socket:recvfrom(U2)),
+           socket:sendto(U1, [<<"ab">>, "cd"], A2, []), From(socket:recvfrom(U2, 2, 1000)), socket:recvfrom(U2, 0, 0), socket:recvfrom(U2, 0, 50),
+           socket:sendto(U1, <<"xyz">>, A2, 1000), From(socket:recvfrom(U2, [], 1000)),
+           socket:sendto(U1, <<"tu">>, A2, [], infinity), From(socket:recvfrom(U2, 0, [], infinity)),
+           socket:sendto(U1, <<>>, A2), From(socket:recvfrom(U2, 0, 1000)),
+           socket:sendto(U1, <<"r">>, A2), timer:sleep(50), From(socket:recvfrom(U2, 0, 0))],
+    {select, {select_info, recvfrom, H1}} = socket:recvfrom(U2, 0, nowait),
+    Selected = [maps:with([rstates, num_readers], socket:info(U2)), socket:sendto(U1, <<"late">>, A2),
+                receive {'$socket', U2, select, H1} -> recv_select after 5000 -> none end,
+                From(socket:recvfrom(U2, 0, [], H1))],
+    {select, {select_info, recvfrom, H2}} = socket:recvfrom(U2, 0, nowait),
+    Cancel = [socket:cancel(U2, {select_info, recvfrom, H2}),
+              masked(socket:cancel(U2, {select_info, recvfrom, H2})),
+              masked(socket:cancel(U2, {select_info, sendto, make_ref()}))],
+    ok = socket:connect(U1, A2),
+    Connected = [socket:peername(U1) =:= {ok, A2}, socket:send(U1, <<"c">>), From(socket:recvfrom(U2, 0, 1000)),
+                 socket:send(U1, <<"d">>), socket:recv(U2, 0, 1000)],
+    Keys = [read_byte, read_pkg, read_pkg_max, read_fails, write_byte, write_pkg, write_pkg_max, write_fails],
+    Counters = [maps:with(Keys, maps:get(counters, socket:info(S))) || S <- [U1, U2]],
+    Path1 = <<"/tmp/pbeam_socket_dgram_1">>,
+    Path2 = <<"/tmp/pbeam_socket_dgram_2">>,
+    _ = [file:delete(P) || P <- [Path1, Path2]],
+    {ok, L1} = socket:open(local, dgram, default),
+    {ok, L2} = socket:open(local, dgram, default),
+    {ok, L3} = socket:open(local, dgram, default),
+    ok = socket:bind(L1, #{family => local, path => Path1}),
+    ok = socket:bind(L2, #{family => local, path => Path2}),
+    Local = [socket:sendto(L1, <<"loc">>, #{family => local, path => Path2}), socket:recvfrom(L2, 0, 1000),
+             socket:sendto(L3, <<"anon">>, #{family => local, path => Path2}), socket:recvfrom(L2, 0, 1000),
+             socket:peername(L2)],
+    _ = [socket:close(S) || S <- [L1, L2, L3]],
+    _ = [file:delete(P) || P <- [Path1, Path2]],
+    {ok, L} = socket:open(inet, stream, tcp),
+    ok = socket:bind(L, Loopback),
+    ok = socket:listen(L),
+    {ok, Addr} = socket:sockname(L),
+    {ok, C} = socket:open(inet, stream, tcp),
+    {_, CRef} = C,
+    NotConnected = socket:peername(C),
+    ok = socket:connect(C, Addr),
+    {ok, A} = socket:accept(L),
+    {select, {select_info, recvfrom, H3}} = socket:recvfrom(A, 0, nowait),
+    Stream = [NotConnected, socket:peername(C) =:= {ok, Addr}, socket:sendto(C, <<"st">>, Addr),
+              receive {'$socket', A, select, H3} -> recv_select after 5000 -> none end,
+              socket:recvfrom(A, 0, [], H3), socket:recvfrom(A, 0, 0)],
+    Big = binary:copy(<<"0123456789abcdef">>, 1 bsl 19),
+    {select, {SI1, Rest}} = socket:sendto(C, Big, Addr, nowait),
+    Partial = [element(1, SI1), byte_size(Rest) < byte_size(Big), socket:cancel(C, SI1)],
+    flush_recv(A),
+    {ok, D} = socket:open(inet, stream, tcp),
+    Shutdown = [socket:shutdown(C, write), socket:recvfrom(A, 0, 1000), socket:send(A, <<"back">>),
+                socket:recv(C, 0, 1000), socket:shutdown(A, read_write), socket:shutdown(A, read),
+                socket:shutdown(D, write), maps:get(read_fails, maps:get(counters, socket:info(A)))],
+    ok = socket:close(U2),
+    Closed = [socket:recvfrom(U2, 0, 0), socket:sendto(U2, <<"x">>, A1), socket:peername(U2),
+              socket:shutdown(U2, read)],
+    {_, U2Ref} = U2,
+    Errors = [strip(catch prim_socket:shutdown(CRef, foo)), strip(catch prim_socket:shutdown(make_ref(), read)),
+              strip(catch prim_socket:shutdown(U2Ref, foo)), strip(catch prim_socket:peername(make_ref())),
+              strip(catch prim_socket:sendto(U1Ref, foo, A2, [], make_ref())),
+              strip(catch prim_socket:sendto(U1Ref, <<>>, A2, [], foo)),
+              strip(catch prim_socket:sendto(make_ref(), <<>>, A2, [], make_ref())),
+              strip(catch prim_socket:sendto(U2Ref, <<>>, #{family => inet, addr => {1, 2, 3}, port => 1}, [], make_ref())),
+              strip(catch prim_socket:sendto(U1Ref, <<>>, {A2, A2, 1 bsl 40}, make_ref())),
+              strip(catch prim_socket:sendto(U1Ref, <<>>, {A2, A2, foo}, make_ref())),
+              strip(catch prim_socket:sendto(U1Ref, <<>>, {bad, #{family => inet, addr => {1, 2, 3}, port => 1}, 0},
+                                             make_ref())),
+              strip(catch prim_socket:recvfrom(make_ref(), 0, [], make_ref())),
+              strip(catch prim_socket:recvfrom(U1Ref, 0, [], foo)),
+              strip(catch prim_socket:recvfrom(U1Ref, foo, [], make_ref())),
+              strip(catch prim_socket:recvfrom(U1Ref, -1, [], make_ref())),
+              strip(catch prim_socket:recvfrom(U1Ref, 1 bsl 70, [], make_ref())),
+              strip(catch prim_socket:recvfrom(U2Ref, 0, [], zero))],
+    erlang:display({socket_dgram, Udp, Selected, Cancel, Connected, Counters, Local, Stream, Partial,
+                    Shutdown, Closed, Errors}),
     init:stop().
 
 flush_recv(S) ->

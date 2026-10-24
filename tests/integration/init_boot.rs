@@ -463,10 +463,32 @@ fn sends_and_receives_on_stream_sockets_as_pinned_erts() {
 }
 
 #[test]
+fn sends_and_receives_on_datagram_and_stream_sockets_with_addresses_as_pinned_erts() {
+    // `kernel_boot_probe:socket_dgram/0` runs `socket:sendto/3,4,5`,
+    // `socket:recvfrom/1,2,3,4`, `socket:peername/1`, `socket:shutdown/2`,
+    // and `socket:cancel/2` on inet and local datagram sockets and inet
+    // stream sockets, on the NIFs `nif_sendto/5`, `nif_recvfrom/4`,
+    // `nif_peername/1`, `nif_shutdown/2`, and `nif_cancel/3`
+    // (prim_socket_nif.c:6527-6600, 7153-7231, 7722-7779, 13626-13704,
+    // 13955-14078; unix_socket_syncio.c:3042-3091, 3888-3977): the source
+    // addresses, a truncated datagram, the read select, a partial send, the
+    // counters of `socket:info/1`, and the argument errors.
+    let (reference, status, node) = run_kernel_boot("socket_dgram", false, &["{socket_dgram,"]);
+    assert_eq!(status, Some(0), "ERTS");
+    assert!(
+        reference.starts_with("{socket_dgram,[{error,enotconn},ok,{ok,{true,<<\"ping\">>}},"),
+        "{reference}"
+    );
+    assert_eq!(node, reference, "PBeam");
+}
+
+#[test]
 fn stops_the_run_at_the_socket_calls_that_pbeam_does_not_support() {
     // PBeam has no acceptor queue (`essio_accept_accepting_other`,
-    // unix_socket_syncio.c:2746-2757) and no `recvfrom` yet. ERTS connects with an
-    // address that it did not decode (prim_socket_nif.c:6122-6143). These
+    // unix_socket_syncio.c:2746-2757). ERTS connects with an
+    // address that it did not decode (prim_socket_nif.c:6122-6143), and it
+    // passes the flags of a recvfrom to `recvfrom(2)`
+    // (unix_socket_syncio.c:3925-3927), which PBeam does not. These
     // calls stop the run with a runtime error (row "NIF stubs").
     for (probe, text) in [
         (
@@ -478,8 +500,8 @@ fn stops_the_run_at_the_socket_calls_that_pbeam_does_not_support() {
             "prim_socket:nif_connect/3: an address that does not decode is not supported",
         ),
         (
-            "socket_cancel_recvfrom",
-            "prim_socket:nif_cancel/3: the operation recvfrom is not supported",
+            "socket_recvfrom_flags",
+            "prim_socket:nif_recvfrom/4: the flags 2 are not supported",
         ),
     ] {
         let child = Command::new(env::current_exe().unwrap())
