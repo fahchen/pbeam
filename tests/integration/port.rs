@@ -393,8 +393,10 @@ fn charges_the_port_bifs_as_pinned_erts() {
     // `close` of an own port then handles the `EXIT` signal of the port
     // before it returns (erl_bif_port.c:419-429). The ERTS run gives the
     // measured processes a large heap, so that no garbage collection
-    // occurs.
-    let expected = "[{open,3},{command,41},{info,41},{info_closed,1},{close,43},{close_other,41}]";
+    // occurs. An exit signal or a close message to a port uses
+    // `CONTEXT_REDS/100`, and a connect message `CONTEXT_REDS/200`
+    // (erl_port.h:370-371).
+    let expected = "[{open,3},{command,41},{info,41},{info_closed,1},{close,43},{close_other,41},{exit,41},{message_close,41},{message_connect,21}]";
     let reference = Command::new("erl")
         .args([
             "+S",

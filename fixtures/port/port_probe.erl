@@ -412,7 +412,7 @@ sigchld_ignored() ->
 costs(Opts) ->
     Base = cost(none, Opts),
     [{Bif, cost(Bif, Opts) - Base}
-     || Bif <- [open, command, info, info_closed, close, close_other]].
+     || Bif <- [open, command, info, info_closed, close, close_other, exit, message_close, message_connect]].
 
 cost(Bif, Opts) ->
     Pid = spawn_opt(?MODULE, measure, [self(), Bif], Opts),
@@ -422,11 +422,12 @@ cost_arg(info_closed) ->
     Port = cat(),
     port_close(Port),
     Port;
-cost_arg(close_other) ->
+cost_arg(Bif) when Bif =:= close_other; Bif =:= exit ->
     Parent = self(),
     Pid = spawn(fun() -> Parent ! {self(), cat()}, receive stop -> ok end end),
     receive {Pid, Port} -> Port end;
-cost_arg(Bif) when Bif =:= command; Bif =:= info; Bif =:= close -> cat();
+cost_arg(Bif) when Bif =:= command; Bif =:= info; Bif =:= close;
+                   Bif =:= message_close; Bif =:= message_connect -> cat();
 cost_arg(_) -> none.
 
 %% Make the argument in the measured process, so that the process owns
@@ -445,6 +446,9 @@ cost_call(open, _) ->
 cost_call(command, Port) -> [erts_internal:port_command(Port, <<"x">>, [])];
 cost_call(Bif, Port) when Bif =:= info; Bif =:= info_closed -> [erts_internal:port_info(Port)];
 cost_call(Bif, Port) when Bif =:= close; Bif =:= close_other -> [erts_internal:port_close(Port)];
+cost_call(exit, Port) -> [exit(Port, shutdown)];
+cost_call(message_close, Port) -> [Port ! {self(), close}];
+cost_call(message_connect, Port) -> [Port ! {self(), {connect, self()}}];
 cost_call(none, _) -> [].
 
 %% The output and the exit status of a port whose pipes get fds at or
