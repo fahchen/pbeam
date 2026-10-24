@@ -58,11 +58,11 @@ fn select(
     direction: Direction,
     pid: ProcessId,
     reference: Term,
-) -> Result<(), BeamError> {
-    let message = socket_message(scheduler, socket, "select", reference)?;
+) {
+    // The load callback made the atoms (`prim_socket_nif.c:18842-18857`).
+    let message = socket_message(scheduler, socket, "select", reference).expect("made at load");
     scheduler.node().poll.select(fd, direction, pid, message);
     NodePoll::start(scheduler.node());
-    Ok(())
 }
 
 /// Return the fd of the host socket of an open socket.
@@ -171,7 +171,7 @@ pub(super) fn connect(
             let fd = fd(&state);
             state.connector = Some((caller, reference.clone()));
             state.write |= CONNECTING | SELECTED;
-            select(scheduler, key, fd, Direction::Write, caller, reference)?;
+            select(scheduler, key, fd, Direction::Write, caller, reference);
             drop(state);
             monitor(scheduler, caller, key);
             value(scheduler, "select")
@@ -311,7 +311,7 @@ pub(super) fn accept(
         Direction::Read,
         caller,
         reference.clone(),
-    )?;
+    );
     drop(state);
     if let Some(old) = current {
         let cancelled = atom(scheduler, "cancelled")?;
@@ -363,7 +363,8 @@ fn accepted_socket(
     };
     monitor(scheduler, owner, reference);
     if let (true, Some(registry)) = (registered, registry) {
-        send_registry(scheduler, registry, "add", reference)?;
+        // The load callback made the atoms (`prim_socket_nif.c:18842-18857`).
+        send_registry(scheduler, registry, "add", reference).expect("made at load");
     }
     Ok(BifResult::Value(Term::tuple(vec![
         Term::static_atom("ok"),

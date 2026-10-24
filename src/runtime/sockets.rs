@@ -78,9 +78,11 @@ impl Sockets {
         pid: ProcessId,
         poll: &NodePoll,
     ) -> (Vec<(ProcessId, Term)>, Option<ProcessId>) {
-        let Some(socket) = self.by_reference.get(&reference) else {
-            return (Vec::new(), None);
-        };
+        // PBeam keeps each socket until the end of the run.
+        let socket = self
+            .by_reference
+            .get(&reference)
+            .expect("a socket monitor refers to a kept socket");
         let mut socket = socket.lock().unwrap_or_else(|poison| poison.into_inner());
         // The connector and the current acceptor: clear the state and keep
         // the select, as `essio_down` and `essio_down_acceptor` do
