@@ -24,8 +24,8 @@ use crate::runtime::port::inet::errno_name;
 use crate::runtime::resources::lock;
 use crate::runtime::signal::Signal;
 use crate::runtime::sockets::{
-    ACCEPTING, BOUND, CLOSED, CLOSING, CONNECTED, CONNECTING, LISTENING, SELECTED, SocketState,
-    Sockets,
+    ACCEPTING, BOUND, CLOSED, CLOSING, CONNECTED, CONNECTING, IoCounters, LISTENING, SELECTED,
+    SocketState, Sockets,
 };
 use crate::term::{AtomTable, ProcessId, Reference};
 pub(super) use options::{getopt_3, getopt_5, setopt_5};
@@ -37,27 +37,29 @@ const SUN_PATH: usize = 104;
 #[cfg(not(target_vendor = "apple"))]
 const SUN_PATH: usize = 108;
 
-/// The keys of the socket counters of `esock_socket_info_counters`
-/// (`prim_socket_nif.c:4920-4990`). PBeam sends and receives nothing on a
-/// socket yet, so each counter is 0.
-const SOCKET_COUNTERS: [&str; 16] = [
-    "read_byte",
-    "read_fails",
-    "read_pkg",
-    "read_pkg_max",
-    "read_tries",
-    "read_waits",
-    "write_byte",
-    "write_fails",
-    "write_pkg",
-    "write_pkg_max",
-    "write_tries",
-    "write_waits",
-    "acc_success",
-    "acc_fails",
-    "acc_tries",
-    "acc_waits",
-];
+/// Return the socket counters of `esock_socket_info_counters`
+/// (`prim_socket_nif.c:4920-4990`) in its key order. PBeam does not count
+/// the accepts yet, so each `acc_` counter is 0.
+fn socket_counters(counters: &IoCounters) -> [(&'static str, Term); 16] {
+    [
+        ("read_byte", count(counters.read_byte)),
+        ("read_fails", count(counters.read_fails)),
+        ("read_pkg", count(counters.read_pkg)),
+        ("read_pkg_max", count(counters.read_pkg_max)),
+        ("read_tries", count(counters.read_tries)),
+        ("read_waits", Term::Integer(0)),
+        ("write_byte", count(counters.write_byte)),
+        ("write_fails", count(counters.write_fails)),
+        ("write_pkg", count(counters.write_pkg)),
+        ("write_pkg_max", count(counters.write_pkg_max)),
+        ("write_tries", count(counters.write_tries)),
+        ("write_waits", count(counters.write_waits)),
+        ("acc_success", Term::Integer(0)),
+        ("acc_fails", Term::Integer(0)),
+        ("acc_tries", Term::Integer(0)),
+        ("acc_waits", Term::Integer(0)),
+    ]
+}
 
 /// Return the map of `pairs`, whose keys are atoms.
 fn map(scheduler: &Scheduler, pairs: Vec<(Term, Term)>) -> Term {
@@ -203,7 +205,9 @@ fn named(scheduler: &mut Scheduler, names: &[(i32, &str)], value: i32) -> Result
 
 /// Run `prim_socket:nif_info(Socket)`, as `esock_socket_info` does
 /// (`prim_socket_nif.c:4689-4743`). PBeam has no reader, writer, or
-/// acceptor queue yet, so each of these numbers is 0.
+/// acceptor queue, so `num_readers` and `num_writers` count only the
+/// current reader and writer (`socket_info_reqs`,
+/// `prim_socket_nif.c:5185-5196`). `num_acceptors` is 0.
 ///
 /// # Errors
 ///
@@ -220,11 +224,7 @@ pub(super) fn info_1(scheduler: &mut Scheduler, socket: &Term) -> Result<BifResu
         .map_or(Term::static_atom("undefined"), Term::Pid);
     let read = states(scheduler, socket.read)?;
     let write = states(scheduler, socket.write)?;
-    let counters = SOCKET_COUNTERS
-        .iter()
-        .map(|name| (*name, Term::Integer(0)))
-        .collect::<Vec<_>>();
-    let counters = pairs(scheduler, &counters)?;
+    let counters = pairs(scheduler, &socket_counters(&socket.counters))?;
     let counters = map(scheduler, counters);
     let normal = atom(scheduler, "normal")?;
     let info = [
@@ -236,8 +236,8 @@ pub(super) fn info_1(scheduler: &mut Scheduler, socket: &Term) -> Result<BifResu
         ("wstates", write),
         ("ctype", normal),
         ("counters", counters),
-        ("num_readers", Term::Integer(0)),
-        ("num_writers", Term::Integer(0)),
+        ("num_readers", Term::Integer(socket.reader.is_some().into())),
+        ("num_writers", Term::Integer(socket.writer.is_some().into())),
         ("num_acceptors", Term::Integer(0)),
     ];
     let info = pairs(scheduler, &info)?;
@@ -397,6 +397,9 @@ pub(super) fn open_4(
                 meta: Term::static_atom("undefined"),
                 connector: None,
                 acceptor: None,
+                reader: None,
+                writer: None,
+                counters: IoCounters::default(),
             },
         );
         sockets.registry

@@ -2,8 +2,8 @@
 -compile(nowarn_deprecated_catch).
 -behaviour(application).
 -behaviour(supervisor).
--export([main/0, main/1, lookup/0, gethost/0, supports/0, socket/0, sockopt/0, socket_select/0,
-         socket_acceptors/0, socket_connect_invalid/0, socket_cancel_recv/0, start/2, stop/1, init/1]).
+-export([main/0, main/1, lookup/0, gethost/0, supports/0, socket/0, sockopt/0, socket_select/0, socket_io/0,
+         socket_acceptors/0, socket_connect_invalid/0, socket_cancel_recvfrom/0, start/2, stop/1, init/1]).
 
 %% `erl -noshell -boot start_clean -pa fixtures/boot -s kernel_boot_probe
 %% main -kernel logger_level warning` runs main/0 in the boot process of init after the boot script
@@ -299,7 +299,7 @@ socket_select() ->
     {ok, E} = socket:open(inet, stream, tcp),
     {select, {select_info, connect, EH}} = socket:connect(E, Addr, nowait),
     EConnect = [receive {'$socket', E, select, EH} -> connect_select after 5000 -> none end,
-                socket:cancel(E, {select_info, connect, EH}), element(1, socket:accept(L, 0))],
+                socket:cancel(E, {select_info, connect, EH}), element(1, socket:accept(L, 5000))],
     {select, {select_info, accept, H5}} = socket:accept(L, nowait),
     ok = socket:close(E),
     ok = socket:close(L),
@@ -394,11 +394,104 @@ socket_connect_invalid() ->
     erlang:display(socket:connect(S, #{family => inet, addr => {1, 2, 3}})),
     init:stop().
 
-%% `-s kernel_boot_probe socket_cancel_recv` cancels a recv.
-socket_cancel_recv() ->
+%% `-s kernel_boot_probe socket_cancel_recvfrom` cancels a recvfrom.
+socket_cancel_recvfrom() ->
     {ok, {_, Ref}} = socket:open(inet, stream, tcp),
-    erlang:display(prim_socket:cancel(Ref, recv, make_ref())),
+    erlang:display(prim_socket:cancel(Ref, recvfrom, make_ref())),
     init:stop().
+
+%% `erl -noshell -boot start_clean -pa fixtures/boot -s kernel_boot_probe
+%% socket_io -kernel logger_level warning` runs socket_io/0. It sends and
+%% receives on connected stream sockets with socket:send/2,3,4 and
+%% socket:recv/1,2,3,4, with timeouts, the flag peek, nowait, a partial send, cancel, a
+%% peer close, a close of a waiting reader, and the counters of
+%% socket:info/1. It displays only the results that are the same on Linux
+%% and macOS.
+socket_io() ->
+    process_flag(trap_exit, true),
+    Parent = self(),
+    {ok, L} = socket:open(inet, stream, tcp),
+    ok = socket:bind(L, #{family => inet, addr => loopback, port => 0}),
+    ok = socket:listen(L),
+    {ok, Addr} = socket:sockname(L),
+    {ok, C} = socket:open(inet, stream, tcp),
+    {_, CRef} = C,
+    ok = socket:connect(C, Addr),
+    {ok, A} = socket:accept(L),
+    Basic = [socket:send(C, <<"hello">>), socket:recv(A, 5),
+             socket:send(C, [<<"ab">>, "cd"], []), socket:recv(A, 4, []),
+             socket:send(C, <<"xyz">>, 1000), socket:recv(A, 0, 1000),
+             socket:recv(A, 0, 0), socket:recv(A, 3, 0), socket:recv(A, 3, 50),
+             socket:send(C, <<"pq">>), timer:sleep(50), socket:recv(A, 5, 0),
+             socket:send(C, <<"rs">>), timer:sleep(50), socket:recv(A, 5, 50),
+             socket:send(C, <<"tu">>, [], infinity), socket:recv(A, 2, [], infinity),
+             socket:send(C, <<"pk">>), socket:recv(A, 2, [peek], 1000), socket:recv(A, 2, 1000)],
+    {select, {select_info, recv, H1}} = socket:recv(A, 0, nowait),
+    Selected = [maps:with([rstates, num_readers], socket:info(A)), socket:send(C, <<"late">>),
+                receive {'$socket', A, select, H1} -> recv_select after 5000 -> none end,
+                socket:recv(A, 0, H1)],
+    {select, {select_info, recv, H2}} = socket:recv(A, 0, nowait),
+    Cancel = [socket:cancel(A, {select_info, recv, H2}),
+              masked(socket:cancel(A, {select_info, recv, H2}))],
+    {select, {select_info, recv, H3}} = socket:recv(A, 0, nowait),
+    ok = socket:send(C, <<"w">>),
+    timer:sleep(50),
+    Sent = [receive {'$socket', A, select, H3} -> recv_select after 5000 -> none end,
+            socket:cancel(A, {select_info, recv, H3}), socket:recv(A, 0, 0)],
+    Keys = [read_byte, read_pkg, read_pkg_max, read_fails, write_byte, write_pkg, write_pkg_max, write_fails],
+    Counters = [maps:with(Keys, maps:get(counters, socket:info(S))) || S <- [A, C]],
+    Big = binary:copy(<<"0123456789abcdef">>, 1 bsl 19),
+    Size = byte_size(Big),
+    {select, {SI1, Rest}} = socket:send(C, Big, nowait),
+    Partial = [element(1, SI1), byte_size(Rest) < Size, maps:with([wstates, num_writers], socket:info(C))],
+    spawn(fun() -> Parent ! {got, socket:recv(A, Size)} end),
+    Continued = socket:send(C, Rest, SI1, infinity),
+    Written = [Continued, receive {got, {ok, Got}} -> Got =:= Big after 5000 -> none end],
+    {select, {SI2, _}} = socket:send(C, Big, nowait),
+    Timeout = [socket:cancel(C, SI2), masked(socket:cancel(C, SI2)),
+               element(1, socket:send(C, Big, 50))],
+    {ok, _} = socket:recv(A, 0, 1000),
+    flush_recv(A),
+    Spawned = spawn(fun() -> Parent ! {reader, socket:recv(A, 0)} end),
+    timer:sleep(50),
+    ok = socket:close(A),
+    Closed = [receive {reader, R} -> R after 5000 -> none end, socket:send(A, <<"x">>), socket:recv(A, 0),
+              socket:cancel(A, {select_info, recv, make_ref()}),
+              socket:cancel(A, {select_info, send, make_ref()}), is_pid(Spawned)],
+    {ok, C2} = socket:open(inet, stream, tcp),
+    ok = socket:connect(C2, Addr),
+    {ok, A2} = socket:accept(L),
+    PeerClosed = [socket:recv(C2, 0, 0), socket:close(A2), socket:recv(C2, 0), socket:recv(C2, 0, nowait),
+                  maps:get(read_fails, maps:get(counters, socket:info(C2)))],
+    {ok, D} = socket:open(inet, stream, tcp),
+    {_, DRef} = D,
+    {ok, L2} = socket:open(inet, stream, tcp),
+    ok = socket:bind(L2, #{family => inet, addr => loopback, port => 0}),
+    ok = socket:listen(L2),
+    {select, _} = socket:accept(L2, nowait),
+    Errors = [socket:recv(D, 0, 0), socket:recv(L2, 0, 0),
+              strip(catch prim_socket:send(DRef, foo, 0, make_ref())),
+              strip(catch prim_socket:send(DRef, <<1:3>>, 0, make_ref())),
+              strip(catch prim_socket:send(DRef, <<>>, 0, foo)),
+              strip(catch prim_socket:send(DRef, <<>>, foo, make_ref())),
+              strip(catch prim_socket:send(DRef, <<>>, 1 bsl 40, make_ref())),
+              strip(catch prim_socket:send(make_ref(), <<>>, 0, make_ref())),
+              strip(catch prim_socket:recv(make_ref(), 0, [], make_ref())),
+              strip(catch prim_socket:recv(DRef, 0, [], foo)),
+              strip(catch prim_socket:recv(DRef, foo, [], make_ref())),
+              strip(catch prim_socket:recv(DRef, -1, [], make_ref())),
+              strip(catch prim_socket:recv(DRef, 1 bsl 70, [], make_ref())),
+              strip(catch prim_socket:recv(DRef, 0, [], zero))],
+    _ = CRef,
+    erlang:display({socket_io, Basic, Selected, Cancel, Sent, Partial, Written, Timeout,
+                    Counters, Closed, PeerClosed, Errors}),
+    init:stop().
+
+flush_recv(S) ->
+    case socket:recv(S, 0, 100) of
+        {ok, _} -> flush_recv(S);
+        _ -> ok
+    end.
 
 quiet() ->
     receive Message -> Message after 50 -> quiet end.

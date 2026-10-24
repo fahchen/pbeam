@@ -19,7 +19,8 @@ use crate::runtime::resources::lock;
 use crate::runtime::scheduler::poll::{Direction, NodePoll};
 use crate::runtime::signal::Signal;
 use crate::runtime::sockets::{
-    ACCEPTING, CLOSED, CLOSING, CONNECTED, CONNECTING, LISTENING, SELECTED, SocketState, Sockets,
+    ACCEPTING, CLOSED, CLOSING, CONNECTED, CONNECTING, IoCounters, LISTENING, SELECTED,
+    SocketState, Sockets,
 };
 use crate::term::{ProcessId, Reference};
 
@@ -51,7 +52,7 @@ fn value(scheduler: &mut Scheduler, name: &str) -> Result<BifResult, BeamError> 
 /// `esock_select_write` do (`prim_socket_nif.c:17707-17760`). The caller
 /// holds the lock of the socket, so that a close cannot run between its
 /// check and the select and leave a closed fd in the poll table.
-fn select(
+pub(super) fn select(
     scheduler: &mut Scheduler,
     socket: Reference,
     fd: i32,
@@ -66,7 +67,7 @@ fn select(
 }
 
 /// Return the fd of the host socket of an open socket.
-fn fd(socket: &SocketState) -> i32 {
+pub(super) fn fd(socket: &SocketState) -> i32 {
     socket
         .socket
         .as_ref()
@@ -184,7 +185,7 @@ pub(super) fn connect(
 }
 
 /// Make the socket `socket` monitor `pid`, as `MONP` does.
-fn monitor(scheduler: &mut Scheduler, pid: ProcessId, socket: Reference) {
+pub(super) fn monitor(scheduler: &mut Scheduler, pid: ProcessId, socket: Reference) {
     scheduler
         .send_signal(None, pid, Signal::SocketMonitor { socket })
         .expect("the caller is alive");
@@ -359,6 +360,9 @@ fn accepted_socket(
                 meta: Term::static_atom("undefined"),
                 connector: None,
                 acceptor: None,
+                reader: None,
+                writer: None,
+                counters: IoCounters::default(),
             },
         );
         sockets.registry
@@ -405,11 +409,28 @@ pub(super) fn cancel(
     let name = scheduler.atoms.name_of(operation).to_owned();
     let poll = scheduler.node().poll.clone();
     let mut state = lock(&socket);
-    let (direction, open, requestor) = match name.as_str() {
-        "connect" => (Direction::Write, state.write, &mut state.connector),
-        "accept" => (Direction::Read, state.read, &mut state.acceptor),
-        "recv" | "recvfrom" | "recvmsg" | "recvmmsg" | "send" | "sendto" | "sendmsg"
-        | "sendmmsg" | "sendv" | "sendfile" => {
+    // The `connect` cancel gives `{error, not_found}`; the others give
+    // `not_found` (`unix_socket_syncio.c:4967-5132`, `5144-5355`). The
+    // reader and writer cancels keep the states.
+    let (direction, open, requestor, not_found_error, bit) = match name.as_str() {
+        "connect" => (
+            Direction::Write,
+            state.write,
+            &mut state.connector,
+            true,
+            CONNECTING,
+        ),
+        "accept" => (
+            Direction::Read,
+            state.read,
+            &mut state.acceptor,
+            false,
+            ACCEPTING,
+        ),
+        "send" => (Direction::Write, state.write, &mut state.writer, false, 0),
+        "recv" => (Direction::Read, state.read, &mut state.reader, false, 0),
+        "recvfrom" | "recvmsg" | "recvmmsg" | "sendto" | "sendmsg" | "sendmmsg" | "sendv"
+        | "sendfile" => {
             return Err(error(format!(
                 "prim_socket:nif_cancel/3: the operation {name} is not supported"
             )));
@@ -425,7 +446,7 @@ pub(super) fn cancel(
         .is_some_and(|(pid, old)| *pid == caller && old == reference);
     if !found {
         drop(state);
-        return if direction == Direction::Write {
+        return if not_found_error {
             error_atom(scheduler, "not_found")
         } else {
             value(scheduler, "not_found")
@@ -433,9 +454,9 @@ pub(super) fn cancel(
     }
     *requestor = None;
     if direction == Direction::Write {
-        state.write &= !CONNECTING;
+        state.write &= !bit;
     } else {
-        state.read &= !ACCEPTING;
+        state.read &= !bit;
     }
     let active = poll.cancel_select(fd(&state), direction);
     drop(state);

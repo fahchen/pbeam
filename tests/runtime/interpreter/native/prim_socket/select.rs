@@ -36,6 +36,9 @@ fn resource(scheduler: &mut Scheduler, socket: Socket, read: u32, acceptor: Opti
             meta: Term::static_atom("undefined"),
             connector: None,
             acceptor: acceptor.map(|reference| (owner, reference)),
+            reader: None,
+            writer: None,
+            counters: IoCounters::default(),
         },
     );
     Term::Reference(reference)

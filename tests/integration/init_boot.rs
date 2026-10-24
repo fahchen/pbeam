@@ -443,9 +443,29 @@ fn connects_listens_accepts_and_cancels_sockets_with_select_messages_as_pinned_e
 }
 
 #[test]
+fn sends_and_receives_on_stream_sockets_as_pinned_erts() {
+    // `kernel_boot_probe:socket_io/0` runs `socket:send/2,3,4`,
+    // `socket:recv/1,2,3,4`, and `socket:cancel/2` with timeouts, `zero`,
+    // and `nowait` on the NIFs `nif_send/4`, `nif_recv/4`, and
+    // `nif_cancel/3` (prim_socket_nif.c:6440-6509, 7056-7124;
+    // unix_socket_syncio.c:2996-3036, 3796-3878, 5144-5355, 6809-7196,
+    // 9869-10520): a partial send and its continuation, the read select,
+    // the end of a stream, the abort of a waiting reader at a close
+    // (unix_socket_syncio.c:4637-4722), the counters of `socket:info/1`, and
+    // the argument errors.
+    let (reference, status, node) = run_kernel_boot("socket_io", false, &["{socket_io,"]);
+    assert_eq!(status, Some(0), "ERTS");
+    assert!(
+        reference.starts_with("{socket_io,[ok,{ok,<<\"hello\">>},"),
+        "{reference}"
+    );
+    assert_eq!(node, reference, "PBeam");
+}
+
+#[test]
 fn stops_the_run_at_the_socket_calls_that_pbeam_does_not_support() {
     // PBeam has no acceptor queue (`essio_accept_accepting_other`,
-    // unix_socket_syncio.c:2746-2757) and no reader. ERTS connects with an
+    // unix_socket_syncio.c:2746-2757) and no `recvfrom` yet. ERTS connects with an
     // address that it did not decode (prim_socket_nif.c:6122-6143). These
     // calls stop the run with a runtime error (row "NIF stubs").
     for (probe, text) in [
@@ -458,8 +478,8 @@ fn stops_the_run_at_the_socket_calls_that_pbeam_does_not_support() {
             "prim_socket:nif_connect/3: an address that does not decode is not supported",
         ),
         (
-            "socket_cancel_recv",
-            "prim_socket:nif_cancel/3: the operation recv is not supported",
+            "socket_cancel_recvfrom",
+            "prim_socket:nif_cancel/3: the operation recvfrom is not supported",
         ),
     ] {
         let child = Command::new(env::current_exe().unwrap())

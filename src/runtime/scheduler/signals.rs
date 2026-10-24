@@ -698,9 +698,19 @@ impl Scheduler {
                 2
             }
             Signal::SocketMonitor { socket } => {
-                self.handled(id, node)
-                    .monitored_by
-                    .push(TargetMonitor::Socket(socket));
+                // One entry per socket: `Sockets::monitor_down` handles each
+                // role of the process (owner, closer, connector, acceptor,
+                // reader, and writer) at once, and PBeam has no demonitor
+                // of a socket, so each read or write select would add one.
+                // The entry goes first, so that the exit clears the socket
+                // state before it sends a 'DOWN' message: a process that
+                // gets the 'DOWN' message of an acceptor, a connector, a
+                // reader, or a writer then sees the socket without it, on
+                // each scheduler thread.
+                let monitored_by = &mut self.handled(id, node).monitored_by;
+                if !monitored_by.contains(&TargetMonitor::Socket(socket)) {
+                    monitored_by.insert(0, TargetMonitor::Socket(socket));
+                }
                 2
             }
             Signal::PortLink { port } => {
