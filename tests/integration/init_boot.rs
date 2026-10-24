@@ -403,6 +403,26 @@ fn opens_binds_and_closes_sockets_at_the_kernel_boot_as_pinned_erts() {
 }
 
 #[test]
+fn sets_and_gets_socket_options_at_the_kernel_boot_as_pinned_erts() {
+    // `kernel_boot_probe:sockopt/0` runs `socket:setopt/3` and
+    // `socket:getopt/2` on the NIFs `nif_setopt/5` and `nif_getopt/3,5`
+    // (prim_socket_nif.c:7801-7961, 8328-8405, 8473-8533, 11504-11710,
+    // 12198-12254): boolean and integer options of the levels `socket`,
+    // `tcp`, and `ip`, the `otp` options `domain`, `meta`, and
+    // `use_registry`, the error returns, a closed socket, and
+    // `socket:bind/2` with the atoms `any`, `loopback`, and `broadcast`,
+    // which read `{otp, domain}` (socket.erl:3477). Some errors depend on
+    // the host OS, so the test compares the two runs on the host.
+    let (reference, status, node) = run_kernel_boot("sockopt", false, &["{sockopt,"]);
+    assert_eq!(status, Some(0), "ERTS");
+    assert!(
+        reference.starts_with("{sockopt,[[ok,{ok,true},ok,{ok,false},"),
+        "{reference}"
+    );
+    assert_eq!(node, reference, "PBeam");
+}
+
+#[test]
 fn connects_listens_accepts_and_cancels_sockets_with_select_messages_as_pinned_erts() {
     // `kernel_boot_probe:socket_select/0` runs `socket:connect/2,3`,
     // `socket:listen/1,2`, `socket:accept/1,2`, and `socket:cancel/2` with

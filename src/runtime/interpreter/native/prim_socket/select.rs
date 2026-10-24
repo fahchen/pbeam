@@ -355,6 +355,8 @@ fn accepted_socket(
                 read: 0,
                 write: CONNECTED,
                 registered,
+                // `alloc_descriptor` sets `meta.ref` to `undefined` (prim_socket_nif.c:17074).
+                meta: Term::static_atom("undefined"),
                 connector: None,
                 acceptor: None,
             },

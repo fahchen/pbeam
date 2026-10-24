@@ -7,6 +7,8 @@
     socket_open_netns/0,
     socket_bind_unspec/0,
     socket_bind_family_number/0,
+    socket_option_1/0, socket_option_2/0, socket_option_3/0, socket_option_4/0,
+    socket_option_5/0, socket_option_6/0,
     spawn/0,
     spawn_system_process/0,
     spawn_link/0,
@@ -1161,6 +1163,20 @@ socket_bind_unspec() ->
 socket_bind_family_number() ->
     {ok, Socket} = prim_socket:open(inet, dgram, 0, #{}),
     prim_socket:bind(Socket, #{family => 2}).
+
+%% Each socket_option_N/0 reaches a socket option form that PBeam does not
+%% set or get yet, and the run stops.
+socket_option_1() -> prim_socket:setopt_native(option_socket(), {socket, 4}, 1).
+socket_option_2() -> prim_socket:getopt_native(option_socket(), {socket, 4}, integer).
+socket_option_3() -> prim_socket:setopt(option_socket(), {socket, debug}, 1).
+socket_option_4() -> prim_socket:getopt(option_socket(), {socket, debug}).
+socket_option_5() -> prim_socket:setopt(option_socket(), {otp, debug}, true).
+socket_option_6() -> prim_socket:getopt(option_socket(), {otp, debug}).
+
+option_socket() ->
+    ok = prim_socket:init(),
+    {ok, Socket} = prim_socket:open(inet, stream, 0, #{}),
+    Socket.
 
 socket_open_netns() ->
     {ok, Socket} = prim_socket:open(inet, stream, 0, #{netns => "/var/run/netns/pbeam"}),
