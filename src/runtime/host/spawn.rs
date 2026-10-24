@@ -13,10 +13,7 @@ use std::{
     ffi::{CString, c_char, c_int, c_short},
     fs::File,
     io::{IoSlice, Write},
-    os::{
-        fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
-        unix::ffi::OsStrExt,
-    },
+    os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
     thread,
 };
 
@@ -81,11 +78,6 @@ pub(crate) enum SpawnError {
     /// with the `errno` of the failed `execve` as its status
     /// (`erl_child_setup.c:361-369`).
     Start(c_int),
-    /// The child cannot change to the directory of `{cd, Dir}`: `chdir`
-    /// fails with this `errno`. The child of ERTS then writes
-    /// `spawn: Could not cd to Dir\r\n` to its fd 2 and exits with the
-    /// `errno` as its status (`erl_child_setup.c:302-306`).
-    Directory(c_int),
 }
 
 /// A program that [`spawn`] started, with the parent ends of its pipes.
@@ -122,10 +114,8 @@ pub(crate) struct Child {
 ///    3 and 4, the output pipe also as fd 2 with `stderr_to_stdout`, a new
 ///    session (`setsid`), an empty signal mask, `argv[0]` `arg0`, the
 ///    environment and the working directory of `setting`
-///    (`erl_child_setup.c:290-369`). Before the start, check that the
-///    child can change to the directory: `access(X_OK)` of the directory,
-///    and `ENOTDIR` for a file that is not a directory, the `errno` values
-///    of `chdir`.
+///    (`erl_child_setup.c:290-369`). A directory that the child cannot
+///    enter fails `posix_spawn` with the `errno` of `chdir`.
 /// 4. Start the waiter thread, which reaps the child.
 ///
 /// A path or an argument ends at its first byte 0, as the C string that
@@ -185,9 +175,6 @@ fn start(
     // SAFETY: `path` is a NUL-terminated string.
     os_result(unsafe { libc::access(path.as_ptr(), libc::X_OK) }).map_err(SpawnError::Open)?;
     let directory = setting.directory.as_deref().map(c_string);
-    if let Some(directory) = &directory {
-        enterable(directory).map_err(SpawnError::Directory)?;
-    }
     let environment: Vec<CString> = setting
         .environment
         .iter()
@@ -430,25 +417,6 @@ fn c_string(bytes: &[u8]) -> CString {
         .position(|&byte| byte == 0)
         .unwrap_or(bytes.len());
     CString::new(&bytes[..end]).expect("the bytes before the first 0 have no 0")
-}
-
-/// Return `Ok` when a child can change to `directory`, or the `errno` that
-/// `chdir` gives: the `errno` of `stat`, `ENOTDIR` for a file that is not
-/// a directory, or the `errno` of `access(X_OK)`.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert_eq!(enterable(&c_string(b"/nonexistent")), Err(libc::ENOENT));
-/// ```
-fn enterable(directory: &CString) -> Result<(), c_int> {
-    let path = std::ffi::OsStr::from_bytes(directory.as_bytes());
-    match std::fs::metadata(path) {
-        Err(error) => Err(error.raw_os_error().unwrap_or(libc::ENOENT)),
-        Ok(metadata) if !metadata.is_dir() => Err(libc::ENOTDIR),
-        Ok(_) => nix::unistd::access(path, nix::unistd::AccessFlags::X_OK)
-            .map_err(|errno| errno as c_int),
-    }
 }
 
 /// Start `path` with `argv` and the environment `envp` in a new

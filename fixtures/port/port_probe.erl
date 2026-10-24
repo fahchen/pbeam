@@ -393,8 +393,8 @@ spawn() ->
 
 %% The env, arg0, cd, hide, and parallelism options: the argv[0], the
 %% environment, and the directory that the program sees, the parallelism
-%% item of port_info/2, the exit status of a child that cannot enter its
-%% directory, and the badarg of each bad option.
+%% item of port_info/2, the directory of the node for {cd, []}, and the
+%% badarg of each bad option.
 options() ->
     process_flag(trap_exit, true),
     os:putenv("PBEAM_PROBE_PUT", "p"),
@@ -417,12 +417,10 @@ options() ->
     Cat = cat(),
     Default = erlang:port_info(Cat, parallelism),
     true = port_close(Cat),
-    NoDir = open_port({spawn_executable, sh()},
-                      [binary, exit_status, stderr_to_stdout, {args, ["-c", "echo x"]},
-                       {cd, "/pbeam_no_such_dir"}]),
-    NoDirMessages = [receive {NoDir, M1} -> M1 end],
-    File = open_port({spawn, "true"}, [binary, exit_status, {cd, sh()}]),
-    FileMessages = [receive {File, M2} -> M2 end],
+    NoCd = open_port({spawn, "pwd"}, [binary, exit_status, {cd, []}]),
+    NoCdMessages = collect_status(NoCd, <<>>),
+    Here = open_port({spawn, "pwd"}, [binary, exit_status]),
+    HereMessages = collect_status(Here, <<>>),
     Errors = [catch_error(fun() -> open_port(Name, [binary | Opts]) end)
               || {Name, Opts} <- [{{spawn, "true"}, [{env, [{"A=B", "1"}]}]},
                                   {{spawn, "true"}, [{env, [{"A", 1}]}]},
@@ -432,7 +430,7 @@ options() ->
                                   {{spawn, "true"}, [{parallelism, x}]},
                                   {{spawn, "true"}, [{arg0, "x"}]},
                                   {{spawn_executable, sh()}, [{arg0, 1}]}]],
-    [Parallel, ExeMessages, ShellParallel, ShellMessages, Default, NoDirMessages, FileMessages, Errors,
+    [Parallel, ExeMessages, ShellParallel, ShellMessages, Default, NoCdMessages =:= HereMessages, Errors,
      flush()].
 
 collect_status(Port, Data) ->
@@ -518,6 +516,8 @@ fd_closed() ->
 %% Each call stops the PBeam run with a runtime error.
 unsupported(line) ->
     open_port({spawn_executable, sh()}, [binary, {line, 1 bsl 31}]);
+unsupported(cd) ->
+    open_port({spawn_executable, sh()}, [binary, {cd, "/pbeam_no_such_dir"}]);
 unsupported(in) ->
     open_port({spawn_executable, sh()}, [binary, in]);
 unsupported(out) ->

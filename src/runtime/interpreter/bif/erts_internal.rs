@@ -305,7 +305,12 @@ pub(super) fn open_port(
         // (`erl_bif_port.c:1086-1092`).
         _ => return Ok(Value(Term::static_atom("badarg"))),
     };
-    let directory = match &settings.directory {
+    // `open_port` converts no `Dir` for `{cd, []}` (`erl_bif_port.c:1094-1098`).
+    let directory = match settings
+        .directory
+        .as_ref()
+        .filter(|directory| !directory.is_nil())
+    {
         Some(directory) => match native_name(atoms, directory, false) {
             Some(directory) => Some(directory),
             None => return Ok(Value(Term::static_atom("badarg"))),
@@ -356,21 +361,12 @@ pub(super) fn open_port(
         let arg0 = settings.arg0.as_deref().unwrap_or(&path);
         spawn::spawn(&path, arg0, &args, settings.streams, &setting)
     };
-    let started = match started {
-        Err(SpawnError::Directory(errno)) => {
-            let directory = setting
-                .directory
-                .expect("a directory error has a directory");
-            spawn::serve(move |_, _| cd_failure(&directory, errno))
-        }
-        started => started,
-    };
     let child = match started {
         Ok(child) => child,
         Err(SpawnError::Open(errno)) => {
             return Ok(Value(Term::Atom(scheduler.atoms.put(&errno_id(errno))?)));
         }
-        Err(SpawnError::Start(errno) | SpawnError::Directory(errno)) => {
+        Err(SpawnError::Start(errno)) => {
             return Err(error(format!(
                 "unsupported open_port/2 of a program that posix_spawn does not start: {}: see \"Ports\" in docs/erts-differences.md",
                 errno_id(errno)
@@ -393,26 +389,6 @@ pub(super) fn open_port(
     let ack = Term::tuple(vec![Term::Reference(reference), Term::Port(port)]);
     scheduler.deliver(caller, ack);
     Ok(Value(Term::Reference(reference)))
-}
-
-/// Run the child of a port whose `{cd, Dir}` names a directory that the
-/// child cannot enter, as `erl_child_setup` does before it moves the pipes
-/// to fds 0, 1, and 2: write `spawn: Could not cd to Dir\r\n` to fd 2 of
-/// the node, and exit with `errno` as the status
-/// (`erl_child_setup.c:302-306`). The port gets no data, also with
-/// `stderr_to_stdout`.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert_eq!(cd_failure(b"/nonexistent", libc::ENOENT), libc::ENOENT);
-/// ```
-fn cd_failure(directory: &[u8], errno: i32) -> i32 {
-    use std::io::Write;
-    let message = [b"spawn: Could not cd to ".as_slice(), directory, b"\r\n"].concat();
-    // The child of ERTS ignores a failed write to fd 2 (`fprintf`).
-    let _ = std::io::stderr().write_all(&message);
-    errno
 }
 
 /// Return true when the last component of the native path `path` is
