@@ -423,6 +423,31 @@ fn sets_and_gets_socket_options_at_the_kernel_boot_as_pinned_erts() {
 }
 
 #[test]
+fn sets_and_gets_the_host_socket_options_as_pinned_erts() {
+    // `kernel_boot_probe:sockopt_host/0` runs the handlers
+    // `esock_setopt_bool_opt`, `esock_getopt_bool_opt`,
+    // `esock_setopt_int_opt`, `esock_getopt_int_opt`, `esock_setopt_hops`,
+    // `esock_setopt_multicast_if`, `esock_getopt_multicast_if`, and
+    // `esock_setopt_in_update_membership` (prim_socket_nif.c:8728-8834,
+    // 8941-8954, 11219-11259, 12638-12669, 13009-13048), the get of an
+    // option without a get handler (prim_socket_nif.c:12234-12236), and the
+    // options that the host does not support. The host options differ
+    // between Linux and macOS, so the test compares the two runs on the
+    // host.
+    let (reference, status, node) = run_kernel_boot("sockopt_host", false, &["{sockopt_host,"]);
+    assert_eq!(status, Some(0), "ERTS");
+    assert!(
+        reference.starts_with("{sockopt_host,[[ok,{ok,true},ok,{ok,false},"),
+        "{reference}"
+    );
+    assert!(
+        reference.contains("[ok,{ok,{127,0,0,1}},ok,{ok,{0,0,0,0}},"),
+        "{reference}"
+    );
+    assert_eq!(node, reference, "PBeam");
+}
+
+#[test]
 fn sets_and_gets_the_otp_socket_options_and_linger_as_pinned_erts() {
     // `kernel_boot_probe:sockopt_otp/0` runs the handlers of
     // `esock_setopt_otp` and `esock_getopt_otp`

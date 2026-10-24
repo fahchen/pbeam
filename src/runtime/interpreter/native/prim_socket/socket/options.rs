@@ -49,6 +49,9 @@ enum Got {
     Type(i32),
     /// The value of `esock_getopt_linger` (`prim_socket_nif.c:12482-12530`).
     Linger(libc::linger),
+    /// The address of `esock_getopt_multicast_if`
+    /// (`prim_socket_nif.c:12638-12669`).
+    Addr(Ipv4Addr),
 }
 
 /// The value form of a host option that [`set_host`] writes.
@@ -60,6 +63,15 @@ enum Form {
     Int,
     /// `esock_setopt_linger` (`prim_socket_nif.c:8551-8597`).
     Linger,
+    /// `esock_setopt_uint_opt` (`prim_socket_nif.c:11263-11288`).
+    #[cfg(target_os = "linux")]
+    Uint,
+    /// `esock_setopt_hops` (`prim_socket_nif.c:8941-8954`).
+    Hops,
+    /// `esock_setopt_multicast_if` (`prim_socket_nif.c:8728-8746`).
+    Addr,
+    /// `esock_setopt_in_update_membership` (`prim_socket_nif.c:8788-8834`).
+    Membership,
 }
 
 /// A decoded value of a host option that [`set_host`] writes.
@@ -68,6 +80,11 @@ enum Value {
     Int(i32),
     /// The `struct linger` of [`Form::Linger`].
     Linger(libc::linger),
+    /// The `struct in_addr` of [`Form::Addr`].
+    Addr(Ipv4Addr),
+    /// The `struct ip_mreq` of [`Form::Membership`]: the group and the
+    /// interface.
+    Membership(Ipv4Addr, Ipv4Addr),
 }
 
 /// Return `{invalid, {integer_range, Term}}` of
@@ -169,6 +186,15 @@ pub(in crate::runtime::interpreter::native::prim_socket) fn setopt_5(
         Form::Bool => decode_bool(scheduler, value).map(|flag| Value::Int(flag.into())),
         Form::Int => int(value).map(Value::Int),
         Form::Linger => decode_linger(scheduler, value).map(Value::Linger),
+        // The `unsigned int` reaches the host with the same bits.
+        #[cfg(target_os = "linux")]
+        Form::Uint => value
+            .bigint()
+            .and_then(|value| u32::try_from(value.as_ref()).ok())
+            .map(|value| Value::Int(value as i32)),
+        Form::Hops => decode_hops(scheduler, value).map(Value::Int),
+        Form::Addr => in_addr(scheduler, value).map(Value::Addr),
+        Form::Membership => decode_membership(scheduler, value),
     };
     let Some(decoded) = decoded else {
         return Ok(invalid(atom(scheduler, "value")?));
@@ -188,14 +214,51 @@ fn set_form(name: (&str, &str)) -> Option<Form> {
             "socket",
             "broadcast" | "keepalive" | "reuseaddr" | "reuseport" | "oobinline" | "dontroute",
         )
+        | ("socket", "timestamp")
         | ("tcp", "nodelay")
-        | ("ipv6", "v6only") => Some(Form::Bool),
+        | ("ip", "multicast_loop" | "recvtos" | "hdrincl")
+        | ("ipv6", "v6only" | "recvtclass" | "multicast_loop") => Some(Form::Bool),
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        ("ip", "pktinfo") => Some(Form::Bool),
+        #[cfg(target_os = "macos")]
+        ("ip", "recvif" | "recvdstaddr") => Some(Form::Bool),
+        #[cfg(target_os = "linux")]
+        ("ip", "recvttl") | ("tcp", "cork") | ("socket", "passcred") => Some(Form::Bool),
         ("socket", "rcvbuf" | "sndbuf" | "priority")
-        | ("tcp", "keepcnt" | "keepintvl")
-        | ("ip", "ttl") => Some(Form::Int),
+        | ("tcp", "keepcnt" | "keepintvl" | "maxseg")
+        | ("ip", "ttl" | "multicast_ttl")
+        | ("ipv6", "tclass" | "multicast_if") => Some(Form::Int),
+        #[cfg(target_os = "linux")]
+        ("tcp", "keepidle") => Some(Form::Int),
+        #[cfg(target_os = "linux")]
+        ("tcp", "user_timeout") => Some(Form::Uint),
+        ("ipv6", "multicast_hops" | "unicast_hops") => Some(Form::Hops),
+        ("ip", "multicast_if") => Some(Form::Addr),
+        ("ip", "add_membership" | "drop_membership") => Some(Form::Membership),
         ("socket", "linger") => Some(Form::Linger),
         _ => None,
     }
+}
+
+/// Return the hop count of `decode_hops` (`prim_socket_nif.c:16395-16410`):
+/// an integer from 0 to 255, or -1 for the atom `default`.
+fn decode_hops(scheduler: &Scheduler, value: &Term) -> Option<i32> {
+    match int(value) {
+        Some(hops) => (0..=255).contains(&hops).then_some(hops),
+        None => (atom_name(scheduler, value) == Some("default")).then_some(-1),
+    }
+}
+
+/// Return the `struct ip_mreq` of `esock_setopt_in_update_membership`
+/// (`prim_socket_nif.c:8797-8830`): the map `#{multiaddr := Addr,
+/// interface := Addr}`, with the addresses of `esock_decode_in_addr`.
+fn decode_membership(scheduler: &Scheduler, value: &Term) -> Option<Value> {
+    let multiaddr = field(&scheduler.atoms, value, "multiaddr")?;
+    let interface = field(&scheduler.atoms, value, "interface")?;
+    Some(Value::Membership(
+        in_addr(scheduler, multiaddr)?,
+        in_addr(scheduler, interface)?,
+    ))
 }
 
 /// Return the `struct linger` of `esock_setopt_linger`
@@ -222,6 +285,12 @@ fn get_form_only(name: (&str, &str)) -> bool {
     name == ("socket", "type")
 }
 
+/// Return whether ERTS has no get handler for the host option `name` that
+/// PBeam sets (`prim_socket_nif.c:3496-3532`, `12234-12236`).
+fn set_form_only(name: (&str, &str)) -> bool {
+    matches!(name, ("ip", "add_membership" | "drop_membership"))
+}
+
 /// Set the host option `name` with the host number `opt` of `host` to
 /// `value`, as
 /// `esock_setopt_level_opt` and `socket_setopt` do
@@ -233,6 +302,15 @@ fn set_host(host: &Socket, name: (&str, &str), opt: i32, value: Value) -> io::Re
         Value::Linger(linger) => {
             return keep_tos_and_priority(host, opt, || {
                 setsockopt(host, sockopt::Linger, &linger).map_err(io::Error::from)
+            });
+        }
+        Value::Addr(address) => {
+            return keep_tos_and_priority(host, opt, || host.set_multicast_if_v4(&address));
+        }
+        Value::Membership(group, interface) => {
+            return keep_tos_and_priority(host, opt, || match name {
+                ("ip", "add_membership") => host.join_multicast_v4(&group, &interface),
+                _ => host.leave_multicast_v4(&group, &interface),
             });
         }
         Value::Int(value) => value,
@@ -256,13 +334,52 @@ fn set_host(host: &Socket, name: (&str, &str), opt: i32, value: Value) -> io::Re
             ("tcp", "keepcnt") => setsockopt(host, sockopt::TcpKeepCount, &count),
             ("tcp", "keepintvl") => setsockopt(host, sockopt::TcpKeepInterval, &count),
             ("ipv6", "v6only") => setsockopt(host, sockopt::Ipv6V6Only, &flag),
+            ("socket", "timestamp") => setsockopt(host, sockopt::ReceiveTimestamp, &flag),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            ("ip", "pktinfo") => setsockopt(host, sockopt::Ipv4PacketInfo, &flag),
+            #[cfg(target_os = "macos")]
+            ("ip", "recvif") => setsockopt(host, sockopt::Ipv4RecvIf, &flag),
+            #[cfg(target_os = "macos")]
+            ("ip", "recvdstaddr") => setsockopt(host, sockopt::Ipv4RecvDstAddr, &flag),
+            #[cfg(target_os = "linux")]
+            ("ip", "recvttl") => setsockopt(host, sockopt::Ipv4RecvTtl, &flag),
+            #[cfg(target_os = "linux")]
+            ("socket", "passcred") => setsockopt(host, sockopt::PassCred, &flag),
             #[cfg(target_os = "linux")]
             ("socket", "priority") => setsockopt(host, sockopt::Priority, &value),
-            // ("ip", "ttl"), the last option of `set_form`.
-            _ => return host.set_ttl_v4(count),
+            #[cfg(target_os = "linux")]
+            ("tcp", "keepidle") => setsockopt(host, sockopt::TcpKeepIdle, &count),
+            #[cfg(target_os = "linux")]
+            ("tcp", "user_timeout") => setsockopt(host, sockopt::TcpUserTimeout, &count),
+            _ => return set_socket2(host, name, value),
         };
         result.map_err(io::Error::from)
     })
+}
+
+/// Set the host option `name` of `host` to the C `int` `value` with the
+/// typed calls of `socket2`, which pass each `u32` and `bool` on as a C
+/// `int`.
+fn set_socket2(host: &Socket, name: (&str, &str), value: i32) -> io::Result<()> {
+    let flag = value != 0;
+    let count = value as u32;
+    match name {
+        ("ip", "multicast_ttl") => host.set_multicast_ttl_v4(count),
+        ("ip", "multicast_loop") => host.set_multicast_loop_v4(flag),
+        ("ip", "recvtos") => host.set_recv_tos_v4(flag),
+        ("ip", "hdrincl") => host.set_header_included_v4(flag),
+        ("ipv6", "tclass") => host.set_tclass_v6(count),
+        ("ipv6", "recvtclass") => host.set_recv_tclass_v6(flag),
+        ("ipv6", "multicast_loop") => host.set_multicast_loop_v6(flag),
+        ("ipv6", "multicast_if") => host.set_multicast_if_v6(count),
+        ("ipv6", "multicast_hops") => host.set_multicast_hops_v6(count),
+        ("ipv6", "unicast_hops") => host.set_unicast_hops_v6(count),
+        ("tcp", "maxseg") => host.set_tcp_mss(count),
+        #[cfg(target_os = "linux")]
+        ("tcp", "cork") => host.set_tcp_cork(flag),
+        // ("ip", "ttl"), the last option of the form `Int` of `set_form`.
+        _ => host.set_ttl_v4(count),
+    }
 }
 
 /// Run `set` on `host`, as `socket_setopt` does on Linux
@@ -385,6 +502,9 @@ fn getopt(
         .socket
         .as_ref()
         .expect("an open socket has a host socket");
+    if set_form_only(name) {
+        return Ok(invalid(atom(scheduler, "socket_option")?));
+    }
     let Some(got) = get_host(host, name) else {
         return Err(unsupported(&format!("option {name:?}")));
     };
@@ -403,6 +523,10 @@ fn getopt(
             ];
             let pairs = pairs(scheduler, &entries)?;
             Ok(Some(map(scheduler, pairs)))
+        }
+        Ok(Got::Addr(address)) => {
+            let octets = address.octets().map(|byte| Term::Integer(byte.into()));
+            Ok(Some(Term::tuple(octets.to_vec())))
         }
         Err(failure) => Err(failure),
     };
@@ -442,10 +566,53 @@ fn get_host(host: &Socket, name: (&str, &str)) -> Option<io::Result<Got>> {
             getsockopt(host, sockopt::TcpKeepInterval).map(|value| Got::Int(value.into()))
         }
         ("ipv6", "v6only") => getsockopt(host, sockopt::Ipv6V6Only).map(Got::Bool),
-        ("ip", "ttl") => return Some(host.ttl_v4().map(|value| Got::Int(value.into()))),
-        _ => return None,
+        ("socket", "timestamp") => getsockopt(host, sockopt::ReceiveTimestamp).map(Got::Bool),
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        ("ip", "pktinfo") => getsockopt(host, sockopt::Ipv4PacketInfo).map(Got::Bool),
+        #[cfg(target_os = "macos")]
+        ("ip", "recvif") => getsockopt(host, sockopt::Ipv4RecvIf).map(Got::Bool),
+        #[cfg(target_os = "macos")]
+        ("ip", "recvdstaddr") => getsockopt(host, sockopt::Ipv4RecvDstAddr).map(Got::Bool),
+        #[cfg(target_os = "linux")]
+        ("ip", "recvttl") => getsockopt(host, sockopt::Ipv4RecvTtl).map(Got::Bool),
+        #[cfg(target_os = "linux")]
+        ("socket", "passcred") => getsockopt(host, sockopt::PassCred).map(Got::Bool),
+        #[cfg(target_os = "linux")]
+        ("tcp", "keepidle") => {
+            getsockopt(host, sockopt::TcpKeepIdle).map(|value| Got::Int((value as i32).into()))
+        }
+        #[cfg(target_os = "linux")]
+        ("tcp", "user_timeout") => {
+            getsockopt(host, sockopt::TcpUserTimeout).map(|value| Got::Int(value.into()))
+        }
+        _ => return get_socket2(host, name),
     };
     Some(result.map_err(io::Error::from))
+}
+
+/// Read the host option `name` of `host` with the typed calls of
+/// `socket2`, which read a C `int`, or `None` for an option without a
+/// handler in PBeam. The casts `as i32` give back the bits of the `int`.
+fn get_socket2(host: &Socket, name: (&str, &str)) -> Option<io::Result<Got>> {
+    let int = |value: io::Result<u32>| value.map(|value| Got::Int((value as i32).into()));
+    Some(match name {
+        ("ip", "ttl") => int(host.ttl_v4()),
+        ("ip", "multicast_ttl") => int(host.multicast_ttl_v4()),
+        ("ip", "multicast_loop") => host.multicast_loop_v4().map(Got::Bool),
+        ("ip", "multicast_if") => host.multicast_if_v4().map(Got::Addr),
+        ("ip", "recvtos") => host.recv_tos_v4().map(Got::Bool),
+        ("ip", "hdrincl") => host.header_included_v4().map(Got::Bool),
+        ("ipv6", "tclass") => int(host.tclass_v6()),
+        ("ipv6", "recvtclass") => host.recv_tclass_v6().map(Got::Bool),
+        ("ipv6", "multicast_loop") => host.multicast_loop_v6().map(Got::Bool),
+        ("ipv6", "multicast_if") => int(host.multicast_if_v6()),
+        ("ipv6", "multicast_hops") => int(host.multicast_hops_v6()),
+        ("ipv6", "unicast_hops") => int(host.unicast_hops_v6()),
+        ("tcp", "maxseg") => int(host.tcp_mss()),
+        #[cfg(target_os = "linux")]
+        ("tcp", "cork") => host.tcp_cork().map(Got::Bool),
+        _ => return None,
+    })
 }
 
 /// Return the raise of `error:{invalid, {otp_socket_option, Opt}}` of
