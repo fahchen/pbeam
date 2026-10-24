@@ -3597,9 +3597,16 @@ pub(super) fn select_replace_trap(
     // (`erl_db_hash.c:2853-2856`, `erl_db_tree.c:2418-2419`). A hash trap
     // uses all reductions, and a bound or impossible key of an
     // `ordered_set` table charges nothing (`erl_db_tree.c:2377-2397`).
+    // A tree turn charges only its own replaced objects
+    // (`erl_db_tree.c:2290`); a hash turn charges the total.
+    let charged = if tree {
+        got - resume.map_or(0, |(_, _, before, _)| before)
+    } else {
+        got
+    };
     match reductions {
         Some(reductions) => process.bump_reductions(
-            i32::try_from((reductions + got).min(2 * REPLACE_ITERATIONS)).unwrap_or(i32::MAX),
+            i32::try_from((reductions + charged).min(2 * REPLACE_ITERATIONS)).unwrap_or(i32::MAX),
         ),
         None if !tree => process.bump_all_reductions(),
         None => {}
