@@ -88,7 +88,7 @@ struct Binding {
 
 /// The load callback of a static NIF library: it takes the load info and
 /// the atom table of the run, and returns the veto of the callback.
-type LoadCallback = fn(&Term, &AtomTable) -> i32;
+type LoadCallback = fn(&Term, &Scheduler) -> i32;
 
 /// The static NIF library of one module. ERTS finds a static library by the
 /// module name (`is_static_nif_module` in `beam/erl_nif.c:5324-5331`).
@@ -603,7 +603,7 @@ pub(super) fn load_nif(
     let veto = match linked {
         Linked::Static(library) => library
             .load
-            .map_or(0, |load| load(&arguments[1], &scheduler.atoms)),
+            .map_or(0, |load| load(&arguments[1], scheduler)),
         Linked::Extension(library) => library.load.map_or(0, |load| {
             load(&mut NifContext::new(&scheduler.atoms), &arguments[1])
         }),

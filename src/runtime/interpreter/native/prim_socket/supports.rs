@@ -361,7 +361,7 @@ pub(super) fn supports_1(scheduler: &mut Scheduler, key: &Term) -> Result<BifRes
 }
 
 /// Return the atom `name`.
-fn atom(scheduler: &mut Scheduler, name: &str) -> Result<Term, BeamError> {
+pub(super) fn atom(scheduler: &mut Scheduler, name: &str) -> Result<Term, BeamError> {
     Ok(Term::Atom(scheduler.atoms.put(name)?))
 }
 

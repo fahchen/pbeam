@@ -18,6 +18,7 @@ use crate::{
         mailbox::{NodeId, Step, Walk},
         scheduler::AliasMode,
         signal::Signal,
+        sockets::Sockets,
     },
     term::{ProcessId, Reference, Term},
 };
@@ -91,6 +92,21 @@ pub(in crate::runtime) enum Flushed {
 }
 
 impl Scheduler {
+    /// Run the monitor of the socket resource `socket` on its owner or
+    /// closer `owner` after it exits (see [`Sockets::monitor_down`]), and send
+    /// `{'$socket', del, Socket}` to the registry as `esock_send_reg_del_msg`
+    /// does (`prim_socket_nif.c:7698-7702`). The load callback made both
+    /// atoms (`prim_socket_nif.c:18842-18857`), so their `put` finds them.
+    pub(in crate::runtime) fn socket_owner_down(&mut self, owner: ProcessId, socket: Reference) {
+        let registry = lock(&self.node().resources.kind::<Sockets>()).monitor_down(socket, owner);
+        if let Some(registry) = registry {
+            let tag = Term::Atom(self.atoms.put("$socket").expect("made at load"));
+            let del = Term::Atom(self.atoms.put("del").expect("made at load"));
+            let socket = Term::tuple(vec![tag.clone(), Term::Reference(socket)]);
+            self.send_message(owner, registry, Term::tuple(vec![tag, del, socket]));
+        }
+    }
+
     /// Remove the monitor of the file resource `file` from the target
     /// monitor list of its owner `owner`, as `enif_demonitor_process` in
     /// `close_nif` (`prim_file_nif.c:633`) does, when the current process is
@@ -670,6 +686,12 @@ impl Scheduler {
                 }
                 2
             }
+            Signal::SocketMonitor { socket } => {
+                self.handled(id, node)
+                    .monitored_by
+                    .push(TargetMonitor::Socket(socket));
+                2
+            }
             Signal::PortLink { port } => {
                 let links = &mut self.handled(id, node).links;
                 if links.get(&LinkId::Port(port)).is_none() {
@@ -989,6 +1011,10 @@ impl Scheduler {
                 Signal::FileMonitor { file } => {
                     count += 4;
                     lock(&self.node().resources.kind::<Files>()).monitor_down(file);
+                }
+                Signal::SocketMonitor { socket } => {
+                    count += 4;
+                    self.socket_owner_down(id, socket);
                 }
                 Signal::PortMonitor { port, reference: _ } => {
                     count += 4;
