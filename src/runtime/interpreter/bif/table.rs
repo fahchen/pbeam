@@ -216,7 +216,7 @@ bifs! {
     erlang:is_record/1 as ErlangIsRecord1 => |_, [term]| Ok(Value(Term::static_atom(if matches!(term, Term::Record(_)) { "true" } else { "false" }))),
     erlang:is_record/2 as ErlangIsRecord2 => |_, [term, name]| Ok(erlang::is_record(term, name, None)),
     erlang:is_record/3 as ErlangIsRecord3 => |_, [term, name, size]| Ok(erlang::is_record(term, name, Some(size))),
-    erlang:is_reference/1 as ErlangIsReference1 => |_, [term]| Ok(Value(Term::static_atom(if matches!(term, Term::Reference(_)) { "true" } else { "false" }))),
+    erlang:is_reference/1 as ErlangIsReference1 => |_, [term]| Ok(Value(Term::static_atom(if matches!(term, Term::Reference(_) | Term::Resource(_)) { "true" } else { "false" }))),
     erlang:is_tuple/1 as ErlangIsTuple1 => |_, [term]| Ok(Value(Term::static_atom(if matches!(term, Term::Tuple(_)) { "true" } else { "false" }))),
     erlang:length/1 as ErlangLength1 => |cx, [list]| erlang::length(cx.scheduler.current_process_mut(), list, 0),
     erlang:link/1 as ErlangLink1 => |cx, [target]| erlang::link(cx.scheduler, target),

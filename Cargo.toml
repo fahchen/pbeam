@@ -188,6 +188,10 @@ name = "nif_terms"
 path = "tests/integration/nif_terms.rs"
 
 [[test]]
+name = "nif_resources"
+path = "tests/integration/nif_resources.rs"
+
+[[test]]
 name = "extension_library"
 path = "tests/integration/extension_library.rs"
 

@@ -22,7 +22,7 @@
 //! | pid | `<0.Number.Serial>` |
 //! | reference | `#Ref<0.N2.N1.N0>` |
 
-use super::{AtomTable, Target, Term, match_context::MATCH_CONTEXT_ESCAPE};
+use super::{AtomTable, Reference, Target, Term, match_context::MATCH_CONTEXT_ESCAPE};
 
 /// The number of low bits of the pid data that ERTS prints as the pid
 /// number (`_PID_NUM_SIZE`, `erl_term.h:646-656`). The higher bits are the
@@ -238,8 +238,8 @@ fn print_term_counted(term: &Term, atoms: &AtomTable, dcount: &mut i64) -> Vec<u
                 );
             }
             Term::Port(port) => text.extend_from_slice(format!("#Port<0.{}>", port.0).as_bytes()),
-            Term::Reference(reference) => {
-                let [n0, n1, n2] = reference.numbers();
+            Term::Reference(_) | Term::Resource(_) => {
+                let [n0, n1, n2] = term.reference().map_or([0; 3], Reference::numbers);
                 text.extend_from_slice(format!("#Ref<0.{n2}.{n1}.{n0}>").as_bytes());
             }
             // `#Module:Name{Key=Value,...}` in the sorted key order

@@ -46,7 +46,9 @@ use crate::term::{
 /// ```
 pub(super) fn node(term: &Term) -> BifResult {
     match term {
-        Term::Pid(_) | Term::Port(_) | Term::Reference(_) => Value(local_node()),
+        Term::Pid(_) | Term::Port(_) | Term::Reference(_) | Term::Resource(_) => {
+            Value(local_node())
+        }
         _ => BifResult::badarg(),
     }
 }
@@ -6546,7 +6548,7 @@ fn write_display(writer: &mut dyn Write, bytes: &[u8]) -> BifResult {
 /// ```
 pub(super) fn ref_to_list(term: &Term, atoms: &AtomTable) -> BifResult {
     match term {
-        Term::Reference(_) => term_text_list(term, atoms),
+        Term::Reference(_) | Term::Resource(_) => term_text_list(term, atoms),
         _ => BifResult::badarg(),
     }
 }

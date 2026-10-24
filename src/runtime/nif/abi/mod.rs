@@ -18,6 +18,9 @@
 
 mod env;
 mod layout;
+mod resource;
+
+pub(crate) use resource::Resource;
 
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 
@@ -128,10 +131,11 @@ pub(crate) struct Library {
     load: Option<LoadFn>,
     /// Whether the entry has an upgrade callback.
     upgrade: bool,
-    /// The `dlopen` handle, which only its drop reads. It is the last
-    /// field, so the drop closes the library after the other fields.
-    #[expect(dead_code, reason = "the drop of the handle closes the library")]
-    handle: Handle,
+    /// The `dlopen` handle. The library and each resource type of its load
+    /// share it, and the drop of the last one closes the library. It is
+    /// the last field, so the drop closes the library after the other
+    /// fields.
+    handle: Arc<Handle>,
 }
 
 impl Library {
@@ -175,7 +179,7 @@ impl Library {
     /// ```
     pub(crate) fn load(&self, atoms: &Arc<AtomTable>, info: &Term) -> i32 {
         self.load.map_or(0, |load| {
-            let mut env = Env::new(atoms, std::slice::from_ref(info));
+            let mut env = Env::load(atoms, info, &self.handle);
             // PBeam has no `enif_priv_data` yet, so no call reads the
             // private data of the callback.
             let mut private: *mut c_void = std::ptr::null_mut();
@@ -340,6 +344,6 @@ pub(crate) fn open(name: &CStr) -> Result<Library, OpenError> {
         functions,
         load: entry.load,
         upgrade: entry.upgrade.is_some(),
-        handle,
+        handle: Arc::new(handle),
     })
 }

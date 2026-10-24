@@ -2408,7 +2408,7 @@ pub(super) fn term_type(atoms: &AtomTable, term: &Term) -> Result<BifResult, Bea
         Term::Map(_) => "flatmap",
         Term::Integer(_) if term.small_integer().is_some() => "fixnum",
         Term::Integer(_) | Term::BigInt(_) => "bignum",
-        Term::Reference(_) => "reference",
+        Term::Reference(_) | Term::Resource(_) => "reference",
         Term::Float(_) => "hfloat",
         Term::Pid(_) => "pid",
         Term::Port(_) => "port",
