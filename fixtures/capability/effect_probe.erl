@@ -647,7 +647,8 @@ ambient() ->
         element(1, prim_net:getnameinfo(#{family => inet, addr => loopback, port => 80}, [numerichost])),
         element(1, prim_net:getaddrinfo("127.0.0.1", "pbeam-no-such-service")),
         prim_net:getservbyname("http", "tcp"),
-        prim_net:getservbyport(80, "tcp")
+        prim_net:getservbyport(80, "tcp"),
+        erts_internal:term_type(id(a))
     ].
 
 %% Each metadata probe makes a temporary file, so `write_file_info/3`
@@ -1027,7 +1028,8 @@ executables() ->
         attempt(fun() -> erlang:port_close(Port) end),
         attempt(fun() -> erlang:open_port({spawn_executable, <<"/bin/cat">>}, [binary]) end),
         attempt(fun() -> erlang:open_port({spawn_executable, "/bin/sh"}, [binary]) end),
-        attempt(fun() -> erlang:open_port({spawn_executable, "/bin/../bin/cat"}, [binary]) end)
+        attempt(fun() -> erlang:open_port({spawn_executable, "/bin/../bin/cat"}, [binary]) end),
+        attempt(fun() -> erlang:open_port({fd, 1, 2}, [binary]) end)
     ].
 
 %% The `signals` constraint of `signal`. SIG_DFL is the start disposition

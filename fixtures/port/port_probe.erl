@@ -1,6 +1,6 @@
 -module(port_probe).
 -export([exit_status/0, output/0, command/0, close/0, owner_exit/0, epipe/0, errors/0,
-         nul_name/0, spawn/0, sigchld_ignored/0, packet/0, packet_errors/0, eof/0, lines/0, monitor/0, unsupported/1, terminal/0, high_fd/0, costs/1, measure/2]).
+         nul_name/0, spawn/0, sigchld_ignored/0, packet/0, packet_errors/0, eof/0, lines/0, monitor/0, fd/3, fd_steal/2, unsupported/1, terminal/0, high_fd/0, fd_closed/0, costs/1, measure/2]).
 
 %% Each result replaces a port with the atom port, because the port numbers
 %% of ERTS and PBeam differ.
@@ -199,7 +199,8 @@ os_pid(Port) ->
 write(Port) ->
     receive {Port, {data, <<"ready">>}} -> ok end,
     Sent = port_command(Port, <<"x">>),
-    [Sent, flush(), erlang:port_info(Port)].
+    Exit = receive {'EXIT', Port, Reason} -> [{'EXIT', port, Reason}] after 5000 -> [] end,
+    [Sent, Exit, erlang:port_info(Port)].
 
 %% Send SIGTERM to the two programs, and wait until kill ends. The program
 %% runs sleep with exec, so its OS pid is the pid of sleep.
@@ -453,6 +454,17 @@ high_fd() ->
                                                 {args, ["-c", "printf hi; exit 5"]}]),
     collect(Port, []).
 
+%% A port on fd 200, which is not open, opens; its write fails with ebadf.
+%% An fd at or above the soft RLIMIT_NOFILE gives einval.
+fd_closed() ->
+    process_flag(trap_exit, true),
+    Port = open_port({fd, 200, 200}, [binary]),
+    Idle = flush(),
+    Sent = port_command(Port, <<"x">>),
+    Exit = receive {'EXIT', Port, Reason} -> [{'EXIT', port, Reason}] after 5000 -> [] end,
+    High = catch_error(fun() -> open_port({fd, 2000000, 2000000}, [binary]) end),
+    [Idle, Sent, Exit, erlang:port_info(Port), High].
+
 %% Each call stops the PBeam run with a runtime error.
 unsupported(line) ->
     open_port({spawn_executable, sh()}, [binary, {line, 1 bsl 31}]);
@@ -462,8 +474,8 @@ unsupported(hide) ->
     open_port({spawn_executable, sh()}, [binary, hide]);
 unsupported(empty_line) ->
     open_port({spawn_executable, sh()}, [binary, {line, 1 bsl 32}]);
-unsupported(fd) ->
-    open_port({fd, 0, 1}, [binary]);
+unsupported(fd_list) ->
+    open_port({fd, 200, 200}, []);
 unsupported(exec) ->
     open_port({spawn_executable, "/"}, [binary, exit_status]);
 unsupported(force) ->
@@ -523,3 +535,46 @@ normal(Port) when is_port(Port) -> port;
 normal({A, B}) -> {normal(A), normal(B)};
 normal({A, B, C}) -> {normal(A), normal(B), normal(C)};
 normal(Term) -> Term.
+
+%% Open fd ports on the pipes `In1` and `In2` and the file `Out`: read the
+%% data and the end of file with `eof`, read the items of port_info/2,
+%% close with port_close/1, then read to the end of file without `eof`,
+%% which closes the port with the reason normal. The output fd stays open
+%% after the first port closes. Then give the errors of open_port/2.
+fd(In1, In2, Out) ->
+    P1 = open_port({fd, In1, Out}, [binary, eof]),
+    true = port_command(P1, <<"ping">>),
+    D1 = fd_read(P1),
+    I1 = [erlang:port_info(P1, Item) || Item <- [name, input, output, os_pid]],
+    C1 = port_close(P1),
+    P2 = open_port({fd, In2, Out}, [binary]),
+    Ref = erlang:monitor(port, P2),
+    true = port_command(P2, <<"pong">>),
+    D2 = receive {P2, {data, Data}} -> Data end,
+    Down = receive {'DOWN', Ref, port, P2, Reason} -> Reason end,
+    Errors = [fd_error(Name, Settings) || {Name, Settings} <-
+                  [{{fd, In1}, [binary]}, {{fd, a, Out}, [binary]},
+                   {{fd, In1, Out, 0}, [binary]}, {{fd, 1 bsl 59, Out}, [binary]},
+                   {{fd, -1, Out}, [binary]}, {{fd, In1, (1 bsl 32) + Out}, [binary]},
+                   {{fd, 1 bsl 31, Out}, [binary]}, {{fd, In1, Out}, [binary, exit_status]},
+                   {{fd, In1, Out}, [binary, {args, []}]}]],
+    {D1, I1, C1, erlang:port_info(P1), D2, Down, erlang:port_info(P2), Errors}.
+
+fd_read(Port) ->
+    receive
+        {Port, {data, Data}} -> [Data | fd_read(Port)];
+        {Port, eof} -> [eof]
+    end.
+
+fd_error(Name, Settings) ->
+    try open_port(Name, Settings) catch error:Reason -> Reason end.
+
+%% Open two fd ports on the pipe `In`: the second port takes the read
+%% select of `In` from the first, so only the second port gets the data
+%% and the end of file.
+fd_steal(In, Out) ->
+    P1 = open_port({fd, In, Out}, [binary]),
+    P2 = open_port({fd, In, Out}, [binary, eof]),
+    Data = fd_read(P2),
+    Stray = receive {P1, Message} -> Message after 100 -> none end,
+    {Data, Stray, port_close(P1), port_close(P2)}.

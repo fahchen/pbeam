@@ -2328,6 +2328,25 @@ fn a_flushed_port_leaves_the_shared_port_table() {
 }
 
 #[test]
+fn a_read_of_a_reader_that_reads_no_spawn_pipe_changes_nothing() {
+    use crate::runtime::port::{
+        Driver,
+        inet::{Inet, SocketType},
+    };
+    // The poll can give an fd whose last reader is not a spawn port that
+    // waits for it, as a reader that changed its select before the read.
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.schedule_next().unwrap();
+    let tcp = Inet::new(SocketType::Stream);
+    let port = scheduler
+        .open_port(b"tcp_inet".to_vec(), Driver::Inet(tcp))
+        .unwrap();
+    let handles = scheduler.node.ports().handles(0);
+    assert!(crate::runtime::port::read(&handles, 0, Some(port)).is_none());
+}
+
+#[test]
 fn changes_nothing_on_a_port_that_closed() {
     use crate::runtime::port::{
         Driver,

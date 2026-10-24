@@ -1,0 +1,77 @@
+-module(size_probe).
+-export([sizes/0, show/0, hashmap/0, flatmap/0, float_pair/0, int_pair/0,
+         binary_type/0, binary_size/0, id/1]).
+
+-record #pt{x = 0}.
+
+%% Return erts_debug:size/1 of a table of shared and unshared terms of
+%% each kind, then erts_debug:same/2 and erts_internal:term_type/1 cases.
+sizes() ->
+    X = id(7),
+    A = id([a, b]),
+    T = {a, X},
+    F = id(1.5),
+    B = id(1 bsl 70),
+    M = #{1 => A, 2 => A},
+    Fun = fun() -> {A, X} end,
+    Bin = id(<<1, 2, 3>>),
+    R = #pt{x = id(1)},
+    Terms = [1, a, [], self(), F, B, {B, B}, make_ref(),
+             {}, T, {T, T},
+             A, [A, A], [a | b], #{}, Fun, {Fun, Fun}, fun lists:map/2,
+             [Fun | A], {fun lists:map/2, erlang:make_fun(lists, map, id(2))}],
+    Sizes = [erts_debug:size(Term) || Term <- id(Terms)],
+    Same = [erts_debug:same(A, A), erts_debug:same(A, id([a, b])),
+            erts_debug:same(1, 1), erts_debug:same(a, b),
+            erts_debug:same(T, T), erts_debug:same(M, M),
+            erts_debug:same(Fun, Fun), erts_debug:same(B, B),
+            erts_debug:same(Bin, Bin), erts_debug:same(R, R),
+            erts_debug:same(fun lists:map/2, erlang:make_fun(lists, map, id(2))),
+            erts_debug:same(Fun, fun() -> {A, X} end),
+            erts_debug:same({}, list_to_tuple(id([])))],
+    Types = [erts_internal:term_type(Term)
+             || Term <- id([X, 1 bsl 59, B, F, a, [], A, T, M,
+                            maps:from_list([{I, I} || I <- lists:seq(1, id(33))]),
+                            Fun, fun lists:map/2, self(), make_ref()])],
+    Keys = [erts_internal:map_to_tuple_keys(Map) || Map <- id([#{}])],
+    Errors = [error_of(a),
+              error_of(maps:from_list([{I, I} || I <- lists:seq(1, id(33))]))],
+    {Sizes, Same, Types, Keys, Errors}.
+
+%% Exit with the result of sizes/0, so the host reads it.
+show() ->
+    exit(sizes()).
+
+%% Return erts_debug:size/1 of a map of more than 32 keys.
+hashmap() ->
+    erts_debug:size(maps:from_list([{I, I} || I <- lists:seq(1, id(33))])).
+
+%% Return erts_debug:size/1 of a flatmap with keys.
+flatmap() ->
+    erts_debug:size(id(#{1 => a})).
+
+%% Return erts_debug:size/1 of a tuple of one float twice.
+float_pair() ->
+    F = id(1.5),
+    erts_debug:size({F, F}).
+
+%% Return erts_debug:size/1 of a tuple of one 64-bit bignum twice.
+int_pair() ->
+    I = id(1 bsl 62),
+    erts_debug:size({I, I}).
+
+%% Return erts_debug:size/1 of a binary built by appends.
+binary_size() ->
+    erts_debug:size(<<(id(<<"a">>))/binary, (id(<<"b">>))/binary>>).
+
+%% Return erts_internal:term_type/1 of a binary.
+binary_type() ->
+    erts_internal:term_type(id(<<1, 2, 3>>)).
+
+error_of(Term) ->
+    try erts_internal:map_to_tuple_keys(Term)
+    catch Class:Reason -> {Class, Reason}
+    end.
+
+id(Term) ->
+    Term.

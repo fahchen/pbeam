@@ -3390,11 +3390,186 @@ pub(super) fn system_info(scheduler: &mut Scheduler, item: &Term) -> Result<BifR
         Term::Atom(atom) if atoms.name_of(atom) == "system_logger" => {
             Ok(Value(scheduler.node().system_logger()))
         }
-        _ => Err(error(format!(
+        Term::Atom(atom) if atoms.name_of(atom) == "version" => Ok(Value(charlist(ERTS_VERSION))),
+        // `EMULATOR` (`erl_bif_info.c:3050-3054`).
+        Term::Atom(atom) if atoms.name_of(atom) == "machine" => Ok(Value(charlist("BEAM"))),
+        // `erl_bif_info.c:3042-3044`, `sys/unix/sys.c:868-885`.
+        Term::Atom(atom) if atoms.name_of(atom) == "os_version" => Ok(Value(Term::tuple(
+            host::os_version()
+                .map(|number| Term::Integer(i64::from(number)))
+                .to_vec(),
+        ))),
+        // `erl_bif_info.c:2855-2856`.
+        Term::Atom(atom) if atoms.name_of(atom) == "start_time" => {
+            Ok(Value(Term::Integer(time::MONOTONIC_TIME_START_EXTERNAL)))
+        }
+        // PBeam does not start distribution, so the node has the creation 0
+        // of a node that is not alive (`erl_bif_info.c:3179-3183`).
+        Term::Atom(atom) if atom.is_static("creation") => Ok(Value(Term::Integer(0))),
+        // PBeam rejects the `+B` emulator flag, so `ignore_break` keeps its
+        // default 0 (`erl_init.c:824`, `erl_bif_info.c:3184-3190`).
+        Term::Atom(atom) if atoms.name_of(atom) == "break_ignored" => {
+            Ok(Value(Term::static_atom("false")))
+        }
+        // PBeam does not support `seq_trace`, so no system sequential tracer
+        // is set (`erl_bif_info.c:2899-2904`).
+        Term::Atom(atom) if atoms.name_of(atom) == "sequential_tracer" => {
+            let tracer = Term::Atom(atoms.put("sequential_tracer")?);
+            Ok(Value(Term::tuple(vec![tracer, Term::static_atom("false")])))
+        }
+        // PBeam rejects the `+zdntgc` emulator flag, so the delay keeps
+        // `ERTS_NODE_TAB_DELAY_GC_DEFAULT` (`erl_node_tables.h:67`,
+        // `erl_bif_info.c:3425-3433`).
+        Term::Atom(atom) if atoms.name_of(atom) == "delayed_node_table_gc" => {
+            Ok(Value(Term::Integer(60)))
+        }
+        // `erl_bif_info.c:2780-2783` takes each tuple to `info_1_tuple`, and
+        // `erl_bif_info.c:3633` rejects each other term that the chain does
+        // not name.
+        Term::Atom(atom)
+            if KNOWN_SYSTEM_INFO_ITEMS
+                .binary_search(&atoms.name_of(atom))
+                .is_err() =>
+        {
+            Ok(BifResult::badarg())
+        }
+        Term::Tuple(_) | Term::Atom(_) => Err(error(format!(
             "unsupported erlang:system_info/1 argument {}",
             debug_term(item, atoms)
         ))),
+        _ => Ok(BifResult::badarg()),
     }
+}
+
+/// The ERTS version of the pinned OTP, `VSN` of `erts/vsn.mk:23`, which
+/// `erlang:system_info(version)` returns (`erl_bif_info.c:3045-3049`).
+const ERTS_VERSION: &str = "17.1";
+
+/// The atoms that `system_info_1` of the pinned ERTS accepts
+/// (`erl_bif_info.c:2773-3633`), in sorted order. The pinned build leaves
+/// out `instruction_counts` (`ERTS_OPCODE_COUNTER_SUPPORT`) and the
+/// `ultrasparc_*` items, so they raise `badarg` there.
+const KNOWN_SYSTEM_INFO_ITEMS: &[&str] = &[
+    "all_schedulers_state",
+    "alloc_util_allocators",
+    "allocated_areas",
+    "allocator",
+    "async_dist",
+    "atom_count",
+    "atom_limit",
+    "beam_jump_table",
+    "break_ignored",
+    "build_type",
+    "c_compiler_used",
+    "check_io",
+    "compat_rel",
+    "compile_info",
+    "constant_pool_support",
+    "context_reductions",
+    "cpu_quota",
+    "cpu_topology",
+    "creation",
+    "debug_compiled",
+    "decentralized_counter_groups_map",
+    "delayed_node_table_gc",
+    "dirty_cpu_schedulers",
+    "dirty_cpu_schedulers_online",
+    "dirty_io_schedulers",
+    "dist",
+    "dist_buf_busy_limit",
+    "dist_ctrl",
+    "driver_version",
+    "dynamic_trace",
+    "dynamic_trace_probes",
+    "eager_check_io",
+    "embedded_3pps",
+    "emu_args",
+    "emu_flavor",
+    "emu_type",
+    "end_time",
+    "endian",
+    "ethread_info",
+    "ethread_used_tse",
+    "ets_always_compress",
+    "ets_count",
+    "ets_limit",
+    "ets_realloc_moves",
+    "fullsweep_after",
+    "garbage_collection",
+    "halt_flush_timeout",
+    "heap_sizes",
+    "heap_type",
+    "hipe_architecture",
+    "info",
+    "io_thread",
+    "kernel_poll",
+    "literal_test",
+    "loaded",
+    "lock_checking",
+    "lock_counting",
+    "logical_processors",
+    "logical_processors_available",
+    "logical_processors_online",
+    "machine",
+    "max_heap_size",
+    "max_integer",
+    "message_queue_data",
+    "min_bin_vheap_size",
+    "min_heap_size",
+    "modified_timing_level",
+    "multi_scheduling",
+    "multi_scheduling_blockers",
+    "nif_version",
+    "normal_multi_scheduling_blockers",
+    "os_monotonic_time_source",
+    "os_system_time_source",
+    "os_type",
+    "os_version",
+    "otp_release",
+    "outstanding_system_requests_limit",
+    "port_count",
+    "port_limit",
+    "port_parallelism",
+    "port_tasks",
+    "process_count",
+    "process_limit",
+    "procs",
+    "reader_groups_map",
+    "run_queues",
+    "scheduler_bind_type",
+    "scheduler_bindings",
+    "scheduler_id",
+    "schedulers",
+    "schedulers_active",
+    "schedulers_online",
+    "schedulers_state",
+    "schedulers_total",
+    "scheduling_statistics",
+    "sequential_tracer",
+    "smp_support",
+    "snifs",
+    "start_time",
+    "system_architecture",
+    "system_logger",
+    "system_version",
+    "taints",
+    "thread_pool_size",
+    "thread_progress",
+    "threads",
+    "time_correction",
+    "time_offset",
+    "time_warp_mode",
+    "tolerant_timeofday",
+    "total_scheduling_statistics",
+    "trace_control_word",
+    "update_cpu_info",
+    "version",
+    "wordsize",
+];
+
+/// Return the string `text` as a list of character codes.
+fn charlist(text: &str) -> Term {
+    Term::list_from(text.bytes().map(|byte| Term::Integer(i64::from(byte))))
 }
 
 /// Return the default scheduler count of the host (see [`Schedulers::host`]).
