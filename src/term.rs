@@ -41,6 +41,8 @@ use tuple::Tuple;
 use num_bigint::BigInt;
 use std::{collections::HashSet, fmt, sync::Arc};
 
+use crate::runtime::Resource;
+
 /// The smallest ERTS small integer on a 64-bit system: -(2^59).
 pub(crate) const SMALL_INTEGER_MIN: i64 = -(1 << 59);
 /// The largest ERTS small integer on a 64-bit system: 2^59 - 1.
@@ -119,6 +121,14 @@ pub enum Term {
     Port(PortId),
     /// A reference owned by this runtime.
     Reference(Reference),
+    /// A NIF resource term: a magic reference that keeps its resource
+    /// object alive, as an ERTS resource term is a magic reference to the
+    /// magic binary of the object (`erl_nif.c:3190-3204`). It is a
+    /// reference in each operation of the language: the type tests, the
+    /// term order, the text, the hash, and the external format use its
+    /// reference. The drop of the last term and the last C reference of
+    /// the object calls the destructor of its type.
+    Resource(Arc<Resource>),
     /// A fun: the fun entry of a lambda and its free variables for a local
     /// fun, or the module, function, and arity for an external fun.
     Fun(Fun),
@@ -451,12 +461,31 @@ impl Term {
                 }
                 _ => left.same_thing(right),
             },
-            (Term::Float(_) | Term::Reference(_), _) if self == other => return None,
+            (Term::Float(_) | Term::Reference(_) | Term::Resource(_), _) if self == other => {
+                return None;
+            }
             (Term::Integer(_), _) if self == other && self.small_integer().is_none() => {
                 return None;
             }
             _ => self == other,
         })
+    }
+
+    /// Return the reference of a reference or of a resource term, which is
+    /// its magic reference, or `None` for another term.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Term::Reference(Reference(0)).reference(), Some(Reference(0)));
+    /// assert_eq!(Term::Nil.reference(), None);
+    /// ```
+    pub(crate) fn reference(&self) -> Option<Reference> {
+        match self {
+            Term::Reference(reference) => Some(*reference),
+            Term::Resource(resource) => Some(resource.reference()),
+            _ => None,
+        }
     }
 
     /// Return the value of an integer in the ERTS small-integer range,
@@ -727,6 +756,7 @@ impl Clone for Term {
             Term::Pid(pid) => Term::Pid(*pid),
             Term::Port(port) => Term::Port(*port),
             Term::Reference(reference) => Term::Reference(*reference),
+            Term::Resource(resource) => Term::Resource(Arc::clone(resource)),
             Term::Fun(fun) => Term::Fun(fun.clone()),
             Term::Record(record) => Term::Record(record.clone()),
             Term::MatchContext(context) => Term::MatchContext(Arc::clone(context)),
@@ -920,7 +950,11 @@ impl Term {
                 }
                 (Term::Pid(left), Term::Pid(right)) => left == right,
                 (Term::Port(left), Term::Port(right)) => left == right,
-                (Term::Reference(left), Term::Reference(right)) => left == right,
+                // A resource term is its magic reference.
+                (
+                    Term::Reference(_) | Term::Resource(_),
+                    Term::Reference(_) | Term::Resource(_),
+                ) => left.reference() == right.reference(),
                 // A match context is a heap object, so its identity is its
                 // address. ERTS never compares a match context
                 // (`get_term_type`, beam_validator.erl:2903-2908).
@@ -1094,6 +1128,7 @@ fn write_debug(term: &Term, atoms: Option<&AtomTable>, out: &mut impl fmt::Write
             Term::Pid(pid) => write!(out, "Pid({pid:?})")?,
             Term::Port(port) => write!(out, "Port({port:?})")?,
             Term::Reference(reference) => write!(out, "Reference({reference:?})")?,
+            Term::Resource(resource) => write!(out, "Resource({:?})", resource.reference())?,
             Term::MatchContext(context) => write!(out, "MatchContext({context:?})")?,
             Term::Nil | Term::Cons(_) => {
                 let (elements, tail) = term.list_cells().expect("the term is a list");

@@ -164,6 +164,7 @@ fn shape(term: &Term) -> Shape<'_> {
         Term::Map(map) => Shape::Map(map),
         Term::Binary(bytes) => Shape::Binary(bytes),
         Term::Reference(reference) => Shape::Reference(*reference),
+        Term::Resource(resource) => Shape::Reference(resource.reference()),
         Term::Fun(fun) => Shape::Fun(fun),
         Term::MatchContext(_) => unreachable!("{MATCH_CONTEXT_ESCAPE}"),
     }
@@ -950,8 +951,11 @@ pub(crate) fn make_hash(atoms: &AtomTable, term: &Term) -> u32 {
                     }
                     hash = uint32_step(hash, u64::from(low), FUNNY_9).wrapping_mul(FUNNY_10);
                 }
-                Term::Reference(reference) => {
-                    let number = u64::from(reference.numbers()[0]);
+                Term::Reference(_) | Term::Resource(_) => {
+                    let number = term
+                        .reference()
+                        .map_or(0, |reference| reference.numbers()[0]);
+                    let number = u64::from(number);
                     hash = uint32_step(hash, number, FUNNY_9).wrapping_mul(FUNNY_10);
                 }
                 Term::Tuple(elements) => stack.push(HashStep::Tuple { elements, index: 0 }),
@@ -1591,8 +1595,11 @@ pub(crate) fn make_hash2(atoms: &AtomTable, term: &Term) -> (u32, u64) {
             Term::Port(port) => {
                 hash = hash2_with(hash, port.0 as u32, (port.0 >> 32) as u32, HCONST_6);
             }
-            Term::Reference(reference) => {
-                hash = hash_with(hash, reference.numbers()[0], HCONST_7);
+            Term::Reference(_) | Term::Resource(_) => {
+                let number = term
+                    .reference()
+                    .map_or(0, |reference| reference.numbers()[0]);
+                hash = hash_with(hash, number, HCONST_7);
             }
             Term::Tuple(elements) => {
                 let arity = elements.len() as u32;

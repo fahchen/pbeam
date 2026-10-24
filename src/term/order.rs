@@ -48,7 +48,7 @@ use std::cmp::Ordering;
 use num_bigint::{BigInt, Sign};
 use num_traits::FromPrimitive;
 
-use super::{AtomTable, Term, match_context::MATCH_CONTEXT_ESCAPE};
+use super::{AtomTable, Reference, Term, match_context::MATCH_CONTEXT_ESCAPE};
 use crate::error::{BeamError, error};
 
 /// The rank of `[]` in the ERTS term order (`NIL_DEF`).
@@ -156,6 +156,35 @@ impl Term {
     }
 }
 
+/// Return the order of two references. ERTS compares two references on
+/// one node by their number words, from the highest word down
+/// (`erts_cmp_compound`, utils.c:2283-2286), and [`Reference::numbers`]
+/// matches that layout (row "Term order" of docs/erts-differences.md). An
+/// alias reference holds the pid of its owner in the higher ERTS words,
+/// which a PBeam reference does not keep, so its order is not supported.
+///
+/// # Errors
+///
+/// Two different references of which one is an alias reference give a
+/// runtime error.
+fn reference_order(left: Reference, right: Reference) -> Result<Ordering, BeamError> {
+    if left == right {
+        return Ok(Ordering::Equal);
+    }
+    if left.is_pid_reference() || right.is_pid_reference() {
+        return Err(error(
+            "unsupported term order of an alias reference (see \"Term order\" in docs/erts-differences.md)",
+        ));
+    }
+    // ERTS compares `N2`, `N1`, `N0`, with the magic marker of a magic
+    // reference in `N1` (`utils.c:2283-2286`, `erl_bif_unique.h:102-113`).
+    Ok(left
+        .numbers()
+        .iter()
+        .rev()
+        .cmp(right.numbers().iter().rev()))
+}
+
 /// Compare two terms without their nested terms. For two lists, tuples,
 /// maps, or funs that the sizes and fun entries do not order, push the
 /// nested pairs onto `steps` and return `Equal`. Two cons cells push the
@@ -180,6 +209,10 @@ fn compare_pair<'a>(
     steps: &mut Vec<Step<'a>>,
     atoms: &AtomTable,
 ) -> Result<Ordering, BeamError> {
+    // A resource term is its magic reference.
+    if let Some((left, right)) = left.reference().zip(right.reference()) {
+        return reference_order(left, right);
+    }
     let order = match (left, right) {
         (Term::Cons(left), Term::Cons(right)) => {
             // The tails go on the stack first, so the heads compare first.
@@ -220,28 +253,6 @@ fn compare_pair<'a>(
         (Term::Binary(left), Term::Binary(right)) => left.cmp(right),
         (Term::Pid(left), Term::Pid(right)) => left.0.cmp(&right.0),
         (Term::Port(left), Term::Port(right)) => left.0.cmp(&right.0),
-        // ERTS compares two references on one node by their number words,
-        // from the highest word down (`erts_cmp_compound`,
-        // utils.c:2283-2286), and the words below match that layout (row
-        // "Term order" of docs/erts-differences.md). An alias reference
-        // holds the pid of its owner in the higher ERTS words, which a PBeam
-        // reference does not keep, so its order is not supported.
-        (Term::Reference(left), Term::Reference(right)) if left == right => Ordering::Equal,
-        (Term::Reference(left), Term::Reference(right))
-            if left.is_pid_reference() || right.is_pid_reference() =>
-        {
-            return Err(error(
-                "unsupported term order of an alias reference (see \"Term order\" in docs/erts-differences.md)",
-            ));
-        }
-        // ERTS compares `N2`, `N1`, `N0`, with the magic marker of a magic
-        // reference in `N1` (`utils.c:2283-2286`,
-        // `erl_bif_unique.h:102-113`).
-        (Term::Reference(left), Term::Reference(right)) => left
-            .numbers()
-            .iter()
-            .rev()
-            .cmp(right.numbers().iter().rev()),
         (Term::Tuple(left), Term::Tuple(right)) if left.len() == right.len() => {
             steps.extend(
                 left.iter()
@@ -414,7 +425,7 @@ fn type_rank(term: &Term) -> u8 {
     match term {
         Term::Integer(_) | Term::BigInt(_) | Term::Float(_) => 0,
         Term::Atom(_) => 1,
-        Term::Reference(_) => 2,
+        Term::Reference(_) | Term::Resource(_) => 2,
         Term::Fun(_) => 3,
         Term::Port(_) => 4,
         Term::Pid(_) => 5,

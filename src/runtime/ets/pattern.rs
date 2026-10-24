@@ -850,7 +850,10 @@ fn call(atoms: &AtomTable, function: Guard, arguments: &[Term]) -> Option<Term> 
         )),
         Guard::IsPid => truth(matches!(arguments[0], Term::Pid(_))),
         Guard::IsPort => truth(matches!(arguments[0], Term::Port(_))),
-        Guard::IsReference => truth(matches!(arguments[0], Term::Reference(_))),
+        Guard::IsReference => truth(matches!(
+            arguments[0],
+            Term::Reference(_) | Term::Resource(_)
+        )),
         Guard::IsTuple => truth(matches!(arguments[0], Term::Tuple(_))),
         Guard::IsMap => truth(matches!(arguments[0], Term::Map(_))),
         // ERTS calls `is_binary_1` (`erl_db_util.c:641-642`).

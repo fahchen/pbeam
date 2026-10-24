@@ -1738,7 +1738,9 @@ impl BeamProgram {
                         TestKind::Atom => matches!(value, Term::Atom(_)),
                         TestKind::Pid => matches!(value, Term::Pid(_)),
                         TestKind::Port => matches!(value, Term::Port(_)),
-                        TestKind::Reference => matches!(value, Term::Reference(_)),
+                        TestKind::Reference => {
+                            matches!(value, Term::Reference(_) | Term::Resource(_))
+                        }
                         TestKind::Tuple => matches!(value, Term::Tuple(_)),
                         // `is_list` and `is_nonempty_list` test the cons tag, so an
                         // improper list passes (emu `instrs.tab:879-891`; JIT

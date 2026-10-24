@@ -65,7 +65,7 @@ pub(crate) fn flat_size(term: &Term) -> usize {
             Term::BigInt(value) => value.bits().div_ceil(64) as usize + 1,
             Term::Float(_) => FLOAT_WORDS,
             Term::Reference(reference) if reference.is_pid_reference() => PID_REFERENCE_WORDS,
-            Term::Reference(_) => REFERENCE_WORDS,
+            Term::Reference(_) | Term::Resource(_) => REFERENCE_WORDS,
             Term::Binary(binary) => binary_words(binary.bit_size()),
             Term::Cons(cell) => {
                 pending.push(&cell.head);

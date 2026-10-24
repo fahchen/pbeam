@@ -20,7 +20,9 @@
 use std::ffi::{CStr, c_char, c_double, c_int, c_long, c_uint, c_void};
 use std::sync::Arc;
 
+use super::Handle;
 use super::layout::{ErlNifBinary, NifTerm};
+use super::resource::{self, DtorFn, ResourceType};
 use crate::AtomTable;
 use crate::BeamError;
 use crate::Term;
@@ -70,6 +72,12 @@ static EXPORTS: Exports = Exports {
     make_list_from_array: enif_make_list_from_array,
     make_tuple: enif_make_tuple,
     raise_exception: enif_raise_exception,
+    open_resource_type: enif_open_resource_type,
+    alloc_resource: enif_alloc_resource,
+    release_resource: enif_release_resource,
+    keep_resource: enif_keep_resource,
+    make_resource: enif_make_resource,
+    get_resource: enif_get_resource,
 };
 
 /// The type of [`EXPORTS`]: one field for each exported function.
@@ -102,6 +110,20 @@ struct Exports {
     make_list_from_array: unsafe extern "C" fn(*mut Env, *const NifTerm, c_uint) -> NifTerm,
     make_tuple: unsafe extern "C" fn(*mut Env, c_uint, ...) -> NifTerm,
     raise_exception: unsafe extern "C" fn(*mut Env, NifTerm) -> NifTerm,
+    open_resource_type: unsafe extern "C" fn(
+        *mut Env,
+        *const c_char,
+        *const c_char,
+        Option<DtorFn>,
+        c_int,
+        *mut c_int,
+    ) -> *const ResourceType,
+    alloc_resource: unsafe extern "C" fn(*const ResourceType, usize) -> *mut c_void,
+    release_resource: unsafe extern "C" fn(*mut c_void),
+    keep_resource: unsafe extern "C" fn(*mut c_void),
+    make_resource: unsafe extern "C" fn(*mut Env, *mut c_void) -> NifTerm,
+    get_resource:
+        unsafe extern "C" fn(*mut Env, NifTerm, *const ResourceType, *mut *mut c_void) -> c_int,
 }
 
 /// The term of one handle of an [`Env`].
@@ -138,6 +160,9 @@ pub(crate) struct Env {
     /// `enif_make_binary` took. The NIF can read the bytes until the call
     /// returns (`erl_nif.c:1708-1714`), so drop frees the blocks.
     taken: Vec<usize>,
+    /// The library of a load callback, or `None` in another env. Only the
+    /// env of a load callback opens a resource type (`erl_nif.c:2708`).
+    library: Option<Arc<Handle>>,
 }
 
 impl Drop for Env {
@@ -170,7 +195,16 @@ impl Env {
             unsupported: None,
             copies: Vec::new(),
             taken: Vec::new(),
+            library: None,
         }
+    }
+
+    /// Return the env of the load callback of the library `library`, with
+    /// the load info `info` as the handle 1.
+    pub(super) fn load(atoms: &Arc<AtomTable>, info: &Term, library: &Arc<Handle>) -> Self {
+        let mut env = Self::new(atoms, std::slice::from_ref(info));
+        env.library = Some(Arc::clone(library));
+        env
     }
 
     /// Return the handles of the arguments, the `argv` of the call.
@@ -1035,6 +1069,150 @@ pub unsafe extern "C" fn enif_make_tuple(
     let handles: Vec<NifTerm> = (0..cnt).map(|_| unsafe { args.next_arg() }).collect();
     let elements: Vec<Term> = handles.into_iter().map(|handle| env.term(handle)).collect();
     env.make(Term::tuple(elements))
+}
+
+/// `ErlNifResourceType* enif_open_resource_type(ErlNifEnv*, const char*,
+/// const char*, ErlNifResourceDtor*, ErlNifResourceFlags,
+/// ErlNifResourceFlags*)`: return a new resource type with the destructor
+/// `dtor` and write `ERL_NIF_RT_CREATE` to `tried`, as ERTS does in a load
+/// callback with `ERL_NIF_RT_CREATE` in `flags` (`erl_nif.c:2696-2785`).
+/// In another env, and without `ERL_NIF_RT_CREATE`, it returns NULL and
+/// writes `flags` to `tried`. A NULL `tried` gets no write.
+///
+/// PBeam loads a module once, so no type of the module exists before its
+/// load callback, and `ERL_NIF_RT_TAKEOVER` finds no type
+/// (`erl_nif.c:2715-2740`). A type lives until the end of the run, as
+/// PBeam does not purge a module.
+///
+/// # Safety
+///
+/// `env` is the env of the current call, and `tried` is NULL or points to
+/// a writable `ErlNifResourceFlags`, as the C API requires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn enif_open_resource_type(
+    env_pointer: *mut Env,
+    _module_str: *const c_char,
+    _name_str: *const c_char,
+    dtor: Option<DtorFn>,
+    flags: c_int,
+    tried: *mut c_int,
+) -> *const ResourceType {
+    // SAFETY: the C API gives the env of the current call.
+    let env = unsafe { env(env_pointer) };
+    let (kind, op) = match &env.library {
+        Some(library) if flags & resource::CREATE != 0 => {
+            let kind = ResourceType::new(dtor, Arc::clone(&env.atoms), Arc::clone(library));
+            (Arc::into_raw(Arc::new(kind)), resource::CREATE)
+        }
+        _ => (std::ptr::null(), flags),
+    };
+    if !tried.is_null() {
+        // SAFETY: the C API requires that a `tried` that is not NULL
+        // points to a writable `ErlNifResourceFlags`.
+        unsafe { tried.write(op) };
+    }
+    kind
+}
+
+/// `void* enif_alloc_resource(ErlNifResourceType*, size_t)`: return the
+/// data of `size` bytes of a new object of `type` with one C reference
+/// (`erl_nif.c:3121-3162`).
+///
+/// # Safety
+///
+/// `kind` is a type of `enif_open_resource_type`, as the C API requires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn enif_alloc_resource(
+    kind: *const ResourceType,
+    size: usize,
+) -> *mut c_void {
+    // SAFETY: `enif_open_resource_type` made `kind` with `Arc::into_raw`
+    // and never takes it back, so its count stays above 0 and one more
+    // `Arc` is valid.
+    let kind = unsafe {
+        Arc::increment_strong_count(kind);
+        Arc::from_raw(kind)
+    };
+    std::ptr::with_exposed_provenance_mut(resource::allocate(kind, size))
+}
+
+/// `void enif_release_resource(void*)`: remove a C reference of the
+/// object `obj`; the drop of its last reference calls its destructor
+/// (`erl_nif.c:3164-3175`). PBeam calls the destructor at once, where ERTS
+/// schedules it as aux work of the scheduler (`erl_nif.c:2961-2972`).
+///
+/// # Safety
+///
+/// `obj` is the data of a resource object with a C reference, as the C
+/// API requires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn enif_release_resource(obj: *mut c_void) {
+    resource::release(obj.expose_provenance());
+}
+
+/// `void enif_keep_resource(void*)`: add a C reference to the object
+/// `obj` (`erl_nif.c:3177-3188`).
+///
+/// # Safety
+///
+/// `obj` is the data of a live resource object, as the C API requires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn enif_keep_resource(obj: *mut c_void) {
+    resource::keep(obj.expose_provenance());
+}
+
+/// `ERL_NIF_TERM enif_make_resource(ErlNifEnv*, void*)`: return the
+/// resource term of the object `obj`, a magic reference
+/// (`erl_nif.c:3197-3204`). Each term of one object is the same reference.
+/// An `obj` that is not the data of a live object breaks the C API
+/// contract: the call gives a runtime error.
+///
+/// # Safety
+///
+/// `env` is the env of the current call, as the C API requires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn enif_make_resource(env_pointer: *mut Env, obj: *mut c_void) -> NifTerm {
+    // SAFETY: the C API gives the env of the current call.
+    let env = unsafe { env(env_pointer) };
+    let Some(term) = resource::term(obj.expose_provenance()) else {
+        env.unsupported.get_or_insert_with(|| {
+            format!("the NIF made a resource term of {obj:p}, which is not a live resource object")
+        });
+        return NON_VALUE;
+    };
+    env.make(term)
+}
+
+/// `int enif_get_resource(ErlNifEnv*, ERL_NIF_TERM, ErlNifResourceType*,
+/// void**)`: write the data of the object of the resource term `term` to
+/// `objp` and return 1, or return 0 when the term is not a resource term
+/// of `type` (`erl_nif.c:3225-3262`). A magic reference of another kind,
+/// such as an ETS table identifier, gives 0.
+///
+/// # Safety
+///
+/// `env` is the env of the current call, and `objp` points to a writable
+/// `void*`, as the C API requires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn enif_get_resource(
+    env_pointer: *mut Env,
+    term: NifTerm,
+    kind: *const ResourceType,
+    objp: *mut *mut c_void,
+) -> c_int {
+    // SAFETY: the C API gives the env of the current call.
+    let env = unsafe { env(env_pointer) };
+    let found = env.get(term);
+    let Some(Term::Resource(object)) = &found else {
+        return 0;
+    };
+    let Some(data) = object.data_of(kind) else {
+        return 0;
+    };
+    // SAFETY: the C API requires that `objp` points to a writable `void*`.
+    // The term of the env keeps the object alive until the call returns.
+    unsafe { objp.write(std::ptr::with_exposed_provenance_mut(data)) };
+    1
 }
 
 #[cfg(test)]
