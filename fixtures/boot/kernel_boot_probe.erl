@@ -490,7 +490,7 @@ socket_io() ->
 %% `erl -noshell -boot start_clean -pa fixtures/boot -s kernel_boot_probe
 %% socket_dgram -kernel logger_level warning` runs socket_dgram/0. It runs
 %% socket:sendto/3,4,5, socket:recvfrom/1,2,3,4, socket:peername/1, and
-%% socket:shutdown/2 on inet datagram, local datagram, and inet stream
+%% socket:shutdown/2 on inet and inet6 datagram, local datagram, and inet stream
 %% sockets, with timeouts, nowait, cancel, a partial send, the counters of
 %% socket:info/1, and the argument errors. The errno of a shutdown after a
 %% peer shutdown depends on the host, so compare it on one host only.
@@ -523,6 +523,18 @@ socket_dgram() ->
                  socket:send(U1, <<"d">>), socket:recv(U2, 0, 1000)],
     Keys = [read_byte, read_pkg, read_pkg_max, read_fails, write_byte, write_pkg, write_pkg_max, write_fails],
     Counters = [maps:with(Keys, maps:get(counters, socket:info(S))) || S <- [U1, U2]],
+    Loopback6 = #{family => inet6, addr => loopback, port => 0},
+    {ok, V1} = socket:open(inet6, dgram, udp),
+    {ok, V2} = socket:open(inet6, dgram, udp),
+    ok = socket:bind(V1, Loopback6),
+    ok = socket:bind(V2, Loopback6),
+    {ok, B1} = socket:sockname(V1),
+    {ok, B2} = socket:sockname(V2),
+    ok = socket:sendto(V1, <<"six">>, B2),
+    Received6 = socket:recvfrom(V2, 0, 1000),
+    ok = socket:connect(V1, B2),
+    Inet6 = [Received6 =:= {ok, {B1, <<"six">>}}, element(1, Received6), socket:peername(V1) =:= {ok, B2}],
+    _ = [socket:close(S) || S <- [V1, V2]],
     Path1 = <<"/tmp/pbeam_socket_dgram_1">>,
     Path2 = <<"/tmp/pbeam_socket_dgram_2">>,
     _ = [file:delete(P) || P <- [Path1, Path2]],
@@ -577,7 +589,7 @@ socket_dgram() ->
               strip(catch prim_socket:recvfrom(U1Ref, -1, [], make_ref())),
               strip(catch prim_socket:recvfrom(U1Ref, 1 bsl 70, [], make_ref())),
               strip(catch prim_socket:recvfrom(U2Ref, 0, [], zero))],
-    erlang:display({socket_dgram, Udp, Selected, Cancel, Connected, Counters, Local, Stream, Partial,
+    erlang:display({socket_dgram, Udp, Selected, Cancel, Connected, Counters, Inet6, Local, Stream, Partial,
                     Shutdown, Closed, Errors}),
     init:stop().
 

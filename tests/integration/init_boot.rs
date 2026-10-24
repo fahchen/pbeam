@@ -466,7 +466,7 @@ fn sends_and_receives_on_stream_sockets_as_pinned_erts() {
 fn sends_and_receives_on_datagram_and_stream_sockets_with_addresses_as_pinned_erts() {
     // `kernel_boot_probe:socket_dgram/0` runs `socket:sendto/3,4,5`,
     // `socket:recvfrom/1,2,3,4`, `socket:peername/1`, `socket:shutdown/2`,
-    // and `socket:cancel/2` on inet and local datagram sockets and inet
+    // and `socket:cancel/2` on inet, inet6, and local datagram sockets and inet
     // stream sockets, on the NIFs `nif_sendto/5`, `nif_recvfrom/4`,
     // `nif_peername/1`, `nif_shutdown/2`, and `nif_cancel/3`
     // (prim_socket_nif.c:6527-6600, 7153-7231, 7722-7779, 13626-13704,
