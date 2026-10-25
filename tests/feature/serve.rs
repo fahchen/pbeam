@@ -48,6 +48,11 @@ const ZSTD_REQUEST: &[u8] =
 /// A response: the status line, the headers without `date`, and the body.
 type Response<Body> = (String, String, Body);
 
+/// One run at a time picks a free port and starts its server on it. Two
+/// concurrent runs could otherwise pick the same port between the probe and
+/// the bind, and the request of one run would reach the server of the other.
+static ONE_FILE_RUN: Mutex<()> = Mutex::new(());
+
 /// The variables that `pbeam erl` rejects when they are set and not empty,
 /// as the flags of `erlexec` that PBeam does not read. Each run removes
 /// them, so that a shell setting does not change the runs.
@@ -344,6 +349,9 @@ fn builds_the_one_file_executable_with_the_mix_task_and_runs_it_clean() {
     assert!(status.success(), "the task writes the executable");
     let executable = clean.join("plug_hello");
     fs::copy(&output, &executable).unwrap();
+    let _serialized = ONE_FILE_RUN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let port = free_port();
     let mut command = Command::new(&executable);
     command
@@ -401,6 +409,75 @@ fn builds_the_one_file_executable_with_the_mix_task_and_runs_it_clean() {
     assert_eq!(response, erts);
 }
 
+#[test]
+fn gives_the_command_line_arguments_of_the_executable_to_the_release() {
+    // A one-file executable starts its bundle also with arguments. The
+    // arguments reach the release as `System.argv()` unchanged, also `erl`,
+    // which the binary would read as its own `erl` command, and `--c`, which
+    // no flag parsing consumes: the launcher gives the bare `--` first, at
+    // which Elixir's `Kernel.CLI` ends its own parsing
+    // (`lib/elixir/lib/kernel/cli.ex` of Elixir 1.20.4,
+    // `parse_argv(["--" | t], config) -> {config, t}`), so none of them
+    // becomes a script file.
+    let directory = test_directory("arguments");
+    let clean = directory.join("clean");
+    let temporary = directory.join("tmp");
+    fs::create_dir_all(&clean).unwrap();
+    fs::create_dir_all(&temporary).unwrap();
+    let output = build_one_file(&directory, &clean);
+    let _serialized = ONE_FILE_RUN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let port = free_port();
+    let mut child = without_erl_flags(&mut Command::new(&output))
+        .args(["a", "erl", "--c"])
+        .current_dir(&clean)
+        .env("TMPDIR", &temporary)
+        .env("PORT", port.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .expect("the one-file run with arguments starts");
+    let stdout = Arc::new(Mutex::new(Vec::new()));
+    let stdout_reader = collect(child.stdout.take().unwrap(), Arc::clone(&stdout));
+    let stderr = Arc::new(Mutex::new(Vec::new()));
+    let stderr_reader = collect(child.stderr.take().unwrap(), Arc::clone(&stderr));
+    let stream = wait_for_server(&mut child, port);
+    let response = stream.and_then(request_argv);
+    let status = stop_with_term(child);
+    stdout_reader.join().unwrap();
+    stderr_reader.join().unwrap();
+    let text =
+        |bytes: &Arc<Mutex<Vec<u8>>>| String::from_utf8_lossy(&bytes.lock().unwrap()).into_owned();
+    assert!(
+        status.success(),
+        "the one-file run with arguments exits 0 after SIGTERM: {status:?}\nstdout: {}\nstderr: {}",
+        text(&stdout),
+        text(&stderr)
+    );
+    assert!(
+        fs::read_dir(&temporary).unwrap().next().is_none(),
+        "the run removes its extracted directory"
+    );
+    let (_status_line, _headers, body) = response.unwrap_or_else(|error| {
+        panic!(
+            "the one-file run with arguments on port {port}: {error}\nstdout: {}\nstderr: {}",
+            text(&stdout),
+            text(&stderr)
+        )
+    });
+    assert_eq!(
+        body,
+        "[\"a\", \"erl\", \"--c\"]",
+        "stdout: {}\nstderr: {}",
+        text(&stdout),
+        text(&stderr)
+    );
+    fs::remove_dir_all(&directory).unwrap();
+}
+
 /// Run the release of `release` on the pinned ERTS, send `GET /`, and
 /// return the response.
 fn erts_release_response(release: &std::path::Path) -> (String, String, String) {
@@ -447,6 +524,9 @@ fn serve_one_file() -> (String, String, String) {
     fs::create_dir_all(&clean).unwrap();
     fs::create_dir_all(&temporary).unwrap();
     let output = build_one_file(&directory, &clean);
+    let _serialized = ONE_FILE_RUN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let port = free_port();
     let mut child = without_erl_flags(&mut Command::new(&output))
         .current_dir(&clean)
@@ -701,8 +781,19 @@ fn wait_for_server(child: &mut Child, port: u16) -> Result<TcpStream, String> {
 
 /// Send `GET /` and return the status line, the headers without `date`, one
 /// `name: value` line for each in their order, and the body as text.
+/// Send `GET /` and return the status line, the headers without `date`, and
+/// the body.
 fn request(stream: TcpStream) -> Result<Response<String>, String> {
     let (status, headers, body) = exchange(stream, PLAIN_REQUEST)?;
+    let body = String::from_utf8(body).map_err(|error| error.to_string())?;
+    Ok((status, headers, body))
+}
+
+/// Send `GET /argv` and return the response: the example answers it with
+/// `System.argv()` of the release.
+fn request_argv(stream: TcpStream) -> Result<Response<String>, String> {
+    let request = b"GET /argv HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    let (status, headers, body) = exchange(stream, request)?;
     let body = String::from_utf8(body).map_err(|error| error.to_string())?;
     Ok((status, headers, body))
 }
