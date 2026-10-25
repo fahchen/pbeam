@@ -1,13 +1,15 @@
 //! The embedded mode of the `pbeam` binary: the `pbeam_bundle` tool appends
-//! an application bundle to the binary, and a run without arguments starts
-//! it. The mode extracts the bundle to a temporary directory and replaces
-//! the process with the normal boot of the extracted release, so the
-//! application needs no loose file of its own, and a signal reaches the boot
-//! as it reaches a normal run. The bundle carries the OTP modules of the
-//! start set, so the run needs no OTP installation.
+//! an application bundle to the binary, and a run starts it, with the
+//! arguments of the command line. The mode extracts the bundle to a temporary
+//! directory and replaces the process with the normal boot of the extracted
+//! release, so the application needs no loose file of its own, and a signal
+//! reaches the boot as it reaches a normal run. The bundle carries the OTP
+//! modules of the start set, so the run needs no OTP installation.
 
 use std::{
-    env, fs,
+    env,
+    ffi::OsString,
+    fs,
     path::{Component, Path, PathBuf},
     process::{Command, ExitCode},
 };
@@ -20,6 +22,12 @@ const MAGIC: &[u8; 8] = b"PBEAMEMB";
 /// The size of the trailer: the magic and the length of the bundle, a `u64`.
 const TRAILER: usize = 16;
 
+/// The word that marks the re-exec of the boot of an extracted release, so
+/// the boot reaches the `erl` command instead of the bundle again. The user
+/// cannot name it: a run with this first word goes to the command line
+/// parser, which knows no such option.
+const BOOT_REEXEC: &str = "--embedded-boot";
+
 /// What the end of `bytes` holds.
 #[derive(Debug, PartialEq, Eq)]
 enum Trailer<'a> {
@@ -31,19 +39,42 @@ enum Trailer<'a> {
     Bundle(&'a [u8]),
 }
 
-/// Run the bundle that is appended to the binary. Return `None` when the
-/// binary holds no bundle.
+/// Run the bundle that is appended to the binary, with `arguments` as the
+/// arguments of the command line. Return `None` when the binary holds no
+/// bundle.
+///
+/// The arguments reach the release as `System.argv()` and
+/// `init:get_plain_arguments/0` give them, also an argument such as `erl`
+/// that the binary would otherwise read as its own `erl` command.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// // A plain binary holds no bundle.
-/// assert!(run().is_none());
+/// assert!(run([]).is_none());
 /// ```
-pub fn run() -> Option<ExitCode> {
+pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Option<ExitCode> {
     let executable = env::current_exe().ok()?;
     let bytes = fs::read(&executable).ok()?;
-    run_bundle(&executable, &bytes, &env::temp_dir())
+    run_bundle(
+        &executable,
+        &bytes,
+        &env::temp_dir(),
+        arguments.into_iter().collect(),
+    )
+}
+
+/// Whether `word` marks the re-exec of the boot of an extracted release, so
+/// the caller starts the `erl` command instead of the bundle.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(is_boot_reexec(OsStr::new("--embedded-boot")));
+/// assert!(!is_boot_reexec(OsStr::new("erl")));
+/// ```
+pub fn is_boot_reexec(word: &std::ffi::OsStr) -> bool {
+    word == BOOT_REEXEC
 }
 
 /// Remove the extracted directory at the end of an embedded run. The boot
@@ -64,7 +95,12 @@ pub fn remove_extraction(directory: Option<PathBuf>) {
 
 /// Run the bundle of `bytes`, with `base` for the extraction. Return `None`
 /// when the bytes end without a trailer.
-fn run_bundle(executable: &Path, bytes: &[u8], base: &Path) -> Option<ExitCode> {
+fn run_bundle(
+    executable: &Path,
+    bytes: &[u8],
+    base: &Path,
+    arguments: Vec<OsString>,
+) -> Option<ExitCode> {
     let bundle_bytes = match trailer(bytes) {
         Trailer::Absent => return None,
         Trailer::Invalid => return Some(failure("the embedded trailer is invalid")),
@@ -77,7 +113,7 @@ fn run_bundle(executable: &Path, bytes: &[u8], base: &Path) -> Option<ExitCode> 
         Ok(directory) => directory,
         Err(message) => return Some(failure(&message)),
     };
-    Some(start(executable, &bundle, &directory))
+    Some(start(executable, &bundle, &directory, &arguments))
 }
 
 /// Return the bundle that the trailer at the end of `bytes` names.
@@ -103,9 +139,15 @@ fn trailer(bytes: &[u8]) -> Trailer<'_> {
 
 /// Extract the bundle to `directory`, then replace this process with the
 /// boot of its entry: the node boot of a release with a boot script, or the
-/// `pbeam_boot` start of a fixture bundle. Return the exit status of a run
-/// that fails before the boot.
-fn start(executable: &Path, bundle: &Bundle<'_>, directory: &Path) -> ExitCode {
+/// `pbeam_boot` start of a fixture bundle. The `arguments` of the command
+/// line reach the release boot as its plain arguments. Return the exit
+/// status of a run that fails before the boot.
+fn start(
+    executable: &Path,
+    bundle: &Bundle<'_>,
+    directory: &Path,
+    arguments: &[OsString],
+) -> ExitCode {
     let result = extract(directory, bundle).and_then(|()| match release_boot(directory) {
         Some((erts, version)) => Ok(boot_release(
             executable,
@@ -114,6 +156,7 @@ fn start(executable: &Path, bundle: &Bundle<'_>, directory: &Path) -> ExitCode {
             &erts,
             &version,
             env::var_os("ELIXIR_ERL_OPTIONS").as_deref(),
+            arguments,
         )),
         None => start_modules(bundle)
             .and_then(|modules| boot(executable, bundle.entry(), &modules, directory)),
@@ -240,13 +283,19 @@ fn boot_release(
     erts: &str,
     version: &str,
     options: Option<&std::ffi::OsStr>,
+    arguments: &[OsString],
 ) -> std::io::Error {
     use std::os::unix::process::CommandExt;
 
     let erts = format!("erts-{erts}");
     let release = directory.join("releases").join(version);
     let mut command = Command::new(executable);
-    command.arg("erl").arg("--root").arg(directory);
+    // The re-exec marks itself, so the binary reads this command line, not
+    // the appended bundle again.
+    command
+        .args([BOOT_REEXEC, "erl"])
+        .arg("--root")
+        .arg(directory);
     command
         .arg("--bindir")
         .arg(directory.join(&erts).join("bin"));
@@ -265,6 +314,15 @@ fn boot_release(
     command.args(["-boot_var", "RELEASE_LIB"]);
     command.arg(directory.join("lib"));
     command.args(["-extra", "--no-halt"]);
+    if !arguments.is_empty() {
+        // The bare `--` ends the flag parsing of Elixir's `Kernel.CLI`, so
+        // every argument of the command line reaches `System.argv()`
+        // unchanged, also one such as `erl`, and none of them becomes a
+        // script file of the command line (`lib/elixir/lib/kernel/cli.ex` of
+        // Elixir 1.20.4: `parse_argv(["--" | t], config) -> {config, t}`).
+        command.arg("--");
+        command.args(arguments);
+    }
     command.env("RELEASE_ROOT", directory);
     command.env("RELEASE_SYS_CONFIG", release.join("sys"));
     command.exec()

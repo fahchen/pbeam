@@ -21,3 +21,4 @@
 # Serena: commit only the shared project config; cache, memories and local overrides stay local.
 .serena/*
 !.serena/project.yml
+.worktrees/

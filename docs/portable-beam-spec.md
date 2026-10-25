@@ -235,6 +235,8 @@ It performs these steps:
 4. Write one bundle with the `pbeam_bundle` tool.
 5. Build the `pbeam` binary for the host, append the bundle and the trailer, and write the application executable at `<app>.bundle` next to the release directory, or at the path of `--output`.
 
+At startup the executable runs its bundle with or without arguments of the command line. The arguments reach the release in order, as `System.argv()` and `init:get_plain_arguments/0` give them: the boot places them behind a bare `--`, where Elixir's `Kernel.CLI` ends its own parsing, so also an argument such as `erl` reaches the release and does not start the `erl` command of the binary. The re-exec of the boot of the extracted release marks itself with the hidden word `--embedded-boot`, which keeps it distinct from a user run.
+
 Reading native declaration metadata and configured native crate paths, proposed in section 8, stays proposed work of the native integration.
 
 The bundle contains identifying/version metadata, an entry MFA, compiler/OTP compatibility metadata, a module table, a resource table, and the module/resource payload. Compression was proposed, but its codec and necessity are not settled. The example `otp: 28` is illustrative, not a compatibility commitment.
