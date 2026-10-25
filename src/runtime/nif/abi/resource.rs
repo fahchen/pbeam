@@ -105,7 +105,7 @@ impl Drop for Resource {
         if let Some(dtor) = self.kind.dtor {
             // The env of a destructor has no process (`pre_nif_noproc`,
             // `erl_nif.c:3016-3021`).
-            let mut env = Env::new(&self.kind.atoms, &[]);
+            let mut env = Env::new(&self.kind.atoms, None, &[]);
             // SAFETY: `dtor` is the destructor of a library that the type
             // keeps open, and the data is the live object of the type, as
             // the C API gives them to a destructor.

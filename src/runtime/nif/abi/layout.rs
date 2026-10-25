@@ -12,6 +12,7 @@ use std::ffi::{c_char, c_int, c_uint, c_void};
 use std::mem::{offset_of, size_of};
 
 use super::env::Env;
+use crate::term::ProcessId;
 
 /// `ERL_NIF_TERM`: an `ErlNifUInt`, which is an `unsigned long` on LP64.
 pub(super) type NifTerm = usize;
@@ -99,8 +100,32 @@ pub(super) struct ErlNifBinary {
     pub(super) spare: [*mut c_void; 2],
 }
 
+/// `ErlNifPid` (`erl_nif.h:201-203`): a local process. ERTS keeps the pid
+/// term in the field; PBeam keeps the number of the process, because the C
+/// code keeps the struct after the call that wrote it. The field is 8 bytes,
+/// as `ERL_NIF_TERM` is.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(super) struct ErlNifPid {
+    /// The number of the process.
+    pid: u64,
+}
+
+impl ErlNifPid {
+    /// Return the `ErlNifPid` of the process `process`.
+    pub(super) fn of(process: ProcessId) -> Self {
+        Self { pid: process.0 }
+    }
+
+    /// Return the process of the `ErlNifPid`.
+    pub(super) fn process(self) -> ProcessId {
+        ProcessId(self.pid)
+    }
+}
+
 const _: () = {
     assert!(size_of::<NifTerm>() == 8);
+    assert!(size_of::<ErlNifPid>() == 8);
     assert!(size_of::<ErlNifFunc>() == 32);
     assert!(offset_of!(ErlNifFunc, name) == 0);
     assert!(offset_of!(ErlNifFunc, arity) == 8);
