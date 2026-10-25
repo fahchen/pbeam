@@ -267,6 +267,9 @@ fn boot_release(
     command.args(["-extra", "--no-halt"]);
     command.env("RELEASE_ROOT", directory);
     command.env("RELEASE_SYS_CONFIG", release.join("sys"));
+    // The path of the one-file executable, so the release can start itself
+    // as a detached daemon; a plain release boot leaves it unset.
+    command.env("PBEAM_EXECUTABLE", executable);
     command.exec()
 }
 
