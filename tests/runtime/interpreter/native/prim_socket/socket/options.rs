@@ -143,3 +143,60 @@ fn has_a_set_and_a_get_handler_for_each_host_option() {
     }
     assert!(count > 40, "{count}");
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn ends_ip_pktoptions_at_a_header_with_a_zero_length() {
+    // A `cmsg_len` of 0 wraps the data size, so `esock_getopt_pktoptions`
+    // ends the list (prim_socket_nif.c:13336-13339). `raw_get` cuts the
+    // buffer to the size that the host gives, so no fixture reaches a
+    // header after the last message.
+    let scheduler = &mut Scheduler::new(AtomTable::new());
+    let buffer = [0; std::mem::size_of::<libc::cmsghdr>()];
+    assert_eq!(pktoptions(scheduler, &buffer).ok(), Some(Term::Nil));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn gives_the_value_of_an_ip_tos_control_message_of_ip_pktoptions() {
+    // `esock_cmsg_encode_ip_tos` encodes the first data byte with
+    // `encode_ip_tos` (prim_socket_nif.c:14335-14349, 16637-16816). ERTS
+    // gives `#{native => 16, tos => #{tos => lowdelay, precedence =>
+    // routine}, dscp => 4}` for the value 16. The CI kernel gives no
+    // `IP_TOS` data in the default buffer, so no fixture reaches it.
+    let scheduler = &mut Scheduler::new(AtomTable::new());
+    let header = std::mem::size_of::<libc::cmsghdr>();
+    let mut buffer = (header + 4).to_ne_bytes().to_vec();
+    buffer.extend(libc::IPPROTO_IP.to_ne_bytes());
+    buffer.extend(libc::IP_TOS.to_ne_bytes());
+    buffer.extend([16, 0, 0, 0]);
+    let [routine, lowdelay, kind] =
+        ["routine", "lowdelay", "tos"].map(|name| atom(scheduler, name).expect("atom"));
+    let tos = pairs(scheduler, &[("precedence", routine), ("tos", lowdelay)]).expect("atoms");
+    let tos = map(scheduler, tos);
+    let value = pairs(
+        scheduler,
+        &[
+            ("native", Term::Integer(16)),
+            ("tos", tos),
+            ("dscp", Term::Integer(4)),
+        ],
+    )
+    .expect("atoms");
+    let value = map(scheduler, value);
+    let message = pairs(
+        scheduler,
+        &[
+            ("level", Term::Integer(0)),
+            ("type", kind),
+            ("data", Term::binary(vec![16, 0, 0, 0])),
+            ("value", value),
+        ],
+    )
+    .expect("atoms");
+    let message = map(scheduler, message);
+    assert_eq!(
+        pktoptions(scheduler, &buffer).ok(),
+        Some(Term::list_from([message]))
+    );
+}
