@@ -80,6 +80,52 @@ defmodule Mix.Tasks.Pbeam.Bundle do
     Path.expand(path)
   end
 
+  # Stop the task when the ERTS version of the release, the first field of
+  # `releases/start_erl.data`, is not the ERTS version of the Erlang that
+  # runs the task. PBeam runs the OTP modules of that Erlang: the pinned
+  # OTP of the PBeam source (`mise.toml`), which the build host must run.
+  # A release of another ERTS version holds OTP modules that PBeam does
+  # not run.
+  @doc false
+  def check_erts_version!(release) do
+    data = Path.join(release, "releases/start_erl.data")
+
+    release_erts =
+      with {:ok, contents} <- File.read(data),
+           [erts | _rest] <- String.split(contents) do
+        erts
+      else
+        _error -> Mix.raise("pbeam: cannot read #{data}: the release names no ERTS version")
+      end
+
+    erts = List.to_string(:erlang.system_info(:version))
+
+    if release_erts != erts do
+      Mix.raise(
+        "pbeam: the release #{release} was built with ERTS #{release_erts}, but PBeam runs " <>
+          "the OTP modules of ERTS #{erts} (the pinned OTP #{pinned_otp()} of the PBeam " <>
+          "source). Build the release with the pinned OTP."
+      )
+    end
+  end
+
+  # Return the OTP pin of the PBeam source: the `erlang` version of its
+  # `mise.toml`, which the Rust build also reads (`otp_release` of
+  # `build.rs`).
+  defp pinned_otp do
+    pin =
+      @source
+      |> Path.join("mise.toml")
+      |> File.read!()
+      |> String.split("\n")
+      |> Enum.find(&String.starts_with?(&1, "erlang = \""))
+
+    case pin do
+      nil -> Mix.raise("pbeam: mise.toml of the PBeam source pins no erlang version")
+      "erlang = \"" <> pin -> String.trim_trailing(pin, "\"")
+    end
+  end
+
   defp default_output(release, app) do
     Path.join(Path.dirname(release), "#{app}.pbeamb")
   end
