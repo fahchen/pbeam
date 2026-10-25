@@ -67,15 +67,15 @@ defmodule Mix.Tasks.Pbeam.Bundle do
     Mix.shell().info("Wrote #{output}")
   end
 
-  # Return the release directory of `--release` or of the project config.
+  # Return the release directory of `--release`, of the project config, or
+  # of the `mix release` default: `_build/<env>/rel/<app>` below the build
+  # path of the project, where `mix release` assembles a release whose
+  # config names no `path`.
   @doc false
   def release_directory!(app, options) do
-    path =
-      Keyword.get(options, :release) || Mix.Project.config()[:releases][app][:path]
+    default = Path.join([Mix.Project.build_path(), "rel", to_string(app)])
 
-    if path == nil do
-      Mix.raise("pbeam.bundle: the project config names no directory for the release #{app}")
-    end
+    path = Keyword.get(options, :release) || Mix.Project.config()[:releases][app][:path] || default
 
     Path.expand(path)
   end
