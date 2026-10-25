@@ -604,7 +604,8 @@ impl Frame {
 /// for a process that is not the caller. A request to a process of another
 /// scheduler carries only these items, because its owner reads the item as
 /// the target process.
-pub(super) const OTHER_PROCESS_INFO_ITEMS: [&str; 14] = [
+pub(super) const OTHER_PROCESS_INFO_ITEMS: [&str; 15] = [
+    "messages",
     "registered_name",
     "heap_size",
     "total_heap_size",
@@ -869,6 +870,9 @@ impl ProcessState {
                 None => return Ok(Some(Term::nil())),
             },
             ("message_queue_len", _) => Term::Integer(messages as i64),
+            // The queue in arrival order, as `erts_bld_sig_list` of the
+            // signal queue gives it (`erl_bif_info.c:1573-1588`).
+            ("messages", _) => Term::list_from(self.mailbox.messages()),
             ("group_leader", _) => Term::Pid(self.group_leader),
             ("priority", _) => Term::static_atom(self.priority.name()),
             ("links", _) => {

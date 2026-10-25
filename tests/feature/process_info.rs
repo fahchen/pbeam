@@ -19,6 +19,13 @@ use common::pinned_beam_path;
 const PROCESS_INFO_PROBE: &str = "fixtures/boot/process_info_probe.beam";
 
 #[test]
+fn reads_the_messages_of_a_process_as_pinned_erts() {
+    // The `messages` item gives the queue in arrival order: a sleeping
+    // child holds [a,b], the caller holds [] (`erl_bif_info.c`).
+    assert_eq!(run(&mut erts("messages")), run(&mut pbeam("messages")));
+}
+
+#[test]
 fn reads_the_links_of_a_process_as_pinned_erts() {
     // `process_info(Pid, links)` gives `{links, [Pid | Port]}` from the
     // link tree, without a link that waits for its unlink acknowledgment,
