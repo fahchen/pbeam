@@ -160,9 +160,14 @@ fn orders_terms_exactly_with_cmp_term_as_pinned_erts() {
     // less than `0.0`. `maps` reads the same BIF to order two keys, and
     // Elixir's `Task` map holds an alias reference as a key.
     let program = BeamProgram::load(&[COMPARE_PROBE]).unwrap();
-    let expected = [0, -1, 1, -1, 1, -1, 1, 0, -1, -1, 1, -1, 1, -1, 0, 0, -1, 0, 1];
+    let expected = [
+        0, -1, 1, -1, 1, -1, 1, 0, -1, -1, 1, -1, 1, -1, 0, 0, -1, 0, 1,
+    ];
     assert_eq!(
-        program.execute("compare_probe", "cmp_term", &[]).unwrap().term,
+        program
+            .execute("compare_probe", "cmp_term", &[])
+            .unwrap()
+            .term,
         Term::list_from(expected.map(Term::Integer))
     );
     assert_eq!(

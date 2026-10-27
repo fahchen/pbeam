@@ -372,8 +372,9 @@ fn gives_the_other_items_of_system_info_and_badarg_as_pinned_erts() {
     // 3179-3190, 3425-3433, 3633; sys/unix/sys.c:838-885.
     let eval = "io:format(\"~p~n\", [[try erlang:system_info(I) catch C:R -> {C, R} end \
                 || I <- [version, machine, os_version, start_time, creation, break_ignored, \
-                sequential_tracer, delayed_node_table_gc, instruction_counts, \
-                ultrasparc_read_tick1, no_such_item, 42, \"version\", [version], 1.0]]]), halt().";
+                sequential_tracer, delayed_node_table_gc, alloc_util_allocators, \
+                instruction_counts, ultrasparc_read_tick1, no_such_item, 42, \"version\", \
+                [version], 1.0]]]), halt().";
     let arguments = ["-noshell", "-eval", eval];
     let mut reference = Command::new("erl");
     reference.args(arguments);
@@ -427,7 +428,6 @@ fn rejects_the_allocator_items_of_system_info() {
         "{internal_cpu_topology, x}",
         "{memory_checker, test_overflow}",
         "allocated_areas",
-        "alloc_util_allocators",
     ] {
         let eval = format!("erlang:system_info({item}), halt().");
         let actual = pbeam_erl(&["-noshell", "-eval", eval.as_str()], &[]);
