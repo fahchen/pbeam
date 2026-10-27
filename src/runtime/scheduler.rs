@@ -2066,6 +2066,18 @@ impl Scheduler {
         (process, &self.atoms)
     }
 
+    /// Return the current process with the code table and the atom table,
+    /// for a read that walks the frames of the process against its code.
+    pub(super) fn current_process_code_and_atoms(
+        &mut self,
+    ) -> (&mut ProcessState, &CodeTable, &AtomTable) {
+        let process = self
+            .processes
+            .current_mut()
+            .expect("the scheduler has a current process");
+        (process, &self.code, &self.atoms)
+    }
+
     /// Store the compiled regular expression `code` with the reference
     /// `reference`: its serialized bytes in the resources of the node, and
     /// the code in the cache of this scheduler.

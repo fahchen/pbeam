@@ -223,13 +223,22 @@ fn walks_the_exit_reason_of_an_exiting_process() {
 #[test]
 fn gives_the_links_of_a_process_as_process_info_2() {
     // `process_info(Pid, links)` gives `{links, Links}`, with a pid or a
-    // port for each link (`erl_bif_info.c`, `links_reply`).
+    // port for each link (`erl_bif_info.c`, `links_reply`). The request
+    // reads the item through the values that `process_info/1` reports, so
+    // the process starts undefined: its frames need no code table.
     let atoms = AtomTable::new();
-    let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
+    let code = crate::runtime::interpreter::CodeTable::default();
+    let mut process = ProcessState::new(ProcessId(0), undefined_start(), vec![]);
+    let request = crate::runtime::interpreter::bif::erlang::ProcessInfoRequest {
+        code: &code,
+        atoms: &atoms,
+        current: 0,
+        messages: 0,
+        caller: false,
+        registered_name: None,
+    };
     assert_eq!(
-        process
-            .info(&atoms, &Term::static_atom("links"), 0, 0, None)
-            .unwrap(),
+        request.item(&process, &Term::static_atom("links")).unwrap(),
         Some(Term::tuple(vec![Term::static_atom("links"), Term::nil()]))
     );
     process.links.insert(LinkId::Process(ProcessId(1)), 0);
@@ -238,8 +247,8 @@ fn gives_the_links_of_a_process_as_process_info_2() {
     // A link that waits for its unlink acknowledgment stays out of the
     // result (`collect_one_link`, `erl_bif_info.c:574-585`).
     process.links.insert(LinkId::Process(ProcessId(4)), 7);
-    let value = process
-        .info(&atoms, &Term::static_atom("links"), 0, 0, None)
+    let value = request
+        .item(&process, &Term::static_atom("links"))
         .unwrap()
         .unwrap();
     let elements = value.tuple_elements().expect("a tuple");
@@ -265,12 +274,30 @@ fn gives_the_links_of_a_process_as_process_info_2() {
 fn reads_each_item_of_another_process_that_a_remote_request_carries() {
     // A request to a process of another scheduler carries only these items,
     // and its owner reads them as the target, so each one must be supported
-    // for a process that is not the caller.
+    // for a process that is not the caller. The process starts undefined,
+    // so the frames of no code table are read.
     let atoms = AtomTable::new();
-    let process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
+    let code = crate::runtime::interpreter::CodeTable::default();
+    let process = ProcessState::new(ProcessId(0), undefined_start(), vec![]);
+    let request = crate::runtime::interpreter::bif::erlang::ProcessInfoRequest {
+        code: &code,
+        atoms: &atoms,
+        current: 0,
+        messages: 0,
+        caller: false,
+        registered_name: None,
+    };
     for name in super::OTHER_PROCESS_INFO_ITEMS {
         let item = Term::static_atom(name);
-        let value = process.info(&atoms, &item, 0, 0, None).unwrap();
+        let value = request.item(&process, &item).unwrap();
         assert!(value.is_some(), "{name}");
+    }
+}
+
+/// An undefined start, whose frames need no code table.
+fn undefined_start() -> Start {
+    Start::Undefined {
+        module: Atom::from_static("erlang").expect("a static atom"),
+        function: Atom::from_static("apply").expect("a static atom"),
     }
 }
