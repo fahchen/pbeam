@@ -571,3 +571,79 @@ fn changes_names_directories_and_links_with_the_errors_of_erts() {
     );
     std::fs::remove_dir_all(&directory).unwrap();
 }
+
+#[test]
+fn advises_a_file_with_the_errors_of_erts() {
+    // `advise_nif_impl` reads the two numbers, then the advise
+    // (prim_file_nif.c:859-884), so a call with a bad number and a bad
+    // advise gives einval for the number. The pinned ERTS gives
+    // `[ok, {error, einval}, ok, {error, einval}, {error, badarg}]` for a
+    // file that it opened for read (measured).
+    let mut scheduler = scheduler();
+    let directory = scratch("advise");
+    let file = directory.join("file");
+    std::fs::write(&file, b"abc").unwrap();
+    let fd = open(&mut scheduler, &file, &["read"]);
+    let sequential = Term::Atom(scheduler.atoms.put("sequential").unwrap());
+    let never = Term::Atom(scheduler.atoms.put("never").unwrap());
+    let zero = Term::Integer(0);
+    let einval = "Value(Tuple([Atom(\"error\"), Atom(\"einval\")]))";
+    assert_eq!(
+        text(&mut scheduler, |s| advise_nif(
+            s,
+            &fd,
+            &zero,
+            &zero,
+            &sequential
+        )),
+        "Value(Atom(\"ok\"))"
+    );
+    // An advice that ERTS does not know gives einval.
+    assert_eq!(
+        text(&mut scheduler, |s| advise_nif(s, &fd, &zero, &zero, &never)),
+        einval
+    );
+    for offset in [
+        Term::Integer(-1),
+        Term::Float(0.0),
+        Term::BigInt(std::sync::Arc::new(9223372036854775808u64.into())),
+    ] {
+        assert_eq!(
+            text(&mut scheduler, |s| advise_nif(
+                s,
+                &fd,
+                &offset,
+                &zero,
+                &sequential
+            )),
+            einval
+        );
+    }
+    // A value that is not a number raises badarg.
+    assert_eq!(
+        text(&mut scheduler, |s| advise_nif(
+            s,
+            &fd,
+            &Term::binary(b"x".to_vec()),
+            &zero,
+            &sequential
+        )),
+        BADARG
+    );
+    // A closed resource gives einval.
+    assert_eq!(
+        text(&mut scheduler, |s| close_nif(s, &fd)),
+        "Value(Atom(\"ok\"))"
+    );
+    assert_eq!(
+        text(&mut scheduler, |s| advise_nif(
+            s,
+            &fd,
+            &zero,
+            &zero,
+            &sequential
+        )),
+        einval
+    );
+    std::fs::remove_dir_all(&directory).unwrap();
+}
