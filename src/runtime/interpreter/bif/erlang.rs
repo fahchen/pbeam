@@ -807,6 +807,8 @@ const ALLOCATORS: &[&str] = &[
 /// The allocators of `ALLOCATORS` that the default emulator flags enable as
 /// `alloc_util` allocators: each one except `sys_alloc` and `test_alloc`
 /// (`erl_alloc.c:3471-3474`; the pinned ERTS gives `notsup` for the two).
+/// The order is the order of the allocator numbers, which is the order of
+/// `erlang:system_info(alloc_util_allocators)` (`erl_alloc.c:2788-2820`).
 const ALLOC_UTIL_ALLOCATORS: &[&str] = &[
     "temp_alloc",
     "sl_alloc",
@@ -3486,6 +3488,16 @@ pub(super) fn system_info(scheduler: &mut Scheduler, item: &Term) -> Result<BifR
                 ]));
             }
             Ok(Value(Term::list_from(entries)))
+        }
+        // The allocators of the `alloc_util` set of the pinned build, in
+        // the order of their allocator numbers, without `sys_alloc` and
+        // `test_alloc` (`erl_alloc.types:71-85`, `erl_alloc.c:2788-2820`).
+        Term::Atom(atom) if atoms.name_of(atom) == "alloc_util_allocators" => {
+            let mut allocators = Vec::with_capacity(ALLOC_UTIL_ALLOCATORS.len());
+            for name in ALLOC_UTIL_ALLOCATORS {
+                allocators.push(Term::Atom(atoms.put(name)?));
+            }
+            Ok(Value(Term::list_from(allocators)))
         }
         // `erl_bif_info.c:2780-2783` takes each tuple to `info_1_tuple`, and
         // `erl_bif_info.c:3633` rejects each other term that the chain does
