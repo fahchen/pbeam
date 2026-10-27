@@ -75,7 +75,8 @@ defmodule Mix.Tasks.Pbeam.Bundle do
   def release_directory!(app, options) do
     default = Path.join([Mix.Project.build_path(), "rel", to_string(app)])
 
-    path = Keyword.get(options, :release) || Mix.Project.config()[:releases][app][:path] || default
+    path =
+      Keyword.get(options, :release) || Mix.Project.config()[:releases][app][:path] || default
 
     Path.expand(path)
   end
