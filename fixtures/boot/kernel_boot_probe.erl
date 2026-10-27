@@ -428,7 +428,11 @@ socket_recvfrom_flags() ->
     Stream = [socket:recvfrom(A, 0, [peek], 0), socket:send(C, <<"st">>), socket:recvfrom(A, 0, [peek], 1000),
               socket:recvfrom(A, 1, [peek], 0), socket:recvfrom(A, 0, [], 0), socket:shutdown(C, write),
               socket:recvfrom(A, 0, [peek], 1000)],
-    Keys = [read_byte, read_pkg, read_pkg_max, read_tries, read_fails, read_waits],
+    %% `read_tries` counts each `recvfrom(2)` attempt, so its value depends on
+    %% whether the datagram had arrived when the call ran: the pinned ERTS
+    %% gives 5, 6, or 7 for this probe over repeated runs (measured). The other
+    %% counters depend only on the calls.
+    Keys = [read_byte, read_pkg, read_pkg_max, read_fails, read_waits],
     Counters = [maps:with(Keys, maps:get(counters, socket:info(S))) || S <- [U2, A]],
     erlang:display({socket_recvfrom_flags, Udp, Inet6, Stream, Counters}),
     init:stop().
