@@ -1,5 +1,5 @@
 -module(compare_probe).
--export([exact/0, equal/0, not_equal/0, guards/0, cmp_term/0, id/1]).
+-export([exact/0, equal/0, not_equal/0, guards/0, id/1]).
 
 %% `bif` `erlang:'=:='/2` and `erlang:'=/='/2` with fail label 0, as
 %% user_drv:init/1 (user_drv.erl:184-186), user_drv:init_shell/2
@@ -36,19 +36,6 @@ guards() ->
       less(id({1}), id({2})), less(id({1, 2}), id({3})), less(id([]), id([1])),
       less(id([1]), id([])), less(id(<<"a">>), id(<<"b">>)), less(self(), id({})),
       less(id(#{}), id([])), less(id(576460752303423488), id(576460752303423487))]].
-
-%% `erts_internal:cmp_term/2` gives -1, 0, or 1 in the exact term order:
-%% `CMP_TERM` calls `erts_cmp` with `exact = 1` (bif.c:5417-5427,
-%% erl_utils.h:122), so each integer is less than each float, -0.0 is less
-%% than 0.0, and the order of the other pairs is the order of data. The
-%% `maps` module reads the same BIF to order two keys.
-cmp_term() ->
-    Ref = make_ref(),
-    Pairs = [{1, 1}, {1, 1.0}, {1.0, 1}, {1, 2}, {2, 1}, {1, a}, {a, 1}, {a, a}, {a, b},
-             {-0.0, 0.0}, {0.0, -0.0}, {[], [1]}, {[1], []}, {{1, a}, {1, b}},
-             {<<"a">>, <<"a">>}, {#{a => 1}, #{a => 1}}, {#{a => 1}, #{a => 2}},
-             {Ref, Ref}, {576460752303423488, 576460752303423487}],
-    [erts_internal:cmp_term(id(A), id(B)) || {A, B} <- Pairs].
 
 next(X) when X + 1 > 0 -> {pos, X + 1};
 next(X) when is_integer(X) -> {nonpos, X + 1};
