@@ -3,7 +3,10 @@ use std::{hint::black_box, rc::Rc, sync::Arc, time::Instant};
 use super::{
     Child, Direction, Drain, HAMT_MAX_LEVEL, Hamt, Insert, Map, Node, Repr, encode_path, map_hash,
 };
-use crate::term::{AtomTable, Reference, Term, internal_hash, test_atom as atom, test_atom_table};
+use crate::term::{
+    AtomTable, Binary, MatchState, Reference, Term, internal_hash, test_atom as atom,
+    test_atom_table,
+};
 
 fn integers(keys: impl IntoIterator<Item = i64>) -> Map {
     Map::from_pairs(
@@ -21,6 +24,12 @@ fn keys(map: &Map) -> Vec<Term> {
 
 fn list(keys: &[i64]) -> Vec<Term> {
     keys.iter().map(|key| Term::Integer(*key)).collect()
+}
+
+/// Return a match context, the one term that a map does not hold: the
+/// interpreter gives a runtime error before one reaches a map operation.
+fn match_context() -> Term {
+    Term::MatchContext(Arc::new(MatchState::new(Binary::from(b"a"))))
 }
 
 #[test]
@@ -113,7 +122,7 @@ fn keeps_flatmap_keys_in_order_and_replaces_values() {
     );
     assert_eq!(map.len(), 4);
     // A key type that the flatmap does not support leaves the map unchanged.
-    let unsupported = Term::tuple(vec![Term::Reference(Reference(0).pid_reference())]);
+    let unsupported = Term::tuple(vec![match_context()]);
     assert_eq!(
         map.insert(unsupported.clone(), atom(&mut table, "v"), &table),
         Err(unsupported)
@@ -164,21 +173,42 @@ fn hashes_tuple_keys_with_the_internal_hash() {
 }
 
 #[test]
-fn rejects_list_and_tuple_keys_with_unsupported_elements() {
+fn hashes_an_alias_reference_with_its_three_numbers() {
     assert_eq!(map_hash(&Term::nil()), Some(internal_hash(&Term::nil())));
-    // An alias reference key alone is not supported.
+    // A PBeam alias reference hashes its three number words, so it is a
+    // supported map key alone and inside a list, tuple, or map
+    // (docs/erts-differences.md, "Map keys").
+    let alias = || Term::Reference(Reference(0).pid_reference());
+    assert_eq!(map_hash(&alias()), Some(internal_hash(&alias())));
+    let alias_map = || {
+        Term::Map(Map::from_pairs(vec![(Term::Integer(1), alias())], &test_atom_table()).unwrap())
+    };
     assert_eq!(
-        map_hash(&Term::Reference(Reference(0).pid_reference())),
-        None
+        map_hash(&Term::tuple(vec![alias()])),
+        Some(internal_hash(&Term::tuple(vec![alias()])))
     );
-    // A map that holds an alias reference.
+    assert_eq!(
+        map_hash(&Term::list_with_tail(vec![Term::Integer(1)], alias())),
+        Some(internal_hash(&Term::list_with_tail(
+            vec![Term::Integer(1)],
+            alias()
+        )))
+    );
+    assert_eq!(
+        map_hash(&Term::tuple(vec![Term::Integer(1), alias_map()])),
+        Some(internal_hash(&Term::tuple(vec![
+            Term::Integer(1),
+            alias_map()
+        ])))
+    );
+}
+
+#[test]
+fn rejects_list_and_tuple_keys_with_unsupported_elements() {
     let port_map = || {
         Term::Map(
             Map::from_pairs(
-                vec![(
-                    Term::Integer(1),
-                    Term::Reference(Reference(0).pid_reference()),
-                )],
+                vec![(Term::Integer(1), match_context())],
                 &test_atom_table(),
             )
             .unwrap(),
@@ -188,14 +218,11 @@ fn rejects_list_and_tuple_keys_with_unsupported_elements() {
         Term::list_from(vec![Term::Integer(1), port_map()]),
         Term::list_from(vec![Term::list_from(vec![port_map()])]),
         // A tuple with an element that is not supported.
-        Term::tuple(vec![Term::Reference(Reference(0).pid_reference())]),
+        Term::tuple(vec![match_context()]),
         Term::tuple(vec![Term::Integer(1), port_map()]),
         // An improper list tail that is not supported.
         Term::list_with_tail(vec![Term::Integer(1)], port_map()),
-        Term::list_with_tail(
-            vec![Term::Integer(1)],
-            Term::Reference(Reference(0).pid_reference()),
-        ),
+        Term::list_with_tail(vec![Term::Integer(1)], match_context()),
         Term::list_from(vec![Term::list_with_tail(
             vec![Term::Integer(1)],
             port_map(),
@@ -628,24 +655,21 @@ fn sorts_pairs_by_the_flatmap_key_order() {
     Map::sort_pairs(&mut references, &test_atom_table()).unwrap();
     let values: Vec<_> = references.iter().map(|(_, value)| value.clone()).collect();
     assert_eq!(values, [1, 2].map(Term::Integer));
-    // An alias reference has no PBeam order, so the sort reports it instead
-    // of panicking.
+    // An alias reference compares by its three number words (`src/term/order.rs`),
+    // so the alias 2 comes after the alias 1.
     let mut aliases = vec![
-        (
-            Term::Reference(Reference(1).pid_reference()),
-            Term::Integer(1),
-        ),
         (
             Term::Reference(Reference(2).pid_reference()),
             Term::Integer(2),
         ),
+        (
+            Term::Reference(Reference(1).pid_reference()),
+            Term::Integer(1),
+        ),
     ];
-    assert!(
-        Map::sort_pairs(&mut aliases, &test_atom_table())
-            .unwrap_err()
-            .to_string()
-            .contains("unsupported term order of an alias reference")
-    );
+    Map::sort_pairs(&mut aliases, &test_atom_table()).unwrap();
+    let values: Vec<_> = aliases.iter().map(|(_, value)| value.clone()).collect();
+    assert_eq!(values, [1, 2].map(Term::Integer));
 }
 
 #[test]
