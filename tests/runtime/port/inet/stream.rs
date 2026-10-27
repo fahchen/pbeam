@@ -1,8 +1,11 @@
-use std::io::Write;
+use std::io::{Read, Write};
 
 use socket2::{Domain, Socket, Type};
 
-use super::{Event, Receiver, Sender};
+use super::{
+    super::{Control, MAGIC},
+    Event, Receiver, Sender,
+};
 use crate::{
     runtime::port::inet::{Inet, SocketType},
     term::{ProcessId, Reference},
@@ -132,4 +135,55 @@ fn delivers_the_buffer_when_a_socket_becomes_active() {
     port.active = 1;
     assert_eq!(port.activate(false), [Event::Data(vec![1, 2])]);
     assert_eq!(port.active, 1);
+}
+
+/// `TCP_REQ_SHUTDOWN` of the write side of a connected socket gives `ok`,
+/// and the peer reads the end of the file (inet_drv.c:12339-12378).
+#[test]
+fn shuts_down_the_write_side_of_a_connected_socket() {
+    let (local, mut peer) = Socket::pair(Domain::UNIX, Type::STREAM, None).unwrap();
+    let mut port = Inet::new(SocketType::Stream).copy(local);
+    assert_eq!(
+        port.control(MAGIC + 44, &[1], ProcessId(1)).unwrap(),
+        Control::Reply(vec![1])
+    );
+    let mut byte = [0; 1];
+    assert_eq!(peer.read(&mut byte).unwrap(), 0);
+}
+
+/// `TCP_REQ_SHUTDOWN` gives `enotconn` without a connection, and `einval`
+/// to a request that is not one byte (inet_drv.c:12339-12352).
+#[test]
+fn gives_the_error_of_a_shutdown_without_a_connection_or_with_a_wrong_request() {
+    let (local, _peer) = Socket::pair(Domain::UNIX, Type::STREAM, None).unwrap();
+    let mut port = Inet::new(SocketType::Stream).copy(local);
+    assert_eq!(
+        port.control(MAGIC + 44, &[1, 1], ProcessId(1)).unwrap(),
+        Control::Reply(b"\0einval".to_vec())
+    );
+    let mut closed = Inet::new(SocketType::Stream);
+    assert_eq!(
+        closed.control(MAGIC + 44, &[1], ProcessId(1)).unwrap(),
+        Control::Reply(b"\0enotconn".to_vec())
+    );
+}
+
+/// A `TCP_REQ_SHUTDOWN` of the write side while the queue holds bytes
+/// waits for the queue, which `send_ready` writes before the shutdown
+/// (`TCP_ADDF_PENDING_SHUT_WR`, inet_drv.c:12362-12376, 14298-14306).
+#[test]
+fn shuts_down_the_write_side_after_the_queue_empties() {
+    let (local, mut peer) = Socket::pair(Domain::UNIX, Type::STREAM, None).unwrap();
+    let mut port = Inet::new(SocketType::Stream).copy(local);
+    port.stream.output.extend([1, 2, 3]);
+    assert_eq!(
+        port.control(MAGIC + 44, &[1], ProcessId(1)).unwrap(),
+        Control::Reply(vec![1])
+    );
+    assert_eq!(port.stream.pending_shutdown, Some(1));
+    assert_eq!(port.send_ready(), Vec::new());
+    assert_eq!(port.stream.pending_shutdown, None);
+    let mut bytes = Vec::new();
+    peer.read_to_end(&mut bytes).unwrap();
+    assert_eq!(bytes, [1, 2, 3]);
 }
