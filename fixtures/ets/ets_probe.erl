@@ -1772,8 +1772,14 @@ walk_error(F, T) ->
 walk_error(F, T, K) ->
     try ets:F(T, K) catch error:R -> {error, R} end.
 
-%% Two different alias references have no PBeam order, so an ordered_set
-%% key that holds one gives a runtime error on a walk.
+%% An ordered_set table holds two different alias references as two keys.
+%% ERTS compares the words of an alias reference, which hold the pid of the
+%% owner and the reference numbers (`erts_cmp_compound`, utils.c:2283-2286),
+%% and a PBeam reference compares its three number words, because it keeps
+%% no pid (row "Term order" of docs/erts-differences.md). The cases give the
+%% same shape on both runtimes: a step from a key that the table does not
+%% hold, a lookup of an arithmetic key, and the first key of a table that
+%% holds two aliases.
 walk_alias(Case) ->
     O = ets:new(ets_probe, [ordered_set]),
     A = erlang:alias([]),
