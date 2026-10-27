@@ -238,7 +238,10 @@ fn boot(
     }
     let version = release_version(directory)?;
     let mut command = Command::new(executable);
-    command.args(["pbeam_boot", "start", entry.module, entry.function]);
+    // The re-exec marks itself, so the binary reads this command line, not
+    // the appended bundle again.
+    command.args([BOOT_REEXEC, "pbeam_boot", "start"]);
+    command.args([entry.module, entry.function]);
     command.arg("--root").arg(directory);
     command.arg("--extracted-root").arg(directory);
     for path in code_paths(directory, &version)? {

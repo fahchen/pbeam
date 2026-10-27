@@ -228,7 +228,10 @@ fn main() -> ExitCode {
         pbeam_runtime::embedded::remove_extraction(extracted);
         return status;
     }
-    let arguments = Cli::parse();
+    // `parse_from` reads `words`, which no longer holds the marker of a
+    // re-exec; `parse` would read the environment again and see it. Its
+    // first word is the program name, as `parse` takes it.
+    let arguments = Cli::parse_from(words);
     let extracted = arguments.extracted_root.clone();
     let status = exit_status(run(arguments));
     // A boot of an extracted release removes its directory at the exit. The
