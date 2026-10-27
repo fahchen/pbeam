@@ -48,9 +48,18 @@ const ZSTD_REQUEST: &[u8] =
 /// A response: the status line, the headers without `date`, and the body.
 type Response<Body> = (String, String, Body);
 
-/// One run at a time picks a free port and starts its server on it. Two
-/// concurrent runs could otherwise pick the same port between the probe and
-/// the bind, and the request of one run would reach the server of the other.
+/// One run at a time builds the example and starts its server on it.
+///
+/// Two concurrent runs could otherwise pick the same port between the probe
+/// and the bind, and the request of one run would reach the server of the
+/// other. A run that builds the example writes `target/examples/plug_hello`
+/// with `mix release --overwrite`, which removes the release directory
+/// before it writes it, and a run that builds a bundle reads that
+/// directory: the two must not overlap.
+///
+/// The lock covers the build of the example, the build of the bundle, and the
+/// run of the server. A helper that the caller holds the lock for must not
+/// take it again.
 static ONE_FILE_RUN: Mutex<()> = Mutex::new(());
 
 /// The variables that `pbeam erl` rejects when they are set and not empty,
@@ -314,6 +323,9 @@ fn builds_the_one_file_executable_with_the_mix_task_and_runs_it_clean() {
     // private to this test, so another test does not rebuild it. The run
     // then uses no installed OTP: `PATH` holds no `erl` or `elixir`, `HOME`
     // is an empty directory, and `PBEAM_OTP_ROOT` is unset.
+    let _serialized = ONE_FILE_RUN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let directory = test_directory("mix-build");
     let example = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/plug_hello");
     let release = directory.join("release");
@@ -349,9 +361,6 @@ fn builds_the_one_file_executable_with_the_mix_task_and_runs_it_clean() {
     assert!(status.success(), "the task writes the executable");
     let executable = clean.join("plug_hello");
     fs::copy(&output, &executable).unwrap();
-    let _serialized = ONE_FILE_RUN
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let port = free_port();
     let mut command = Command::new(&executable);
     command
@@ -419,15 +428,15 @@ fn gives_the_command_line_arguments_of_the_executable_to_the_release() {
     // (`lib/elixir/lib/kernel/cli.ex` of Elixir 1.20.4,
     // `parse_argv(["--" | t], config) -> {config, t}`), so none of them
     // becomes a script file.
+    let _serialized = ONE_FILE_RUN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let directory = test_directory("arguments");
     let clean = directory.join("clean");
     let temporary = directory.join("tmp");
     fs::create_dir_all(&clean).unwrap();
     fs::create_dir_all(&temporary).unwrap();
     let output = build_one_file(&directory, &clean);
-    let _serialized = ONE_FILE_RUN
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let port = free_port();
     let mut child = without_erl_flags(&mut Command::new(&output))
         .args(["a", "erl", "--c"])
@@ -518,15 +527,15 @@ fn erts_release_response(release: &std::path::Path) -> (String, String, String) 
 /// Build `examples/plug_hello` as one file in a clean directory, run it
 /// there, and return the response.
 fn serve_one_file() -> (String, String, String) {
+    let _serialized = ONE_FILE_RUN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let directory = test_directory("one-file");
     let clean = directory.join("clean");
     let temporary = directory.join("tmp");
     fs::create_dir_all(&clean).unwrap();
     fs::create_dir_all(&temporary).unwrap();
     let output = build_one_file(&directory, &clean);
-    let _serialized = ONE_FILE_RUN
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let port = free_port();
     let mut child = without_erl_flags(&mut Command::new(&output))
         .current_dir(&clean)
@@ -691,6 +700,12 @@ fn test_directory(name: &str) -> PathBuf {
 /// return the plain response and the zstd response, and stop the server.
 /// `pbeam` sets `PBEAM_BIN` for the pbeam run.
 fn serve(arguments: &[&str], pbeam: Option<&str>) -> (Response<String>, Response<Vec<u8>>) {
+    // The run without `--no-build` writes `target/examples/plug_hello`, and a
+    // bundle built from that directory while the write runs has no boot
+    // script. The lock covers the build and the run.
+    let _serialized = ONE_FILE_RUN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let port = free_port();
     let mut command = Command::new("bash");
     command
@@ -752,13 +767,28 @@ fn collect(
     })
 }
 
-/// Return a free port of the loopback address.
+/// Return a free port of the loopback address that no earlier call of this
+/// process returned.
+///
+/// The probe closes its listener before the server of the run binds the port,
+/// so the host can give the port to the server of another run of this test
+/// binary, and then the request of the run reaches the wrong server. A port
+/// that this function returned once is never returned again, so two runs of
+/// the binary cannot pick one port.
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("the loopback address has a free port")
-        .local_addr()
-        .expect("the listener has an address")
-        .port()
+    static USED: Mutex<Option<std::collections::HashSet<u16>>> = Mutex::new(None);
+    let mut used = USED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let used = used.get_or_insert_with(std::collections::HashSet::new);
+    loop {
+        let port = TcpListener::bind("127.0.0.1:0")
+            .expect("the loopback address has a free port")
+            .local_addr()
+            .expect("the listener has an address")
+            .port();
+        if used.insert(port) {
+            return port;
+        }
+    }
 }
 
 /// Connect to `port` until the server accepts, and return the stream. Give
