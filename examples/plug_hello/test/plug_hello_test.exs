@@ -9,8 +9,18 @@ defmodule PlugHelloTest do
     assert ["text/plain" <> _] = Plug.Conn.get_resp_header(conn, "content-type")
   end
 
+  test "GET /argv answers the arguments of the command line" do
+    # The release reads what the one-file executable gave it as `System.argv()`,
+    # so the route prints the arguments of this test run.
+    conn = PlugHello.call(conn(:get, "/argv"), PlugHello.init([]))
+    assert conn.status == 200
+    assert conn.resp_body == inspect(System.argv())
+    assert ["text/plain" <> _] = Plug.Conn.get_resp_header(conn, "content-type")
+  end
+
   test "another path answers 404" do
     assert PlugHello.call(conn(:get, "/other"), []).status == 404
+    assert PlugHello.call(conn(:post, "/"), []).status == 404
   end
 
   test "the started Bandit listener serves the page over TCP" do
