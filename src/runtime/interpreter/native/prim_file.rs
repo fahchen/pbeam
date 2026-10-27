@@ -27,6 +27,7 @@ use std::{
     ffi::{CStr, c_int},
     fs::File,
     io::{IoSlice, SeekFrom},
+    os::fd::AsRawFd,
 };
 
 /// The functions of the ERTS `prim_file` NIF library, as `(name, arity)` in
@@ -127,6 +128,12 @@ pub(super) const BINDINGS: &[Binding] = &[
         arity: 0,
         job: Job::IoBound,
         run: |_, _| get_cwd_nif(),
+    },
+    Binding {
+        name: "get_handle_nif",
+        arity: 1,
+        job: Job::Normal,
+        run: |scheduler, arguments| get_handle_nif(scheduler, &arguments[0]),
     },
     Binding {
         name: "list_dir_nif",
@@ -698,6 +705,36 @@ fn advise_nif(
         |_, ()| (),
         |_, ()| Ok(BifResult::Value(Term::static_atom("ok"))),
     )
+}
+
+/// Run `prim_file:get_handle_nif(Fd)`, as the ERTS NIF `get_handle_nif`
+/// (`prim_file_nif.c:989-994`) does after [`file_handle_wrapper`]: the
+/// result is the host file descriptor in the native-endian bytes of a C
+/// `int`, as `efile_get_handle` (`nifs/unix/unix_prim_file.c:103-113`)
+/// makes it. `prim_inet:sendfile/4` reads it. ERTS has no dirty job flag
+/// on this function (`prim_file_nif.c:215`), so it runs on the scheduler
+/// thread, and the resource state changes there as
+/// [`file_handle_wrapper`] changes it.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // <<3, 0, 0, 0>> when the host file descriptor of the resource is 3
+/// let result = get_handle_nif(&mut scheduler, &fd)?;
+/// ```
+fn get_handle_nif(scheduler: &mut Scheduler, fd: &Term) -> Result<BifResult, BeamError> {
+    let Term::Reference(reference) = fd else {
+        return Ok(BifResult::badarg());
+    };
+    let Some(data) = lock(&scheduler.node().resources.kind::<Files>()).get(*reference) else {
+        return Ok(BifResult::badarg());
+    };
+    let Some(file) = data.acquire() else {
+        return einval();
+    };
+    let handle = file.as_raw_fd().to_ne_bytes();
+    data.release(file);
+    Ok(BifResult::Value(Term::binary(handle.to_vec())))
 }
 
 /// Run `prim_file:read_info_nif(Path, FollowLinks)`, as the ERTS NIF
