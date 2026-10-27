@@ -197,7 +197,7 @@ fn has_binding(module: &str, name: &str, arity: u32) -> bool {
 /// other function has no flag and runs on a normal scheduler.
 const DIRTY_FUNCTIONS: &[(&str, &str, u32, Job)] = &[
     // prim_file_nif.c:179-218: each function except `get_handle_nif/1`
-    // (prim_file_nif.c:215).
+    // (prim_file_nif.c:215), which has no flag.
     ("prim_file", "open_nif", 2, Job::IoBound),
     ("prim_file", "close_nif", 1, Job::IoBound),
     ("prim_file", "read_nif", 2, Job::IoBound),
