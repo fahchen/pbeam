@@ -39,9 +39,11 @@
 //! - binary: by the bytes, then by the size.
 //!
 //! Two references compare by their number words, from the highest word
-//! down, as in ERTS (`erts_cmp_compound`, `utils.c:2283-2286`). Two
-//! different alias references have no PBeam order: ERTS holds the pid of
-//! the owner in the higher words, and a PBeam reference does not keep it.
+//! down, as in ERTS (`erts_cmp_compound`, `utils.c:2283-2286`). ERTS holds
+//! the pid of the owner in the two higher words of an alias reference, and
+//! a PBeam reference keeps no pid, so two alias references compare by their
+//! three PBeam number words. A PBeam alias reference is still a term of its
+//! own, so the comparison stays consistent with equality.
 
 use std::cmp::Ordering;
 
@@ -49,7 +51,7 @@ use num_bigint::{BigInt, Sign};
 use num_traits::FromPrimitive;
 
 use super::{AtomTable, Reference, Term, match_context::MATCH_CONTEXT_ESCAPE};
-use crate::error::{BeamError, error};
+use crate::error::BeamError;
 
 /// The rank of `[]` in the ERTS term order (`NIL_DEF`).
 const NIL_RANK: u8 = 9;
@@ -160,21 +162,12 @@ impl Term {
 /// one node by their number words, from the highest word down
 /// (`erts_cmp_compound`, utils.c:2283-2286), and [`Reference::numbers`]
 /// matches that layout (row "Term order" of docs/erts-differences.md). An
-/// alias reference holds the pid of its owner in the higher ERTS words,
-/// which a PBeam reference does not keep, so its order is not supported.
-///
-/// # Errors
-///
-/// Two different references of which one is an alias reference give a
-/// runtime error.
+/// alias reference has two more ERTS number words that hold the pid of its
+/// owner, and a PBeam reference keeps no pid, so two alias references
+/// compare by the three PBeam number words.
 fn reference_order(left: Reference, right: Reference) -> Result<Ordering, BeamError> {
     if left == right {
         return Ok(Ordering::Equal);
-    }
-    if left.is_pid_reference() || right.is_pid_reference() {
-        return Err(error(
-            "unsupported term order of an alias reference (see \"Term order\" in docs/erts-differences.md)",
-        ));
     }
     // ERTS compares `N2`, `N1`, `N0`, with the magic marker of a magic
     // reference in `N1` (`utils.c:2283-2286`, `erl_bif_unique.h:102-113`).

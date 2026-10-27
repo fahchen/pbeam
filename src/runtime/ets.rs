@@ -5,7 +5,6 @@ pub(super) mod order;
 pub(super) mod pattern;
 pub(super) mod range;
 
-use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::{DefaultHasher, Hasher};
 use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -1950,7 +1949,6 @@ impl Table {
     /// Return a runtime error when the order of a key is not supported.
     pub(super) fn ordered_end(&self, first: bool) -> Result<Option<Term>, BeamError> {
         let order = self.key_order();
-        order.check()?;
         let mut keys = order.iter();
         Ok(if first { keys.next() } else { keys.next_back() }.cloned())
     }
@@ -2002,7 +2000,6 @@ impl Table {
         forward: bool,
     ) -> Result<impl Iterator<Item = &'a [Term]> + 'a, BeamError> {
         let order = self.key_order();
-        order.check()?;
         let keys: Box<dyn Iterator<Item = &'a Term> + 'a> = match after {
             None if forward => Box::new(order.iter()),
             None => Box::new(order.iter().rev()),
@@ -2886,7 +2883,7 @@ impl Table {
         };
         if found.is_none() && self.table_type == TableType::OrderedSet {
             let key = self.key(&object).clone();
-            self.key_order_mut().put(atoms, key);
+            self.key_order_mut().put(key);
         }
         if found.is_none() && self.is_fixed() {
             let key = self.key(&object);
@@ -2912,7 +2909,7 @@ impl Table {
                 self.rekey(slot, old, hash);
                 if self.table_type == TableType::OrderedSet {
                     let key = self.key(&object).clone();
-                    self.key_order_mut().put(atoms, key);
+                    self.key_order_mut().put(key);
                 }
                 self.objects[slot] = Some(object);
                 self.writes += 1;
@@ -3732,13 +3729,7 @@ impl Table {
         }
         match self.key_order().find(atoms, key) {
             Ok(Some(stored)) => self.position(stored_hash(atoms, stored), stored),
-            Ok(None) => None,
-            // A key with no order compares with each object, and a
-            // comparison error is not equal.
-            Err(_) => self.objects.iter().enumerate().find_map(|(slot, object)| {
-                let object = object.as_ref()?;
-                matches!(self.key(object).compare(key, atoms), Ok(Ordering::Equal)).then_some(slot)
-            }),
+            Ok(None) | Err(_) => None,
         }
     }
 
