@@ -368,7 +368,7 @@ bifs! {
     erts_internal:binary_to_integer/2 as ErtsInternalBinaryToInteger2 => |_, [binary, base]| Ok(erts_internal::binary_to_integer(binary, base)),
     erts_internal:check_dirty_process_code/2 => unsupported,
     erts_internal:check_process_code/1 => unsupported,
-    erts_internal:cmp_term/2 => unsupported,
+    erts_internal:cmp_term/2 as ErtsInternalCmpTerm2 => |cx, [left, right]| erts_internal::cmp_term(&cx.scheduler.atoms, left, right),
     erts_internal:counters_add/3 as ErtsInternalCountersAdd3 => |cx, [reference, index, increment]| atomics::counters_add(cx.scheduler, reference, index, increment),
     erts_internal:counters_get/2 as ErtsInternalCountersGet2 => |cx, [reference, index]| atomics::counters_get(cx.scheduler, reference, index),
     erts_internal:counters_info/1 as ErtsInternalCountersInfo1 => |cx, [reference]| atomics::counters_info(cx.scheduler, reference),

@@ -1,5 +1,7 @@
 //! Bodies of the `erts_internal` BIFs that do not fit on one table line.
 
+use std::cmp::Ordering;
+
 use super::BifResult::Value;
 use super::erlang::signals_return;
 use super::*;
@@ -2452,6 +2454,39 @@ pub(super) fn term_type(atoms: &AtomTable, term: &Term) -> Result<BifResult, Bea
         }
     };
     Ok(Value(Term::Atom(atoms.put(name)?)))
+}
+
+/// Return the ERTS term order of `left` against `right`, as
+/// `erts_internal:cmp_term/2` does (`bif.c:5417-5427`): `-1` when `left` is
+/// less, `0` when the terms are equal, and `1` when `left` is greater. The
+/// comparison is exact, because `CMP_TERM` calls `erts_cmp` with
+/// `exact = 1` (`erl_utils.h:122`), so each integer is less than each float
+/// and `-0.0` is less than `0.0`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(
+///     cmp_term(&atoms, &Term::Integer(1), &Term::Float(1.0))?,
+///     Value(Term::Integer(-1))
+/// );
+/// ```
+///
+/// # Errors
+///
+/// Return a runtime error when the result depends on the order of an
+/// alias reference.
+pub(super) fn cmp_term(
+    atoms: &AtomTable,
+    left: &Term,
+    right: &Term,
+) -> Result<BifResult, BeamError> {
+    let order = left.compare_exact(right, atoms)?;
+    Ok(Value(Term::Integer(match order {
+        Ordering::Less => -1,
+        Ordering::Equal => 0,
+        Ordering::Greater => 1,
+    })))
 }
 
 /// Return the key tuple of a flatmap, as
