@@ -237,6 +237,10 @@ pub(in crate::runtime) struct Stream {
     /// order, which get `{empty_out_q, S}` once when the queue becomes
     /// empty (`empty_out_q_subs`, inet_drv.c:10819-10848).
     pub(super) subscribers: Vec<ProcessId>,
+    /// `shutdown/2` how of the `TCP_REQ_SHUTDOWN` that waits for this queue
+    /// to empty (`TCP_ADDF_PENDING_SHUT_WR` and
+    /// `TCP_ADDF_PENDING_SHUT_RDWR`).
+    pub(super) pending_shutdown: Option<u8>,
     /// The next send gives `{error, closed}` (`TCP_ADDF_DELAYED_CLOSE_SEND`).
     closed_send: bool,
     /// The next receive gives `{error, closed}`
@@ -272,6 +276,7 @@ impl Stream {
             output: VecDeque::new(),
             busy: None,
             subscribers: Vec::new(),
+            pending_shutdown: None,
             closed_send: false,
             closed_receive: false,
             closed_sent: false,
@@ -560,6 +565,7 @@ impl Inet {
         self.socket = None;
         self.state = State::Closed;
         self.stream.ended = true;
+        self.stream.pending_shutdown = None;
         self.stream.input = Vec::new();
         self.stream.filled = 0;
         self.stream.input_size = 0;
@@ -599,6 +605,19 @@ impl Inet {
         let sender = Sender { caller, tag };
         if self.socket_type == SocketType::Datagram {
             return self.send_datagram(data, sender).map(Output::Sent);
+        }
+        if self.stream.pending_shutdown.is_some() {
+            // `tcp_inet_commandv` gives the error of `tcp_shutdown_error` to
+            // a send after a shutdown that waits for the queue.
+            let busy = self.stream.busy.take();
+            let mut events = self.send_failed(Some(sender));
+            if let Some(busy) = busy {
+                events.push(Event::Replied {
+                    sender: busy,
+                    result: Err("closed".to_owned()),
+                });
+            }
+            return Ok(Output::Sent(events));
         }
         let reply = |result| Ok(Output::Sent(vec![Event::Replied { sender, result }]));
         if self.state != State::Connected {
@@ -673,6 +692,13 @@ impl Inet {
         }
         if self.stream.output.is_empty() {
             events.extend(self.empty_queue());
+            if let Some(how) = self.stream.pending_shutdown.take() {
+                // `tcp_shutdown_async`: a failed shutdown ends the socket as
+                // `tcp_shutdown_error` does.
+                if self.shutdown(how).first() != Some(&OK) {
+                    events.extend(self.send_failed(None));
+                }
+            }
         }
         events
     }
