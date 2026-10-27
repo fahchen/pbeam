@@ -454,7 +454,7 @@ fn gives_the_command_line_arguments_of_the_executable_to_the_release() {
     let stderr = Arc::new(Mutex::new(Vec::new()));
     let stderr_reader = collect(child.stderr.take().unwrap(), Arc::clone(&stderr));
     let stream = wait_for_server(&mut child, port);
-    let response = stream.and_then(request_argv);
+    let response = stream.and_then(|stream| request_argv_after_cli(port, stream));
     let status = stop_with_term(child);
     stdout_reader.join().unwrap();
     stderr_reader.join().unwrap();
@@ -817,6 +817,24 @@ fn request(stream: TcpStream) -> Result<Response<String>, String> {
     let (status, headers, body) = exchange(stream, PLAIN_REQUEST)?;
     let body = String::from_utf8(body).map_err(|error| error.to_string())?;
     Ok((status, headers, body))
+}
+
+/// Send `GET /argv` after the command-line initialization. The boot script
+/// starts the applications before `init:start_em/1` runs `elixir:start_cli/0`
+/// (`init.erl:1215-1217`, `1539-1547`), so Bandit can answer before
+/// `Kernel.CLI.main/1` replaces the initial empty `System.argv()`
+/// (`kernel/cli.ex:29-32`). Retry only that initial value: this test passes
+/// arguments, and a non-empty wrong value must fail at once.
+fn request_argv_after_cli(port: u16, mut stream: TcpStream) -> Result<Response<String>, String> {
+    let deadline = Instant::now() + START_TIME_LIMIT;
+    loop {
+        let response = request_argv(stream)?;
+        if response.2 != "[]" || Instant::now() >= deadline {
+            return Ok(response);
+        }
+        thread::sleep(Duration::from_millis(10));
+        stream = TcpStream::connect(("127.0.0.1", port)).map_err(|error| error.to_string())?;
+    }
 }
 
 /// Send `GET /argv` and return the response: the example answers it with
