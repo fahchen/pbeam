@@ -332,6 +332,10 @@ name = "code"
 path = "tests/integration/code.rs"
 
 [[test]]
+name = "cmp_term"
+path = "tests/integration/cmp_term.rs"
+
+[[test]]
 name = "compare"
 path = "tests/integration/compare.rs"
 

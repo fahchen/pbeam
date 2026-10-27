@@ -150,28 +150,3 @@ fn runs_the_is_lt_is_integer_and_is_boolean_tests_as_pinned_erts() {
           nlt,lt,nlt,lt,nlt,lt,nlt,lt,lt,lt,nlt]]\n"
     );
 }
-
-#[test]
-fn orders_terms_exactly_with_cmp_term_as_pinned_erts() {
-    // `compare_probe:cmp_term/0` calls `erts_internal:cmp_term/2` with
-    // `CMP_TERM` of the pinned BIF table (`bif.c:5417-5427`,
-    // `erl_utils.h:122`), which compares with `erts_cmp` and
-    // `exact = 1`: each integer is less than each float, and `-0.0` is
-    // less than `0.0`. `maps` reads the same BIF to order two keys, and
-    // Elixir's `Task` map holds an alias reference as a key.
-    let program = BeamProgram::load(&[COMPARE_PROBE]).unwrap();
-    let expected = [
-        0, -1, 1, -1, 1, -1, 1, 0, -1, -1, 1, -1, 1, -1, 0, 0, -1, 0, 1,
-    ];
-    assert_eq!(
-        program
-            .execute("compare_probe", "cmp_term", &[])
-            .unwrap()
-            .term,
-        Term::list_from(expected.map(Term::Integer))
-    );
-    assert_eq!(
-        reference("cmp_term"),
-        b"[0,-1,1,-1,1,-1,1,0,-1,-1,1,-1,1,-1,0,0,-1,0,1]\n"
-    );
-}
