@@ -12,6 +12,7 @@ use std::ffi::{c_char, c_int, c_uint, c_void};
 use std::mem::{offset_of, size_of};
 
 use super::env::Env;
+use super::resource::DtorFn;
 use crate::term::ProcessId;
 
 /// `ERL_NIF_TERM`: an `ErlNifUInt`, which is an `unsigned long` on LP64.
@@ -150,6 +151,88 @@ const _: () = {
     assert!(offset_of!(ErlNifBinary, data) == 8);
     assert!(offset_of!(ErlNifBinary, ref_bin) == 16);
     assert!(offset_of!(ErlNifBinary, spare) == 24);
+};
+
+/// The `err_handler` of `enif_dlopen` and `enif_dlsym`: `void (*)(void*,
+/// const char*)` (`erl_nif_api_funcs.h:144`). The functions accept NULL.
+pub(super) type DlErrHandler = unsafe extern "C" fn(*mut c_void, *const c_char);
+
+/// `ErlNifMonitor` (`erl_nif.h:210`, `erl_drv_nif.h:64-69`): an opaque
+/// driver monitor of 4 words. ERTS copies the bytes of the monitor
+/// reference into it (`erts_ref_to_driver_monitor`), and a NIF only
+/// passes it back, so PBeam keeps its own monitor identity in the words.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(super) struct ErlNifMonitor {
+    /// The words of the monitor. Only the ABI layer reads them.
+    pub(super) words: [usize; 4],
+}
+
+/// `ErlNifPort` (`erl_nif.h:205-207`): an opaque local port. Only the ABI
+/// layer reads the field.
+#[repr(C)]
+pub(super) struct ErlNifPort {
+    /// The port id.
+    pub(super) port_id: NifTerm,
+}
+
+/// `ErlNifMapIterator` (`erl_nif.h:242-261`): an opaque map iterator of 7
+/// words, which the C code only passes back.
+#[repr(C)]
+pub(super) struct ErlNifMapIterator {
+    /// The words of the iterator. Only the ABI layer reads them.
+    pub(super) words: [usize; 7],
+}
+
+/// An opaque `ErlNifSysInfo` (`erl_nif.h:229`), which the C code only
+/// passes to `enif_system_info`.
+#[repr(C)]
+pub(super) struct ErlNifSysInfo {
+    /// No field of the struct is read.
+    _opaque: [u8; 0],
+}
+
+/// The `ErlNifResourceStop` callback: `void (*)(ErlNifEnv*, void*,
+/// ErlNifEvent, int)` (`erl_nif.h:217`). `ErlNifEvent` is a C `int` on
+/// Unix (`erl_nif.h:173-175`).
+pub(super) type StopFn = unsafe extern "C" fn(*mut Env, *mut c_void, c_int, c_int);
+
+/// The `ErlNifResourceDown` callback: `void (*)(ErlNifEnv*, void*,
+/// ErlNifPid*, ErlNifMonitor*)` (`erl_nif.h:218`).
+pub(super) type DownFn =
+    unsafe extern "C" fn(*mut Env, *mut c_void, *mut ErlNifPid, *mut ErlNifMonitor);
+
+/// The `ErlNifResourceDynCall` callback: `void (*)(ErlNifEnv*, void*,
+/// void*)` (`erl_nif.h:219`).
+pub(super) type DynCallFn = unsafe extern "C" fn(*mut Env, *mut c_void, *mut c_void);
+
+/// `ErlNifResourceTypeInit` (`erl_nif.h:221-227`). The `members` field is
+/// the count of the struct members that the library set, from 0 to 4, and
+/// ERTS reads the fields from the last one down (`erl_nif.c:2747-2756`).
+#[repr(C)]
+pub(super) struct ErlNifResourceTypeInit {
+    /// The destructor, or NULL.
+    pub(super) dtor: Option<DtorFn>,
+    /// The stop callback of `enif_select`, or NULL.
+    pub(super) stop: Option<StopFn>,
+    /// The down callback of `enif_monitor_process`, or NULL.
+    pub(super) down: Option<DownFn>,
+    /// The count of the members that the library set.
+    pub(super) members: c_int,
+    /// The dynamic resource call callback, or NULL.
+    pub(super) dyncall: Option<DynCallFn>,
+}
+
+const _: () = {
+    assert!(size_of::<ErlNifMonitor>() == 32);
+    assert!(size_of::<ErlNifPort>() == 8);
+    assert!(size_of::<ErlNifMapIterator>() == 56);
+    assert!(size_of::<ErlNifResourceTypeInit>() == 40);
+    assert!(offset_of!(ErlNifResourceTypeInit, dtor) == 0);
+    assert!(offset_of!(ErlNifResourceTypeInit, stop) == 8);
+    assert!(offset_of!(ErlNifResourceTypeInit, down) == 16);
+    assert!(offset_of!(ErlNifResourceTypeInit, members) == 24);
+    assert!(offset_of!(ErlNifResourceTypeInit, dyncall) == 32);
 };
 
 #[cfg(test)]
