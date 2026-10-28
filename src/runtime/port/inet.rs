@@ -279,6 +279,12 @@ pub(in crate::runtime) enum Control {
 }
 
 impl Inet {
+    /// Return the option `send_timeout` in milliseconds, -1 for `infinity`
+    /// (the start value, `INET_INFINITY`).
+    pub(in crate::runtime) fn send_timeout(&self) -> i32 {
+        self.send_timeout
+    }
+
     /// Return the descriptor of a new port of `socket_type`: no socket,
     /// `list` mode, passive, and an infinite send timeout.
     ///

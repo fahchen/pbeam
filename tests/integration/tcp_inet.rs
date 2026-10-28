@@ -826,11 +826,6 @@ fn stops_the_run_for_each_receive_and_send_part_that_is_not_implemented() {
             "unsupported tcp_inet output header other than term_to_binary(Ref, [local])",
         ),
         ("delay_send", "unsupported tcp_inet output with delay_send"),
-        (
-            "send_timeout",
-            "unsupported tcp_inet output to a busy port with a send_timeout",
-        ),
-        ("busy", "unsupported tcp_inet output to a busy port"),
     ] {
         let path = std::env::temp_dir().join(format!(
             "pbeam-tcp-unsupported-{case}-{}",
@@ -852,6 +847,21 @@ fn stops_the_run_for_each_receive_and_send_part_that_is_not_implemented() {
         stop.store(true, Ordering::SeqCst);
         handle.join().unwrap();
         assert!(error.starts_with(message), "{case}: {error}");
+    }
+}
+
+#[test]
+fn ends_the_send_that_waits_with_a_timeout_as_pinned_erts() {
+    // `tcp_inet_send_timeout` replies `{error, timeout}` to the send that
+    // waits for the queue, and `send_timeout_close` closes the passive
+    // socket without a message, so the next send gives `enotconn`
+    // (inet_drv.c:12458-12534, measured case c of the `send_timeout`
+    // research).
+    for (name, (text, _)) in ["ERTS", "PBeam"]
+        .into_iter()
+        .zip(transfer_runs("busy_timeout"))
+    {
+        assert_eq!(text, "[{error,timeout},{error,enotconn},[]]", "{name}");
     }
 }
 

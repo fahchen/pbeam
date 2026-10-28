@@ -1047,6 +1047,9 @@ fn output(
             port_state.output += bytes.len() as u64;
             return Ok(match sent {
                 Output::Sent(events) => {
+                    // A send that made the port busy starts its send timer
+                    // (`add_multi_timer`, inet_drv.c:13785-13792).
+                    scheduler.tcp_send_timer(id, tcp);
                     Written::Step(scheduler.send_events(id, port_state, events)?)
                 }
                 Output::Failed => Written::Failed,
