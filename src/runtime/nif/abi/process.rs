@@ -42,16 +42,18 @@ pub(super) struct Context {
     /// The messages of `enif_send`: the receiver and the message, in send
     /// order.
     sends: Vec<(ProcessId, Term)>,
-    /// The text of the first broken contract of `enif_send`, or `None`.
+    /// The text of the runtime error of the call: the first broken
+    /// contract of `enif_send`, or the name of the first `enif_*` function
+    /// that PBeam does not implement, or `None`.
     unsupported: Option<String>,
 }
 
-/// The messages and the broken contract of a call that ended.
+/// The messages and the runtime error of a call that ended.
 #[derive(Debug)]
 pub(super) struct Ended {
     /// The messages of `enif_send`, in send order.
     pub(super) sends: Vec<(ProcessId, Term)>,
-    /// The text of the first broken contract of `enif_send`, or `None`.
+    /// The text of the runtime error of the call, or `None`.
     pub(super) unsupported: Option<String>,
 }
 
@@ -93,6 +95,17 @@ pub(super) fn within<T>(
 /// on a thread that runs no NIF call.
 fn with_context<T>(read: impl FnOnce(&mut Context) -> T) -> Option<T> {
     CONTEXT.with_borrow_mut(|context| context.as_mut().map(read))
+}
+
+/// Record the name of an unsupported `enif_*` function of the call that
+/// runs on the thread, so the call gives a runtime error when it returns.
+/// A thread that runs no NIF call records nothing.
+pub(super) fn record_unsupported(name: &str) {
+    with_context(|context| {
+        context.unsupported.get_or_insert_with(|| {
+            format!("the NIF called {name}, which PBeam does not implement yet")
+        });
+    });
 }
 
 /// Return true when the local process `pid` exists and does not exit, as
