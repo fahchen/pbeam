@@ -88,6 +88,15 @@ pub(super) enum Timer {
         /// The key of this timer, which the receive holds while it waits.
         key: TimerKey,
     },
+    /// The send timer of the port `port`, which a send that made the port
+    /// busy starts for a `send_timeout` other than `infinity` and 0
+    /// (`add_multi_timer`, inet_drv.c:13785-13792).
+    SocketSend {
+        /// The port with the queue that the send waits for.
+        port: PortId,
+        /// The key of this timer, which the send holds while it waits.
+        key: TimerKey,
+    },
 }
 
 /// The receiver of a BIF timer message.
