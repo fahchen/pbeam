@@ -1415,12 +1415,14 @@ pub unsafe extern "C" fn enif_get_ulong(
     // SAFETY: the C API gives the env of the current call.
     let env = unsafe { env(env_pointer) };
     let term = env.get(term);
-    let integer = match &term {
-        Some(Term::Integer(value)) => Some(*value),
-        Some(Term::BigInt(value)) => i64::try_from(&**value).ok(),
+    // `term_to_Uint` takes each integer from 0 to the largest `Uint`, also
+    // a bignum above `i64::MAX` (`erl_nif.c:1893-1896`).
+    let value = match &term {
+        Some(Term::Integer(value)) => c_ulong::try_from(*value).ok(),
+        Some(Term::BigInt(value)) => c_ulong::try_from(&**value).ok(),
         _ => None,
     };
-    let Some(value) = integer.and_then(|value| c_ulong::try_from(value).ok()) else {
+    let Some(value) = value else {
         return 0;
     };
     // SAFETY: the C API requires that `ip` points to a writable C
