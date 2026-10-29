@@ -39,9 +39,11 @@
 //! - binary: by the bytes, then by the size.
 //!
 //! Two references compare by their number words, from the highest word
-//! down, as in ERTS (`erts_cmp_compound`, `utils.c:2283-2286`). Two
-//! different alias references have no PBeam order: ERTS holds the pid of
-//! the owner in the higher words, and a PBeam reference does not keep it.
+//! down, as in ERTS (`erts_cmp_compound`, `utils.c:2283-2286`). ERTS holds
+//! the pid of the owner in the two higher words of an alias reference, and
+//! a PBeam reference keeps no pid, so two alias references compare by their
+//! three PBeam number words. A PBeam alias reference is still a term of its
+//! own, so the comparison stays consistent with equality.
 
 use std::cmp::Ordering;
 
@@ -49,7 +51,7 @@ use num_bigint::{BigInt, Sign};
 use num_traits::FromPrimitive;
 
 use super::{AtomTable, Reference, Term, match_context::MATCH_CONTEXT_ESCAPE};
-use crate::error::{BeamError, error};
+use crate::error::BeamError;
 
 /// The rank of `[]` in the ERTS term order (`NIL_DEF`).
 const NIL_RANK: u8 = 9;
@@ -91,10 +93,9 @@ impl Term {
     ///
     /// # Errors
     ///
-    /// Return a runtime error when the result depends on the order of an
-    /// alias reference.
+    /// Never returns an error: each term has a place in the term order.
     pub(crate) fn compare(&self, other: &Term, atoms: &AtomTable) -> Result<Ordering, BeamError> {
-        self.compare_in(other, false, atoms)
+        Ok(self.compare_in(other, false, atoms))
     }
 
     /// Compare two terms in the ERTS term order with exact comparison, as
@@ -113,14 +114,13 @@ impl Term {
     ///
     /// # Errors
     ///
-    /// Return a runtime error when the result depends on the order of an
-    /// alias reference.
+    /// Never returns an error: each term has a place in the term order.
     pub(crate) fn compare_exact(
         &self,
         other: &Term,
         atoms: &AtomTable,
     ) -> Result<Ordering, BeamError> {
-        self.compare_in(other, true, atoms)
+        Ok(self.compare_in(other, true, atoms))
     }
 
     /// Compare two terms, exactly when `exact` is true.
@@ -128,31 +128,38 @@ impl Term {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert!(Term::Integer(1).compare_in(&Term::Float(1.0), false, &atoms)?.is_eq());
+    /// assert!(Term::Integer(1).compare_in(&Term::Float(1.0), false, &atoms).is_eq());
     /// ```
-    fn compare_in(
-        &self,
-        other: &Term,
-        exact: bool,
-        atoms: &AtomTable,
-    ) -> Result<Ordering, BeamError> {
+    fn compare_in(&self, other: &Term, exact: bool, atoms: &AtomTable) -> Ordering {
         // The pair of the two terms is compared first, with no work stack. A
         // pair that the comparison decides needs no stack and allocates
         // nothing; only a pair that the comparison does not decide pushes the
         // pairs of its elements, and the loop then drains them in the order of
         // the comparison.
         let mut steps = Vec::new();
-        let order = compare_pair(self, other, exact, &mut steps, atoms)?;
+        let order = compare_pair(self, other, exact, &mut steps, atoms);
         if order.is_ne() {
-            return Ok(order);
+            return order;
         }
         while let Some(Step(left, right, exact)) = steps.pop() {
-            let order = compare_pair(left, right, exact, &mut steps, atoms)?;
+            let order = compare_pair(left, right, exact, &mut steps, atoms);
             if order.is_ne() {
-                return Ok(order);
+                return order;
             }
         }
-        Ok(Ordering::Equal)
+        Ordering::Equal
+    }
+
+    /// Compare two terms in the exact ERTS term order, as
+    /// [`Self::compare_exact`] does. The order has no error.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(Term::Integer(1).order_exact(&Term::Float(1.0), &atoms), Ordering::Less);
+    /// ```
+    pub(crate) fn order_exact(&self, other: &Term, atoms: &AtomTable) -> Ordering {
+        self.compare_in(other, true, atoms)
     }
 }
 
@@ -160,29 +167,19 @@ impl Term {
 /// one node by their number words, from the highest word down
 /// (`erts_cmp_compound`, utils.c:2283-2286), and [`Reference::numbers`]
 /// matches that layout (row "Term order" of docs/erts-differences.md). An
-/// alias reference holds the pid of its owner in the higher ERTS words,
-/// which a PBeam reference does not keep, so its order is not supported.
-///
-/// # Errors
-///
-/// Two different references of which one is an alias reference give a
-/// runtime error.
-fn reference_order(left: Reference, right: Reference) -> Result<Ordering, BeamError> {
+/// alias reference has two more ERTS number words that hold the pid of its
+/// owner, and a PBeam reference keeps no pid, so two alias references
+/// compare by the three PBeam number words.
+fn reference_order(left: Reference, right: Reference) -> Ordering {
     if left == right {
-        return Ok(Ordering::Equal);
-    }
-    if left.is_pid_reference() || right.is_pid_reference() {
-        return Err(error(
-            "unsupported term order of an alias reference (see \"Term order\" in docs/erts-differences.md)",
-        ));
+        return Ordering::Equal;
     }
     // ERTS compares `N2`, `N1`, `N0`, with the magic marker of a magic
     // reference in `N1` (`utils.c:2283-2286`, `erl_bif_unique.h:102-113`).
-    Ok(left
-        .numbers()
+    left.numbers()
         .iter()
         .rev()
-        .cmp(right.numbers().iter().rev()))
+        .cmp(right.numbers().iter().rev())
 }
 
 /// Compare two terms without their nested terms. For two lists, tuples,
@@ -199,7 +196,7 @@ fn reference_order(left: Reference, right: Reference) -> Result<Ordering, BeamEr
 /// let left = Term::tuple(vec![Term::Integer(1)]);
 /// let right = Term::tuple(vec![Term::Integer(2)]);
 /// let atoms = AtomTable::new();
-/// assert_eq!(compare_pair(&left, &right, false, &mut steps, &atoms)?, Ordering::Equal);
+/// assert_eq!(compare_pair(&left, &right, false, &mut steps, &atoms), Ordering::Equal);
 /// assert_eq!(steps.len(), 1);
 /// ```
 fn compare_pair<'a>(
@@ -208,12 +205,12 @@ fn compare_pair<'a>(
     exact: bool,
     steps: &mut Vec<Step<'a>>,
     atoms: &AtomTable,
-) -> Result<Ordering, BeamError> {
+) -> Ordering {
     // A resource term is its magic reference.
     if let Some((left, right)) = left.reference().zip(right.reference()) {
         return reference_order(left, right);
     }
-    let order = match (left, right) {
+    match (left, right) {
         (Term::Cons(left), Term::Cons(right)) => {
             // The tails go on the stack first, so the heads compare first.
             steps.extend([
@@ -298,8 +295,7 @@ fn compare_pair<'a>(
             order
         }
         _ => type_rank(left).cmp(&type_rank(right)),
-    };
-    Ok(order)
+    }
 }
 
 /// Return the bits of a float as an unsigned value whose order is the exact

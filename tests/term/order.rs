@@ -372,27 +372,32 @@ fn orders_references_by_their_number_words() {
 }
 
 #[test]
-fn rejects_the_order_of_an_alias_reference() {
-    // ERTS keeps the pid of the owner in the higher reference words of an
-    // alias, and a PBeam reference does not keep it, so an alias reference
-    // has no PBeam order with another reference.
+fn orders_an_alias_reference_by_its_three_numbers() {
+    // ERTS keeps the pid of the owner in the two higher number words of an
+    // alias, and a PBeam reference does not keep it, so an alias compares
+    // by the three PBeam number words (`src/term/order.rs`).
     let alias = |number| Term::Reference(Reference(number).pid_reference());
-    let error = alias(1)
-        .compare(&alias(2), &test_atom_table())
-        .unwrap_err()
-        .to_string();
-    assert!(
-        error.contains("unsupported term order of an alias reference"),
-        "{error}"
-    );
-    assert!(
-        alias(1)
-            .compare(&Term::Reference(Reference(2)), &test_atom_table())
-            .is_err()
+    assert_eq!(
+        alias(1).compare(&alias(2), &test_atom_table()).unwrap(),
+        Less
     );
     assert_eq!(
         alias(1).compare(&alias(1), &test_atom_table()).unwrap(),
         Equal
+    );
+    // The pid mark in `N1` makes an alias greater than an ordinary reference
+    // of the same counter (`Reference::numbers`).
+    assert_eq!(
+        alias(1)
+            .compare(&Term::Reference(Reference(1)), &test_atom_table())
+            .unwrap(),
+        Greater
+    );
+    assert_eq!(
+        alias(1)
+            .compare(&Term::Reference(Reference(2)), &test_atom_table())
+            .unwrap(),
+        Greater
     );
 }
 

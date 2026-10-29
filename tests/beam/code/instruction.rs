@@ -304,8 +304,9 @@ fn prepares_the_select_value_choices_by_shape() {
         prepare_select_value_choices(references, &atoms),
         SelectValueChoices::Ordered(_)
     ));
-    // Two different alias references have no term order, so the linear form
-    // keeps the encoded order and the first match.
+    // Two different alias references have a PBeam term order
+    // (`src/term/order.rs`), so a large list of distinct aliases also takes
+    // the ordered form.
     let aliases: Vec<(Term, u32)> = (0..=SELECT_VALUE_LINEAR_LIMIT as u64)
         .map(|index| {
             (
@@ -316,7 +317,7 @@ fn prepares_the_select_value_choices_by_shape() {
         .collect();
     assert!(matches!(
         prepare_select_value_choices(aliases, &atoms),
-        SelectValueChoices::Linear(_)
+        SelectValueChoices::Ordered(_)
     ));
 }
 

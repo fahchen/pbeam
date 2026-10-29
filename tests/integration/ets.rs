@@ -1384,23 +1384,20 @@ fn restores_a_bag_object_behind_a_deleted_node_as_pinned_erts() {
 }
 
 #[test]
-fn returns_a_runtime_error_for_a_walk_over_alias_keys_of_an_ordered_set() {
-    // Two different alias references have no PBeam order (row "Term order"
-    // of docs/erts-differences.md), so a walk of an ordered_set that holds
-    // them returns a runtime error, and a key lookup compares each object.
+fn orders_the_alias_keys_of_an_ordered_set() {
+    // An ordered_set table holds two different alias references as two keys:
+    // ERTS compares the words of an alias reference, which hold the pid of
+    // the owner and the reference numbers (`erts_cmp_compound`,
+    // `utils.c:2283-2286`), and a PBeam reference compares its three number
+    // words (row "Term order" of docs/erts-differences.md). The shape of
+    // each case is the same on both runtimes: a step from a key that the
+    // table does not hold, an arithmetic lookup after the delete of an
+    // alias key, and the first key of a table that holds two aliases.
     let ets = pinned_beam("ets");
     let program = BeamProgram::load(&[&ets, ETS_PROBE]).unwrap();
     let atom = |name| Term::Atom(program.atom(name).unwrap());
     let run = |case| program.execute("ets_probe", "walk_alias", &[program.host_term(atom(case))]);
-    for case in ["step", "unordered_first"] {
-        let error = run(case).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("unsupported term order of an alias reference"),
-            "{case}: {error}"
-        );
-    }
+    assert_eq!(run("step").unwrap().term, atom("$end_of_table"));
     let unordered: Vec<Term> = run("unordered")
         .unwrap()
         .term
@@ -1415,6 +1412,21 @@ fn returns_a_runtime_error_for_a_walk_over_alias_keys_of_an_ordered_set() {
             atom("true"),
         ]
     );
+    // The lookup of the second alias key gives its object: a list of the
+    // object `{B, 2}` of an alias key.
+    let object = unordered[2]
+        .list_iter()
+        .unwrap()
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(object.len(), 1);
+    let Term::Tuple(pair) = &object[0] else {
+        panic!("the object is a tuple: {:?}", object[0]);
+    };
+    assert_eq!(pair[1], Term::Integer(2));
+    // ERTS 29.1.1: the first key of two aliases of one process is the
+    // first alias.
+    assert_eq!(run("unordered_first").unwrap().term, atom("true"));
     assert_eq!(
         run("cleared").unwrap().term,
         Term::list_from([Term::Integer(1), Term::Integer(2)])
