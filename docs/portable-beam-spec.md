@@ -233,7 +233,7 @@ It performs these steps:
 4. Write one bundle with the `pbeam_bundle` tool.
 5. Build the `pbeam` binary for the selected target, append the bundle and the trailer, and write the application executable, illustrated as `dist/my_app` in the discussion.
 
-At startup the executable runs its bundle with or without arguments of the command line. The arguments reach the release in order, as `System.argv()` and `init:get_plain_arguments/0` give them: the boot places them behind a bare `--`, where Elixir's `Kernel.CLI` ends its own parsing, so also an argument such as `erl` reaches the release and does not start the `erl` command of the binary. The re-exec of the boot of the extracted release marks itself with the hidden word `--embedded-boot`, which keeps it distinct from a user run.
+At startup the executable runs its bundle with or without arguments of the command line. The arguments reach the release in order, as `System.argv()` and `init:get_plain_arguments/0` give them: the boot places them behind a bare `--`, where Elixir's `Kernel.CLI` ends its own parsing, so also an argument such as `erl` reaches the release and does not start the `erl` command of the binary. The re-exec of the boot of the extracted release marks itself with the hidden word `--embedded-boot` as its first word. A run with that first word drops it and runs the command line of the binary, not the bundle, so a release cannot get `--embedded-boot` as its first argument.
 
 The bundle contains identifying/version metadata, an entry MFA, compiler/OTP compatibility metadata, a module table, a resource table, and the module/resource payload. Compression was proposed, but its codec and necessity are not settled. The example `otp: 28` is illustrative, not a compatibility commitment.
 

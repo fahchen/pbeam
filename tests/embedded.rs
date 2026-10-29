@@ -386,7 +386,7 @@ fn a_release_with_a_boot_script_boots_with_pbeam_erl() {
         "17.1",
         "0.1.0",
         Some(std::ffi::OsStr::new(" +S  4\t")),
-        &[],
+        &[std::ffi::OsString::from("a")],
     );
     assert!(error.to_string().contains("No such file"), "{error}");
     fs::remove_dir_all(&directory).unwrap();

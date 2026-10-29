@@ -23,9 +23,9 @@ const MAGIC: &[u8; 8] = b"PBEAMEMB";
 const TRAILER: usize = 16;
 
 /// The word that marks the re-exec of the boot of an extracted release, so
-/// the boot reaches the `erl` command instead of the bundle again. The user
-/// cannot name it: a run with this first word goes to the command line
-/// parser, which knows no such option.
+/// the boot reaches the `erl` command instead of the bundle again. A run
+/// with this first word drops it and runs the command line of the binary,
+/// so a release never gets it as its first argument.
 const BOOT_REEXEC: &str = "--embedded-boot";
 
 /// What the end of `bytes` holds.
@@ -328,9 +328,6 @@ fn boot_release(
     }
     command.env("RELEASE_ROOT", directory);
     command.env("RELEASE_SYS_CONFIG", release.join("sys"));
-    // The path of the one-file executable, so the release can start itself
-    // as a detached daemon; a plain release boot leaves it unset.
-    command.env("PBEAM_EXECUTABLE", executable);
     command.exec()
 }
 
