@@ -112,11 +112,20 @@ fn reads_the_cpu_topology_as_pinned_erts() {
     assert_eq!(super::read_topology(&root, 8, 3), expected);
     // More processors than configured (erl_misc_utils.c:947-948), and fewer
     // than online (erl_misc_utils.c:969-970).
-    assert!(super::read_topology(&root, 2, 1).is_empty());
-    assert!(super::read_topology(&root, 8, 4).is_empty());
+    assert_eq!(
+        super::read_topology(&root, 2, 1),
+        <[[i32; 6]; 0]>::default()
+    );
+    assert_eq!(
+        super::read_topology(&root, 8, 4),
+        <[[i32; 6]; 0]>::default()
+    );
     // No cpu directory (erl_misc_utils.c:908-910).
     let empty = sysfs("empty", &[("other", "")]);
-    assert!(super::read_topology(&empty, 8, 0).is_empty());
+    assert_eq!(
+        super::read_topology(&empty, 8, 0),
+        <[[i32; 6]; 0]>::default()
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -158,5 +167,8 @@ fn moves_a_processor_on_two_nodes_to_processor_nodes_as_pinned_erts() {
     // A node directory that cannot be read gives no topology
     // (erl_misc_utils.c:908-910).
     let broken = sysfs("broken", &[("node/node0", "")]);
-    assert!(super::read_topology(&broken, 8, 0).is_empty());
+    assert_eq!(
+        super::read_topology(&broken, 8, 0),
+        <[[i32; 6]; 0]>::default()
+    );
 }
