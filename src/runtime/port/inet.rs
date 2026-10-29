@@ -279,6 +279,12 @@ pub(in crate::runtime) enum Control {
 }
 
 impl Inet {
+    /// Return the option `send_timeout` in milliseconds, -1 for `infinity`
+    /// (the start value, `INET_INFINITY`).
+    pub(in crate::runtime) fn send_timeout(&self) -> i32 {
+        self.send_timeout
+    }
+
     /// Return the descriptor of a new port of `socket_type`: no socket,
     /// `list` mode, passive, and an infinite send timeout.
     ///
@@ -968,6 +974,11 @@ impl Inet {
                 35 => {
                     self.send_timeout_close = value;
                     true
+                }
+                // A send that waits for a busy port runs at the unbusy, which
+                // cannot return the error of `delay_send` (see `Inet::send`).
+                31 if value != 0 && !self.stream.waiters.is_empty() => {
+                    return Err(self.unsupported("option", "delay_send while a send waits"));
                 }
                 31 => {
                     self.delay_send = value != 0;

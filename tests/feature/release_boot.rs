@@ -146,6 +146,59 @@ fn boots_a_release_with_the_arguments_of_erl_as_pinned_erts() {
     );
 }
 
+/// The flag variables of the release boot test of the flag variables. The
+/// `-eval` of `ERL_AFLAGS` runs before the `-s` of the release and writes
+/// the kernel flags, the two kernel variables that they set, the online
+/// schedulers, and the plain arguments.
+const FLAG_VARIABLES: [(&str, &str); 4] = [
+    ("ERL_OTP29_FLAGS", "-kernel logger_level warning"),
+    (
+        "ERL_AFLAGS",
+        "-kernel shell_history enabled -eval 'io:format(\"~p~n\", [{init:get_argument(kernel), \
+         application:get_env(kernel, shell_history), application:get_env(kernel, logger_level), \
+         erlang:system_info(schedulers_online), init:get_plain_arguments()}])'",
+    ),
+    ("ERL_FLAGS", "+S 1"),
+    ("ERL_ZFLAGS", "-extra \"z w\" s\\ t"),
+];
+
+#[test]
+fn reads_the_flag_variables_of_erlexec_as_pinned_erts() {
+    // `erlexec` adds the words of `ERL_OTP29_FLAGS` and `ERL_AFLAGS` before
+    // the command line and those of `ERL_FLAGS` and `ERL_ZFLAGS` after it,
+    // and moves the `-extra` words of each to the end
+    // (erlexec.c:2177-2260). It splits a value at white space, and a quote
+    // or a backslash keeps white space in a word (erlexec.c:1770-1931).
+    let mut reference = Command::new("erl");
+    reference.args(RELEASE_ARGUMENTS);
+    let reference = isolate(&mut reference)
+        .envs(FLAG_VARIABLES)
+        .output()
+        .unwrap();
+    let result = |output: &Output| {
+        (
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+            output.status.code(),
+        )
+    };
+    let (stdout, stderr, status) = result(&reference);
+    assert_eq!((stderr.as_str(), status), ("", Some(0)), "ERTS: {stdout}");
+    assert!(
+        stdout.starts_with(
+            "{{ok,[[\"logger_level\",\"warning\"],[\"shell_history\",\"enabled\"]]},\n \
+             {ok,enabled},\n {ok,warning},\n 1,\n \
+             [\"plain\",\"-sname\",\"x\",\"z w\",\"s t\"]}\n"
+        ),
+        "ERTS: {stdout}"
+    );
+    assert_eq!(
+        result(&pbeam_erl(&RELEASE_ARGUMENTS, &FLAG_VARIABLES)),
+        (stdout, stderr, status),
+        "PBeam"
+    );
+}
+
 /// A rejected command of `pbeam erl`: the `erl` arguments, the
 /// environment, and the message of the error.
 type Rejected = (
@@ -157,9 +210,9 @@ type Rejected = (
 #[test]
 fn rejects_the_options_and_variables_of_erlexec() {
     // `erlexec` reads these options before it starts the emulator
-    // (erlexec.c:661-861, 869-964, 2122-2140), and the flags of
-    // `ERL_AFLAGS`, `ERL_FLAGS`, and `ERL_ZFLAGS`. `pbeam erl` has no
-    // `erlexec` part for them, and no distribution for `-sname`.
+    // (erlexec.c:661-861, 869-964, 2122-2140), and `ERL_EPMD_PORT`.
+    // `pbeam erl` has no `erlexec` part for them, and no distribution for
+    // `-sname` and `ERL_EPMD_PORT`.
     let cases: [Rejected; 10] = [
         (
             &["-S", "release_boot_probe", "main", "--", "x"],
@@ -192,15 +245,17 @@ fn rejects_the_options_and_variables_of_erlexec() {
             &[],
             "the erl option -proto_dist is not supported",
         ),
+        // A flag of a flag variable gives the error of the same flag on
+        // the command line.
         (
             &["-noshell"],
-            &[("ERL_AFLAGS", "-kernel shell_history enabled")],
-            "the environment variable ERL_AFLAGS of erl is not supported",
+            &[("ERL_FLAGS", "-env NAME value")],
+            "the erl option -env is not supported",
         ),
         (
-            &["-noshell"],
-            &[("ERL_OTP29_FLAGS", "-kernel logger_level warning")],
-            "the environment variable ERL_OTP29_FLAGS of erl is not supported",
+            &["-noshell", "-extra", "plain"],
+            &[("ERL_ZFLAGS", "+SP 50")],
+            "the erl option +SP is not supported",
         ),
         (
             &["-noshell"],

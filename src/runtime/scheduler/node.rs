@@ -157,14 +157,34 @@ struct BifTimers {
     trees: HashMap<ProcessId, MonitorLinkTree<TimerReference, ()>>,
 }
 
+/// The owner of a registered name: a process or a port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::runtime) enum Named {
+    /// A local process.
+    Process(ProcessId),
+    /// A local port.
+    Port(PortId),
+}
+
+impl Named {
+    /// Return the pid or the port term of the owner.
+    pub(in crate::runtime) fn term(self) -> Term {
+        match self {
+            Named::Process(id) => Term::Pid(id),
+            Named::Port(port) => Term::Port(port),
+        }
+    }
+}
+
 /// The state of a run that more than one scheduler thread shares.
 #[derive(Debug)]
 pub(in crate::runtime) struct Node {
     /// The process table of the node: the scheduler, the exiting state,
     /// and the table order of each live process.
     pub(super) processes: ProcessTable,
-    /// The registered names of the node, as the ERTS `process_reg` table.
-    names: Mutex<HashMap<String, ProcessId>>,
+    /// The registered names of the node, as the ERTS `process_reg` table,
+    /// which holds the names of processes and ports (`register.c:175-253`).
+    names: Mutex<HashMap<String, Named>>,
     /// The port table of the node, as the ERTS `erts_port` table (`io.c:76`,
     /// `erl_ptab.c`): each open port with the scheduler that serves its I/O.
     /// Any scheduler reads and changes a port through it.
@@ -475,7 +495,7 @@ impl Node {
     pub(in crate::runtime) fn remove_process(&self, id: ProcessId) {
         self.processes.remove(id, || {
             let mut names = self.names.lock().expect("the name table is not poisoned");
-            names.retain(|_, owner| *owner != id);
+            names.retain(|_, owner| *owner != Named::Process(id));
         });
         // ERTS finds no process for the pid of an exited process, so
         // `is_system_process/1` gives `false` (erl_bif_info.c:4934-4938).
@@ -1068,23 +1088,61 @@ impl Node {
             return false;
         };
         let mut names = self.names.lock().expect("the name table is not poisoned");
-        if names.contains_key(name) || names.values().any(|owner| *owner == id) {
+        if names.contains_key(name) || names.values().any(|owner| *owner == Named::Process(id)) {
             return false;
         }
-        names.insert(name.to_owned(), id);
+        names.insert(name.to_owned(), Named::Process(id));
         true
     }
 
-    /// Remove the process of `name`. Return the process that had it.
-    pub(in crate::runtime) fn name_remove(&self, name: &str) -> Option<ProcessId> {
+    /// Register `name` for the port `port`. Return false when a process or
+    /// a port has the name. The caller holds the lock of the open port, so
+    /// its close, which removes its name under that lock, cannot pass the
+    /// registration.
+    pub(in crate::runtime) fn port_name_register(&self, name: &str, port: PortId) -> bool {
+        let mut names = self.names.lock().expect("the name table is not poisoned");
+        if names.contains_key(name) {
+            return false;
+        }
+        names.insert(name.to_owned(), Named::Port(port));
+        true
+    }
+
+    /// Remove the name of the port `port`, as `erts_deliver_port_exit`
+    /// does (`io.c:3904-3905`).
+    pub(in crate::runtime) fn remove_port_name(&self, port: PortId) {
+        let mut names = self.names.lock().expect("the name table is not poisoned");
+        names.retain(|_, owner| *owner != Named::Port(port));
+    }
+
+    /// Return the name of the port `port`.
+    pub(in crate::runtime) fn port_name_of(&self, port: PortId) -> Option<String> {
+        self.names
+            .lock()
+            .expect("the name table is not poisoned")
+            .iter()
+            .find_map(|(name, owner)| (*owner == Named::Port(port)).then(|| name.clone()))
+    }
+
+    /// Remove the owner of `name`. Return the process or the port that had
+    /// it.
+    pub(in crate::runtime) fn name_remove(&self, name: &str) -> Option<Named> {
         self.names
             .lock()
             .expect("the name table is not poisoned")
             .remove(name)
     }
 
-    /// Return the process of `name`.
+    /// Return the process of `name`, or `None` when no process has it.
     pub(in crate::runtime) fn name_get(&self, name: &str) -> Option<ProcessId> {
+        match self.name_owner(name)? {
+            Named::Process(id) => Some(id),
+            Named::Port(_) => None,
+        }
+    }
+
+    /// Return the process or the port of `name`.
+    pub(in crate::runtime) fn name_owner(&self, name: &str) -> Option<Named> {
         self.names
             .lock()
             .expect("the name table is not poisoned")
@@ -1098,7 +1156,7 @@ impl Node {
             .lock()
             .expect("the name table is not poisoned")
             .iter()
-            .find_map(|(name, owner)| (*owner == id).then(|| name.clone()))
+            .find_map(|(name, owner)| (*owner == Named::Process(id)).then(|| name.clone()))
     }
 
     /// Return the registered names, in no order.

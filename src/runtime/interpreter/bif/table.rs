@@ -16,9 +16,10 @@ use super::BifResult::{Raise, Value};
 use super::{
     Arc, BeamError, BifContext, BifResult, ExceptionClass, Term, atomics, binary, chksum, erlang,
     erts_internal, ets, file, float, hash, integer, iolist, lists, maps, math, native, os, packet,
-    persistent_term, re, records, subtract, term, timer, unicode, unresolved_mfa, unsupported_port,
+    persistent_term, re, records, subtract, term, timer, unicode, unresolved_mfa,
 };
 use crate::runtime::host::filename_encoding;
+use crate::runtime::scheduler::node::Named;
 use crate::runtime::time;
 use integer::{Arith, Bitwise};
 
@@ -287,7 +288,7 @@ bifs! {
     erlang:read_timer/1 as ErlangReadTimer1 => |cx, [reference]| timer::read_timer(cx, reference),
     erlang:read_timer/2 as ErlangReadTimer2 => |cx, [reference, options]| timer::read_timer_2(cx, reference, options),
     erlang:ref_to_list/1 as ErlangRefToList1 => |cx, [term]| Ok(erlang::ref_to_list(term, &cx.scheduler.atoms)),
-    erlang:register/2 as ErlangRegister2 => |cx, [name, id]| match id { Term::Port(_) => Err(unsupported_port("erlang:register/2")), _ => Ok(match cx.scheduler.register(name, id) { Ok(()) => Value(Term::static_atom("true")), Err(cause) => BifResult::badarg_with_cause(cause) }) },
+    erlang:register/2 as ErlangRegister2 => |cx, [name, id]| Ok(match cx.scheduler.register(name, id) { Ok(()) => Value(Term::static_atom("true")), Err(cause) => BifResult::badarg_with_cause(cause) }),
     erlang:registered/0 as ErlangRegistered0 => |cx, []| erlang::registered(cx.scheduler),
     erlang:rem/2 as ErlangRem2 => |cx, [left, right]| Ok(integer::charge(cx.scheduler, integer::div_rem(left, right, true))),
     erlang:resume_process/1 => unsupported,
@@ -342,7 +343,7 @@ bifs! {
     erlang:universaltime_to_posixtime/1 as ErlangUniversaltimeToPosixtime1 => |_, [date]| Ok(erlang::universaltime_to_posixtime(date)),
     erlang:unlink/1 as ErlangUnlink1 => |cx, [target]| match target { Term::Pid(target) => { cx.scheduler.unlink(*target); Ok(Value(Term::static_atom("true"))) } Term::Port(port) => { cx.scheduler.unlink_port(*port); Ok(Value(Term::static_atom("true"))) } _ => Ok(BifResult::badarg()) },
     erlang:unregister/1 as ErlangUnregister1 => |cx, [name]| erlang::unregister(cx.scheduler, name),
-    erlang:whereis/1 as ErlangWhereis1 => |cx, [name]| Ok(match name { Term::Atom(name) => Value(cx.scheduler.whereis(cx.scheduler.atoms.name_of(name)).map_or(Term::static_atom("undefined"), Term::Pid)), _ => BifResult::badarg() }),
+    erlang:whereis/1 as ErlangWhereis1 => |cx, [name]| Ok(match name { Term::Atom(name) => Value(cx.scheduler.name_owner(cx.scheduler.atoms.name_of(name)).map_or(Term::static_atom("undefined"), Named::term)), _ => BifResult::badarg() }),
     erlang:xor/2 as ErlangXor2 => |_, [left, right]| Ok(match (left, right) { (Term::Atom(left), Term::Atom(right)) if left.is_one_of(&["true", "false"]) && right.is_one_of(&["true", "false"]) => Value(Term::static_atom(if left.is_static("true") == right.is_static("true") { "false" } else { "true" })), _ => BifResult::badarg() }),
     error_logger:warning_map/0 => unsupported,
     erts_debug:breakpoint/2 => unsupported,

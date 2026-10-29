@@ -20,6 +20,7 @@ nix = { version = "0.31.3", default-features = false, features = [
   "resource",
   "socket",
   "uio",
+  "zerocopy",
 ] }
 num-bigint = "0.5"
 num-integer = "0.1"
