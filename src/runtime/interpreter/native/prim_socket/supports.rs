@@ -27,10 +27,10 @@ use super::*;
 
 /// The column of the host OS in the tables of this file.
 #[cfg(target_os = "macos")]
-const HOST: usize = 0;
+pub(super) const HOST: usize = 0;
 /// The column of the host OS in the tables of this file.
 #[cfg(target_os = "linux")]
-const HOST: usize = 1;
+pub(super) const HOST: usize = 1;
 
 /// The host file that `getprotoent` reads.
 const PROTOCOLS_FILE: &str = "/etc/protocols";
@@ -105,7 +105,7 @@ const IOCTL_FLAGS: [(&str, [i32; 2]); 34] = [
 /// The requests of `esock_supports_ioctl_requests`
 /// (`prim_socket_nif.c:5509-5626`), in source order, as `(name, request)`.
 /// `None` is a request that the host does not define.
-const IOCTL_REQUESTS: [(&str, [Option<u32>; 2]); 20] = [
+pub(super) const IOCTL_REQUESTS: [(&str, [Option<u32>; 2]); 20] = [
     ("gifconf", [Some(3222038820), Some(35090)]),
     ("nread", [Some(1074030207), Some(21531)]),
     ("atmark", [Some(1074033415), Some(35077)]),

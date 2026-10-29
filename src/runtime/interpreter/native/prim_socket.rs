@@ -18,6 +18,7 @@ use crate::runtime::sockets::Sockets;
 
 mod atoms;
 mod io;
+mod ioctl;
 mod select;
 mod socket;
 mod supports;
@@ -105,6 +106,24 @@ pub(super) const BINDINGS: &[Binding] = &[
         run: |scheduler, arguments| socket::info_1(scheduler, &arguments[0]),
     },
     Binding {
+        name: "nif_ioctl",
+        arity: 2,
+        job: Job::Normal,
+        run: |scheduler, arguments| ioctl::ioctl(scheduler, &arguments[0], &arguments[1..]),
+    },
+    Binding {
+        name: "nif_ioctl",
+        arity: 3,
+        job: Job::Normal,
+        run: |scheduler, arguments| ioctl::ioctl(scheduler, &arguments[0], &arguments[1..]),
+    },
+    Binding {
+        name: "nif_ioctl",
+        arity: 4,
+        job: Job::Normal,
+        run: |scheduler, arguments| ioctl::ioctl(scheduler, &arguments[0], &arguments[1..]),
+    },
+    Binding {
         name: "nif_listen",
         arity: 2,
         job: Job::Normal,
@@ -181,6 +200,42 @@ pub(super) const BINDINGS: &[Binding] = &[
                 &arguments[1],
                 &arguments[2],
                 &arguments[3],
+            )
+        },
+    },
+    Binding {
+        name: "nif_sendfile",
+        arity: 1,
+        job: Job::Normal,
+        run: |scheduler, arguments| io::sendfile::deferred_close(scheduler, &arguments[0]),
+    },
+    Binding {
+        name: "nif_sendfile",
+        arity: 4,
+        job: Job::Normal,
+        run: |scheduler, arguments| {
+            io::sendfile::sendfile(
+                scheduler,
+                &arguments[0],
+                &arguments[1],
+                &arguments[2],
+                &arguments[3],
+                None,
+            )
+        },
+    },
+    Binding {
+        name: "nif_sendfile",
+        arity: 5,
+        job: Job::Normal,
+        run: |scheduler, arguments| {
+            io::sendfile::sendfile(
+                scheduler,
+                &arguments[0],
+                &arguments[1],
+                &arguments[2],
+                &arguments[3],
+                Some(&arguments[4]),
             )
         },
     },

@@ -372,6 +372,8 @@ fn accepted_socket(
                 options,
                 select_read: false,
                 recv_count_done: 0,
+                sendfile: None,
+                sendfile_counters: None,
             },
         );
         sockets.registry

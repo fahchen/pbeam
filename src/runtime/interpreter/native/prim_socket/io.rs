@@ -25,6 +25,8 @@ use crate::runtime::scheduler::poll::Direction;
 use crate::runtime::sockets::{CLOSED, CLOSING, SELECTED, SocketState};
 use crate::term::{ProcessId, Reference};
 
+pub(super) mod sendfile;
+
 /// The most elements of the I/O vector of one `nif_sendv/3` call,
 /// `iov_max`, which is `sysconf(_SC_IOV_MAX)` (`prim_socket_nif.c:18981-18990`):
 /// 1024 on Linux and macOS.

@@ -26,7 +26,7 @@ use crate::runtime::resources::lock;
 use crate::runtime::signal::Signal;
 use crate::runtime::sockets::{
     ACCEPTING, BOUND, CLOSED, CLOSING, CONNECTED, CONNECTING, IoCounters, LISTENING, OtpOptions,
-    SELECTED, SocketState, Sockets,
+    SELECTED, SendfileCounters, SocketState, Sockets,
 };
 use crate::term::{AtomTable, ProcessId, Reference};
 pub(super) use options::{getopt_3, getopt_5, setopt_5};
@@ -62,6 +62,23 @@ fn socket_counters(counters: &IoCounters) -> [(&'static str, Term); 16] {
     ]
 }
 
+/// Return the sendfile counters of `esock_socket_info_counters`
+/// (`prim_socket_nif.c:4958-4989`). ERTS makes each value with
+/// `enif_make_uint`, so a value keeps its low 32 bits.
+fn sendfile_counters(counters: &SendfileCounters) -> [(&'static str, Term); 8] {
+    let uint = |value: u64| Term::Integer((value as u32).into());
+    [
+        ("sendfile", uint(counters.calls)),
+        ("sendfile_byte", uint(counters.byte)),
+        ("sendfile_fails", uint(counters.fails)),
+        ("sendfile_max", uint(counters.max)),
+        ("sendfile_pkg", uint(counters.pkg)),
+        ("sendfile_pkg_max", uint(counters.pkg_max)),
+        ("sendfile_tries", uint(counters.tries)),
+        ("sendfile_waits", uint(counters.waits)),
+    ]
+}
+
 /// Return the map of `pairs`, whose keys are atoms.
 fn map(scheduler: &Scheduler, pairs: Vec<(Term, Term)>) -> Term {
     // ponytail: atom keys fit each map form, so `from_pairs` cannot fail.
@@ -85,7 +102,7 @@ fn boolean(value: bool) -> Term {
 }
 
 /// Return the unsigned integer term of a counter.
-fn count(value: u64) -> Term {
+pub(super) fn count(value: u64) -> Term {
     Term::Integer(i64::try_from(value).unwrap_or(i64::MAX))
 }
 
@@ -237,7 +254,11 @@ pub(super) fn info_1(scheduler: &mut Scheduler, socket: &Term) -> Result<BifResu
         .map_or(Term::static_atom("undefined"), Term::Pid);
     let read = states(scheduler, socket.read)?;
     let write = states(scheduler, socket.write)?;
-    let counters = pairs(scheduler, &socket_counters(&socket.counters))?;
+    let mut counters = socket_counters(&socket.counters).to_vec();
+    if let Some(sendfile) = &socket.sendfile_counters {
+        counters.extend(sendfile_counters(sendfile));
+    }
+    let counters = pairs(scheduler, &counters)?;
     let counters = map(scheduler, counters);
     let normal = atom(scheduler, "normal")?;
     let info = [
@@ -421,6 +442,8 @@ pub(super) fn open_4(
                 options: OtpOptions::default(),
                 select_read: false,
                 recv_count_done: 0,
+                sendfile: None,
+                sendfile_counters: None,
             },
         );
         sockets.registry
@@ -920,6 +943,7 @@ pub(super) fn finalize_close(
         socket.closer = None;
         socket.owner = None;
         socket.socket = None;
+        socket.sendfile = None;
         socket.read |= CLOSED;
         socket.write |= CLOSED;
         (
