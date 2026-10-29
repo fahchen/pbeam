@@ -67,7 +67,18 @@ fn a_trailer_whose_bundle_does_not_fit_is_invalid() {
 #[test]
 fn a_run_of_a_binary_without_a_trailer_has_no_status() {
     // The unit test binary carries no bundle.
-    assert!(run().is_none());
+    assert!(run([]).is_none());
+}
+
+#[test]
+fn the_word_of_the_boot_re_exec_marks_only_itself() {
+    use std::ffi::OsStr;
+
+    // Only the marker word of the re-exec keeps a run from the bundle; a
+    // user word such as `erl` does not, so it reaches the release.
+    assert!(is_boot_reexec(OsStr::new("--embedded-boot")));
+    assert!(!is_boot_reexec(OsStr::new("erl")));
+    assert!(!is_boot_reexec(OsStr::new("")));
 }
 
 #[test]
@@ -78,17 +89,20 @@ fn a_run_bundle_stops_at_an_invalid_trailer_or_bundle() {
     invalid.extend_from_slice(MAGIC);
     invalid.extend_from_slice(&100_u64.to_le_bytes());
     assert_eq!(
-        run_bundle(executable, &invalid, &directory),
+        run_bundle(executable, &invalid, &directory, Vec::new()),
         Some(ExitCode::FAILURE)
     );
     let mut garbage = b"garbage!".to_vec();
     garbage.extend_from_slice(MAGIC);
     garbage.extend_from_slice(&8_u64.to_le_bytes());
     assert_eq!(
-        run_bundle(executable, &garbage, &directory),
+        run_bundle(executable, &garbage, &directory, Vec::new()),
         Some(ExitCode::FAILURE)
     );
-    assert_eq!(run_bundle(executable, b"plain", &directory), None);
+    assert_eq!(
+        run_bundle(executable, b"plain", &directory, Vec::new()),
+        None
+    );
     fs::remove_dir_all(&directory).unwrap();
 }
 
@@ -98,7 +112,12 @@ fn a_run_bundle_reports_a_base_that_fails() {
     let file = directory.join("file");
     fs::write(&file, b"").unwrap();
     assert_eq!(
-        run_bundle(Path::new("/nonexistent/pbeam"), &image(&startable()), &file),
+        run_bundle(
+            Path::new("/nonexistent/pbeam"),
+            &image(&startable()),
+            &file,
+            Vec::new()
+        ),
         Some(ExitCode::FAILURE)
     );
     fs::remove_dir_all(&directory).unwrap();
@@ -108,7 +127,12 @@ fn a_run_bundle_reports_a_base_that_fails() {
 fn a_run_bundle_that_cannot_start_removes_its_directory() {
     let base = directory("run-remove");
     assert_eq!(
-        run_bundle(Path::new("/nonexistent/pbeam"), &image(&startable()), &base),
+        run_bundle(
+            Path::new("/nonexistent/pbeam"),
+            &image(&startable()),
+            &base,
+            Vec::new()
+        ),
         Some(ExitCode::FAILURE)
     );
     assert!(fs::read_dir(&base).unwrap().next().is_none());
@@ -298,7 +322,7 @@ fn a_start_that_fails_reports_it_and_removes_the_directory() {
     let bytes = bundle(&[]);
     let bundle = Bundle::parse(&bytes).unwrap();
     assert_eq!(
-        start(Path::new("/nonexistent/pbeam"), &bundle, &directory),
+        start(Path::new("/nonexistent/pbeam"), &bundle, &directory, &[]),
         ExitCode::FAILURE
     );
     assert!(!directory.exists());
@@ -362,6 +386,7 @@ fn a_release_with_a_boot_script_boots_with_pbeam_erl() {
         "17.1",
         "0.1.0",
         Some(std::ffi::OsStr::new(" +S  4\t")),
+        &[std::ffi::OsString::from("a")],
     );
     assert!(error.to_string().contains("No such file"), "{error}");
     fs::remove_dir_all(&directory).unwrap();
@@ -384,7 +409,7 @@ fn a_start_of_a_release_that_fails_reports_it_and_removes_the_directory() {
     ]);
     let bundle = Bundle::parse(&bytes).unwrap();
     assert_eq!(
-        start(Path::new("/nonexistent/pbeam"), &bundle, &directory),
+        start(Path::new("/nonexistent/pbeam"), &bundle, &directory, &[]),
         ExitCode::FAILURE
     );
     assert!(!directory.exists());
@@ -411,4 +436,47 @@ fn the_extraction_makes_each_file_of_the_erts_bin_directory_executable() {
     assert!(!is_erts_program("erts-17.1"));
     assert!(!is_erts_program("lib/erts-17.1/bin/x"));
     fs::remove_dir_all(&directory).unwrap();
+}
+
+#[test]
+fn gives_the_release_variables_of_the_mix_release_script() {
+    // `bin/<name>` exports these variables before `start`, and a value of
+    // the environment wins (`${VAR:-default}`).
+    let root = directory("release-variables");
+    fs::create_dir_all(root.join("releases/0.1.0")).unwrap();
+    fs::write(root.join("releases/0.1.0/suikou.rel"), b"").unwrap();
+    fs::write(root.join("releases/0.1.0/start.boot"), b"").unwrap();
+    let executable = Path::new("/usr/local/bin/suikou-cli");
+    let variables = release_variables(&root, "0.1.0", executable, |name| {
+        // An environment value of `RELEASE_VSN` does not change the boot,
+        // so the version of the boot stays.
+        matches!(name, "RELEASE_TMP" | "RELEASE_VSN").then(|| OsString::from("/tmp/own"))
+    });
+    let text = |value: &OsString| value.to_str().unwrap().to_owned();
+    let pairs = variables
+        .iter()
+        .map(|(name, value)| (*name, text(value)))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        pairs,
+        [
+            ("RELEASE_NODE", "suikou".to_owned()),
+            ("RELEASE_NAME", "suikou".to_owned()),
+            ("RELEASE_VSN", "0.1.0".to_owned()),
+            ("RELEASE_COMMAND", "start".to_owned()),
+            ("RELEASE_PROG", "suikou-cli".to_owned()),
+            ("RELEASE_MODE", "embedded".to_owned()),
+            ("RELEASE_TMP", "/tmp/own".to_owned()),
+            ("RELEASE_DISTRIBUTION", "none".to_owned()),
+            ("RELEASE_BOOT_SCRIPT", "start".to_owned()),
+            ("RELEASE_BOOT_SCRIPT_CLEAN", "start_clean".to_owned()),
+        ]
+    );
+    // A release directory without a `.rel` file gives an empty name.
+    let other = directory("release-variables-none");
+    let variables = release_variables(&other, "0.1.0", Path::new("/"), |_| None);
+    assert_eq!(variables[1], ("RELEASE_NAME", OsString::new()));
+    assert_eq!(variables[4], ("RELEASE_PROG", OsString::new()));
+    fs::remove_dir_all(&root).unwrap();
+    fs::remove_dir_all(&other).unwrap();
 }
