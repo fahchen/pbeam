@@ -42,6 +42,8 @@ fn resource(scheduler: &mut Scheduler, socket: Socket, read: u32, acceptor: Opti
             options: OtpOptions::default(),
             select_read: false,
             recv_count_done: 0,
+            sendfile: None,
+            sendfile_counters: None,
         },
     );
     Term::Reference(reference)
