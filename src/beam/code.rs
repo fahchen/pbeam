@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use num_bigint::{BigInt, Sign};
 
@@ -426,7 +429,8 @@ fn decode(
         code, atom_table, &atoms, &imports, &literals, &lambdas, strings, &records, &mut lines,
     )?;
     if let Some(label) = exports
-        .values()
+        .iter()
+        .map(|(_, label)| label)
         .find(|&&label| label < FIRST_LABEL_NUMBER || label > number_of_labels)
     {
         return Err(error(format!(
@@ -543,7 +547,11 @@ fn atom_chunk_name(bytes: &[u8]) -> Result<&str, BeamError> {
     }
 }
 
-/// Read exported function names, arities, and labels from an `ExpT` chunk.
+/// The name and the arity of an export of an `ExpT` chunk, and its label.
+type Export = ((String, u32), u32);
+
+/// Read exported function names, arities, and labels from an `ExpT` chunk,
+/// in the order of the chunk.
 ///
 /// # Examples
 ///
@@ -552,13 +560,13 @@ fn atom_chunk_name(bytes: &[u8]) -> Result<&str, BeamError> {
 /// let names = vec![atoms.put("main")?];
 /// let table = &[0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1];
 /// let exports = parse_exports(table, &names, &atoms)?;
-/// assert_eq!(exports.get(&("main".to_owned(), 0)), Some(&1));
+/// assert_eq!(exports, [(("main".to_owned(), 0), 1)]);
 /// ```
 fn parse_exports(
     data: &[u8],
     atoms: &[Atom],
     atom_table: &AtomTable,
-) -> Result<HashMap<(String, u32), u32>, BeamError> {
+) -> Result<Vec<Export>, BeamError> {
     let export_count = read_u32(data)? as usize;
     let expected_table_size = WORD_SIZE
         .checked_add(
@@ -570,15 +578,17 @@ fn parse_exports(
     if expected_table_size != data.len() {
         return Err(error("invalid export table size"));
     }
-    let mut exports = HashMap::new();
+    let mut exports = Vec::with_capacity(export_count);
+    let mut seen = HashSet::new();
     for entry in data[WORD_SIZE..].chunks(EXPORT_ENTRY_SIZE) {
         let atom_index = read_u32(&entry[..WORD_SIZE])? as usize;
         let arity = read_u32(&entry[WORD_SIZE..WORD_SIZE * 2])?;
         let label = read_u32(&entry[WORD_SIZE * 2..])?;
         let name = atom_table.name_of(atom_at(atoms, atom_index)?).to_owned();
-        if exports.insert((name, arity), label).is_some() {
+        if !seen.insert((name.clone(), arity)) {
             return Err(error("duplicate BEAM export"));
         }
+        exports.push(((name, arity), label));
     }
     Ok(exports)
 }

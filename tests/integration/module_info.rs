@@ -58,6 +58,7 @@ fn text(term: &Term, atoms: &AtomTable) -> String {
         }
         Term::Tuple(terms) => format!("{{{}}}", join(terms)),
         Term::Integer(value) => value.to_string(),
+        Term::BigInt(value) => value.to_string(),
         Term::Binary(bytes) => format!(
             "<<{}>>",
             bytes
@@ -253,35 +254,37 @@ fn refuses_a_compile_chunk_that_is_not_an_external_term() {
 }
 
 #[test]
-fn stops_get_module_info_for_the_key_exports() {
-    // ERTS returns the exports in the order of the export table
-    // (erl_bif_info.c:5822-5862). PBeam does not keep that order (row
-    // "Module information" of docs/erts-differences.md).
-    let program = BeamProgram::load(&[MODULE_INFO_PROBE]).unwrap();
-    let failure = program
-        .execute("module_info_probe", "exports", &[])
-        .unwrap_err()
-        .to_string();
-    assert!(
-        failure.contains("erlang:get_module_info/2 key exports is not implemented"),
-        "{failure}"
-    );
-}
-
-#[test]
-fn stops_get_module_info_1_for_a_loaded_module() {
-    // ERTS returns the pair list of the keys `module`, `exports`,
-    // `attributes`, `compile`, and `md5` (erl_bif_info.c:5946-5984). PBeam
-    // cannot give the key `exports`, so the call of a loaded module stops
-    // the run at that key (row "Module information" of
-    // docs/erts-differences.md).
-    let program = BeamProgram::load(&[MODULE_INFO_PROBE]).unwrap();
-    let failure = program
-        .execute("module_info_probe", "info", &[])
-        .unwrap_err()
-        .to_string();
-    assert!(
-        failure.contains("erlang:get_module_info/1 key exports is not implemented"),
-        "{failure}"
-    );
+fn gives_the_exports_and_the_module_info_list_as_pinned_erts() {
+    // `exported_from_module` prepends each export of the module in the
+    // order of the export table (erl_bif_info.c:5822-5862), and the loader
+    // puts the exports there in `ExpT` order (jit/asm_load.c:1180-1186).
+    // `module_info_0` builds the pairs from `md5` to `module`
+    // (erl_bif_info.c:5946-5984). The ERTS run loads the probe before the
+    // calls, so no apply makes an export entry of it first.
+    for function in ["exports", "info"] {
+        let program = BeamProgram::load(&[MODULE_INFO_PROBE]).unwrap();
+        let result = program.execute("module_info_probe", function, &[]).unwrap();
+        let reference = Command::new("erl")
+            .args([
+                "-noshell",
+                "-pa",
+                "fixtures/module_info",
+                "-eval",
+                &format!(
+                    "{{module, _}} = code:ensure_loaded(module_info_probe), \
+                     io:format(\"~w~n\", [module_info_probe:{function}()]), halt()."
+                ),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            reference.status.success() && reference.stderr.is_empty(),
+            "{reference:?}"
+        );
+        assert_eq!(
+            format!("{}\n", text(&result.term, result.atoms())),
+            String::from_utf8(reference.stdout).unwrap(),
+            "{function}"
+        );
+    }
 }
