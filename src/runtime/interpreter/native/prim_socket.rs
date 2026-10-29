@@ -125,10 +125,22 @@ pub(super) const BINDINGS: &[Binding] = &[
         },
     },
     Binding {
+        name: "nif_peeloff",
+        arity: 2,
+        job: Job::Normal,
+        run: |_, _| Ok(socket::sctp_notsup()),
+    },
+    Binding {
         name: "nif_peername",
         arity: 1,
         job: Job::Normal,
         run: |scheduler, arguments| socket::peername(scheduler, &arguments[0]),
+    },
+    Binding {
+        name: "nif_peernames",
+        arity: 2,
+        job: Job::Normal,
+        run: |_, _| Ok(socket::sctp_notsup()),
     },
     Binding {
         name: "nif_recv",
@@ -212,6 +224,12 @@ pub(super) const BINDINGS: &[Binding] = &[
         arity: 1,
         job: Job::Normal,
         run: |scheduler, arguments| socket::sockname(scheduler, &arguments[0]),
+    },
+    Binding {
+        name: "nif_socknames",
+        arity: 2,
+        job: Job::Normal,
+        run: |_, _| Ok(socket::sctp_notsup()),
     },
     Binding {
         name: "nif_supports",

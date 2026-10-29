@@ -4,7 +4,7 @@
 -behaviour(supervisor).
 -export([main/0, main/1, lookup/0, gethost/0, supports/0, socket/0, sockopt/0, socket_select/0, socket_io/0,
          socket_dgram/0,         socket_acceptors/0, socket_connect_invalid/0, socket_recvfrom_flags/0, socket_recvfrom_local_flags/0,
-         socket_recvfrom_errqueue/0, socket_sendv/0, socket_backend_tcp/0, socket_backend_udp/0, sockopt_otp/0, sockopt_select_read/0, sockopt_host/0, sockopt_raw/0, sockopt_pkt/0, start/2, stop/1, init/1]).
+         socket_recvfrom_errqueue/0, socket_sendv/0, socket_sctp/0, socket_backend_tcp/0, socket_backend_udp/0, sockopt_otp/0, sockopt_select_read/0, sockopt_host/0, sockopt_raw/0, sockopt_pkt/0, start/2, stop/1, init/1]).
 
 %% `erl -noshell -boot start_clean -pa fixtures/boot -s kernel_boot_probe
 %% main -kernel logger_level warning` runs main/0 in the boot process of init after the boot script
@@ -435,6 +435,19 @@ socket_recvfrom_flags() ->
     Keys = [read_byte, read_pkg, read_pkg_max, read_fails, read_waits],
     Counters = [maps:with(Keys, maps:get(counters, socket:info(S))) || S <- [U2, A]],
     erlang:display({socket_recvfrom_flags, Udp, Inet6, Stream, Counters}),
+    init:stop().
+
+%% `-s kernel_boot_probe socket_sctp` runs socket:peeloff/2,
+%% prim_socket:socknames/2, and prim_socket:peernames/2 on a host whose
+%% pinned ERTS build has no SCTP.
+socket_sctp() ->
+    {ok, S} = socket:open(inet, stream, tcp),
+    {'$socket', Ref} = S,
+    Raised = fun(F) -> try F() catch Class:Reason -> {Class, Reason} end end,
+    erlang:display({socket_sctp, [Raised(fun() -> socket:peeloff(S, 1) end),
+                                  Raised(fun() -> prim_socket:peeloff(Ref, foo) end),
+                                  Raised(fun() -> prim_socket:socknames(Ref, 0) end),
+                                  Raised(fun() -> prim_socket:peernames(make_ref(), 0) end)]}),
     init:stop().
 
 %% `-s kernel_boot_probe socket_recvfrom_local_flags` receives with the flag

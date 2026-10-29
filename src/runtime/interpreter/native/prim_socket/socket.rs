@@ -287,6 +287,18 @@ pub(super) fn invalid(reason: Term) -> BifResult {
     BifResult::Value(Term::tuple(vec![Term::static_atom("invalid"), reason]))
 }
 
+/// Run `prim_socket:nif_peeloff/2`, `nif_socknames/2`, or
+/// `nif_peernames/2` on a host without SCTP, as the pinned ERTS builds of
+/// macOS and Linux do without `HAVE_SCTP` (`prim_socket_nif.c:6419-6421`,
+/// `13608-13610`, `13767-13769`): the exception
+/// `error:notsup` before any argument check.
+pub(super) fn sctp_notsup() -> BifResult {
+    BifResult::Raise {
+        class: ExceptionClass::Error,
+        reason: Term::static_atom("notsup"),
+    }
+}
+
 /// Return `{error, Errno}` of a failed socket call, as
 /// `esock_make_error_errno` does.
 pub(super) fn errno_error(
