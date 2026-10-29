@@ -628,6 +628,23 @@ fn receives_with_flags_on_inet_sockets_as_pinned_erts() {
 }
 
 #[test]
+fn raises_notsup_for_the_sctp_functions_as_pinned_erts() {
+    // `kernel_boot_probe:socket_sctp/0` runs `socket:peeloff/2`,
+    // `prim_socket:socknames/2`, and `prim_socket:peernames/2`. The pinned
+    // ERTS builds of macOS and of the Linux CI host have no `HAVE_SCTP`, so
+    // `nif_peeloff/2`, `nif_socknames/2`, and `nif_peernames/2` raise
+    // `error:notsup` before any argument check (prim_socket_nif.c:6419-6421,
+    // 13608-13610, 13767-13769).
+    let (reference, status, node) = run_kernel_boot("socket_sctp", false, &["{socket_sctp,"]);
+    assert_eq!(status, Some(0), "ERTS");
+    assert_eq!(
+        reference.trim_end(),
+        "{socket_sctp,[{error,notsup},{error,notsup},{error,notsup},{error,notsup}]}"
+    );
+    assert_eq!(node, reference, "PBeam");
+}
+
+#[test]
 fn sends_io_vectors_as_pinned_erts() {
     // `kernel_boot_probe:socket_sendv/0` runs `socket:sendv/2,3` on the NIF
     // `nif_sendv/3` (prim_socket_nif.c:6777-6822; unix_socket_syncio.c:3361-3524):
