@@ -200,6 +200,10 @@ name = "nif_messages"
 path = "tests/integration/nif_messages.rs"
 
 [[test]]
+name = "nif_atoms"
+path = "tests/integration/nif_atoms.rs"
+
+[[test]]
 name = "extension_library"
 path = "tests/integration/extension_library.rs"
 
