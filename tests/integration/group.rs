@@ -1,3 +1,6 @@
+//! Runs guard BIFs, name registration and the `group` server on PBeam and compares them with the
+//! pinned ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};

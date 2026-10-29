@@ -1,3 +1,5 @@
+//! Checks the exceptions of the error path instructions on PBeam against the pinned ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};

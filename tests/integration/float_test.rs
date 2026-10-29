@@ -1,3 +1,6 @@
+//! Runs the `is_float` test and the float register instructions on PBeam and compares them with the
+//! pinned ERTS.
+
 #[path = "../common/mod.rs"]
 mod common;
 

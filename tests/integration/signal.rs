@@ -1,3 +1,6 @@
+//! Checks `os:set_signal` and the start dispositions of the host signals on PBeam against the
+//! pinned ERTS.
+
 use std::{
     env,
     ffi::c_int,

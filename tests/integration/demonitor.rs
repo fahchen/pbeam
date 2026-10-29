@@ -1,3 +1,5 @@
+//! Checks the options and the argument errors of `demonitor` on PBeam against the pinned ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};

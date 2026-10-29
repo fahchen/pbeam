@@ -1,3 +1,6 @@
+//! Runs the `gen_tcp` calls (listen, accept, connect, peer name, local family) through the `pbeam`
+//! binary and compares them with the pinned ERTS.
+
 use std::{
     io::{BufRead, BufReader, Read, Write},
     net::TcpStream,

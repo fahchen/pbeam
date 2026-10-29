@@ -1,3 +1,6 @@
+//! Runs `erts_debug:flat_size` on PBeam and compares the sizes of each term kind with the pinned
+//! ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::BeamProgram;

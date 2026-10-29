@@ -1,3 +1,6 @@
+//! Reads lines from a pipe and from a terminal through the `pbeam` binary and compares them with
+//! the pinned ERTS.
+
 use std::{
     io::{self, Read, Write},
     os::fd::{FromRawFd, OwnedFd},

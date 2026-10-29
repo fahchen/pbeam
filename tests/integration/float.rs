@@ -1,3 +1,6 @@
+//! Runs float literals, arithmetic, comparison and text on PBeam and compares them with the pinned
+//! ERTS.
+
 #[path = "../common/mod.rs"]
 mod common;
 

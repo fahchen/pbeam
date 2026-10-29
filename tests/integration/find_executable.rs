@@ -1,3 +1,6 @@
+//! Runs the executable search and the file info functions on PBeam and compares them with the
+//! pinned ERTS.
+
 use std::{
     env,
     fs::{self, File, FileTimes, Permissions},

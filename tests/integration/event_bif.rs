@@ -1,3 +1,6 @@
+//! Runs the BIFs of the `event_bif` probe (integer to list, iolist size, remainder, minimum,
+//! printable range) on PBeam and compares them with the pinned ERTS.
+
 #[path = "../common/mod.rs"]
 mod common;
 

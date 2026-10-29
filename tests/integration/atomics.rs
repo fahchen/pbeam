@@ -1,3 +1,6 @@
+//! Runs the `atomics` and `counters` functions on PBeam and compares the results with the pinned
+//! ERTS.
+
 use std::process::Command;
 use std::sync::Arc;
 

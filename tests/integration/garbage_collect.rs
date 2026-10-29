@@ -1,3 +1,5 @@
+//! Runs `garbage_collect` on PBeam and compares the results with the pinned ERTS.
+
 use pbeam_runtime::{BeamProgram, Term};
 
 #[path = "../common/mod.rs"]

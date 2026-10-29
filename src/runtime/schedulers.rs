@@ -48,6 +48,12 @@ impl Schedulers {
 
     /// Return the count of schedulers, which `erlang:system_info(schedulers)`
     /// gives.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the stored count is not positive. This does not happen:
+    /// each constructor and [`Schedulers::apply_flag`] keep the count
+    /// positive.
     pub fn total(&self) -> usize {
         usize::try_from(self.total).expect("a checked count is positive")
     }
@@ -55,6 +61,12 @@ impl Schedulers {
     /// Return the count of schedulers online, which
     /// `erlang:system_info(schedulers_online)` gives. The node starts one
     /// scheduler thread for each.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the stored count is not positive. This does not happen:
+    /// each constructor and [`Schedulers::apply_flag`] keep the count
+    /// positive.
     pub fn online(&self) -> usize {
         usize::try_from(self.online).expect("a checked count is positive")
     }

@@ -52,11 +52,11 @@ const OPCODE_CATCH: u8 = 62;
 const OPCODE_CATCH_END: u8 = 63;
 /// `bs_get_float2 Fail Ctx Live Size Unit Flags Dst` (genop.tab:448).
 const OPCODE_BS_GET_FLOAT2: u8 = 118;
-/// The `little` flag of a segment (`BSF_LITTLE`, erl_bits.h:462).
+/// The `little` flag of a segment (`BSF_LITTLE`, `erl_bits.h:462`).
 const BSF_LITTLE: u64 = 2;
-/// The `native` flag of a segment (`BSF_NATIVE`, erl_bits.h:465).
+/// The `native` flag of a segment (`BSF_NATIVE`, `erl_bits.h:465`).
 const BSF_NATIVE: u64 = 16;
-/// The `signed` flag of a segment (`BSF_SIGNED`, erl_bits.h:463).
+/// The `signed` flag of a segment (`BSF_SIGNED`, `erl_bits.h:463`).
 const BSF_SIGNED: u64 = 4;
 /// `bs_get_binary2 Fail Ctx Live Size Unit Flags Dst` (genop.tab:449).
 const OPCODE_BS_GET_BINARY2: u8 = 119;
@@ -518,7 +518,7 @@ pub(crate) enum Instruction {
     /// `{gc_bif,'-',{f,0},1,[{tr,{y,0},...},{tr,{x,0},...}],{x,0}}`. The
     /// guard `when -X > 0` of `arith_probe:neg/1` compiles to
     /// `{gc_bif,'-',{f,55},1,[{x,0}],{x,0}}`, and `length(Args)` in
-    /// `proc_lib:trans_init/3` (proc_lib.erl:944) compiles to
+    /// `proc_lib:trans_init/3` (`proc_lib.erl:944`) compiles to
     /// `{gc_bif,length,{f,0},3,[{tr,{x,2},...}],{x,2}}`. The guard
     /// `when binary_part(Binary, Start, Length) =:= <<"ell">>` of
     /// `binary_part_probe:guard/3` compiles to
@@ -1074,7 +1074,7 @@ pub(crate) enum Instruction {
     /// 0x13]`, which fails to label 25 unless `x0` equals `x1`.
     ///
     /// Erlang: the guard `CtrlSync==0` of `logger_h_common:handle_load/2`
-    /// (logger_h_common.erl:250) compiles to an `is_eq` test.
+    /// (`logger_h_common.erl:250`) compiles to an `is_eq` test.
     /// `eq(A, B) when A == B -> id(true);` compiles to
     /// `{test,is_eq,{f,25},[{x,0},{x,1}]}`.
     TestEqual {
@@ -1110,7 +1110,7 @@ pub(crate) enum Instruction {
     /// fails to label 157 when `x0` equals `x3`.
     ///
     /// Erlang: the guard `element(1,Req) =:= User orelse element(1,Req) =:=
-    /// Curr` of `user_drv:server/3` (user_drv.erl:542) compiles to
+    /// Curr` of `user_drv:server/3` (`user_drv.erl:542`) compiles to
     /// `{test,is_ne_exact,{f,157},[{x,0},{x,3}]}`. When the first test is
     /// true, the jump skips the `orelse` test.
     TestExactNotEqual {
@@ -1129,7 +1129,7 @@ pub(crate) enum Instruction {
     ///
     /// Erlang: `width(F) when F < 0 -> left;` compiles to
     /// `{test,is_lt,{f,15},[{x,0},{integer,0}]}`, as the guard of
-    /// `io_lib_format:field_width/3` (io_lib_format.erl:259) does, which
+    /// `io_lib_format:field_width/3` (`io_lib_format.erl:259`) does, which
     /// compares the atom `none` with 0.
     TestLess {
         fail_label: u32,
@@ -1280,7 +1280,7 @@ pub(crate) enum Instruction {
     /// flags 2 (`little`), and the destination `x1`. A literal size that
     /// is not a small integer, such as the bignum 2^64, stays in `size`:
     /// ERTS loads it as `i_bs_get_float2` (jit/arm/ops.tab:1009-1010, `s`
-    /// includes literals per beam_makeops:163) and jumps to the fail label
+    /// includes literals per `beam_makeops:163`) and jumps to the fail label
     /// at run time (`emit_bs_get_field_size`, jit/arm/instr_bs.cpp:58-86).
     ///
     /// Erlang: `<<F:N/float-little, Rest/binary>>` compiles to
@@ -1754,7 +1754,7 @@ pub(crate) enum TestKind {
     /// `compare_probe:kind/1` fails to label 11 unless `x0` is an integer.
     /// Erlang: `kind(X) when is_integer(X) -> integer;` compiles to
     /// `{test,is_integer,{f,11},[{x,0}]}`, as the guard of
-    /// `io_lib_format:field_value/2` (io_lib_format.erl:271) does.
+    /// `io_lib_format:field_value/2` (`io_lib_format.erl:271`) does.
     Integer,
     /// `is_float`, opcode 46. Example: `[0x2E, 0x55, 0x03]` in
     /// `float_test_probe:kind/1` fails to label 5 unless `x0` is a float.
@@ -1774,14 +1774,14 @@ pub(crate) enum TestKind {
     /// `compare_probe:kind/1` fails to label 12 unless `x0` is the atom
     /// `true` or `false`. Erlang: `kind(X) when is_boolean(X) -> boolean;`
     /// compiles to `{test,is_boolean,{f,12},[{x,0}]}`, as the guard of
-    /// `standard_error:check_valid_opts/1` (standard_error.erl:236) does.
+    /// `standard_error:check_valid_opts/1` (`standard_error.erl:236`) does.
     Boolean,
     /// `is_any_native_record`, opcode 186 (genop.tab:722-724). Example:
     /// `[0xBA, 0x55, 0x03]` fails to label 5 unless `x0` is a native
     /// record. Erlang: `kind(T) when is_record(T) -> record;` compiles to
     /// `{test,is_record,{f,5},[{x,0}]}`, as the guard of
-    /// `io_lib:write1/4` (io_lib.erl:843) and of
-    /// `io_lib_pretty:print_length/7` (io_lib_pretty.erl:938) does. PBeam
+    /// `io_lib:write1/4` (`io_lib.erl:843`) and of
+    /// `io_lib_pretty:print_length/7` (`io_lib_pretty.erl:938`) does. PBeam
     /// has no native record term, so the test fails for each term.
     AnyNativeRecord,
 }

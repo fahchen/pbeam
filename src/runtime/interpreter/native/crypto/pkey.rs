@@ -811,7 +811,7 @@ fn dss_parts(term: &Term) -> Option<[BigNum; 4]> {
     matches!(cell, Term::Nil).then_some(parts)
 }
 
-/// Return the bytes and the type of the EdDSA key `[Key, Curve]`
+/// Return the bytes and the type of the `EdDSA` key `[Key, Curve]`
 /// (`eddsa.c:26-66`).
 fn eddsa_parts<'a>(scheduler: &Scheduler, term: &'a Term) -> Option<(&'a [u8], Id)> {
     let (head, tail) = term.cons_cell()?;

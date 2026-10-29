@@ -1,3 +1,5 @@
+//! Runs `os:getenv` on PBeam and compares the results with the pinned ERTS.
+
 use std::{
     env,
     ffi::OsStr,

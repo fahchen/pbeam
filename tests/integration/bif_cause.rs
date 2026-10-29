@@ -1,3 +1,5 @@
+//! Checks the `error_info` cause of the BIF errors on PBeam against the pinned ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::BeamProgram;

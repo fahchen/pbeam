@@ -1,3 +1,6 @@
+//! Runs the ETS table functions (lookup, insert, delete, owner exit) on PBeam and compares them
+//! with the pinned ERTS.
+
 use std::process::Command;
 use std::sync::Arc;
 

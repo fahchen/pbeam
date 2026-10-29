@@ -1,3 +1,6 @@
+//! Checks how the `pbeam` binary handles host signals (the signal server, the break menu,
+//! `SIGUSR1`) and compares it with the pinned ERTS.
+
 use std::{
     ffi::c_int,
     io::{self, Read, Write},

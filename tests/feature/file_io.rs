@@ -1,3 +1,6 @@
+//! Opens, writes, positions and closes a file through the `pbeam` binary and compares the result
+//! with the pinned ERTS.
+
 use std::{
     fs,
     process::{Command, Output},

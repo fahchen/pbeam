@@ -1,3 +1,6 @@
+//! Runs the `at_exit` callbacks and the logger flush at the end of a `pbeam` run and compares the
+//! output with the pinned ERTS.
+
 use std::fmt::Write as _;
 use std::{
     path::PathBuf,

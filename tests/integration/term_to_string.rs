@@ -1,3 +1,5 @@
+//! Runs term printing with a limit on PBeam and compares the text with the pinned ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};

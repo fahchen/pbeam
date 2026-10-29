@@ -1,3 +1,6 @@
+//! Checks `function_clause` errors, their arguments and their stack frames on PBeam against the
+//! pinned ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};

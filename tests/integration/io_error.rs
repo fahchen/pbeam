@@ -1,3 +1,5 @@
+//! Checks that the exit of a writer process surfaces as an IO protocol error on PBeam.
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};

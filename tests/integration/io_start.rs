@@ -1,3 +1,6 @@
+//! Loads the pinned `io_lib` modules and runs the BIFs of the `io_start` probe (list tail,
+//! booleans, key member) on PBeam against the pinned ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Map, Term};

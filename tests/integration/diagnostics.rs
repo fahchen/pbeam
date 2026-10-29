@@ -1,3 +1,6 @@
+//! Runs the diagnostics BIFs (display, module delete, `process_info`) on PBeam and compares them
+//! with the pinned ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::{AtomTable, BeamProgram, Term};

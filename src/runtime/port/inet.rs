@@ -38,8 +38,8 @@
 //! `prim_inet:accept_opts/3` copies to an accepted socket: `keepalive` (1),
 //! `linger` (3), `priority` (8), `tos` (9), `delay_send` (31), `recvtos`
 //! (43), `ttl` (46), and `recvttl` (47) (prim_inet.erl:502-518;
-//! inet_tcp.erl:249). Each other request, option, family, and protocol
-//! returns a runtime error (row "tcp_inet ports" of
+//! `inet_tcp.erl:249`). Each other request, option, family, and protocol
+//! returns a runtime error (row "`tcp_inet` ports" of
 //! `docs/erts-differences.md`).
 //!
 //! A `udp_inet` port runs the requests of `packet_inet_ctl`, which runs
@@ -76,23 +76,23 @@ use stream::Stream;
 pub(in crate::runtime) use stream::{Event, Output, Receiver};
 
 /// The number that `prim_inet` adds to each request code
-/// (`ERTS_INET_DRV_CONTROL_MAGIC_NUMBER`, prim_inet.erl:2969).
+/// (`ERTS_INET_DRV_CONTROL_MAGIC_NUMBER`, `prim_inet.erl:2969`).
 const MAGIC: u32 = 0x03f1_a300;
 
 /// The largest reply of `GETOPTS` and `SUBSCRIBE` (`INET_MAX_OPT_BUFFER`,
-/// inet_drv.c:1046).
+/// `inet_drv.c:1046`).
 const MAX_OPT_BUFFER: usize = 64 * 1024;
 
 /// The `how` of `TCP_REQ_SHUTDOWN` for the read side (`TCP_SHUT_RD`,
-/// inet_drv.c:684).
+/// `inet_drv.c:684`).
 const SHUT_READ: u8 = 0;
 
 /// The `how` of `TCP_REQ_SHUTDOWN` for the write side (`TCP_SHUT_WR`,
-/// inet_drv.c:683).
+/// `inet_drv.c:683`).
 const SHUT_WRITE: u8 = 1;
 
 /// The `how` of `TCP_REQ_SHUTDOWN` for both sides (`TCP_SHUT_RDWR`,
-/// inet_drv.c:685).
+/// `inet_drv.c:685`).
 const SHUT_READ_WRITE: u8 = 2;
 
 /// The reply code of a request that succeeded (`INET_REP_OK`).
@@ -101,13 +101,13 @@ pub(in crate::runtime) const OK: u8 = 1;
 /// The reply code of a request that failed (`INET_REP_ERROR`).
 const ERROR: u8 = 0;
 
-/// The family code of IPv4 (`INET_AF_INET`, inet_int.hrl:31).
+/// The family code of IPv4 (`INET_AF_INET`, `inet_int.hrl:31`).
 const AF_INET: u8 = 1;
 
-/// The family code of IPv6 (`INET_AF_INET6`, inet_int.hrl:32).
+/// The family code of IPv6 (`INET_AF_INET6`, `inet_int.hrl:32`).
 const AF_INET6: u8 = 2;
 
-/// The family code of the `local` family (`INET_AF_LOCAL`, inet_int.hrl:35).
+/// The family code of the `local` family (`INET_AF_LOCAL`, `inet_int.hrl:35`).
 const AF_LOCAL: u8 = 5;
 
 /// The size of `sun_path` of `struct sockaddr_un` on the host.
@@ -116,7 +116,7 @@ const SUN_PATH: usize = 108;
 #[cfg(not(target_os = "linux"))]
 const SUN_PATH: usize = 104;
 
-/// The state of the socket of a port (`INET_STATE_*`, inet_drv.c).
+/// The state of the socket of a port (`INET_STATE_*`, `inet_drv.c`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
     /// No socket: the port opened, and `OPEN` did not run.
@@ -204,7 +204,7 @@ pub(in crate::runtime) struct Inet {
     active_count: i16,
     /// The option `read_packets` of a `udp_inet` port: the most datagrams
     /// that one poll event reads (`INET_PACKET_POLL`, 5, at the start,
-    /// inet_drv.c:1072, 14508).
+    /// `inet_drv.c:1072`, 14508).
     read_packets: i32,
     /// A `udp_inet` socket whose read select is off: it reads no datagram,
     /// also in active mode, until a receive request or a change of the
@@ -222,9 +222,9 @@ pub(in crate::runtime) struct Inet {
     delay_send: bool,
     /// Whether a `SETOPTS` set the option `buffer` (`INET_FLG_BUFFER_SET`),
     /// after which `recbuf` does not change `buffer`. An accepted socket
-    /// starts without it (inet_drv.c:14457).
+    /// starts without it (`inet_drv.c:14457`).
     buffer_set: bool,
-    /// The next async reference (`op_ref`, inet_drv.c:1549, 10937).
+    /// The next async reference (`op_ref`, `inet_drv.c:1549`, 10937).
     op_ref: u16,
     /// The callers that wait for a connection, in arrival order.
     pub(in crate::runtime) acceptors: VecDeque<Acceptor>,
@@ -337,7 +337,7 @@ impl Inet {
     }
 
     /// Return the next async reference, as `NEW_ASYNC_ID` does
-    /// (inet_drv.c:1549): 0 first, then 1 more each time, modulo 2^16.
+    /// (`inet_drv.c:1549)`: 0 first, then 1 more each time, modulo 2^16.
     ///
     /// # Examples
     ///
@@ -581,7 +581,7 @@ impl Inet {
     }
 
     /// Make the non-blocking socket of `domain`, `socket_type`, and
-    /// `protocol`. `SET_NONBLOCKING` ignores its result (inet_drv.c:5212).
+    /// `protocol`. `SET_NONBLOCKING` ignores its result (`inet_drv.c:5212`).
     fn open_socket(
         &mut self,
         domain: Domain,
@@ -731,7 +731,7 @@ impl Inet {
         Ok(address)
     }
 
-    /// Run `INET_REQ_SETOPTS` (inet_set_opts, inet_drv.c:6871-7530): set
+    /// Run `INET_REQ_SETOPTS` (`inet_set_opts`, inet_drv.c:6871-7530): set
     /// each option of 5 bytes in order, and ignore a rest of fewer bytes.
     /// `linger` takes 4 more bytes, the time in seconds, and a missing time
     /// gives `einval`. A failed `setsockopt` of `reuseaddr`, `keepalive`,
@@ -1047,7 +1047,7 @@ impl Inet {
         !propagate || matches!(result, Some(Ok(())))
     }
 
-    /// Run `INET_REQ_GETOPTS` (inet_fill_opts, inet_drv.c:9071-9754): give
+    /// Run `INET_REQ_GETOPTS` (`inet_fill_opts`, inet_drv.c:9071-9754): give
     /// each option code with its value in order. A socket option whose
     /// `getsockopt` fails, also without a socket, is not in the reply, and
     /// `send_timeout`, `send_timeout_close`, and `delay_send` are not in it
@@ -1178,7 +1178,7 @@ impl Inet {
 
 /// The runtime error of `{active, N}`.
 /// The `buffer` that `recbuf` sets on a `udp_inet` port at most
-/// (`INET_UDP_THEORETICAL_MAX_MTU`, inet_drv.c:1059).
+/// (`INET_UDP_THEORETICAL_MAX_MTU`, `inet_drv.c:1059`).
 const MAX_UDP_BUFFER: i32 = 1 << 16;
 
 const ACTIVE_N: &str = "unsupported tcp_inet option active with a count: see \"tcp_inet ports\" in docs/erts-differences.md";
@@ -1423,7 +1423,7 @@ fn priority(socket: Option<&Socket>) -> Option<i32> {
 }
 
 impl Inet {
-    /// Run `INET_REQ_SUBSCRIBE` of `caller` (inet_subscribe,
+    /// Run `INET_REQ_SUBSCRIBE` of `caller` (`inet_subscribe`,
     /// inet_drv.c:10819-10848; the size check, inet_drv.c:11025-11044):
     /// give each `subs_empty_out_q` (1) with the size of the queue, 32
     /// bits. With a size above 0, each code adds `caller` to the
@@ -1495,7 +1495,7 @@ fn local_address(n: u8, name: &[u8]) -> Result<SockAddr, Vec<u8>> {
 /// which starts with a zero byte, and an unnamed address gives the empty
 /// name. `nix` keeps each byte of the length that the host gives, which
 /// on macOS has no terminating zero byte for a name that ERTS binds
-/// (inet_drv.c:4772).
+/// (`inet_drv.c:4772`).
 fn local_name(
     socket: &Socket,
     get: fn(std::os::fd::RawFd) -> nix::Result<nix::sys::socket::UnixAddr>,

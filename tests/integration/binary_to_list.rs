@@ -1,3 +1,6 @@
+//! Runs `binary_to_list` on PBeam with one scheduler and compares the results and the reductions
+//! with the pinned ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::{AtomTable, BeamProgram, HostTerm, Term};

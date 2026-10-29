@@ -1,3 +1,6 @@
+//! Runs `decode_packet` for HTTP lines and headers on PBeam and compares the results with the
+//! pinned ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, HostTerm, Map, Term};

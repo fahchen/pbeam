@@ -1,3 +1,6 @@
+//! Runs bitstring literals, the `is_bitstr` test and the order of bitstrings on PBeam and compares
+//! them with the pinned ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};

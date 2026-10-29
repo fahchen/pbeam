@@ -1,3 +1,6 @@
+//! Runs `module_info` of preloaded and loaded modules on PBeam and compares the results with the
+//! pinned ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::{AtomTable, BeamProgram, Term};

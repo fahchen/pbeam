@@ -1,3 +1,6 @@
+//! Checks the scheduling of processes by priority on PBeam against the pinned ERTS with one
+//! scheduler.
+
 #[path = "../common/mod.rs"]
 mod common;
 

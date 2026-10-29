@@ -1,3 +1,6 @@
+//! Runs the `zlib` functions (deflate, inflate, flush, one-shot) on PBeam and compares the bytes
+//! with the pinned ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};

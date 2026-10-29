@@ -1,3 +1,6 @@
+//! Sets the terminal mode with `stty` through a port and compares the result and the exit status
+//! with the pinned ERTS.
+
 use std::{
     io::{self, Read},
     os::{

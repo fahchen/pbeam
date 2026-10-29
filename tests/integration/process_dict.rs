@@ -1,3 +1,5 @@
+//! Checks the order of the process dictionary on PBeam against the pinned ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};

@@ -4,7 +4,7 @@
 //! builds them with `mix compile`, so `elixir_make` builds `bcrypt_nif.so`
 //! with the pinned ERTS headers and the host `cc`. Then the pinned ERTS and
 //! PBeam run `nif_bcrypt:main/0` of `fixtures/nif` with the code path of
-//! `bcrypt_elixir`, and the outputs are equal. The on_load function of
+//! `bcrypt_elixir`, and the outputs are equal. The `on_load` function of
 //! `Elixir.Bcrypt.Base` loads the library from `code:priv_dir/1`.
 //!
 //! The bundle test builds the release of the project, whose bundle ships

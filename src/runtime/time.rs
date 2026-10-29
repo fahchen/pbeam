@@ -36,7 +36,7 @@ pub(super) const MONOTONIC_OFFSET_NATIVE: i64 = MONOTONIC_TIME_START_EXTERNAL - 
 /// (`sys_time.c:989-1007`, `ethr_aux.c:167-168`). Intel and AMD define no
 /// bit 23 there: the bit numbers come from the Linux software flags
 /// `constant_tsc` and `tsc_reliable`. Thus ERTS gives this unit also on an
-/// x86_64 host.
+/// `x86_64` host.
 pub(super) const PERF_COUNTER_UNIT: i64 = 1_000_000_000;
 
 /// The result of [`time_unit_conversion`].

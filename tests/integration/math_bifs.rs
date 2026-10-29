@@ -1,3 +1,5 @@
+//! Runs the `math` BIFs of the C library on PBeam and checks that each one costs one reduction.
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};

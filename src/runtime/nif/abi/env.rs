@@ -6,7 +6,7 @@
 //! which `enif_make_badarg` returns. The arguments of the call are the
 //! handles `1..=argc`, and each `enif_make_*` call adds a term. A handle is
 //! valid only in the call of its env, as an ERTS process-bound term is
-//! valid only until the NIF returns (`erl_nif.h`, "ERL_NIF_TERM").
+//! valid only until the NIF returns (`erl_nif.h`, "`ERL_NIF_TERM`").
 //!
 //! The handle of an atom is the exception: it is [`ATOM_HANDLE`] plus the
 //! index of the atom, for an atom of `enif_make_atom`, an argument, and an
@@ -523,7 +523,7 @@ fn byte_of(element: &Term) -> Option<u8> {
 /// `env` is the `ErlNifEnv*` that the loader gave to the running NIF call
 /// or load callback, which is alive and has no other reference while the
 /// call runs. The C API allows an `enif_*` call only with the env of the
-/// current call (`erl_nif.h`, "ErlNifEnv").
+/// current call (`erl_nif.h`, "`ErlNifEnv`").
 pub(super) unsafe fn env<'a>(env: *mut Env) -> &'a mut Env {
     // SAFETY: the caller gives a valid and unique `Env`, as the function
     // documents.

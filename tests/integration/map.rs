@@ -1,3 +1,6 @@
+//! Runs map construction, matching, comparison and the flatmap and hashmap limits on PBeam and
+//! compares them with the pinned ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::{Atom, AtomTable, BeamProgram, Map, Term};

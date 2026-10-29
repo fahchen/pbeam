@@ -1,3 +1,6 @@
+//! Checks the IO request that PBeam sends to a group leader and the group leader errors, against
+//! the pinned ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};

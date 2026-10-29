@@ -144,6 +144,8 @@ impl NameTable {
     }
 }
 
+/// A parsed BEAM module: its name, its exports, its instructions, and the
+/// tables that the instructions refer to.
 #[derive(Debug)]
 pub struct BeamModule {
     pub(crate) name: String,
@@ -603,6 +605,10 @@ impl BeamModule {
     /// let module = BeamModule::load(CONSTANT)?;
     /// assert!(BeamModule::load(b"not beam").is_err());
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`BeamError`] when `bytes` is not a valid BEAM file.
     pub fn load(bytes: &[u8]) -> Result<Self, BeamError> {
         code::parse(bytes, &AtomTable::new())
     }
@@ -616,6 +622,13 @@ impl BeamModule {
     /// let module = BeamModule::load(CONSTANT)?;
     /// assert_eq!(module.execute("number", &[])?, Term::Integer(7));
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`BeamError`] when `arguments` has more elements than a
+    /// BEAM arity allows, when the module has no export `function` of that
+    /// arity, when the entry runs an instruction other than a move of a
+    /// constant to `x0` and a return, or when the entry never sets `x0`.
     pub fn execute(&self, function: &str, arguments: &[Term]) -> Result<Term, BeamError> {
         let arity = checked_arity(arguments.len())?;
         let entry = self

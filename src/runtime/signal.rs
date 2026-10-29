@@ -141,7 +141,7 @@ pub(super) enum Signal {
     },
     /// `ERTS_SIG_Q_OP_MONITOR` of a port monitor: `driver_monitor_process`
     /// (`io.c`) in `INET_REQ_ACCEPT` monitors the caller for the listen
-    /// port `port` (inet_drv.c:12172, 12198, 12214). The receiver adds the
+    /// port `port` (`inet_drv.c:12172`, 12198, 12214). The receiver adds the
     /// target monitor for 2 (`erl_proc_sig_queue.c:6544-6562`). At exit it
     /// runs the monitor of the port (`tcp_inet_process_exit`,
     /// inet_drv.c:12732-12771).

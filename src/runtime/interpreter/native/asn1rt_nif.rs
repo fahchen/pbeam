@@ -492,7 +492,7 @@ fn per_complete(input: &[u8], truncated: &mut bool) -> Option<Vec<u8>> {
 /// (`asn1_erl_nif.c:954-958`), so the depth of the `unknown` error depends
 /// on the stack frame size of the ERTS build: the pinned ERTS on
 /// aarch64-apple-darwin decodes 454 calls and stops at 455, and the pinned
-/// ERTS on x86_64 Linux decodes more. PBeam decodes the depth that each
+/// ERTS on `x86_64` Linux decodes more. PBeam decodes the depth that each
 /// build decodes and stops the run for a deeper input.
 const MAX_DECODE_DEPTH: u32 = 454;
 

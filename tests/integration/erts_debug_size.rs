@@ -1,3 +1,6 @@
+//! Runs `erts_debug:size` on PBeam and compares it with the pinned ERTS. It also checks the terms
+//! that PBeam cannot size.
+
 use std::process::Command;
 
 use pbeam_runtime::BeamProgram;

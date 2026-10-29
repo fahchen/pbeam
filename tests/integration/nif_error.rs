@@ -1,3 +1,5 @@
+//! Checks `erlang:nif_error` and the fallback of a NIF without a binding on PBeam.
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};

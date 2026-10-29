@@ -1,3 +1,5 @@
+//! Runs the `to_existing_atom` functions on PBeam and compares the results with the pinned ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Map, Term};

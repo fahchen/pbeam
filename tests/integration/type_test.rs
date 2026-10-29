@@ -1,3 +1,5 @@
+//! Runs the type test BIFs in guards and in bodies on PBeam and compares them with the pinned ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::{AtomTable, BeamProgram, Term};

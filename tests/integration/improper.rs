@@ -1,3 +1,6 @@
+//! Runs improper lists (literals, matching, list BIFs, iodata) on PBeam and compares the results
+//! with the pinned ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};

@@ -1,3 +1,6 @@
+//! Runs the `bs_create_bin` instruction (string, binary, integer, UTF and append segments) on PBeam
+//! and compares it with the pinned ERTS.
+
 use std::{process::Command, sync::Arc};
 
 use num_bigint::BigInt;

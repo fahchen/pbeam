@@ -1,3 +1,6 @@
+//! Starts `erl_prim_loader` with the code path of `-pa` and compares the result with the pinned
+//! ERTS.
+
 use std::{
     env, fs,
     path::{Path, PathBuf},

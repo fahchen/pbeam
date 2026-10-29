@@ -1,3 +1,5 @@
+//! Runs the BIFs that `io:inspect` uses on a tuple on PBeam and compares them with the pinned ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::{AtomTable, BeamProgram, Term};

@@ -1,3 +1,6 @@
+//! Runs the `rand` seeding and drawing functions and the system time on PBeam and compares them
+//! with the pinned ERTS.
+
 #[path = "../common/mod.rs"]
 mod common;
 

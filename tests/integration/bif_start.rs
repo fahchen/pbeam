@@ -1,3 +1,6 @@
+//! Runs a BIF as the initial call of a process on PBeam and compares the result with the pinned
+//! ERTS.
+
 #[path = "../common/mod.rs"]
 mod common;
 

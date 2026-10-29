@@ -1,6 +1,6 @@
 //! The receive and send state of a connected socket of a `tcp_inet` port
 //! in passive and active mode with `{packet, raw}`, as `tcp_descriptor` keeps it
-//! (inet_drv.c:1308, 1050-1064, 12268-12325, 12657-12731, 12783-12890,
+//! (`inet_drv.c:1308`, 1050-1064, 12268-12325, 12657-12731, 12783-12890,
 //! 12967-13240, 13613-13852, 14234-14370).
 //!
 //! `TCP_REQ_RECV` (42) takes `[T3, T2, T1, T0, N3, N2, N1, N0]`: the
@@ -42,18 +42,18 @@ use crate::{
 };
 
 /// The buffer size of a receive of length 0 (`INET_BUFFER_TCP_DEFAULT`,
-/// inet_drv.c:1050).
+/// `inet_drv.c:1050`).
 pub(super) const BUFFER: usize = 9216;
 
-/// The largest receive length (`TCP_MAX_PACKET_SIZE`, inet_drv.c:1308).
+/// The largest receive length (`TCP_MAX_PACKET_SIZE`, `inet_drv.c:1308`).
 const MAX_PACKET: i32 = 0x400_0000;
 
 /// The queue size that makes a send wait (`INET_HIGH_WATERMARK`,
-/// inet_drv.c:1062).
+/// `inet_drv.c:1062`).
 const HIGH: usize = 8 * 1024;
 
 /// The queue size that ends the wait of a send (`INET_LOW_WATERMARK`,
-/// inet_drv.c:1063).
+/// `inet_drv.c:1063`).
 const LOW: usize = 4 * 1024;
 
 /// The timeout of `infinity` (`INET_INFINITY`).
@@ -250,7 +250,7 @@ pub(in crate::runtime) struct Stream {
     closed_sent: bool,
     /// The connection ended and the socket closed: `INET_STATE_CLOSED`
     /// with the `stype` `SOCK_STREAM` of `OPEN`, which a port without
-    /// `OPEN` does not have (inet_drv.c:5215, 10925).
+    /// `OPEN` does not have (`inet_drv.c:5215`, 10925).
     pub(super) ended: bool,
     /// The counts of `GETSTAT`.
     pub(super) statistics: Statistics,
@@ -730,8 +730,8 @@ impl Inet {
 
     /// Return the fd of a socket with a receive that waits and a read
     /// select that is on (`sock_select(desc, FD_READ, 1)`,
-    /// inet_drv.c:12317, 15496; see `Inet::read_off`) or of a
-    /// connected stream socket in active mode (inet_drv.c:7966), else
+    /// `inet_drv.c:12317`, 15496; see `Inet::read_off`) or of a
+    /// connected stream socket in active mode (`inet_drv.c:7966`), else
     /// `None`.
     pub(in crate::runtime) fn stream_receive_fd(&self) -> Option<c_int> {
         let socket = self.socket.as_ref()?;
@@ -742,8 +742,8 @@ impl Inet {
     }
 
     /// Return the fd of a socket with queued output (`sock_select(desc,
-    /// FD_WRITE, 1)`, inet_drv.c:13846) or that connects (`sock_select(desc,
-    /// FD_CONNECT, 1)`, inet_drv.c:12109), else `None`.
+    /// FD_WRITE, 1)`, `inet_drv.c:13846`) or that connects (`sock_select(desc,
+    /// FD_CONNECT, 1)`, `inet_drv.c:12109`), else `None`.
     pub(in crate::runtime) fn send_fd(&self) -> Option<c_int> {
         let socket = self.socket.as_ref()?;
         (!self.stream.output.is_empty() || self.state == State::Connecting)

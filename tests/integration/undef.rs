@@ -1,3 +1,6 @@
+//! Checks the `undef` error for a function that a loaded module does not export, and the
+//! `system_limit` error for a spawn with too many arguments.
+
 #[path = "../common/mod.rs"]
 mod common;
 

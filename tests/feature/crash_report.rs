@@ -1,3 +1,6 @@
+//! Checks the error report that the `pbeam` binary writes for an uncaught error or throw, as the
+//! pinned ERTS does.
+
 use std::{
     process::{Command, Stdio},
     time::Duration,

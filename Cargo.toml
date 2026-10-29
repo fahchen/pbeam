@@ -868,8 +868,8 @@ path = "tests/integration/erts_debug_size.rs"
 # Silence a lint locally with #[expect(clippy::<lint>, reason = "...")].
 [lints.rust]
 unsafe_op_in_unsafe_fn = "warn"                      # each unsafe op needs its own unsafe block
-missing_debug_implementations = "allow"              # #1347 turns on: every public type implements Debug
-missing_docs = "allow"                               # #1347 turns on: [lib] document every public item
+missing_debug_implementations = "warn"               # every public type implements Debug
+missing_docs = "warn"                                # [lib] document every public item
 unreachable_pub = "warn"                             # pub items that aren't actually exported
 rust_2018_idioms = { level = "warn", priority = -1 } # 2018-edition idioms, e.g. Formatter<'_>
 
@@ -884,8 +884,8 @@ pedantic = { level = "warn", priority = -1 }
 unwrap_used = "allow"        # #1350 turns on: use ?, or expect("why this cannot fail")
 expect_used = "allow"        # expect with a reason is the sanctioned form
 panic_in_result_fn = "allow" # #1350 turns on: a fn returning Result shouldn't also panic
-missing_panics_doc = "allow" # #1347 turns on: [lib] document reachable panics under # Panics
-missing_errors_doc = "allow" # #1347 turns on: [lib] document failures under # Errors
+missing_panics_doc = "warn"  # [lib] document reachable panics under # Panics
+missing_errors_doc = "warn"  # [lib] document failures under # Errors
 
 # Suppressions must explain themselves and expire when no longer needed.
 allow_attributes = "allow"                # #1352 turns on: prefer #[expect] over #[allow] (needs rust-version 1.81+)
@@ -924,9 +924,6 @@ module_inception = "allow"        # a leaf module named after its main item is f
 enum_glob_use = "allow"           # use Enum::* inside a function that matches on it
 
 # m23 allow list: lints of the groups above with a hit on main. The named task removes the line and fixes the hits.
-# #1347
-doc_markdown = "allow"
-missing_fields_in_debug = "allow"
 # #1349
 unnecessary_wraps = "allow"
 too_many_lines = "allow"

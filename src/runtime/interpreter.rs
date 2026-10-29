@@ -66,7 +66,7 @@ const APPLY_MAX_ARGUMENTS: usize = 1023;
 const APPLY_FUN_MAX_ARGUMENTS: usize = 1022;
 
 /// The bits that ERTS copies for one reduction when it puts a binary in a
-/// new binary (`ERL_BITS_PER_REDUCTION`, erl_bits.h:41).
+/// new binary (`ERL_BITS_PER_REDUCTION`, `erl_bits.h:41`).
 const BITS_PER_REDUCTION: usize = 8 * 1024;
 
 /// The module of the error handler of a process that does not set one, as
@@ -74,6 +74,8 @@ const BITS_PER_REDUCTION: usize = 8 * 1024;
 /// process-specific data holds no handler (`erl_process.h:2420-2430`).
 const DEFAULT_ERROR_HANDLER: &str = "error_handler";
 
+/// A loaded set of BEAM modules with the atom table of the program. Each run
+/// of the program starts from a copy of its modules and its atom table.
 #[derive(Debug)]
 pub struct BeamProgram {
     /// The start modules by name. Each run starts its code table with them
@@ -343,6 +345,12 @@ impl BeamProgram {
     /// let program = BeamProgram::load(&[CALLS, EXTERNAL])?;
     /// assert!(BeamProgram::load(&[CALLS, CALLS]).is_err());
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`BeamError`] when a module is not a valid BEAM file, when
+    /// two modules have one name, or when a module has an `-on_load`
+    /// function.
     pub fn load(modules: &[&[u8]]) -> Result<Self, BeamError> {
         let atoms = AtomTable::new();
         let mut loaded = HashMap::new();
@@ -440,6 +448,12 @@ impl BeamProgram {
     /// register_library(&NATIVE_HASH_LIBRARY).unwrap();
     /// assert!(program.validate_native_declarations().is_ok());
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`BeamError`] that names the first native declaration, in
+    /// the order of the module names, that has no registered
+    /// implementation.
     pub fn validate_native_declarations(&self) -> Result<(), BeamError> {
         let mut names: Vec<&String> = self.modules.keys().collect();
         names.sort();
@@ -548,6 +562,13 @@ impl BeamProgram {
     /// ```rust,ignore
     /// let result = program.execute("process_probe", "main", &[])?;
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`BeamError`] when an argument cannot enter the atom table
+    /// of the run, when the root process exits with a reason, when it waits
+    /// for a message that cannot arrive, or when the run ends with
+    /// [`BeamError::Halt`] or another run error.
     pub fn execute(
         &self,
         module: &str,
@@ -575,6 +596,10 @@ impl BeamProgram {
     /// ```rust,ignore
     /// let result = program.execute_with_policy("process_probe", "main", &[], &AllowAll)?;
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`BeamProgram::execute`].
     pub fn execute_with_policy(
         &self,
         module: &str,
@@ -758,6 +783,11 @@ impl BeamProgram {
     /// error or waits for a message that cannot arrive, the error of an
     /// empty list of roots, and the error of a scheduler that cannot be
     /// created.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a root that returned no error has no result. This does
+    /// not happen: a root that does not exit gives an error.
     pub fn execute_on_schedulers(
         &self,
         roots: &[(&str, &str)],
@@ -1005,6 +1035,10 @@ impl BeamProgram {
     /// let result = program.execute_sampled("terra_probe", "main", &[], &mut |live| peak = peak.max(live))?;
     /// assert!(peak > 0);
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`BeamProgram::execute`].
     pub fn execute_sampled(
         &self,
         module: &str,
@@ -5527,7 +5561,7 @@ fn check_remote_call_arguments(registers: &[Option<Term>], arity: u32) -> Result
 /// (`emit_bs_get_field_size` in jit/arm/instr_bs.cpp:38-116). That check
 /// also fails a register size from 2^48 and a literal size above
 /// `MAX_SMALL / unit`. The compiler gives a unit from 1 to 256
-/// (`type_to_record` in erl_bits.erl:93), so such a size is always more
+/// (`type_to_record` in `erl_bits.erl:93`), so such a size is always more
 /// bits than a binary has, and `erts_bs_get_binary_2` then fails
 /// (erl_bits.c:400-424). Thus `MatchState::read_bits` gives the same
 /// result for it.
@@ -6036,7 +6070,7 @@ fn f64_to_f16(value: f64) -> u16 {
 /// positive bignum and with `badarg` for each other term
 /// (`BSC_REASON_DEPENDS`, jit/beam_jit_common.cpp:968-975). For a unit
 /// other than 1, a size of 2^52 or more fails with `system_limit`, as the
-/// arm64 JIT checks it (jit/arm/instr_bs.cpp:1685). The x86_64 JIT fails
+/// arm64 JIT checks it (`jit/arm/instr_bs.cpp:1685`). The `x86_64` JIT fails
 /// only on an overflow of the size times the unit
 /// (jit/x86/instr_bs.cpp:1942-1943) and then stops at the allocation; row
 /// "Binary construction" of `docs/erts-differences.md` records it.
@@ -6171,7 +6205,7 @@ fn integer_type_failure(parts: &[BinaryPart<'_>], first: usize) -> BinarySegment
 /// jit/arm/instr_bs.cpp:1442-2490). It has three passes, and the first
 /// failed check gives the failure.
 ///
-/// The size pass reads the segments in order (jit/arm/instr_bs.cpp:
+/// The size pass reads the segments in order (`jit/arm/instr_bs.cpp`:
 /// 1579-1808). A `binary` segment of size `all` with a term that is not a
 /// binary fails with `type`. An `integer` segment checks its size (see
 /// `integer_segment_bits`). A `utf8` segment with a term that is not a
@@ -6191,14 +6225,14 @@ fn integer_type_failure(parts: &[BinaryPart<'_>], first: usize) -> BinarySegment
 /// (erl_bits.c:1855-1924). PBeam has no writable binary (row "Binary
 /// construction" of `docs/erts-differences.md`).
 ///
-/// The construct pass writes the segments (jit/arm/instr_bs.cpp:
+/// The construct pass writes the segments (`jit/arm/instr_bs.cpp`:
 /// 1994-2486). A `string` segment keeps its bytes (`erts_bs_put_string`,
 /// erl_bits.c:1641-1654). A `binary` segment keeps its binary and uses one
 /// reduction for each 8192 bits (`beam_jit_bs_put_binary_all`,
 /// jit/beam_jit_common.cpp:1043-1057). An `integer` segment with a term
 /// that is not an integer fails with `type`, in the order of
 /// `integer_type_failure`; else it writes the integer with no reduction
-/// (`erts_bs_put_integer_be` and `erts_bs_put_integer_le`, erl_bits.c:
+/// (`erts_bs_put_integer_be` and `erts_bs_put_integer_le`, `erl_bits.c`:
 /// 926-1167). A `utf8` segment writes the UTF-8 bytes of its code point
 /// (`emit_construct_utf8`). A `binary` part whose size in bits is not a
 /// multiple of its unit fails with `unit` in the construct pass
@@ -6671,12 +6705,12 @@ fn bitstring(bytes: Vec<u8>, bits: u64) -> Binary {
 /// jit/arm/instr_bs.cpp:1865-1881). The segment has no check, and the
 /// other segments write after the bytes of the writable binary in
 /// `source`. ERTS changes the size of that binary term in place, so the
-/// result is also the term of `source` (erl_bits.c:1978, 2017). PBeam
+/// result is also the term of `source` (`erl_bits.c:1978`, 2017). PBeam
 /// takes the binary out of `source`, so the binary has one owner when no
 /// other term holds it, and writes the new bytes in its array
 /// (`Binary::append_in_place`). Else it builds a new binary that shares
 /// the old arrays (`Binary::concat`). PBeam charges no reduction. ERTS
-/// calls `BUMP_REDS` when it grows the buffer (erl_bits.c:1974, 2010), but
+/// calls `BUMP_REDS` when it grows the buffer (`erl_bits.c:1974`, 2010), but
 /// the arm JIT drops that bump (jit/arm/instr_bs.cpp:1876-1880), so the
 /// pinned ERTS on arm64 also charges none. The x86 JIT keeps the bump (row
 /// "Binary construction" of `docs/erts-differences.md`).

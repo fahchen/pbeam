@@ -1,3 +1,5 @@
+//! Runs the pinned OTP IO request path down to the writer NIF on PBeam.
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};

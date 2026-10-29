@@ -1,3 +1,5 @@
+//! Runs term comparison and the comparison tests on PBeam and compares them with the pinned ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};

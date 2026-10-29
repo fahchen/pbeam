@@ -1,3 +1,5 @@
+//! Runs a compiled process probe with reference matching and cleanup on PBeam.
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};

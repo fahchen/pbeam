@@ -1,3 +1,5 @@
+//! Runs the clock, time unit and date BIFs on PBeam and compares them with the pinned ERTS.
+
 #[path = "../common/boot.rs"]
 mod boot;
 #[path = "../common/mod.rs"]

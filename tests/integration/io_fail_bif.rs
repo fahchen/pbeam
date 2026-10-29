@@ -1,3 +1,6 @@
+//! Runs the Unicode IO BIFs (`characters_to_list` and related) on PBeam and compares them with the
+//! pinned ERTS.
+
 #[path = "../common/mod.rs"]
 mod common;
 

@@ -1,3 +1,5 @@
+//! Checks that calls into each pinned OTP IO module resolve on PBeam.
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};

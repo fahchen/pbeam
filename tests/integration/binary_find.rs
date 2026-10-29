@@ -1,3 +1,6 @@
+//! Runs the binary search functions (`binary:match` and related) on PBeam and compares them with
+//! the pinned ERTS.
+
 use std::process::{Command, Stdio};
 
 use pbeam_runtime::{AtomTable, BeamProgram, HostTerm, Term};

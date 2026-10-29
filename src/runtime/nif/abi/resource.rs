@@ -13,6 +13,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::{c_int, c_void};
+use std::fmt;
 use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
@@ -108,6 +109,19 @@ pub struct Resource {
     data: usize,
     /// The number of words of the data.
     words: usize,
+}
+
+impl fmt::Debug for Resource {
+    /// Write the magic reference and the number of words of the data.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The type and the address stay out: the type holds C callbacks,
+        // and the address is a raw pointer value of the C data.
+        formatter
+            .debug_struct("Resource")
+            .field("reference", &self.reference)
+            .field("words", &self.words)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Resource {

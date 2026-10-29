@@ -2,7 +2,7 @@
 //! `local` for a reference, as in ERTS OTP 29.1.1 (`external.c`).
 //!
 //! PBeam encodes only an ordinary reference with `[local]`, which
-//! `prim_inet:send/3` puts in the header of each send (prim_inet.erl:581):
+//! `prim_inet:send/3` puts in the header of each send (`prim_inet.erl:581`):
 //!
 //! | Bytes | Value |
 //! | --- | --- |
@@ -84,7 +84,7 @@ pub(crate) fn decode_local_reference(bytes: &[u8], seed: u32) -> Option<Referenc
 }
 
 /// The golden ratio, the start value of `a` and `b` (`HCONST`,
-/// erl_term_hashing.c:440).
+/// `erl_term_hashing.c:440`).
 const HCONST: u32 = 0x9e37_79b9;
 
 /// Return the block hash of `bytes` with the start value `seed`, as

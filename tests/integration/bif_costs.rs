@@ -1,3 +1,6 @@
+//! Checks the reduction costs of the remaining BIFs and of the process exit on PBeam against the
+//! pinned ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::{AtomTable, BeamProgram, HostTerm, Term};

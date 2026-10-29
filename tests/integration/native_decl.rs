@@ -1,3 +1,6 @@
+//! Reads the persisted native declarations of a compiled module and checks that each call path
+//! reaches the registered native.
+
 use pbeam_runtime::{
     BeamModule, BeamProgram, Binding, Job, Library, NativeResult, NifContext, Term,
     register_library,

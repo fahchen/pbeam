@@ -1,3 +1,5 @@
+//! Runs `term_to_binary` and `binary_to_term` on PBeam and compares them with the pinned ERTS.
+
 #[path = "../common/mod.rs"]
 mod common;
 

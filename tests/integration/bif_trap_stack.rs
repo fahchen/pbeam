@@ -1,3 +1,5 @@
+//! Checks the stack trace of a BIF error after a trap on PBeam against the pinned ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::BeamProgram;

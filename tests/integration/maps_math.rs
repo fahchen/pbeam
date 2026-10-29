@@ -1,3 +1,6 @@
+//! Runs `maps:values`, `maps:update` and the `math` BIFs on PBeam and compares them with the pinned
+//! ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};

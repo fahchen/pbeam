@@ -1,3 +1,6 @@
+//! Runs the iodata conversion and binary split BIFs on PBeam and compares them with the pinned
+//! ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::{AtomTable, BeamProgram, Term};

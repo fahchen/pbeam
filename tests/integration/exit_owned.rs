@@ -1,3 +1,6 @@
+//! Checks what a process exit deletes and notifies (owned tables, TTY monitors) on PBeam against
+//! the pinned ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::{AtomTable, BeamProgram, Term};

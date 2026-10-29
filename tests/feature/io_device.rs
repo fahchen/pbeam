@@ -1,3 +1,6 @@
+//! Reads and writes an IO device from a pipe and from a terminal in raw mode, and compares the
+//! result with the pinned ERTS.
+
 use std::{
     io::{self, Read, Write},
     os::fd::{FromRawFd, OwnedFd},

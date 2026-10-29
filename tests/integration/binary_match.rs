@@ -1,3 +1,6 @@
+//! Runs the binary match instructions and the BIFs that use them on PBeam and compares them with
+//! the pinned ERTS.
+
 #[path = "../common/mod.rs"]
 mod common;
 
@@ -1566,7 +1569,7 @@ fn runs_bs_skip_utf8_as_pinned_erts() {
 }
 
 /// `bs_get_binary2` with the size `all` runs `{ensure_at_least,0,Unit}`
-/// and `get_tail` (`emit_i_bs_get_binary_all2`, jit/arm/instr_bs.cpp:
+/// and `get_tail` (`emit_i_bs_get_binary_all2`, `jit/arm/instr_bs.cpp`:
 /// 386-405): a rest that is not a multiple of the unit fails.
 #[test]
 fn runs_bs_get_binary2_with_the_size_all_as_pinned_erts() {

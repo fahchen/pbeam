@@ -1,3 +1,6 @@
+//! Runs `code:ensure_loaded`, `erlang:module_loaded` and the module load functions on PBeam and
+//! compares them with the pinned ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::{

@@ -64,7 +64,7 @@ pub(in crate::runtime) struct CodeTable {
     /// The code of each module that `erlang:finish_loading/1` loaded with an
     /// `-on_load` function, by module name, as the ERTS `on_load` instance
     /// of the module (`beam_load.c:305-313`). The code is in `by_id`, so
-    /// that its on_load function runs, but not in `modules`: the module is
+    /// that its `on_load` function runs, but not in `modules`: the module is
     /// not loaded, and its exports stay hidden until
     /// [`CodeTable::finish_after_on_load`] keeps the code.
     on_load: HashMap<String, OnLoadCode>,
@@ -762,7 +762,7 @@ impl CodeTable {
     }
 
     /// Return the code of `module` that waits for its `-on_load` function,
-    /// else the loaded module `module`. `erlang:load_nif/2` from an on_load
+    /// else the loaded module `module`. `erlang:load_nif/2` from an `on_load`
     /// function checks the functions of the waiting code, as ERTS
     /// `erts_load_nif` takes the `on_load` instance of the module
     /// (`beam/erl_nif.c:4764-4770`).
@@ -1019,7 +1019,7 @@ impl CodeTable {
     ///
     /// # Errors
     ///
-    /// An on_load function with an arity that is not 0 gives the error of
+    /// An `on_load` function with an arity that is not 0 gives the error of
     /// [`frame`].
     pub(in crate::runtime) fn on_load_frame(&self, name: &str) -> Result<Option<Frame>, BeamError> {
         self.on_load

@@ -249,6 +249,11 @@ static REGISTRY: RwLock<Vec<&'static Library>> = RwLock::new(Vec::new());
 ///   function of `functions`.
 /// - [`RegistrationError::DuplicateBinding`] when two bindings name the
 ///   same function.
+///
+/// # Panics
+///
+/// Panics when a thread that held the lock of the registry panicked, which
+/// poisons the lock.
 pub fn register_library(library: &'static Library) -> Result<(), RegistrationError> {
     for (index, binding) in library.bindings.iter().enumerate() {
         let (name, arity) = (binding.name, binding.arity);

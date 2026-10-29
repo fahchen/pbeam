@@ -371,6 +371,7 @@ impl Target {
 /// The thing of a fun, as the `ErlFunThing` of ERTS is: the entry that the
 /// fun points to and the values of its free variables. An external fun has
 /// no free variables.
+#[derive(Debug)]
 pub(super) struct FunThing {
     /// The entry of the fun.
     pub(super) target: Target,
@@ -389,7 +390,7 @@ pub(super) struct FunThing {
 /// assert_eq!(fun.free().len(), 1);
 /// assert!(Fun::external(module, function, 1).free().is_empty());
 /// ```
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 #[repr(transparent)]
 pub struct Fun(Option<Arc<FunThing>>);
 

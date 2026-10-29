@@ -1,3 +1,5 @@
+//! Runs a `gen_statem` server that starts with `enter_loop` on PBeam.
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};

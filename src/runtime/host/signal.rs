@@ -64,7 +64,7 @@ pub(crate) enum Disposition {
 /// first, so the exit status of the port is lost. ERTS installs `request_break` for `SIGINT`,
 /// which writes to the notify pipe as the other handler does
 /// (sys.c:626-629). The Rust runtime already sets `SIGPIPE` to `SIG_IGN`,
-/// as `erl_sys_late_init` does (sys_drivers.c:175). The `pbeam` binary
+/// as `erl_sys_late_init` does (`sys_drivers.c:175`). The `pbeam` binary
 /// calls this function before it loads the BEAM files.
 ///
 /// # Examples

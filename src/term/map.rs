@@ -137,7 +137,7 @@ enum Entry<'a> {
 /// the drop cannot move the `Arc` out of the term, so it takes the `Arc` out
 /// of the `Option` and calls `Arc::into_inner` (see [`Map::drain_into`]).
 /// Each other reader finds the form.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Map {
     /// The flatmap or hashmap form of the map. All copies of the map own
     /// one reference to it. `insert` and `get_mut` copy it first when
@@ -147,7 +147,7 @@ pub struct Map {
 }
 
 /// The two forms of a map. The number of keys selects the form.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(super) enum Repr {
     /// At most 32 pairs, sorted by the flatmap key order.
     Flat(Vec<(Term, Term)>),
@@ -156,7 +156,7 @@ pub(super) enum Repr {
 }
 
 /// A hash array mapped trie of map pairs.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(super) struct Hamt {
     /// The node at level 0.
     pub(super) root: Node,
@@ -176,7 +176,7 @@ pub(super) enum Form<'a> {
 /// `children` holds one child per set bit, in ascending slot order. A copy
 /// of a node copies the keys and values of its leaves, and shares its child
 /// nodes.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(super) struct Node {
     /// The occupied slots.
     pub(super) bitmap: u16,
@@ -185,7 +185,7 @@ pub(super) struct Node {
 }
 
 /// The child in one slot of a HAMT node.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(super) enum Child {
     /// A key and its value.
     Leaf(Term, Term),

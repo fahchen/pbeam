@@ -1,3 +1,5 @@
+//! Checks that the run stops for the exit status of a child that the host reaped.
+
 use std::process::Command;
 
 use pbeam_runtime::BeamProgram;

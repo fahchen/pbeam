@@ -1,3 +1,5 @@
+//! Checks how a `pbeam` run ends: root exit, `halt` status code and crash dump slogan.
+
 use std::{
     process::{Command, Stdio},
     time::Duration,

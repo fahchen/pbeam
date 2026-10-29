@@ -1,3 +1,6 @@
+//! Runs the `prim_file` NIFs (owner exit, write, metadata) on PBeam and compares them with the
+//! pinned ERTS.
+
 use std::{
     fs::File,
     io::Read,

@@ -1,3 +1,6 @@
+//! Runs the `tcp_inet` port requests (reply bytes, socket options, linger) on PBeam and compares
+//! them with the pinned ERTS.
+
 use std::{
     io::{Read, Write},
     net::{SocketAddr, TcpStream},
@@ -36,7 +39,7 @@ const UDP_LOCAL: &[u8] = include_bytes!("../../fixtures/tcp/udp_local.beam");
 /// The pinned OTP modules that the probes call: `erlang` has
 /// `open_port/2`, `port_control/3`, `port_close/1`, and `port_info/1`,
 /// which call the `erts_internal` port BIFs, and `prim_inet` makes the
-/// requests of `gen_tcp` (prim_inet.erl). `gen_tcp:controlling_process/2`
+/// requests of `gen_tcp` (`prim_inet.erl`). `gen_tcp:controlling_process/2`
 /// calls `inet_db:lookup_socket/1` and `inet:tcp_controlling_process/2`.
 /// `timer` has `sleep/1`.
 const MODULES: [&str; 7] = [

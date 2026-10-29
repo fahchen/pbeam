@@ -1,3 +1,6 @@
+//! The `pbeam` command-line binary. It loads BEAM files, runs a function as the root process, and
+//! boots a node as `erl` does.
+
 use std::{
     ffi::{OsStr, OsString},
     fs,

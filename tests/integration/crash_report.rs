@@ -1,3 +1,6 @@
+//! Checks that the error report of a crash goes where the system logger says, as the pinned ERTS
+//! does.
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, debug_term};

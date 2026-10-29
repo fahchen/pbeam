@@ -1,3 +1,6 @@
+//! Checks that the `pbeam` binary restores the terminal mode of fd 0 at the end of a run, as the
+//! pinned ERTS does.
+
 use std::{
     io::{Read, Write},
     os::fd::{FromRawFd, OwnedFd},

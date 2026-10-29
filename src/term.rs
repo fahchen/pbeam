@@ -1091,6 +1091,11 @@ impl fmt::Debug for Term {
 /// that holds the table calls this function, so its text keeps the atom name.
 /// Every other part of the text is the same as the `Debug` text.
 ///
+/// # Panics
+///
+/// Panics when writing to the `String` fails. This does not happen: a write
+/// to a `String` always succeeds.
+///
 /// # Examples
 ///
 /// ```rust,ignore

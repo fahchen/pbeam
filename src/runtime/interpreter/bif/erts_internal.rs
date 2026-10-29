@@ -432,7 +432,7 @@ fn is_gethost(path: &[u8]) -> bool {
 /// A driver other than `tcp_inet` and `udp_inet`, a setting other than
 /// `binary`, a port without `binary`, and an open by a runtime process in
 /// a run with a policy return a runtime error: no capability kind permits a
-/// network effect yet (rows "tcp_inet ports" and "udp_inet ports" of
+/// network effect yet (rows "`tcp_inet` ports" and "`udp_inet` ports" of
 /// `docs/erts-differences.md`). A boot process opens the port, because the
 /// boot authority passes each check (row "Boot authority"), as the kernel
 /// start opens a `udp_inet` port in `inet_config:set_hostname/0`.
@@ -919,7 +919,7 @@ pub(super) type Slot<'a> = Option<port::PortGuard<'a>>;
 /// for a term that is not a port in the table. An atom names no port,
 /// because PBeam registers no port. The caller locks the port once with
 /// [`lock_found`] and checks its state under that lock, as ERTS checks the
-/// state of a port under the port lock (`erts_port_lookup`, erl_port.h).
+/// state of a port under the port lock (`erts_port_lookup`, `erl_port.h`).
 ///
 /// # Examples
 ///
@@ -1369,7 +1369,7 @@ const SPAWN_CONTROL: u32 = 0x04c7_6a00;
 /// not an integer from 0 to 2^32 - 1, data that is not iodata, and a
 /// request that the driver rejects give the atom `badarg` and use no
 /// reductions. The control of the spawn driver, `spawn_control`
-/// (sys_drivers.c:241, 731-756), rejects each command other than
+/// (`sys_drivers.c:241`, 731-756), rejects each command other than
 /// `ERTS_SPAWN_DRV_CONTROL_MAGIC_NUMBER` (`0x04c76a00`, sys.h:1467). That
 /// command, which `erl_child_setup` sends when the program exits, sets the
 /// exit state of the port in ERTS; PBeam does not run it.
@@ -1747,7 +1747,7 @@ fn connect_denial(
 }
 
 /// The reductions of a port connect (`ERTS_PORT_REDS_CONNECT`,
-/// `CONTEXT_REDS / 200`, erl_port.h:371).
+/// `CONTEXT_REDS / 200`, `erl_port.h:371`).
 const CONNECT_REDUCTIONS: i32 = 20;
 
 /// Run `erts_internal:prepare_loading(Module, Code)`, which

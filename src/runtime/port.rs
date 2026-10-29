@@ -540,7 +540,7 @@ impl Port {
 /// (`erts_port_lock`, io.c:923-1002). The slot holds `None` once the port
 /// closed: a holder of the handle that locks it after the close sees the
 /// closed port, as `erts_port_lookup` checks the state of the port under
-/// its lock (erl_port.h). Code takes a port lock before the table lock or
+/// its lock (`erl_port.h`). Code takes a port lock before the table lock or
 /// after it is released, and never holds two port locks.
 pub(super) type PortCell = Arc<Mutex<Option<Port>>>;
 

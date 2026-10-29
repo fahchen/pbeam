@@ -1,3 +1,6 @@
+//! Runs ports of external programs (output, input, close, exit status, owner exit) on PBeam and
+//! compares them with the pinned ERTS.
+
 use std::{io::Write, os::fd::AsRawFd, process::Command};
 
 use pbeam_runtime::{AtomTable, BeamProgram, Term};

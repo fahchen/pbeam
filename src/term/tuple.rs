@@ -19,7 +19,7 @@ use super::Term;
 /// The elements of a BEAM tuple. All copies of the tuple own one reference
 /// to the array. `Arc::make_mut` copies it first when another copy also
 /// holds it. The last copy that drops releases it.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 #[repr(transparent)]
 pub struct Tuple(Option<Arc<Vec<Term>>>);
 

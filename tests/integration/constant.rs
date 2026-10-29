@@ -1,3 +1,6 @@
+//! Loads BEAM containers with atom and small integer constants and checks the errors for malformed
+//! containers.
+
 use std::sync::OnceLock;
 
 use pbeam_runtime::{Atom, BeamModule, Term};

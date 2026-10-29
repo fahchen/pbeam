@@ -1,3 +1,6 @@
+//! Boots the `pbeam` binary like `erl` (standard IO servers, logger, application controller,
+//! `init:stop`, bindir flag) and compares it with the pinned ERTS.
+
 use std::{
     env, fs,
     os::unix::ffi::{OsStrExt, OsStringExt},

@@ -1,3 +1,6 @@
+//! Runs the `binary` module functions on PBeam and checks which results share bytes with their
+//! source.
+
 use std::process::{Command, Stdio};
 
 use pbeam_runtime::{AtomTable, BeamProgram, HostTerm, Term};

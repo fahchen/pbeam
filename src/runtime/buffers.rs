@@ -151,7 +151,7 @@ impl Buffer {
     /// `copying_read_nif` (`prim_buffer_nif.c:302-334`) does: `None` when
     /// the buffer holds fewer bytes, which raises `error:badarg`. ERTS
     /// copies the bytes into a new binary (`enif_make_new_binary`,
-    /// prim_buffer_nif.c:324), and PBeam copies them into a `Vec`.
+    /// `prim_buffer_nif.c:324`), and PBeam copies them into a `Vec`.
     ///
     /// # Examples
     ///

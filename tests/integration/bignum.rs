@@ -1,3 +1,6 @@
+//! Runs bignum literals, arithmetic, comparison, text and bit operations on PBeam and compares them
+//! with the pinned ERTS.
+
 use std::{process::Command, sync::Arc};
 
 use num_bigint::BigInt;

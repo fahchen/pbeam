@@ -1,3 +1,6 @@
+//! Runs name registration, lookup and send to a name on PBeam and compares them with the pinned
+//! ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};

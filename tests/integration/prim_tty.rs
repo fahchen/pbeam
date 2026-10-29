@@ -1,3 +1,6 @@
+//! Runs the `prim_tty` NIFs (resources, window size, locale, terminfo, termcap) on PBeam and
+//! compares them with the pinned ERTS.
+
 use std::{
     env,
     ffi::OsStr,
@@ -1526,7 +1529,7 @@ fn erts_host_write_probe() -> Command {
 /// `standard_error`. It uses `-noinput`: under `-noshell`, `user_drv` starts
 /// its own cooked reader on fd 0 (user_sup.erl:129-130), and the select of
 /// the probe reader makes ERTS log "stealing control of fd=0" on stdout
-/// (erl_check_io.c:1608). Under `-noinput`, no other process reads fd 0
+/// (`erl_check_io.c:1608`). Under `-noinput`, no other process reads fd 0
 /// (user_sup.erl:135-136), as in PBeam.
 ///
 /// # Examples

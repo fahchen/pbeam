@@ -1,3 +1,5 @@
+//! Runs term order in `is_ge` and `erlang:'>='` on PBeam and compares it with the pinned ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};

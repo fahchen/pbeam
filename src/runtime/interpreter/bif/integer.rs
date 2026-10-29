@@ -247,7 +247,7 @@ fn arith_reductions(op: Arith, left: &Term, right: &Term) -> i32 {
 ///
 /// Two small integers cost no reduction, except `-(2^59) div -1` and
 /// `-(2^59) rem -1`, which cost 1, as the `div` and `rem` instructions of
-/// the arm64 and x86_64 JIT charge them. A direct call of `erlang:'rem'/2`
+/// the arm64 and `x86_64` JIT charge them. A direct call of `erlang:'rem'/2`
 /// in ERTS (`rem_2`, `erl_arith.c:152-156`) charges 0 for `-(2^59) rem -1`;
 /// PBeam charges 1 on each path (row "Integer division reductions" of
 /// `docs/erts-differences.md`). A bignum division costs [`quadratic`] of

@@ -1,3 +1,5 @@
+//! Checks that the display bytes of the `pbeam` binary match the pinned ERTS.
+
 use std::{
     process::{Command, Stdio},
     time::Duration,

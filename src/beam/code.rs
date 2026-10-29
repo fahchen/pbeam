@@ -1360,8 +1360,8 @@ const RECORD_OP: u8 = 5;
 /// per record with the name, the export flag, and the extended list of
 /// field and default pairs.
 ///
-/// recs_chunk ::= "Recs" chunk_size 0:i32be record_count:i32be field_count:i32be record*
-/// record ::= 5 atom (atom_true | atom_false) list_count (atom default)*
+/// `recs_chunk` ::= "Recs" `chunk_size` 0:i32be `record_count:i32be` `field_count:i32be` record*
+/// record ::= 5 atom (`atom_true` | `atom_false`) `list_count` (atom default)*
 /// default ::= u0 (no default) | atom | nil | integer | literal
 ///
 /// # Examples

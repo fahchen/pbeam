@@ -1,3 +1,5 @@
+//! Checks that a failed stdout write through `user_drv` raises `terminated`.
+
 use std::{process::Command, time::Duration};
 
 #[path = "../common/boot.rs"]

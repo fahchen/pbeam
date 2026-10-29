@@ -1,3 +1,6 @@
+//! Runs the `prim_file` read NIFs (files, directories, links, current directory) on PBeam and
+//! compares them with the pinned ERTS.
+
 use std::{
     env,
     ffi::OsStr,

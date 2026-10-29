@@ -1,3 +1,5 @@
+//! Checks the argument errors and the status codes of `halt` on PBeam against the pinned ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamError, BeamProgram, HostTerm, Term};

@@ -1,3 +1,5 @@
+//! Checks local and external calls, unresolved imports and malformed modules on PBeam.
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};

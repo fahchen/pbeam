@@ -1,3 +1,5 @@
+//! Checks the stack trace of `erlang:throw/1` and `erlang:exit/1` on PBeam against the pinned ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::BeamProgram;

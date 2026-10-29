@@ -1,3 +1,5 @@
+//! Runs receive timeouts and the timer BIFs on PBeam and compares them with the pinned ERTS.
+
 #[path = "../common/mod.rs"]
 mod common;
 

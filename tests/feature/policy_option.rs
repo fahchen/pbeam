@@ -1,3 +1,6 @@
+//! Checks the `--policy` option of the `pbeam` binary and the capability checks that it enables or
+//! skips.
+
 use std::{
     process::{Command, Stdio},
     time::Duration,

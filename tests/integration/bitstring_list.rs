@@ -1,3 +1,6 @@
+//! Runs the conversions between bitstrings and lists on PBeam and compares them with the pinned
+//! ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};

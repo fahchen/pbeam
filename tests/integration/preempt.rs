@@ -1,3 +1,6 @@
+//! Checks the preemption of busy processes, the reduction charge of `receive`, and `erlang:yield`
+//! on PBeam against the pinned ERTS.
+
 #[path = "../common/mod.rs"]
 mod common;
 

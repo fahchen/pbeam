@@ -297,7 +297,7 @@ impl MatchState {
 
     /// Return the bits after the position as a view of the bytes of the
     /// binary, and keep the position, as the `get_tail` command of
-    /// `bs_match` does (`emit_bs_get_tail_shared`, jit/arm/instr_bs.cpp:
+    /// `bs_match` does (`emit_bs_get_tail_shared`, `jit/arm/instr_bs.cpp`:
     /// 407-439). The view shares the bytes of the binary, as an ERTS
     /// sub-bitstring refers to its binary. The position can be at any bit,
     /// so the tail can be a bitstring.

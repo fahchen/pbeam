@@ -1,3 +1,5 @@
+//! Checks that PBeam runs a port whose pipes have fds at or above `FD_SETSIZE`.
+
 use std::os::fd::{FromRawFd, OwnedFd};
 
 use pbeam_runtime::{BeamProgram, Term};

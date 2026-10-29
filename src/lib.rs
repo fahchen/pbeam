@@ -1,3 +1,6 @@
+//! The `pbeam_runtime` library. It loads BEAM modules and bundles, and runs them with the PBeam
+//! interpreter and schedulers.
+
 mod beam;
 mod bundle;
 mod error;

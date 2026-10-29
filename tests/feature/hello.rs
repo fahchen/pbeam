@@ -1,3 +1,6 @@
+//! Runs the compiled Elixir greeting fixtures through the `pbeam` binary and checks its output, its
+//! errors and its help text.
+
 use std::{
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},

@@ -1,3 +1,6 @@
+//! Checks the reduction costs of a process exit on PBeam against the pinned ERTS with one
+//! scheduler.
+
 use std::process::Command;
 
 use pbeam_runtime::{AtomTable, BeamProgram, Term};

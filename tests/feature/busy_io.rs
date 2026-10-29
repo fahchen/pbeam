@@ -1,3 +1,5 @@
+//! Checks that socket and port input and output progress while a process always can run.
+
 use std::{
     io::{BufRead, BufReader, Read, Write},
     net::TcpStream,

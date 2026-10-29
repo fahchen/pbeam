@@ -1,3 +1,5 @@
+//! Checks that the file and line of each stack frame on PBeam match the pinned ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::BeamProgram;

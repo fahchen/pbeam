@@ -1,3 +1,5 @@
+//! Runs the `md5` and `phash` BIFs on PBeam and compares the results with the pinned ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::{AtomTable, BeamProgram, Term};

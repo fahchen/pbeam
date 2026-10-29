@@ -217,6 +217,14 @@ impl ProgramId {
     }
 }
 
+/// The number of names in one chunk of the name storage of an
+/// [`AtomTable`]. `ATOM_LIMIT / ATOM_CHUNK` chunks hold every index.
+const ATOM_CHUNK: usize = 4096;
+
+/// One chunk of the name storage of an [`AtomTable`]. Each slot is set once,
+/// when its atom is created, and never changes after that.
+type NameChunk = Box<[OnceLock<Arc<str>>]>;
+
 /// The atom table of one program or one run (`erts_atom_table` in ERTS).
 ///
 /// A caller receives the table of a program from [`BeamProgram::atoms`] and
@@ -226,14 +234,6 @@ impl ProgramId {
 ///
 /// [`BeamProgram::atoms`]: crate::BeamProgram::atoms
 /// [`Map::from_pairs`]: crate::Map::from_pairs
-/// The number of names in one chunk of the name storage of an
-/// [`AtomTable`]. `ATOM_LIMIT / ATOM_CHUNK` chunks hold every index.
-const ATOM_CHUNK: usize = 4096;
-
-/// One chunk of the name storage of an [`AtomTable`]. Each slot is set once,
-/// when its atom is created, and never changes after that.
-type NameChunk = Box<[OnceLock<Arc<str>>]>;
-
 pub struct AtomTable {
     /// The index of each atom, keyed by its name. The number of entries is
     /// the next index. A writer holds the write lock while it sets the name
@@ -253,11 +253,13 @@ pub struct AtomTable {
 impl fmt::Debug for AtomTable {
     /// Write the number of atoms and the program of the table.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The name chunks stay out: they hold the same atoms as the index
+        // map, and their empty slots add no information.
         formatter
             .debug_struct("AtomTable")
             .field("len", &self.read_indices().len())
             .field("program", &self.program)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -292,6 +294,12 @@ impl AtomTable {
 
     /// Return a table with the 1150 static atoms at indices 0 to 1149, as
     /// `init_atom_table` makes it, and then the preloaded atoms.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the static and preloaded atoms do not fit in the table.
+    /// This does not happen: both lists are fixed and shorter than the atom
+    /// limit.
     ///
     /// # Examples
     ///

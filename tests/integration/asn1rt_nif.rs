@@ -1,3 +1,5 @@
+//! Runs the `asn1rt_nif` functions on PBeam and compares the results with the pinned ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};

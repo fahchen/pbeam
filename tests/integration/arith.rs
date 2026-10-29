@@ -1,3 +1,6 @@
+//! Runs integer arithmetic, bignum results and `badarith` jumps on PBeam and compares them with the
+//! pinned ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};

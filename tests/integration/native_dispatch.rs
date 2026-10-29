@@ -1,3 +1,6 @@
+//! Checks that a registered native MFA reaches Rust and that an unregistered MFA resolves to BEAM
+//! code.
+
 use pbeam_runtime::{
     Atom, BeamProgram, Binding, Job, Library, NativeResult, NifContext, Term, register_library,
 };

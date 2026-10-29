@@ -11,13 +11,13 @@ use std::ops::RangeInclusive;
 /// `logger_backend:log_allowed/3` (logger.erl:1927). The default filters of
 /// the `default` handler call `logger_filters:remote_gl/2`
 /// (logger_internal.hrl:30-33). `logger_formatter` calls
-/// `error_logger:get_format_depth/0` (logger_formatter.erl:667) and
-/// `string:uppercase/1` for the title (logger_formatter.erl:616), which calls
+/// `error_logger:get_format_depth/0` (`logger_formatter.erl:667`) and
+/// `string:uppercase/1` for the title (`logger_formatter.erl:616`), which calls
 /// `unicode_util:uppercase/1` (string.erl:1317). `~p` calls
-/// `io_lib_pretty:print/2` (io_lib_format.erl:635), which calls
-/// `epp:default_encoding/0` (io_lib_pretty.erl:102). `io_lib:quote_atom/2`
-/// calls `erl_scan:reserved_word/1` (io_lib.erl:980), which calls
-/// `erl_features:keywords/0` (erl_scan.erl:2282). Without one of them, the
+/// `io_lib_pretty:print/2` (`io_lib_format.erl:635`), which calls
+/// `epp:default_encoding/0` (`io_lib_pretty.erl:102`). `io_lib:quote_atom/2`
+/// calls `erl_scan:reserved_word/1` (`io_lib.erl:980`), which calls
+/// `erl_features:keywords/0` (`erl_scan.erl:2282`). Without one of them, the
 /// run stops with status 1 and `pbeam: unresolved external MFA` of that
 /// function (measured).
 ///

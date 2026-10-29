@@ -1,3 +1,6 @@
+//! Checks `try` and `catch` of error and exit exceptions, and the stack trace of a caught error, on
+//! PBeam.
+
 use std::process::Command;
 
 #[path = "../common/mod.rs"]

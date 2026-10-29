@@ -1,3 +1,5 @@
+//! Checks that PBeam raises `badarg` that `catch` and `try` catch, as the pinned ERTS does.
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term, debug_term};

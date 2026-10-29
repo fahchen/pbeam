@@ -1,3 +1,5 @@
+//! Checks the log event that the default logger handler writes after the boot.
+
 use std::{
     process::{Command, Stdio},
     time::Duration,

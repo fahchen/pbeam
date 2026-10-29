@@ -1,3 +1,5 @@
+//! Checks the magic marker of each kind of reference on PBeam against the pinned ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::BeamProgram;

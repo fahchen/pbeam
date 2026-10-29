@@ -1,3 +1,5 @@
+//! Checks the stack trace frames of `error/1` and `raise/3` on PBeam against the pinned ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};

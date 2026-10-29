@@ -1,3 +1,5 @@
+//! Checks the stack trace of `erlang:error/3` on PBeam against the pinned ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::BeamProgram;
