@@ -1,7 +1,9 @@
 //! The atoms of `enif_make_atom` in each env: the library of
 //! `fixtures/nif/nif_atoms.c` keeps the atoms of its load callback and of
 //! a process-independent env in static variables, as exqlite 0.37.0 does,
-//! and uses them in later calls, also in a dirty NIF and in a message.
+//! and uses them in later calls, also in a dirty NIF and in a message. It
+//! compares atom handles of arguments, of the load info, and of list
+//! elements with C `==`, as an ERTS atom is an immediate term.
 //! `nif_atoms:mismatches/1` compares each result with the results of the
 //! pinned ERTS, which `expected/0` of `fixtures/nif/nif_atoms.erl` holds.
 //!

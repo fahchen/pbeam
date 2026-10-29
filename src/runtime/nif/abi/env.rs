@@ -8,9 +8,11 @@
 //! valid only in the call of its env, as an ERTS process-bound term is
 //! valid only until the NIF returns (`erl_nif.h`, "ERL_NIF_TERM").
 //!
-//! The handle of an atom of `enif_make_atom` is the exception: it is
-//! [`ATOM_HANDLE`] plus the index of the atom, and it names the same atom
-//! in each env of the node, as an ERTS atom is an immediate term
+//! The handle of an atom is the exception: it is [`ATOM_HANDLE`] plus the
+//! index of the atom, for an atom of `enif_make_atom`, an argument, and an
+//! element that an `enif_get_*` call reads. It names the same atom in each
+//! env of the node, and two handles of one atom are equal, as an ERTS
+//! atom is an immediate term
 //! (`make_atom`, `erl_term.h:300`). A library can thus keep the atoms of
 //! its load callback in static variables and return them from later
 //! calls, as exqlite 0.37.0 does (`sqlite3_nif.c:13-20`, `1428`). A handle
@@ -32,13 +34,13 @@ use super::Handle;
 use super::layout::{ErlNifBinary, ErlNifPid, NifTerm};
 use super::resource::{self, DtorFn, ResourceType};
 use super::{mutex, process};
-use crate::AtomTable;
 use crate::BeamError;
 use crate::Term;
 use crate::error::error;
 use crate::runtime::NativeResult;
 use crate::runtime::interpreter::bif::iodata_bytes;
 use crate::term::{MAX_ATOM_CHARACTERS, ProcessId};
+use crate::{Atom, AtomTable};
 
 /// `THE_NON_VALUE`: the handle that no term has.
 const NON_VALUE: NifTerm = 0;
@@ -258,9 +260,14 @@ impl Env {
         self.process
     }
 
-    /// Return the handles of the arguments, the `argv` of the call.
+    /// Return the handles of the arguments, the `argv` of the call. The
+    /// handle of an atom argument is its atom handle.
     pub(super) fn handles(&self) -> Vec<NifTerm> {
-        (1..=self.slots.len()).collect()
+        let handle = |(index, slot): (usize, &Slot)| match slot {
+            Slot::Term(Term::Atom(atom)) => atom_handle(atom),
+            _ => index + 1,
+        };
+        self.slots.iter().enumerate().map(handle).collect()
     }
 
     /// Add `slot` and return its handle.
@@ -303,8 +310,12 @@ impl Env {
         })
     }
 
-    /// Add the term `term` and return its handle.
+    /// Add the term `term` and return its handle. An atom adds no term:
+    /// its handle is its atom handle.
     fn make(&mut self, term: Term) -> NifTerm {
+        if let Term::Atom(atom) = &term {
+            return atom_handle(atom);
+        }
         self.put(Slot::Term(term))
     }
 
@@ -326,7 +337,7 @@ impl Env {
         }
         let name: String = name.iter().copied().map(char::from).collect();
         match self.atoms.put(&name) {
-            Ok(atom) => ATOM_HANDLE | atom.index() as NifTerm,
+            Ok(atom) => self.make(Term::Atom(atom)),
             // ERTS stops the node when the atom table is full
             // (`index.c:86-91`); PBeam gives a runtime error.
             Err(failure) => {
@@ -376,6 +387,11 @@ impl Env {
             ))
         })
     }
+}
+
+/// Return the atom handle of `atom`, the same in each env of the node.
+fn atom_handle(atom: &Atom) -> NifTerm {
+    ATOM_HANDLE | atom.index() as NifTerm
 }
 
 /// Return the bytes that `enif_get_string` writes for `list` with the

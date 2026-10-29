@@ -9,11 +9,12 @@
 %% Load the library `Path` and return the result of each case, in the
 %% order of expected/0.
 results(Path) ->
-    ok = erlang:load_nif(Path, 0),
+    ok = erlang:load_nif(Path, pbeam_nif_atoms_info),
     Calls = [probe(0, x), probe(1, 7), probe(2, [tail]), probe(3, x)],
     Sent = [probe(4, x), flush()],
     Kept = [probe(5, x), probe(6, x), probe(6, x)],
-    Same = probe(7, x),
+    Same = [probe(7, x), probe(8, pbeam_nif_atoms_loaded), probe(8, ok), probe(8, x),
+            probe(9, [ok, x]), probe(9, [x]), probe(10, x)],
     Dirty = [dirty_probe(0, 5), dirty_probe(1, x), flush()],
     [Calls, Sent, Kept, Same, Dirty].
 
@@ -38,5 +39,5 @@ expected() ->
       [ok, pbeam_nif_atoms_loaded, tail], 23],
      [1, [{pbeam_nif_atoms_loaded, ok}]],
      [ok, pbeam_nif_atoms_kept, pbeam_nif_atoms_kept],
-     1,
+     [1, {1, 0}, {0, 1}, {0, 0}, 1, 0, 1],
      [{pbeam_nif_atoms_loaded, 5}, 1, [{pbeam_nif_atoms_loaded, dirty}]]].

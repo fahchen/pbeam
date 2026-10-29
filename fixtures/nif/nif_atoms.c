@@ -19,6 +19,12 @@
  *    6  the atom of 5
  *    7  whether enif_make_atom of the name of the atom of the load callback
  *       gives the same ERL_NIF_TERM: 1 or 0
+ *    8  {Arg == the atom pbeam_nif_atoms_loaded of the load callback,
+ *       Arg == enif_make_atom of ok}, as C == of the ERL_NIF_TERM: 1 or 0
+ *    9  the head of the list Arg of enif_get_list_cell == the atom ok of
+ *       the load callback, as C == of the ERL_NIF_TERM: 1 or 0
+ *   10  whether the load info == enif_make_atom of pbeam_nif_atoms_info
+ *       in the load callback: 1 or 0
  *
  * dirty_probe (a dirty IO NIF):
  *    0  {pbeam_nif_atoms_loaded, Arg} with the atom of the load callback
@@ -32,11 +38,13 @@
 static ERL_NIF_TERM am_ok;
 static ERL_NIF_TERM am_loaded;
 static ERL_NIF_TERM kept;
+static int info_same;
 
 static int load(ErlNifEnv *env, void **priv, ERL_NIF_TERM info)
 {
     am_ok = enif_make_atom(env, "ok");
     am_loaded = enif_make_atom(env, "pbeam_nif_atoms_loaded");
+    info_same = info == enif_make_atom(env, "pbeam_nif_atoms_info");
     return 0;
 }
 
@@ -60,6 +68,7 @@ static ERL_NIF_TERM probe(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
     int kind;
     char name[64];
     ErlNifEnv *other;
+    ERL_NIF_TERM head, tail;
 
     if (!enif_get_int(env, argv[0], &kind)) {
         return enif_make_badarg(env);
@@ -84,6 +93,16 @@ static ERL_NIF_TERM probe(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
         return kept;
     case 7:
         return enif_make_int(env, enif_make_atom(env, "pbeam_nif_atoms_loaded") == am_loaded);
+    case 8:
+        return enif_make_tuple(env, 2, enif_make_int(env, argv[1] == am_loaded),
+                               enif_make_int(env, argv[1] == enif_make_atom(env, "ok")));
+    case 9:
+        if (!enif_get_list_cell(env, argv[1], &head, &tail)) {
+            return enif_make_badarg(env);
+        }
+        return enif_make_int(env, head == am_ok);
+    case 10:
+        return enif_make_int(env, info_same);
     default:
         return enif_make_badarg(env);
     }
