@@ -24,6 +24,7 @@ mod common;
 
 use std::path::Path;
 use std::process::Command;
+use std::sync::{Mutex, PoisonError};
 
 use common::pinned_beam;
 use pbeam_runtime::{BeamError, BeamProgram, HostTerm, Term};
@@ -58,6 +59,11 @@ fn build(name: &str) -> String {
     path.display().to_string()
 }
 
+/// Held for each run. A library thread and a down callback send through the
+/// run of the last load of a NIF library in the OS process, so a run of
+/// another test at the same time takes their messages.
+static ONE_RUN: Mutex<()> = Mutex::new(());
+
 /// Return `text` as a list of its bytes.
 fn string(text: &str) -> Term {
     Term::list_from(text.bytes().map(|byte| Term::Integer(byte.into())))
@@ -66,6 +72,7 @@ fn string(text: &str) -> Term {
 /// Run `nif_resources:Function(Arguments)` with the library `path` as the
 /// first argument and return its result.
 fn execute(function: &str, path: &str, rest: Vec<Term>) -> Result<HostTerm, BeamError> {
+    let _run = ONE_RUN.lock().unwrap_or_else(PoisonError::into_inner);
     let program = BeamProgram::load(&[
         &pinned_beam("erlang"),
         &pinned_beam("erts_internal"),
