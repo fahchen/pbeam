@@ -56,9 +56,6 @@ const HIGH: usize = 8 * 1024;
 /// inet_drv.c:1063).
 const LOW: usize = 4 * 1024;
 
-/// The timeout of `infinity` (`INET_INFINITY`).
-const INFINITY: i32 = -1;
-
 /// The caller of the receive that waits (`enq_async`, one at a time,
 /// `INET_MAX_ASYNC`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +77,9 @@ pub(in crate::runtime) struct Sender {
     pub(in crate::runtime) caller: ProcessId,
     /// The reference of the header.
     pub(in crate::runtime) tag: Reference,
+    /// The send timer of the busy port, or `None` without one. The timer
+    /// service owns it; the end of the send cancels it.
+    pub(in crate::runtime) timer: Option<PortTimer>,
 }
 
 /// A message that a step of the driver sends, or the end of the port.
@@ -232,11 +232,19 @@ pub(in crate::runtime) struct Stream {
     /// The bytes that the socket did not take yet (the queue of the port).
     output: VecDeque<u8>,
     /// The send that waits until the queue is small (`INET_F_BUSY`).
-    busy: Option<Sender>,
+    pub(in crate::runtime) busy: Option<Sender>,
+    /// The sends that arrived while the port was busy, whose callers ERTS
+    /// suspends until the port unbusies (`set_busy_port`,
+    /// inet_drv.c:13783-13784), in arrival order.
+    waiters: VecDeque<Sender>,
     /// The callers of `SUBSCRIBE` while the queue held bytes, in call
     /// order, which get `{empty_out_q, S}` once when the queue becomes
     /// empty (`empty_out_q_subs`, inet_drv.c:10819-10848).
     pub(super) subscribers: Vec<ProcessId>,
+    /// `shutdown/2` how of the `TCP_REQ_SHUTDOWN` that waits for this queue
+    /// to empty (`TCP_ADDF_PENDING_SHUT_WR` and
+    /// `TCP_ADDF_PENDING_SHUT_RDWR`).
+    pub(super) pending_shutdown: Option<u8>,
     /// The next send gives `{error, closed}` (`TCP_ADDF_DELAYED_CLOSE_SEND`).
     closed_send: bool,
     /// The next receive gives `{error, closed}`
@@ -271,7 +279,9 @@ impl Stream {
             connector: None,
             output: VecDeque::new(),
             busy: None,
+            waiters: VecDeque::new(),
             subscribers: Vec::new(),
+            pending_shutdown: None,
             closed_send: false,
             closed_receive: false,
             closed_sent: false,
@@ -521,6 +531,67 @@ impl Inet {
         events
     }
 
+    /// End the send that waits for the queue with `{error, timeout}` when
+    /// its `send_timeout` ends, as `tcp_inet_send_timeout` does
+    /// (inet_drv.c:12458-12534): the port unbusies and keeps the queue, so
+    /// a later send makes it busy again with a new timer (12529-12533),
+    /// and a send that arrived while the port was busy runs with the same
+    /// result (see [`Self::unbusy`]). With `send_timeout_close`, the
+    /// socket closes: in active mode after `{tcp_closed, S}` and the end
+    /// of the port (12484-12505), and in passive mode without a message,
+    /// so the next send gives `{error, enotconn}` (12506-12521, measured
+    /// case c of the `send_timeout` research). A send that arrived while
+    /// the port was busy gives `{error, enotconn}` in passive mode, as the
+    /// command that the unbusy port runs gives (`tcp_inet_commandv`,
+    /// 12681-12693), and `{error, closed}` in active mode, as the port
+    /// monitor of each caller gives when the port ends (prim_inet.erl:619-623).
+    pub(in crate::runtime) fn send_timeout_expired(&mut self) -> Vec<Event> {
+        let Some(sender) = self.stream.busy.take() else {
+            return Vec::new();
+        };
+        let timeout = Event::Replied {
+            sender,
+            result: Err("timeout".to_owned()),
+        };
+        if self.send_timeout_close == 0 {
+            let mut events = vec![timeout];
+            events.extend(self.unbusy());
+            return events;
+        }
+        if self.active != 0 {
+            let mut events = vec![timeout];
+            events.extend(self.close_waiters("closed"));
+            return self.active_end(events, None, "normal".to_owned());
+        }
+        let mut events = vec![timeout];
+        events.extend(self.close_waiters("enotconn"));
+        events.extend(self.close_socket());
+        events
+    }
+
+    /// Run the sends that arrived while the port was busy, as the port
+    /// unbusies and ERTS runs their suspended commands
+    /// (`set_busy_port`, inet_drv.c:13783-13784): a queue at the low
+    /// watermark or below answers `ok` to each caller in order, and a
+    /// queue above it makes the first caller the send that waits, with a
+    /// new `send_timeout` timer (`tcp_sendv`, inet_drv.c:13771-13792,
+    /// `Scheduler::tcp_send_timer`).
+    fn unbusy(&mut self) -> Vec<Event> {
+        let mut events = Vec::new();
+        while let Some(sender) = self.stream.waiters.pop_front() {
+            if self.stream.output.len() <= LOW {
+                events.push(Event::Replied {
+                    sender,
+                    result: Ok(()),
+                });
+            } else {
+                self.stream.busy = Some(sender);
+                break;
+            }
+        }
+        events
+    }
+
     /// End the send that waits for the queue with `{error, closed}` after
     /// the drop of the queue (inet_drv.c:12791-12801).
     fn end_busy(&mut self) -> Vec<Event> {
@@ -532,7 +603,22 @@ impl Inet {
             sender,
             result: Err("closed".to_owned()),
         });
+        events.extend(self.close_waiters("closed"));
         events
+    }
+
+    /// End each send that arrived while the port was busy with
+    /// `{error, reason}`, in order. Their bytes go with the queue that the
+    /// close drops (`tcp_clear_output`, inet_drv.c:11718-11725).
+    fn close_waiters(&mut self, reason: &str) -> Vec<Event> {
+        self.stream
+            .waiters
+            .drain(..)
+            .map(|sender| Event::Replied {
+                sender,
+                result: Err(reason.to_owned()),
+            })
+            .collect()
     }
 
     /// Drop the queue and return `{empty_out_q, S}` for the subscribers, as
@@ -560,6 +646,7 @@ impl Inet {
         self.socket = None;
         self.state = State::Closed;
         self.stream.ended = true;
+        self.stream.pending_shutdown = None;
         self.stream.input = Vec::new();
         self.stream.filled = 0;
         self.stream.input_size = 0;
@@ -575,9 +662,8 @@ impl Inet {
     /// # Errors
     ///
     /// The errors of [`Inet::send_datagram`], a tag that is not the
-    /// reference bytes of `term_to_binary/2` with `[local]`, a send while a send waits for the queue (ERTS suspends the
-    /// caller of a busy port), a send that would wait with a `send_timeout`
-    /// other than `infinity` and 0, and a send with `delay_send`.
+    /// reference bytes of `term_to_binary/2` with `[local]`, and a send
+    /// with `delay_send`.
     pub(in crate::runtime) fn send(
         &mut self,
         bytes: &[u8],
@@ -593,12 +679,37 @@ impl Inet {
         let tag = external::decode_local_reference(tag, seed).ok_or_else(|| {
             self.unsupported("output header", "other than term_to_binary(Ref, [local])")
         })?;
+        let sender = Sender {
+            caller,
+            tag,
+            timer: None,
+        };
         if self.stream.busy.is_some() {
-            return Err(self.unsupported("output", "to a busy port"));
+            // ERTS suspends a command to a busy port and runs it when the
+            // port unbusies (`set_busy_port`, inet_drv.c:13783-13784). Its
+            // bytes join the queue before any check, as `driver_enqv` does
+            // (13774), and its caller waits for its reply behind the send
+            // that the port is busy for.
+            self.stream.statistics.output(data.len() as u64);
+            self.stream.output.extend(data);
+            self.stream.waiters.push_back(sender);
+            return Ok(Output::Sent(Vec::new()));
         }
-        let sender = Sender { caller, tag };
         if self.socket_type == SocketType::Datagram {
             return self.send_datagram(data, sender).map(Output::Sent);
+        }
+        if self.stream.pending_shutdown.is_some() {
+            // `tcp_inet_commandv` gives the error of `tcp_shutdown_error` to
+            // a send after a shutdown that waits for the queue.
+            let busy = self.stream.busy.take();
+            let mut events = self.send_failed(Some(sender));
+            if let Some(busy) = busy {
+                events.push(Event::Replied {
+                    sender: busy,
+                    result: Err("closed".to_owned()),
+                });
+            }
+            return Ok(Output::Sent(events));
         }
         let reply = |result| Ok(Output::Sent(vec![Event::Replied { sender, result }]));
         if self.state != State::Connected {
@@ -612,12 +723,19 @@ impl Inet {
             self.stream.output.extend(data);
             match self.send_timeout {
                 _ if self.stream.output.len() < HIGH => {}
+                // The bytes are in the queue before the check; a queue that
+                // reaches the high watermark makes the port busy, and the
+                // caller waits with no reply until the queue drains
+                // (inet_drv.c:13771-13792). A `send_timeout` of 0 answers
+                // `{error, timeout}` at once (13776-13780); each other
+                // value only marks the port busy, and a value other than
+                // `infinity` also starts its send timer, which
+                // `Scheduler::tcp_send_timer` starts (13783-13792).
                 0 => return reply(Err("timeout".to_owned())),
-                INFINITY => {
+                _ => {
                     self.stream.busy = Some(sender);
                     return Ok(Output::Sent(Vec::new()));
                 }
-                _ => return Err(self.unsupported("output", "to a busy port with a send_timeout")),
             }
         } else if !data.is_empty() {
             if self.delay_send {
@@ -665,14 +783,30 @@ impl Inet {
             if self.stream.output.len() <= LOW
                 && let Some(sender) = self.stream.busy.take()
             {
+                // The queue reached the low watermark, so the port unbusies,
+                // cancels the send timer, and answers the caller with `ok`
+                // (inet_drv.c:14350-14359).
                 events.push(Event::Replied {
                     sender,
                     result: Ok(()),
                 });
             }
         }
+        if self.stream.busy.is_none() {
+            // The sends that arrived while the port was busy run when it
+            // unbusies (`set_busy_port`, inet_drv.c:13783-13784): see
+            // [`Self::unbusy`].
+            events.extend(self.unbusy());
+        }
         if self.stream.output.is_empty() {
             events.extend(self.empty_queue());
+            if let Some(how) = self.stream.pending_shutdown.take() {
+                // `tcp_shutdown_async`: a failed shutdown ends the socket as
+                // `tcp_shutdown_error` does.
+                if self.shutdown(how).first() != Some(&OK) {
+                    events.extend(self.send_failed(None));
+                }
+            }
         }
         events
     }
@@ -686,14 +820,19 @@ impl Inet {
     /// `{error, closed}`, and the port ends with the reason `normal`
     /// (inet_drv.c:13648-13662).
     fn send_failed(&mut self, sender: Option<Sender>) -> Vec<Event> {
+        // A send that arrived while the port was busy ends with
+        // `{error, closed}`, as the send that waits does
+        // (inet_drv.c:12791-12801, 13663-13682).
+        let waiters = self.close_waiters("closed");
         if self.active != 0 {
             let reply = sender.map(|sender| Event::Replied {
                 sender,
                 result: Err("closed".to_owned()),
             });
-            return self.active_end(Vec::new(), reply, "normal".to_owned());
+            return self.active_end(waiters, reply, "normal".to_owned());
         }
         let mut events = self.end_receive(Err("closed".to_owned()));
+        events.extend(waiters);
         match sender {
             Some(sender) => events.push(Event::Replied {
                 sender,

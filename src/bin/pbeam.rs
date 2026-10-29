@@ -207,20 +207,31 @@ const ERLEXEC_VARIABLES: [&str; 5] = [
 /// // Hello, world!
 /// ```
 fn main() -> ExitCode {
-    // A binary with an appended bundle starts it when it has no argument.
-    if std::env::args_os().len() == 1
-        && let Some(status) = pbeam_runtime::embedded::run()
-    {
+    // A binary with an appended bundle starts it with the arguments of the
+    // command line, so a user argument such as `erl` reaches the release and
+    // does not start the `erl` command below. The re-exec of the boot of an
+    // extracted release marks itself with `--embedded-boot`, so it reaches
+    // the commands below instead of the bundle again.
+    let mut words: Vec<OsString> = std::env::args_os().collect();
+    if words.len() > 1 && pbeam_runtime::embedded::is_boot_reexec(words[1].as_os_str()) {
+        words.remove(1);
+    } else if let Some(status) = pbeam_runtime::embedded::run(words.iter().skip(1).cloned()) {
         return status;
     }
-    if std::env::args_os().nth(1).as_deref() == Some(OsStr::new("erl")) {
-        let arguments = ErlCli::parse_from(std::env::args_os().skip(1));
+    if words
+        .get(1)
+        .is_some_and(|word| word.as_os_str() == OsStr::new("erl"))
+    {
+        let arguments = ErlCli::parse_from(words.into_iter().skip(1));
         let extracted = arguments.extracted_root.clone();
         let status = exit_status(boot_erl(arguments));
         pbeam_runtime::embedded::remove_extraction(extracted);
         return status;
     }
-    let arguments = Cli::parse();
+    // `parse_from` reads `words`, which no longer holds the marker of a
+    // re-exec; `parse` would read the environment again and see it. Its
+    // first word is the program name, as `parse` takes it.
+    let arguments = Cli::parse_from(words);
     let extracted = arguments.extracted_root.clone();
     let status = exit_status(run(arguments));
     // A boot of an extracted release removes its directory at the exit. The

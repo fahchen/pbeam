@@ -14,11 +14,11 @@
 //! env, because the C code keeps it after the call (`erl_nif.h:201-203`).
 
 use std::cell::RefCell;
-use std::ffi::c_int;
-use std::sync::Arc;
+use std::ffi::{c_int, c_void};
+use std::sync::{Arc, RwLock};
 
 use super::env::Env;
-use super::layout::{ErlNifPid, NifTerm};
+use super::layout::{ErlNifMonitor, ErlNifPid, NifTerm};
 use crate::AtomTable;
 use crate::Term;
 use crate::runtime::scheduler::node::Node;
@@ -28,6 +28,41 @@ thread_local! {
     /// The context of the NIF call or of the load callback that runs on the
     /// thread, or `None`.
     static CONTEXT: RefCell<Option<Context>> = const { RefCell::new(None) };
+}
+
+/// The run that a thread of a NIF library finds: the atom table and the
+/// node of the run that loaded the library. ERTS keeps its atom table and
+/// its process registry for the whole life of the emulator
+/// (`erl_atom.c`, `erl_process.c`), so `enif_alloc_env`
+/// (`erl_nif.c:669-675`) and `enif_send` (`erl_nif.c:2296-2338`) run from
+/// a thread that the emulator does not manage. PBeam keeps the run of the
+/// last NIF library load here, and never clears it, as ERTS never clears
+/// its tables.
+static RUN: RwLock<Option<RunContext>> = RwLock::new(None);
+
+/// The run of the loaded NIF libraries.
+#[derive(Debug)]
+struct RunContext {
+    atoms: Arc<AtomTable>,
+    node: Arc<Node>,
+}
+
+/// Record the run of `atoms` and `node` as the run that a thread of a NIF
+/// library finds.
+pub(super) fn enter_run(atoms: &Arc<AtomTable>, node: &Arc<Node>) {
+    *RUN.write().expect("the run lock is not poisoned") = Some(RunContext {
+        atoms: Arc::clone(atoms),
+        node: Arc::clone(node),
+    });
+}
+
+/// Return the result of `read` with the run of the loaded NIF libraries,
+/// or `None` when no library has loaded.
+fn with_run<T>(read: impl FnOnce(&RunContext) -> T) -> Option<T> {
+    RUN.read()
+        .expect("the run lock is not poisoned")
+        .as_ref()
+        .map(read)
 }
 
 /// The context of one NIF call or load callback.
@@ -42,16 +77,18 @@ pub(super) struct Context {
     /// The messages of `enif_send`: the receiver and the message, in send
     /// order.
     sends: Vec<(ProcessId, Term)>,
-    /// The text of the first broken contract of `enif_send`, or `None`.
+    /// The text of the runtime error of the call: the first broken
+    /// contract of `enif_send`, or the name of the first `enif_*` function
+    /// that PBeam does not implement, or `None`.
     unsupported: Option<String>,
 }
 
-/// The messages and the broken contract of a call that ended.
+/// The messages and the runtime error of a call that ended.
 #[derive(Debug)]
 pub(super) struct Ended {
     /// The messages of `enif_send`, in send order.
     pub(super) sends: Vec<(ProcessId, Term)>,
-    /// The text of the first broken contract of `enif_send`, or `None`.
+    /// The text of the runtime error of the call, or `None`.
     pub(super) unsupported: Option<String>,
 }
 
@@ -95,6 +132,17 @@ fn with_context<T>(read: impl FnOnce(&mut Context) -> T) -> Option<T> {
     CONTEXT.with_borrow_mut(|context| context.as_mut().map(read))
 }
 
+/// Record the name of an unsupported `enif_*` function of the call that
+/// runs on the thread, so the call gives a runtime error when it returns.
+/// A thread that runs no NIF call records nothing.
+pub(super) fn record_unsupported(name: &str) {
+    with_context(|context| {
+        context.unsupported.get_or_insert_with(|| {
+            format!("the NIF called {name}, which PBeam does not implement yet")
+        });
+    });
+}
+
 /// Return true when the local process `pid` exists and does not exit, as
 /// `erts_proc_lookup` and `erts_pid2proc_opt` find it
 /// (`erl_nif.c:2323-2338`). A thread that runs no NIF call finds no process.
@@ -105,11 +153,14 @@ fn alive(pid: ProcessId) -> bool {
 /// `ErlNifEnv* enif_alloc_env(void)`: return a new process-independent env
 /// (`erl_nif.c:669-675`). Its terms stay valid until `enif_free_env`.
 ///
-/// On a thread that runs no NIF call, PBeam has no atom table for the env
-/// and returns NULL.
+/// A thread that runs no NIF call finds the run of the loaded libraries
+/// through [`RUN`], as ERTS finds its global tables from each thread. A
+/// thread of a run with no loaded library has no atom table for the env
+/// and gets NULL.
 #[unsafe(no_mangle)]
 pub extern "C" fn enif_alloc_env() -> *mut Env {
     with_context(|context| Box::into_raw(Box::new(Env::new(&context.atoms, None, &[]))))
+        .or_else(|| with_run(|run| Box::into_raw(Box::new(Env::new(&run.atoms, None, &[])))))
         .unwrap_or(std::ptr::null_mut())
 }
 
@@ -215,24 +266,80 @@ pub unsafe extern "C" fn enif_send(
     if !alive(target) {
         return 0;
     }
-    with_context(|context| {
-        let source = if msg_env.is_null() {
-            std::ptr::with_exposed_provenance_mut(context.env)
-        } else {
-            msg_env
-        };
-        // SAFETY: `source` is an env of `enif_alloc_env` or the env of the
-        // running call, which is alive until the call returns.
-        let Some(term) = unsafe { super::env::env(source) }.get(msg) else {
+    // The message term of a call comes from the env of the call when the
+    // NIF gives no message env, as ERTS reads it
+    // (`erl_nif.c:1100-1106`). A thread of a library gives the env of
+    // `enif_alloc_env` and no env of a call.
+    let in_call = with_context(|context| context.env);
+    let source = if !msg_env.is_null() {
+        msg_env
+    } else if let Some(env) = in_call {
+        std::ptr::with_exposed_provenance_mut(env)
+    } else {
+        return 0;
+    };
+    // SAFETY: `source` is an env of `enif_alloc_env` or the env of the
+    // running call, which is alive until the call returns.
+    let Some(term) = (unsafe { super::env::env(source) }).get(msg) else {
+        with_context(|context| {
             context.unsupported.get_or_insert_with(|| {
                 format!("enif_send sent the term {msg:#x}, which its env does not have")
             });
-            return 0;
-        };
-        context.sends.push((target, term));
-        1
+        });
+        return 0;
+    };
+    // A call queues its messages for the caller's scheduler to send when
+    // the call returns. A thread of a library, which runs no call, sends
+    // through the node at once, as ERTS sends through the global process
+    // registry from each thread (`erl_nif.c:2296-2338`). The sender of the
+    // message is `None`, as a thread of a library is no process.
+    match with_context(|context| context.sends.push((target, term.clone()))) {
+        Some(()) => 1,
+        None => {
+            with_run(|run| run.node.send_message(0, None, term, target, None)).map_or(0, |()| 1)
+        }
+    }
+}
+
+/// `int enif_monitor_process(ErlNifEnv*, void*, const ErlNifPid*,
+/// ErlNifMonitor*)`: watch the process `to_pid` for the resource object
+/// `obj` and return 0, or return -1 when the type of the object has no
+/// down callback, and 1 when the process does not exist, as ERTS gives for
+/// a monitor signal that it cannot send (`erl_nif.c:3933-3990`).
+///
+/// PBeam does not run the down callback of the type yet: it writes a
+/// monitor of zero words, which `enif_demonitor_process` and
+/// `enif_compare_monitors` do not use.
+///
+/// # Safety
+///
+/// `obj` is the data of a live resource object, `to_pid` points to a valid
+/// `ErlNifPid`, and `monitor` is NULL or points to a writable
+/// `ErlNifMonitor`, as the C API requires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn enif_monitor_process(
+    _env: *mut Env,
+    obj: *mut c_void,
+    to_pid: *const ErlNifPid,
+    monitor: *mut ErlNifMonitor,
+) -> c_int {
+    // SAFETY: the C API gives a valid `ErlNifPid`.
+    let target = unsafe { to_pid.read() }.process();
+    with_context(|context| {
+        if !super::resource::has_down(obj.expose_provenance()) {
+            return -1;
+        }
+        if context.node.live_owner(target).is_none() {
+            return 1;
+        }
+        if !monitor.is_null() {
+            // SAFETY: the C API requires that a `monitor` that is not NULL
+            // points to a writable `ErlNifMonitor`.
+            unsafe { monitor.write(ErlNifMonitor { words: [0; 4] }) };
+        }
+        0
     })
-    .unwrap_or(0)
+    .unwrap_or(1)
 }
 
 #[cfg(test)]

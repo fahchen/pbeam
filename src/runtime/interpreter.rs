@@ -805,6 +805,10 @@ impl BeamProgram {
                 let node = Arc::clone(&node);
                 let thread_gate = Arc::clone(&gate);
                 let body = move || -> Result<_, (BeamError, bool)> {
+                    // A NIF of a library that asks for the kind of its
+                    // thread runs on this scheduler thread
+                    // (`enif_thread_type`).
+                    crate::runtime::nif::abi::thread::set(crate::runtime::nif::abi::thread::NORMAL);
                     // The guard aborts the gate if the scheduler cannot be
                     // created, so a peer never waits for a thread that
                     // panicked before it arrived.
@@ -1021,6 +1025,10 @@ impl BeamProgram {
         sample: &mut Option<&mut dyn FnMut(usize)>,
     ) -> Result<HostTerm, BeamError> {
         let initial_mode = InitialMode::read();
+        // A NIF of a library that asks for the kind of its thread runs on
+        // this scheduler thread (`enif_thread_type`), as on each thread of
+        // `run_on_schedulers`.
+        crate::runtime::nif::abi::thread::set(crate::runtime::nif::abi::thread::NORMAL);
         let mut scheduler = match issuer {
             Issuer::Unchecked => Scheduler::without_checks((*self.atoms).clone()),
             Issuer::Host(_) | Issuer::Module { .. } => Scheduler::new((*self.atoms).clone()),

@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use super::{
     capability::SecurityContext,
     dirty::{Claim, Output},
-    heap_flags::{HeapFlags, garbage_collection_list, max_heap_size_map},
+    heap_flags::HeapFlags,
     mailbox::Mailbox,
     scheduler::AliasMode,
     timer::TimerKey,
@@ -17,7 +17,7 @@ use super::{
 use crate::{
     beam::{ModuleId, NameId},
     error::{BeamError, error},
-    term::{Atom, AtomTable, LiveBytes, PortId, ProcessId, Reference, Term},
+    term::{Atom, LiveBytes, PortId, ProcessId, Reference, Term},
 };
 
 /// The other end of a link: a process or a port, as the `other.item` of an
@@ -600,11 +600,18 @@ impl Frame {
     }
 }
 
-/// The items of `erlang:process_info/2` that [`ProcessState::info`] reads
-/// for a process that is not the caller. A request to a process of another
-/// scheduler carries only these items, because its owner reads the item as
-/// the target process.
-pub(super) const OTHER_PROCESS_INFO_ITEMS: [&str; 14] = [
+/// The atom items of `erlang:process_info/2` that a read of another process
+/// carries. The owner of the target process reads each item from the same
+/// values that `erlang:process_info/1` reports, so a request to a process of
+/// another scheduler carries only these items.
+pub(super) const OTHER_PROCESS_INFO_ITEMS: [&str; 21] = [
+    "messages",
+    "dictionary",
+    "trap_exit",
+    "error_handler",
+    "current_function",
+    "initial_call",
+    "status",
     "registered_name",
     "heap_size",
     "total_heap_size",
@@ -852,63 +859,6 @@ impl ProcessState {
     /// # Errors
     ///
     /// A reduction total above the PBeam integer range is an error.
-    pub(super) fn info(
-        &self,
-        atoms: &AtomTable,
-        item: &Term,
-        current: u64,
-        messages: usize,
-        registered_name: Option<&Atom>,
-    ) -> Result<Option<Term>, BeamError> {
-        let Term::Atom(name) = item else {
-            return Ok(None);
-        };
-        let value = match (atoms.name_of(name), &self.registered_name) {
-            ("registered_name", _) => match registered_name {
-                Some(registered) => Term::Atom(registered.clone()),
-                None => return Ok(Some(Term::nil())),
-            },
-            ("message_queue_len", _) => Term::Integer(messages as i64),
-            ("group_leader", _) => Term::Pid(self.group_leader),
-            ("priority", _) => Term::static_atom(self.priority.name()),
-            ("links", _) => {
-                // An entry of a link that waits for its unlink
-                // acknowledgment stays in the tree with a nonzero value,
-                // and ERTS reports only active links (`collect_one_link`,
-                // `erl_bif_info.c:574-585`). ERTS walks the tree and
-                // prepends each link, so the list is the reverse of the
-                // walk (`erl_bif_info.c:1764-1775`).
-                let links: Vec<Term> = self
-                    .links
-                    .post_order()
-                    .filter(|(_, unlinking)| **unlinking == 0)
-                    .map(|(id, _)| id.term())
-                    .collect();
-                Term::list_from(links.into_iter().rev())
-            }
-            ("min_heap_size", _) => Term::Integer(self.heap_flags.min_heap_size),
-            ("min_bin_vheap_size", _) => Term::Integer(self.heap_flags.min_bin_vheap_size),
-            ("fullsweep_after", _) => Term::Integer(i64::from(self.heap_flags.fullsweep_after)),
-            ("max_heap_size", _) => max_heap_size_map(
-                atoms,
-                self.heap_flags.max_heap_size,
-                self.heap_flags.max_heap_flags,
-            ),
-            ("garbage_collection", _) => garbage_collection_list(atoms, self.heap_flags)?,
-            ("heap_size" | "total_heap_size", _) => Term::Integer(self.heap_words()?),
-            ("memory", _) => Term::Integer(
-                i64::try_from(std::mem::size_of::<Self>() + self.allocated_bytes())
-                    .map_err(|_| error("the process memory exceeds the PBeam integer range"))?,
-            ),
-            ("reductions", _) => Term::Integer(
-                i64::try_from(self.reductions + current)
-                    .map_err(|_| error("the reduction total exceeds the PBeam integer range"))?,
-            ),
-            _ => return Ok(None),
-        };
-        Ok(Some(Term::tuple(vec![item.clone(), value])))
-    }
-
     /// Return true while the dirty NIF call of the process runs or waits in
     /// the queue of its pool: the process waits for its completion and does
     /// not run Erlang code.

@@ -384,6 +384,9 @@ struct Pool {
     name: &'static str,
     /// The number of threads.
     threads: usize,
+    /// The kind that `enif_thread_type` gives a thread of the pool
+    /// (`erl_nif.h:336-337`).
+    kind: c_int,
     /// The queue, which the threads share.
     shared: Arc<Shared>,
     /// Set when the first call started the threads.
@@ -399,10 +402,11 @@ impl Pool {
     /// ```rust,ignore
     /// let pool = Pool::new("erts_dios", 10);
     /// ```
-    fn new(name: &'static str, threads: usize) -> Self {
+    fn new(name: &'static str, threads: usize, kind: c_int) -> Self {
         Pool {
             name,
             threads,
+            kind,
             shared: Arc::default(),
             started: OnceLock::new(),
         }
@@ -418,11 +422,12 @@ impl Pool {
     /// thread` in this case (`erl_process.c:8962`, `8970`).
     fn submit(&self, priority: Priority, call: Call) {
         self.started.get_or_init(|| {
+            let kind = self.kind;
             for index in 1..=self.threads {
                 let shared = Arc::clone(&self.shared);
                 thread::Builder::new()
                     .name(format!("{}_{index}", self.name))
-                    .spawn(move || run_calls(&shared))
+                    .spawn(move || run_calls(&shared, kind))
                     .expect("the host starts a dirty scheduler thread");
             }
         });
@@ -475,8 +480,8 @@ impl Pools {
     /// ```
     pub(in crate::runtime) fn new(schedulers: usize) -> Self {
         Pools {
-            cpu: Pool::new("erts_dcpus", schedulers),
-            io: Pool::new("erts_dios", DIRTY_IO_THREADS),
+            cpu: Pool::new("erts_dcpus", schedulers, abi::thread::DIRTY_CPU),
+            io: Pool::new("erts_dios", DIRTY_IO_THREADS, abi::thread::DIRTY_IO),
         }
     }
 
@@ -664,7 +669,8 @@ impl DirtyCalls {
 /// ```rust,ignore
 /// thread::spawn(move || run_calls(&shared));
 /// ```
-fn run_calls(shared: &Arc<Shared>) {
+fn run_calls(shared: &Arc<Shared>, kind: c_int) {
+    abi::thread::set(kind);
     while let Some(taken) = shared.take() {
         let Call {
             process,

@@ -44,6 +44,37 @@ fn resource(scheduler: &mut Scheduler, change: impl FnOnce(&mut SocketState)) ->
     (reference, Term::Reference(reference))
 }
 
+/// Keep a new IPv4 datagram socket that `change` sets up as a socket
+/// resource of the current process, and return its key and term.
+fn datagram(scheduler: &mut Scheduler) -> (Reference, Term) {
+    let socket = Socket::new(Domain::IPV4, Type::DGRAM, None).unwrap();
+    socket.set_nonblocking(true).unwrap();
+    socket
+        .bind(&std::net::SocketAddr::from(([127, 0, 0, 1], 0)).into())
+        .unwrap();
+    let state = SocketState {
+        socket: Some(socket),
+        domain: libc::AF_INET,
+        kind: libc::SOCK_DGRAM,
+        protocol: libc::IPPROTO_UDP,
+        owner: Some(scheduler.current_process().id),
+        closer: None,
+        read: 0,
+        write: 0,
+        registered: false,
+        meta: Term::static_atom("undefined"),
+        connector: None,
+        acceptor: None,
+        reader: None,
+        writer: None,
+        counters: IoCounters::default(),
+        options: OtpOptions::default(),
+    };
+    let reference = scheduler.make_magic_ref().unwrap();
+    lock(&scheduler.node().resources.kind::<Sockets>()).insert(reference, state);
+    (reference, Term::Reference(reference))
+}
+
 /// Return the text of the runtime error of `result`.
 fn error_text(result: Result<BifResult, BeamError>) -> String {
     match result {
@@ -204,4 +235,40 @@ fn clears_the_current_reader_and_writer_at_their_exit() {
     let state = lock(&sockets).get(key).unwrap();
     let state = lock(&state);
     assert!(state.reader.is_none() && state.writer.is_none() && state.socket.is_some());
+}
+
+#[test]
+fn counts_each_read_attempt_of_a_timed_read() {
+    // `essio_recvfrom` increments `read_tries` before each `recvfrom(2)`
+    // (`unix_socket_syncio.c:3919-3920`). A read of the `zero` reference that
+    // finds no data counts one attempt and returns `{error, timeout}`, and a
+    // read with a reference that finds no data counts one attempt and returns
+    // `select`; its later attempt counts another.
+    let mut scheduler = scheduler();
+    let (key, socket) = datagram(&mut scheduler);
+    let counters = |scheduler: &mut Scheduler| {
+        let sockets = scheduler.node().resources.kind::<Sockets>();
+        let state = lock(&sockets).get(key).unwrap();
+        lock(&state).counters.read_tries
+    };
+    assert_eq!(counters(&mut scheduler), 0);
+    let zero = Term::Atom(scheduler.atoms.put("zero").unwrap());
+    let result = super::recvfrom(
+        &mut scheduler,
+        &socket,
+        &Term::Integer(0),
+        &Term::Integer(0),
+        &zero,
+    );
+    assert_eq!(printed(&scheduler, result), "timeout");
+    assert_eq!(counters(&mut scheduler), 1);
+    let result = super::recvfrom(
+        &mut scheduler,
+        &socket,
+        &Term::Integer(0),
+        &Term::Integer(0),
+        &Term::Reference(Reference(0)),
+    );
+    assert_eq!(printed(&scheduler, result), "select");
+    assert_eq!(counters(&mut scheduler), 2);
 }

@@ -4,8 +4,8 @@ PBeam is a planned Rust runtime for executing existing Erlang/Elixir `.beam`
 artifacts without ERTS and packaging applications as single native executables.
 
 **Status: verified Elixir references, constant-return and bounded-call slices, and the compiled Elixir and OTP IO path of Hello World through the host write.**
-The Hello World run uses the boot module `pbeam_boot` of `examples/hello_world` and the pinned Elixir and OTP modules. Application build tooling is not implemented yet.
-`mix pbeam.build` is a proposed command, not an available installation or build instruction.
+The Hello World run uses the boot module `pbeam_boot` of `examples/hello_world` and the pinned Elixir and OTP modules. The native crate configuration of the specification stays proposed.
+`mix pbeam.build` is an implemented command of the `pbeam` Mix package: a Mix project that adds `{:pbeam, path: "path/to/pbeam", runtime: false}` (or the git dependency) runs `MIX_ENV=prod mix pbeam.build`, which runs its `mix release`, writes the bundle, and writes one executable. The build host needs Erlang, Elixir, and the Rust toolchain of the pins in [mise.toml](mise.toml); the executable needs none of them. The task stops with an error when the ERTS version of the release (`releases/start_erl.data`) is not the ERTS version of the pinned OTP, because PBeam runs the pinned OTP modules. The options: `--release` names a built release directory instead of running `mix release`, `--output` names the executable path (the default is `<app>.bundle` next to the release directory), `--runtime` and `--tool` name built `pbeam` and `pbeam_bundle` binaries instead of Cargo builds, and `--start-list` passes the start list through to `mix pbeam.bundle`. See [the bundle format](docs/bundle-format.md).
 
 ## Design
 
@@ -32,7 +32,7 @@ The [capability security design](docs/capability-security-design.md) records the
 
 Development toolchains are pinned in [mise.toml](mise.toml). Use `mise install`
 to install them; see the [target contract](docs/terra-target.md#toolchain-baseline)
-for versions and verification limits. There is no PBeam build command yet.
+for versions and verification limits. `mix pbeam.build` of the `pbeam` Mix package builds one executable from the release of a Mix project.
 
 The Rust build compiles the PCRE2 10.47 sources of OTP 29.1.1 in `vendor/pcre2` with the host C compiler, under the licence in [vendor/pcre2/LICENCE](vendor/pcre2/LICENCE).
 

@@ -1,5 +1,7 @@
 //! Bodies of the `erts_internal` BIFs that do not fit on one table line.
 
+use std::cmp::Ordering;
+
 use super::BifResult::Value;
 use super::erlang::signals_return;
 use super::*;
@@ -12,7 +14,7 @@ use crate::runtime::{
         environment,
         errno::errno_id,
         filename_encoding, gethost,
-        spawn::{self, Fds, Setting, SpawnError, Streams},
+        spawn::{self, Fds, ReadWrite, Setting, SpawnError, Streams},
     },
     port::{
         self, Driver, Input, Lines, Packets, Port, PortCell, Program, Spawn,
@@ -204,10 +206,6 @@ const PORT_REDUCTIONS: i32 = 40;
 /// support (`erl_bif_port.c:849-976`).
 const UNSUPPORTED_TUPLE_OPTIONS: [&str; 2] = ["busy_limits_port", "busy_limits_msgq"];
 
-/// The atom options of `open_port/2` that ERTS accepts and PBeam does not
-/// support (`erl_bif_port.c:979-1009`).
-const UNSUPPORTED_ATOM_OPTIONS: [&str; 2] = ["in", "out"];
-
 /// The options of `open_port/2` that PBeam supports, as the fields of the
 /// ERTS `SysDriverOpts` and the port flags that `open_port` sets
 /// (`erl_bif_port.c:812-834`).
@@ -245,6 +243,9 @@ struct PortSettings {
     directory: Option<Term>,
     /// `{parallelism, Boolean}`, false without it (`erl_bif_port.c:913-919`).
     parallelism: bool,
+    /// `DO_READ` of the `in` option and `DO_WRITE` of the `out` option
+    /// (`erl_bif_port.c:991-994`); both without them (`erl_bif_port.c:1015-1016`).
+    read_write: ReadWrite,
 }
 
 /// Run `erts_internal:open_port(PortName, PortSettings)`, which
@@ -286,9 +287,8 @@ struct PortSettings {
 /// # Errors
 ///
 /// An option that ERTS accepts and PBeam does not support, an fd that is
-/// not open, `{line, L}` whose low 32 bits are not positive, and a failed
-/// `posix_spawn`
-/// return a runtime error. A new atom in a full atom table gives the error
+/// not open, and `{line, L}` whose low 32 bits are not positive return a
+/// runtime error. A new atom in a full atom table gives the error
 /// of `AtomTable::put`.
 pub(super) fn open_port(
     context: &mut BifContext<'_>,
@@ -355,23 +355,24 @@ pub(super) fn open_port(
         directory,
     };
     let started = if is_command {
-        spawn::spawn_shell(&path, settings.streams, &setting)
+        spawn::spawn_shell(&path, settings.streams, settings.read_write, &setting)
     } else if is_gethost(&path) {
         spawn::serve(move |input, output| gethost::serve(&args, input, output))
     } else {
         let arg0 = settings.arg0.as_deref().unwrap_or(&path);
-        spawn::spawn(&path, arg0, &args, settings.streams, &setting)
+        spawn::spawn(
+            &path,
+            arg0,
+            &args,
+            settings.streams,
+            settings.read_write,
+            &setting,
+        )
     };
     let child = match started {
         Ok(child) => child,
         Err(SpawnError::Open(errno)) => {
             return Ok(Value(Term::Atom(scheduler.atoms.put(&errno_id(errno))?)));
-        }
-        Err(SpawnError::Start(errno)) => {
-            return Err(error(format!(
-                "unsupported open_port/2 of a program that posix_spawn does not start: {}: see \"Ports\" in docs/erts-differences.md",
-                errno_id(errno)
-            )));
         }
     };
     let spawn = Spawn {
@@ -382,7 +383,13 @@ pub(super) fn open_port(
         lines,
         parallelism: settings.parallelism,
         program: Program::Child(child),
-        input: Input::Open,
+        // The `out` option keeps no read side, and the port reads nothing
+        // (`sys_drivers.c:1307-1311`).
+        input: if settings.read_write.read {
+            Input::Open
+        } else {
+            Input::Write
+        },
     };
     let port = scheduler.open_port(path, Driver::Spawn(spawn))?;
     let reference = scheduler.make_ref()?;
@@ -521,11 +528,13 @@ fn open_fd_port(
         return Ok(Value(Term::static_atom("einval")));
     };
     // `fd_start` refuses an fd at or above `sys_max_files()`, the soft
-    // `RLIMIT_NOFILE` (sys_drivers.c:822-824), which `open_port` gives as
-    // `einval`.
+    // `RLIMIT_NOFILE` (sys_drivers.c:822-824), for each direction that
+    // `in` or `out` keeps, which `open_port` gives as `einval`.
     let max = nix::sys::resource::getrlimit(nix::sys::resource::Resource::RLIMIT_NOFILE)
         .map_or(u64::MAX, |(soft, _)| soft);
-    if input as u64 >= max || output as u64 >= max {
+    if (settings.read_write.read && input as u64 >= max)
+        || (settings.read_write.write && output as u64 >= max)
+    {
         return Ok(Value(Term::static_atom("einval")));
     }
     // ERTS opens a port on an fd that is not open: the select of the input
@@ -533,7 +542,10 @@ fn open_fd_port(
     // is not open has no entry in the fd directory of the process
     // (`/dev/fd`, which is `/proc/self/fd` on Linux).
     let closed = |fd| std::fs::symlink_metadata(format!("/dev/fd/{fd}")).is_err();
-    let port_input = if closed(input) {
+    let port_input = if !settings.read_write.read {
+        // The `out` option keeps no read side (`sys_drivers.c:385-400`).
+        Input::Write
+    } else if closed(input) {
         Input::Ended
     } else {
         Input::Open
@@ -556,7 +568,16 @@ fn open_fd_port(
         binary: true,
         lines: settings.line.map(line_size).transpose()?,
         parallelism: settings.parallelism,
-        program: Program::Fds(Fds { input, output }),
+        // The `in` option keeps no write side: a write fails with `ebadf`
+        // (`sys_drivers.c:1145`, `1177`).
+        program: Program::Fds(Fds {
+            input: if settings.read_write.read { input } else { -1 },
+            output: if settings.read_write.write {
+                output
+            } else {
+                -1
+            },
+        }),
         input: port_input,
     };
     let port = scheduler.open_port(name, Driver::Spawn(spawn))?;
@@ -601,6 +622,10 @@ fn port_settings(atoms: &AtomTable, settings: &Term) -> Result<Option<PortSettin
         environment: Vec::new(),
         directory: None,
         parallelism: false,
+        read_write: ReadWrite {
+            read: false,
+            write: false,
+        },
     };
     for element in elements {
         let option = match element {
@@ -678,6 +703,10 @@ fn port_settings(atoms: &AtomTable, settings: &Term) -> Result<Option<PortSettin
                     result.line = Some(512);
                 } else if option.is_static("exit_status") {
                     result.exit_status = true
+                } else if option.is_static("in") {
+                    result.read_write.read = true;
+                } else if option.is_static("out") {
+                    result.read_write.write = true;
                 } else if option.is_static("eof") {
                     result.eof = true
                 } else if option.is_static("overlapped_io") {
@@ -685,8 +714,6 @@ fn port_settings(atoms: &AtomTable, settings: &Term) -> Result<Option<PortSettin
                 } else if option.is_static("hide") {
                     // Only a Windows port hides its window
                     // (`erl_bif_port.c:997-998`, `hide_window`).
-                } else if option.is_one_of(&UNSUPPORTED_ATOM_OPTIONS) {
-                    return Err(unsupported_option(atoms.name_of(option)));
                 } else {
                     return Ok(None);
                 }
@@ -701,6 +728,11 @@ fn port_settings(atoms: &AtomTable, settings: &Term) -> Result<Option<PortSettin
         || (result.line.is_some() && result.packet != 0)
     {
         return Ok(None);
+    }
+    // Without `in` and `out` the port reads and writes
+    // (`erl_bif_port.c:1015-1016`).
+    if !result.read_write.read && !result.read_write.write {
+        result.read_write = ReadWrite::both();
     }
     Ok(Some(result))
 }
@@ -1045,6 +1077,9 @@ fn output(
             port_state.output += bytes.len() as u64;
             return Ok(match sent {
                 Output::Sent(events) => {
+                    // A send that made the port busy starts its send timer
+                    // (`add_multi_timer`, inet_drv.c:13785-13792).
+                    scheduler.tcp_send_timer(id, tcp);
                     Written::Step(scheduler.send_events(id, port_state, events)?)
                 }
                 Output::Failed => Written::Failed,
@@ -2422,6 +2457,39 @@ pub(super) fn term_type(atoms: &AtomTable, term: &Term) -> Result<BifResult, Bea
         }
     };
     Ok(Value(Term::Atom(atoms.put(name)?)))
+}
+
+/// Return the ERTS term order of `left` against `right`, as
+/// `erts_internal:cmp_term/2` does (`bif.c:5417-5427`): `-1` when `left` is
+/// less, `0` when the terms are equal, and `1` when `left` is greater. The
+/// comparison is exact, because `CMP_TERM` calls `erts_cmp` with
+/// `exact = 1` (`erl_utils.h:122`), so each integer is less than each float
+/// and `-0.0` is less than `0.0`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(
+///     cmp_term(&atoms, &Term::Integer(1), &Term::Float(1.0))?,
+///     Value(Term::Integer(-1))
+/// );
+/// ```
+///
+/// # Errors
+///
+/// Return a runtime error when the result depends on the order of an
+/// alias reference.
+pub(super) fn cmp_term(
+    atoms: &AtomTable,
+    left: &Term,
+    right: &Term,
+) -> Result<BifResult, BeamError> {
+    let order = left.compare_exact(right, atoms)?;
+    Ok(Value(Term::Integer(match order {
+        Ordering::Less => -1,
+        Ordering::Equal => 0,
+        Ordering::Greater => 1,
+    })))
 }
 
 /// Return the key tuple of a flatmap, as

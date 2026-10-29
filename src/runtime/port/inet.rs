@@ -24,6 +24,7 @@
 //! | `SUBSCRIBE` | 24 | `[1, ...]` | `[1, 1, Q3, Q2, Q1, Q0, ...]` |
 //! | `ACCEPT` | 26 | `[T3, T2, T1, T0]` | `[1, R1, R0]` |
 //! | `LISTEN` | 27 | `[B1, B0]` | `[1]` |
+//! | `SHUTDOWN` | 44 | `[How]`, 0 read, 1 write, 2 both | `[1]` |
 //!
 //! `P1, P0` is the port number, `B1, B0` the backlog, `T3..T0` the timeout
 //! in milliseconds (`16#ffffffff` for `infinity`), `Q3..Q0` the size of
@@ -74,6 +75,18 @@ const MAGIC: u32 = 0x03f1_a300;
 /// The largest reply of `GETOPTS` and `SUBSCRIBE` (`INET_MAX_OPT_BUFFER`,
 /// inet_drv.c:1046).
 const MAX_OPT_BUFFER: usize = 64 * 1024;
+
+/// The `how` of `TCP_REQ_SHUTDOWN` for the read side (`TCP_SHUT_RD`,
+/// inet_drv.c:684).
+const SHUT_READ: u8 = 0;
+
+/// The `how` of `TCP_REQ_SHUTDOWN` for the write side (`TCP_SHUT_WR`,
+/// inet_drv.c:683).
+const SHUT_WRITE: u8 = 1;
+
+/// The `how` of `TCP_REQ_SHUTDOWN` for both sides (`TCP_SHUT_RDWR`,
+/// inet_drv.c:685).
+const SHUT_READ_WRITE: u8 = 2;
 
 /// The reply code of a request that succeeded (`INET_REP_OK`).
 pub(in crate::runtime) const OK: u8 = 1;
@@ -252,6 +265,12 @@ pub(in crate::runtime) enum Control {
 }
 
 impl Inet {
+    /// Return the option `send_timeout` in milliseconds, -1 for `infinity`
+    /// (the start value, `INET_INFINITY`).
+    pub(in crate::runtime) fn send_timeout(&self) -> i32 {
+        self.send_timeout
+    }
+
     /// Return the descriptor of a new port of `socket_type`: no socket,
     /// `list` mode, passive, and an infinite send timeout.
     ///
@@ -420,6 +439,13 @@ impl Inet {
             27 if self.socket_type == SocketType::Stream => self.listen(request),
             // `LISTEN` is only for an SCTP socket (inet_drv.c:14846-14858).
             27 => error_reply("exbadport"),
+            // `prim_inet:sendfile/4` asks for the sendfile of a file handle.
+            // PBeam runs no host sendfile call, so the request gives the
+            // error of a platform without `HAVE_SENDFILE`
+            // (inet_drv.c:12440-12444), and `file:sendfile/8` reads the
+            // file instead (`file.erl:2788-2797`).
+            45 if self.socket_type == SocketType::Stream => error_reply("enotsup"),
+            44 if self.socket_type == SocketType::Stream => self.shutdown_request(request),
             42 if self.socket_type == SocketType::Stream => return self.receive_request(request),
             60 if self.socket_type == SocketType::Datagram => {
                 return Ok(self.datagram_receive_request(request));
@@ -427,6 +453,45 @@ impl Inet {
             other => return Err(self.unsupported("request", other)),
         };
         Ok(Control::Reply(reply))
+    }
+
+    /// Run `TCP_REQ_SHUTDOWN` with the one byte of `shutdown/2`: 0 for the
+    /// read side, 1 for the write side, and 2 for both
+    /// (inet_drv.c:12339-12378). A port without a connection gives
+    /// `enotconn`, and a request that is not one byte gives `einval`. A
+    /// shutdown other than of the read side waits while the output queue
+    /// holds bytes (`TCP_ADDF_PENDING_SHUT_WR` and
+    /// `TCP_ADDF_PENDING_SHUT_RDWR`); the queue empties in
+    /// [`Self::send_ready`], which runs the shutdown.
+    fn shutdown_request(&mut self, request: &[u8]) -> Vec<u8> {
+        if self.state != State::Connected {
+            return error_reply("enotconn");
+        }
+        let &[how] = request else {
+            return error_reply("einval");
+        };
+        if how != SHUT_READ && self.stream.output_size() > 0 {
+            self.stream.pending_shutdown =
+                matches!(how, SHUT_WRITE | SHUT_READ_WRITE).then_some(how);
+            return vec![OK];
+        }
+        self.shutdown(how)
+    }
+
+    /// Shut down the socket with the `shutdown/2` how `how`, and return the
+    /// reply, as `sock_shutdown` gives it (inet_drv.c:12368-12377). A how
+    /// that is not 0, 1, or 2 gives `einval`.
+    fn shutdown(&mut self, how: u8) -> Vec<u8> {
+        let Some(socket) = self.socket.as_ref() else {
+            return error_reply("enotconn");
+        };
+        let how = match how {
+            SHUT_READ => std::net::Shutdown::Read,
+            SHUT_WRITE => std::net::Shutdown::Write,
+            SHUT_READ_WRITE => std::net::Shutdown::Both,
+            _ => return error_reply("einval"),
+        };
+        reply(socket.shutdown(how), |()| vec![OK])
     }
 
     /// Return the runtime error of a `what` code that PBeam does not run.
@@ -685,6 +750,12 @@ impl Inet {
             let value = i32::from_be_bytes([*v3, *v2, *v1, *v0]);
             request = rest;
             let set = match option {
+                // PBeam reads a `tcp_inet` socket with `{packet, raw}` only,
+                // so a `SETOPTS` that keeps `raw` changes nothing. The port
+                // stores the packet type for each other value
+                // (inet_drv.c:7018-7024), and PBeam cannot frame that type.
+                23 if value == 0 => true,
+                23 => return Err(self.unsupported("option packet", value)),
                 24 => {
                     self.mode = value;
                     true
@@ -800,6 +871,9 @@ impl Inet {
                 47 if value != 0 => return Err(error(RECVTTL_ON)),
                 // PBeam never sets `IP_RECVTTL`, so a socket has it off.
                 47 => self.socket.is_some(),
+                // macOS has no `TCP_NOPUSH`, so ERTS skips the option
+                // (inet_drv.c:1102-1104, 7506-7521).
+                48 => true,
                 30 | 35 | 31 if !self.has_stream_socket() => true,
                 30 => {
                     self.send_timeout = value;
@@ -920,6 +994,9 @@ impl Inet {
                 7 => size(Socket::recv_buffer_size),
                 12 => integer(Socket::multicast_ttl_v4),
                 13 => flag(Socket::multicast_loop_v4, 1),
+                // macOS gives no `TCP_NOPUSH`, so `nopush` is false
+                // (inet_drv.c:9451-9464).
+                48 => Some(0),
                 30 => self.has_stream_socket().then_some(self.send_timeout),
                 35 => self.has_stream_socket().then_some(self.send_timeout_close),
                 31 => self
