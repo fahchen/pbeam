@@ -636,9 +636,6 @@ fn sends_and_receives_messages_with_control_data_as_pinned_erts() {
     // control messages of the tables of prim_socket_nif.c:15645-15758 that
     // the host sends and gives, the `{invalid, ctrl}` cases, a truncated
     // datagram, a short control buffer, a stream socket, and the counters.
-    // On macOS it also runs `socket:sendmmsg/4` and `socket:recvmmsg/6`,
-    // whose NIFs raise `error:notsup` there
-    // (unix_socket_syncio.c:4297-4309, 4526-4537).
     let (reference, status, node) = run_kernel_boot("socket_msg", false, &["{socket_msg,"]);
     assert_eq!(status, Some(0), "ERTS");
     assert!(
@@ -647,6 +644,35 @@ fn sends_and_receives_messages_with_control_data_as_pinned_erts() {
         ),
         "{reference}"
     );
+    assert_eq!(node, reference, "PBeam");
+}
+
+#[test]
+fn sends_and_receives_several_messages_as_pinned_erts() {
+    // `kernel_boot_probe:socket_mmsg/0` runs `socket:sendmmsg/4` and
+    // `socket:recvmmsg/6` on the NIFs `nif_sendmmsg/4` and `nif_recvmmsg/6`
+    // (prim_socket_nif.c:6691-6760, 7447-7540). The argument checks come
+    // first on each host. macOS has no `sendmmsg(2)` and `recvmmsg(2)`, so
+    // the NIFs then raise `error:notsup` (unix_socket_syncio.c:4297-4309,
+    // 4526-4537). Linux sends and receives the messages
+    // (unix_socket_syncio.c:4111-4295, 4320-4524): control messages, a
+    // failed first and later message, a partial message, a select, `zero`,
+    // `{otp, select_read}`, the flags peek and trunc, the parts of a stream,
+    // the end of a stream, and the counters.
+    let (reference, status, node) = run_kernel_boot("socket_mmsg", false, &["{socket_mmsg,"]);
+    assert_eq!(status, Some(0), "ERTS");
+    assert!(
+        reference.starts_with(
+            "{socket_mmsg,[{error,badarg},{error,badarg},{invalid,{integer_range,0}},{invalid,{integer_range,4294967296}},{invalid,{integer_range,-1}},{error,badarg},{invalid,{integer_range,-1}},{invalid,{integer_range,-1}}],"
+        ),
+        "{reference}"
+    );
+    if cfg!(target_os = "macos") {
+        assert!(
+            reference.ends_with(",[{error,notsup},{error,notsup}]}\r\n"),
+            "{reference}"
+        );
+    }
     assert_eq!(node, reference, "PBeam");
 }
 
@@ -732,16 +758,6 @@ fn stops_the_run_at_the_socket_calls_that_pbeam_does_not_support() {
         probes.push((
             "socket_recvfrom_errqueue",
             "prim_socket:nif_recvfrom/4: the flags 8192 on a socket of the domain 2 are not supported",
-        ));
-        // ERTS on Linux runs `sendmmsg(2)` and `recvmmsg(2)`
-        // (unix_socket_syncio.c:4111-4524).
-        probes.push((
-            "socket_sendmmsg",
-            "prim_socket:nif_sendmmsg/4 is not supported: see \"NIF stubs\" in docs/erts-differences.md",
-        ));
-        probes.push((
-            "socket_recvmmsg",
-            "prim_socket:nif_recvmmsg/6 is not supported: see \"NIF stubs\" in docs/erts-differences.md",
         ));
     }
     for (probe, text) in probes {

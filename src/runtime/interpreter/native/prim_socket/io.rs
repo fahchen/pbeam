@@ -529,20 +529,351 @@ fn send_message(
     host.sendmsg(&header, flags)
 }
 
-/// Run `prim_socket:nif_sendmmsg/4` on a host without `sendmmsg(2)`, as
-/// the stub of `essio_sendmmsg` does (`unix_socket_syncio.c:4526-4537`):
-/// the exception `error:notsup`.
+/// The most messages of one `nif_sendmmsg/4` or `nif_recvmmsg/6` call,
+/// `ESOCK_MMSG_MAX` (`unix_socket_syncio.c:263`, `4137-4138`, `4376-4377`).
+#[cfg(target_os = "linux")]
+const MMSG_MAX: usize = 1024;
+
+/// Run `prim_socket:nif_sendmmsg(Socket, Msgs, Flags, Ref)`, as
+/// `nif_sendmmsg` (`prim_socket_nif.c:6691-6760`) does: `badarg` for a term
+/// that is not a socket, a `Ref` that is not a reference, `Msgs` that is
+/// not a list, or `Flags` that is not an integer;
+/// `{invalid, {integer_range, Flags}}` for an integer outside the `int`
+/// range; `badarg` for `Msgs` that is not a proper list; then the send of
+/// [`send_messages`].
+///
+/// # Errors
+///
+/// The errors of [`send_messages`].
+pub(super) fn sendmmsg(
+    scheduler: &mut Scheduler,
+    socket: &Term,
+    messages: &Term,
+    flags: &Term,
+    reference: &Term,
+) -> Result<BifResult, BeamError> {
+    let Some((key, socket)) = socket_argument(scheduler, socket) else {
+        return Ok(BifResult::badarg());
+    };
+    if !matches!(reference, Term::Reference(_)) || !messages.is_list() {
+        return Ok(BifResult::badarg());
+    }
+    let flags = match int(flags) {
+        Ok(flags) => flags,
+        Err(true) => return integer_range(scheduler, flags),
+        Err(false) => return Ok(BifResult::badarg()),
+    };
+    // `enif_get_list_length` takes only a proper list
+    // (`prim_socket_nif.c:6726-6730`).
+    let Some(messages) = messages.proper_list() else {
+        return Ok(BifResult::badarg());
+    };
+    let messages: Vec<&Term> = messages.collect();
+    send_messages(scheduler, (key, &socket), &messages, flags, reference)
+}
+
+/// Raise `error:notsup` after the checks of `nif_sendmmsg`, as the stub of
+/// `essio_sendmmsg` does on a host without `sendmmsg(2)`
+/// (`unix_socket_syncio.c:4526-4537`).
 #[cfg(not(target_os = "linux"))]
-pub(super) fn sendmmsg(_scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
+fn send_messages(
+    _scheduler: &mut Scheduler,
+    _socket: (Reference, &Mutex<SocketState>),
+    _messages: &[&Term],
+    _flags: i32,
+    _reference: &Term,
+) -> Result<BifResult, BeamError> {
     Ok(notsup())
 }
 
-/// Run `prim_socket:nif_recvmmsg/6` on a host without `recvmmsg(2)`, as
-/// the stub of `essio_recvmmsg` does (`unix_socket_syncio.c:4297-4309`):
-/// the exception `error:notsup`.
+/// Send `messages` as `essio_sendmmsg` does (`unix_socket_syncio.c:4320-4524`):
+/// `{error, closed}`; `{error, {invalid, state}}` during a connect; `badarg`
+/// for an element that is not a map; `ok` for no message; then for each of
+/// the first `ESOCK_MMSG_MAX` messages in turn `{invalid, addr}` for an
+/// `addr` that does not decode, `badarg` for an `iov` that is missing or
+/// that `enif_inspect_iovec` does not take, and `{invalid, ctrl}` for a
+/// `ctrl` that does not decode. The elements of an `iov` after the first
+/// `iov_max` are not sent. Then `ok` when the host takes each byte of each
+/// message that it sends, `{ok, [{Index, Written}]}` for the messages that
+/// it takes in part, and the results of [`send`] when it sends no message.
+/// A send counts only as a write try, and it does not release the current
+/// writer.
+///
+/// PBeam sends each message with the safe `sendmsg` of socket2: the
+/// `sendmmsg` of nix sends one list of typed control messages with each
+/// message. A nonblocking `sendmmsg(2)` sends the messages in turn until
+/// the first error, which it gives only when it sends no message
+/// (`sendmmsg(2)`), and so does this loop.
+///
+/// # Errors
+///
+/// The errors of [`send`], a native `sockaddr` (see `socket::sockaddr`),
+/// and a control message `value` that PBeam does not decode stop the run.
+#[cfg(target_os = "linux")]
+fn send_messages(
+    scheduler: &mut Scheduler,
+    (key, socket): (Reference, &Mutex<SocketState>),
+    messages: &[&Term],
+    flags: i32,
+    reference: &Term,
+) -> Result<BifResult, BeamError> {
+    let caller = scheduler.current_process().id;
+    let mut state = lock(socket);
+    if let Some(result) = write_entry(scheduler, &state, "nif_sendmmsg/4", caller)? {
+        return Ok(result);
+    }
+    if !messages
+        .iter()
+        .all(|message| matches!(message, Term::Map(_)))
+    {
+        return Ok(BifResult::badarg());
+    }
+    if messages.is_empty() {
+        return Ok(BifResult::Value(Term::static_atom("ok")));
+    }
+    let mut parts = Vec::new();
+    for &message in messages.iter().take(MMSG_MAX) {
+        let address = match message_address(scheduler, message)? {
+            Ok(address) => address,
+            Err(result) => return Ok(result),
+        };
+        let iov = field(&scheduler.atoms, message, "iov");
+        let Some((buffers, _)) = iov.and_then(iovec) else {
+            return Ok(BifResult::badarg());
+        };
+        let control = match message_control(scheduler, message, state.options.send_ctrl)? {
+            Ok(control) => control,
+            Err(result) => return Ok(result),
+        };
+        parts.push((address, buffers, control));
+    }
+    state.counters.write_tries += 1;
+    let mut written = Vec::new();
+    for (address, buffers, control) in &parts {
+        match send_message(&state, address.as_ref(), buffers, control.as_deref(), flags) {
+            Ok(sent) => written.push(sent),
+            Err(failure) if written.is_empty() => {
+                let request = (key, caller, reference);
+                return send_result(scheduler, state, Err(failure), 0, false, request);
+            }
+            Err(_) => break,
+        }
+    }
+    // Each message whose `msg_len` is not the length of its I/O vector
+    // (`unix_socket_syncio.c:4489-4501`).
+    let partial: Vec<Term> = written
+        .iter()
+        .zip(&parts)
+        .enumerate()
+        .filter(|(_, (sent, (_, buffers, _)))| {
+            **sent != buffers.iter().map(|buffer| buffer.len()).sum::<usize>()
+        })
+        .map(|(index, (sent, _))| {
+            Term::tuple(vec![
+                Term::Integer(index as i64),
+                Term::Integer(*sent as i64),
+            ])
+        })
+        .collect();
+    if partial.is_empty() {
+        return Ok(BifResult::Value(Term::static_atom("ok")));
+    }
+    Ok(BifResult::Value(Term::tuple(vec![
+        Term::static_atom("ok"),
+        Term::list_from(partial),
+    ])))
+}
+
+/// Return the `uint64` of `term` as `enif_get_uint64` gives it, `Err(true)`
+/// for another integer, and `Err(false)` for a term that is not an integer.
+fn uint64(term: &Term) -> Result<u64, bool> {
+    match term {
+        Term::Integer(value) => u64::try_from(*value).map_err(|_| true),
+        Term::BigInt(value) => u64::try_from(value.as_ref()).map_err(|_| true),
+        _ => Err(false),
+    }
+}
+
+/// Run `prim_socket:nif_recvmmsg(Socket, VLen, BufSz, CtrlSz, Flags, Ref)`,
+/// as `nif_recvmmsg` does (`prim_socket_nif.c:7447-7540`): `badarg` for a
+/// term that is not a socket, a `Ref` that is neither a reference nor
+/// `zero`, or a `VLen`, `BufSz`, `CtrlSz`, or `Flags` that is not an
+/// integer; `{invalid, {integer_range, Value}}` for the first of them
+/// outside the `uint64` or `int` range, and for a `VLen` of 0 or above the
+/// `unsigned int` range; then the receive of [`receive_messages`].
+///
+/// # Errors
+///
+/// A `BufSz` or `CtrlSz` above the `ssize_t` range stops the run: ERTS then
+/// gives a term made of the integer itself (`prim_socket_nif.c:7502-7508`).
+/// The errors of [`receive_messages`].
+pub(super) fn recvmmsg(
+    scheduler: &mut Scheduler,
+    socket: &Term,
+    [count, buffer_size, control_size, flags, reference]: [&Term; 5],
+) -> Result<BifResult, BeamError> {
+    let Some((key, socket)) = socket_argument(scheduler, socket) else {
+        return Ok(BifResult::badarg());
+    };
+    let zero = match reference {
+        Term::Reference(_) => false,
+        Term::Atom(name) if scheduler.atoms.name_of(name) == "zero" => true,
+        _ => return Ok(BifResult::badarg()),
+    };
+    let lengths = [count, buffer_size, control_size];
+    let (values, flags_value) = (lengths.map(uint64), int(flags));
+    if values.contains(&Err(false)) || flags_value == Err(false) {
+        return Ok(BifResult::badarg());
+    }
+    if let Some(index) = values.iter().position(Result::is_err) {
+        return integer_range(scheduler, lengths[index]);
+    }
+    let Ok(flags) = flags_value else {
+        return integer_range(scheduler, flags);
+    };
+    let [vlen, size, control] = values.map(Result::unwrap_or_default);
+    let Some(vlen) = u32::try_from(vlen).ok().filter(|&vlen| vlen != 0) else {
+        return integer_range(scheduler, count);
+    };
+    if let Some(length) = [size, control]
+        .into_iter()
+        .find(|&length| i64::try_from(length).is_err())
+    {
+        return Err(error(format!(
+            "prim_socket:nif_recvmmsg/6: the length {length} above the ssize_t range is not supported"
+        )));
+    }
+    let caller = scheduler.current_process().id;
+    let request = ReadRequest {
+        key,
+        socket,
+        zero,
+        size,
+        flags,
+        caller,
+    };
+    receive_messages(scheduler, request, vlen, control, reference)
+}
+
+/// Raise `error:notsup` after the checks of `nif_recvmmsg`, as the stub of
+/// `essio_recvmmsg` does on a host without `recvmmsg(2)`
+/// (`unix_socket_syncio.c:4297-4309`).
 #[cfg(not(target_os = "linux"))]
-pub(super) fn recvmmsg(_scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
+fn receive_messages(
+    _scheduler: &mut Scheduler,
+    _request: ReadRequest,
+    _count: u32,
+    _control_size: u64,
+    _reference: &Term,
+) -> Result<BifResult, BeamError> {
     Ok(notsup())
+}
+
+/// Receive at most `count` messages, as `essio_recvmmsg` does
+/// (`unix_socket_syncio.c:4111-4295`): the state checks of [`recv`]; then
+/// at most `ESOCK_MMSG_MAX` messages, each into a buffer of `BufSz` bytes,
+/// or `rBufSz`, and a control buffer of `CtrlSz` bytes, or `rCtrlSz`, which
+/// give `{ok, [Msg]}` or `{select_read, [Msg]}` with each `Msg` of
+/// [`recvmsg`], counted as one read try; and the results of [`recvfrom`]
+/// after a failed first read. The end of a stream gives a message without
+/// data, as a read of length 0 does, and does not stop the receive.
+///
+/// PBeam receives each message with the safe `recvmsg` of nix: the
+/// `recvmmsg` of nix gives the control messages only as typed values, not
+/// as the bytes that `encode_cmsgs` reads. A nonblocking `recvmmsg(2)`
+/// receives the messages in turn until the first error, which it gives only
+/// when it receives no message (`recvmmsg(2)`), and so does this loop.
+///
+/// # Errors
+///
+/// A socket for which [`flagged_source_known`] is `false` and a control
+/// message that PBeam does not encode stop the run.
+#[cfg(target_os = "linux")]
+fn receive_messages(
+    scheduler: &mut Scheduler,
+    request: ReadRequest,
+    count: u32,
+    control_size: u64,
+    reference: &Term,
+) -> Result<BifResult, BeamError> {
+    let name = "nif_recvmmsg/6";
+    let ReadRequest {
+        key,
+        socket,
+        zero,
+        size,
+        flags,
+        caller,
+    } = request;
+    let mut state = lock(&socket);
+    if let Some(result) = read_entry(scheduler, &state, name, caller)? {
+        return Ok(result);
+    }
+    if !flagged_source_known(&state, flags) {
+        return Err(unknown_source(name, &state, flags));
+    }
+    let size = buffer_size(&state, size);
+    let control_size = control_buffer_size(&state, control_size);
+    state.counters.read_tries += 1;
+    let mut received = Vec::new();
+    for _ in 0..(count as usize).min(MMSG_MAX) {
+        let mut buffer = vec![0; size];
+        let mut control = vec![0; control_size];
+        match recv_message(&state, &mut buffer, &mut control, flags) {
+            Ok((read, from, message_flags)) => {
+                // With `MSG_TRUNC`, the length can pass the buffer size
+                // (`unix_socket_syncio.c:4219-4224`).
+                buffer.truncate(read);
+                received.push((buffer, control, from, message_flags));
+            }
+            // A failed read ends the buffers of `rNum` (`recv_check_fail`,
+            // unix_socket_syncio.c:10153).
+            Err(failure) if received.is_empty() => {
+                state.recv_count_done = 0;
+                return recv_fail(
+                    scheduler,
+                    state,
+                    &failure.into(),
+                    zero,
+                    key,
+                    caller,
+                    reference,
+                );
+            }
+            Err(_) => break,
+        }
+    }
+    let counters = &mut state.counters;
+    counters.read_pkg += received.len() as u64;
+    for (buffer, ..) in &received {
+        counters.read_byte += buffer.len() as u64;
+        counters.read_pkg_max = counters.read_pkg_max.max(buffer.len() as u64);
+    }
+    let mut messages = Vec::new();
+    for (buffer, control, from, message_flags) in received {
+        messages.push(message_term(
+            scheduler,
+            buffer,
+            &control,
+            from,
+            message_flags,
+        )?);
+    }
+    let messages = Term::list_from(messages);
+    // With `selectRead`, `{select_read, Msgs}` and the next read select
+    // (`unix_socket_syncio.c:4262-4268`).
+    if state.select_read && !zero {
+        let result = Term::tuple(vec![atom(scheduler, "select_read")?, messages]);
+        return Ok(recv_select(
+            scheduler, state, key, caller, reference, result,
+        ));
+    }
+    state.reader = None;
+    drop(state);
+    Ok(BifResult::Value(Term::tuple(vec![
+        Term::static_atom("ok"),
+        messages,
+    ])))
 }
 
 /// Return the exception `error:notsup` of `enif_raise_exception`.
@@ -552,36 +883,6 @@ fn notsup() -> BifResult {
         class: ExceptionClass::Error,
         reason: Term::static_atom("notsup"),
     }
-}
-
-/// Stop the run of `prim_socket:nif_sendmmsg/4` on Linux, where ERTS
-/// sends with `sendmmsg(2)` (`unix_socket_syncio.c:4320-4524`).
-///
-/// # Errors
-///
-/// Each call stops the run: PBeam does not run `sendmmsg(2)` yet.
-#[cfg(target_os = "linux")]
-pub(super) fn sendmmsg(_scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
-    Err(mmsg_unsupported("nif_sendmmsg/4"))
-}
-
-/// Stop the run of `prim_socket:nif_recvmmsg/6` on Linux, where ERTS
-/// receives with `recvmmsg(2)` (`unix_socket_syncio.c:4111-4295`).
-///
-/// # Errors
-///
-/// Each call stops the run: PBeam does not run `recvmmsg(2)` yet.
-#[cfg(target_os = "linux")]
-pub(super) fn recvmmsg(_scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
-    Err(mmsg_unsupported("nif_recvmmsg/6"))
-}
-
-/// Return the error of a function of `sendmmsg(2)` or `recvmmsg(2)`.
-#[cfg(target_os = "linux")]
-fn mmsg_unsupported(name: &str) -> BeamError {
-    error(format!(
-        "prim_socket:{name} is not supported: see \"NIF stubs\" in docs/erts-differences.md"
-    ))
 }
 
 /// The checked arguments of `nif_recv/4` and `nif_recvfrom/4`.

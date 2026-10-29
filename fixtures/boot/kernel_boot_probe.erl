@@ -4,7 +4,7 @@
 -behaviour(supervisor).
 -export([main/0, main/1, lookup/0, gethost/0, supports/0, socket/0, sockopt/0, socket_select/0, socket_io/0,
          socket_dgram/0,         socket_acceptors/0, socket_connect_invalid/0, socket_recvfrom_flags/0, socket_recvfrom_local_flags/0,
-         socket_recvfrom_errqueue/0, socket_sendv/0, socket_msg/0, socket_sendmmsg/0, socket_recvmmsg/0, socket_backend_tcp/0, socket_backend_udp/0, sockopt_otp/0, sockopt_select_read/0, sockopt_host/0, sockopt_raw/0, sockopt_pkt/0, start/2, stop/1, init/1]).
+         socket_recvfrom_errqueue/0, socket_sendv/0, socket_msg/0, socket_mmsg/0, socket_backend_tcp/0, socket_backend_udp/0, sockopt_otp/0, sockopt_select_read/0, sockopt_host/0, sockopt_raw/0, sockopt_pkt/0, start/2, stop/1, init/1]).
 
 %% `erl -noshell -boot start_clean -pa fixtures/boot -s kernel_boot_probe
 %% main -kernel logger_level warning` runs main/0 in the boot process of init after the boot script
@@ -437,9 +437,8 @@ socket_recvfrom_flags() ->
     erlang:display({socket_recvfrom_flags, Udp, Inet6, Stream, Counters}),
     init:stop().
 
-%% `-s kernel_boot_probe socket_msg` runs socket:sendmsg/2,3,4,
-%% socket:recvmsg/1,2,3,4,5, socket:sendmmsg/4, and socket:recvmmsg/6 on
-%% inet and inet6 datagram sockets and an inet stream socket, with the
+%% `-s kernel_boot_probe socket_msg` runs socket:sendmsg/2,3,4 and
+%% socket:recvmsg/1,2,3,4,5 on inet and inet6 datagram sockets and an inet stream socket, with the
 %% control messages of the options recvtos, recvttl, pktinfo, timestamp,
 %% recvtclass, recvhoplimit, and recvpktinfo. The source address shows as
 %% whether it is the address of the sender, and the time of a timestamp as
@@ -510,31 +509,101 @@ socket_msg() ->
               socket:recvmsg(A, 0, 0, [], 0)],
     Keys = [read_byte, read_pkg, read_pkg_max, read_fails, write_pkg, write_byte, write_fails],
     Counters = [sorted(maps:with(Keys, maps:get(counters, socket:info(S)))) || S <- [U1, U2, A, C]],
+    erlang:display({socket_msg, Plain, Opts, Ctrl, Inet6, Stream, Counters}),
+    init:stop().
+
+%% `-s kernel_boot_probe socket_mmsg` runs socket:sendmmsg/4 and
+%% socket:recvmmsg/6, and prim_socket:sendmmsg/4 and recvmmsg/6 for the
+%% argument checks, which come before the `error:notsup` of macOS. On Linux
+%% it sends and receives on inet datagram sockets with control messages,
+%% sends no message, fails at the first and at a later message, receives
+%% with a select, with `zero`, with `{otp, select_read}`, and with the flags
+%% peek and trunc, and it sends a partial message, receives parts of a
+%% stream, and receives at the end of a stream.
+socket_mmsg() ->
+    Loopback = #{family => inet, addr => {127, 0, 0, 1}, port => 0},
+    {ok, U1} = socket:open(inet, dgram, udp),
+    {ok, U2} = socket:open(inet, dgram, udp),
+    ok = socket:bind(U1, Loopback),
+    ok = socket:bind(U2, Loopback),
+    {ok, A1} = socket:sockname(U1),
+    {ok, A2} = socket:sockname(U2),
+    {'$socket', R1} = U1,
+    {'$socket', R2} = U2,
+    Raised = fun(F) -> try F() catch Class:Reason -> {Class, Reason} end end,
+    Ref = make_ref(),
+    Checks = [Raised(fun() -> prim_socket:sendmmsg(R1, [], [], notref) end),
+              Raised(fun() -> prim_socket:recvmmsg(R2, 1, 0, 0, [], notref) end)
+              | [Raised(fun() -> prim_socket:recvmmsg(R2, V, B, C, [], Ref) end)
+                 || {V, B, C} <- [{0, 0, 0}, {1 bsl 32, 0, 0}, {-1, 0, 0}, {-1, a, 0}, {1, -1, 0}, {1, 0, -1}]]],
     Mmsg = case os:type() of
                {unix, darwin} ->
-                   Raised = fun(F) -> try F() catch Class:Reason -> {Class, Reason} end end,
                    [Raised(fun() -> socket:sendmmsg(U1, [#{addr => A2, iov => [<<"m">>]}], [], infinity) end),
                     Raised(fun() -> socket:recvmmsg(U2, 1, 0, 0, [], infinity) end)];
-               _ -> skipped
+               _ ->
+                   socket_mmsg_linux(U1, U2, A1, A2, Loopback)
            end,
-    erlang:display({socket_msg, Plain, Opts, Ctrl, Inet6, Stream, Counters, Mmsg}),
+    erlang:display({socket_mmsg, Checks, Mmsg}),
     init:stop().
 
-%% `-s kernel_boot_probe socket_sendmmsg` and `socket_recvmmsg` run
-%% socket:sendmmsg/4 and socket:recvmmsg/6 on an inet datagram socket,
-%% which ERTS on Linux runs with sendmmsg(2) and recvmmsg(2).
-socket_sendmmsg() ->
-    {ok, U} = socket:open(inet, dgram, udp),
-    ok = socket:bind(U, #{family => inet, addr => {127, 0, 0, 1}, port => 0}),
-    {ok, A} = socket:sockname(U),
-    erlang:display({socket_sendmmsg, socket:sendmmsg(U, [#{addr => A, iov => [<<"m">>]}], [], infinity)}),
-    init:stop().
+socket_mmsg_linux(U1, U2, A1, A2, Loopback) ->
+    Raised = fun(F) -> try F() catch Class:Reason -> {Class, Reason} end end,
+    Msg = fun(#{addr := Addr} = M) -> sorted(M#{addr := Addr =:= A1}); (M) -> sorted(M) end,
+    Msgs = fun({Tag, Ms}) when is_list(Ms) -> {Tag, [Msg(M) || M <- Ms]}; (Other) -> Other end,
+    Big = <<0:70000/unit:8>>,
+    Send = fun(Ms) -> socket:sendmmsg(U1, [M#{addr => A2} || M <- Ms], [], infinity) end,
+    Dgram = [Send([]), socket:setopt(U2, ip, recvtos, true),
+             Send([#{iov => [<<"a">>]}, #{iov => [<<"b">>, <<>>, <<"c">>], ctrl => [#{level => ip, type => tos, value => 16}]}]),
+             Msgs(socket:recvmmsg(U2, 4, 0, 0, [], 1000)), socket:setopt(U2, ip, recvtos, false),
+             Send([#{iov => [Big]}]), Send([#{iov => [<<"d">>]}, #{iov => [Big]}, #{iov => [<<"e">>]}]),
+             Msgs(socket:recvmmsg(U2, 4, 0, 0, [], 1000)),
+             Raised(fun() -> Send([#{iov => [<<"f">>]}, #{}]) end),
+             Raised(fun() -> Send([#{iov => [<<"g">>], ctrl => [#{level => ip, type => tos, data => 1.5}]}]) end),
+             Send([#{iov => [<<"hello">>]}]), Msgs(socket:recvmmsg(U2, 2, 0, 0, [peek], 1000)),
+             Msgs(socket:recvmmsg(U2, 1, 2, 0, [trunc], 1000)), socket:recvmmsg(U2, 1, 0, 0, [], 0)],
+    {select, {select_info, recvmmsg, H1}} = socket:recvmmsg(U2, 2, 0, 0, [], nowait),
+    ok = Send([#{iov => [<<"i">>]}]),
+    Select = [receive {'$socket', U2, select, H1} -> selected after 1000 -> none end,
+              Msgs(socket:recvmmsg(U2, 2, 0, 0, [], nowait)),
+              Send([#{iov => [<<"j">>]}]), Msgs(socket:recvmmsg(U2, 1, 0, 0, [peek], 1000)),
+              socket:setopt(U2, otp, select_read, true),
+              case socket:recvmmsg(U2, 2, 0, 0, [], nowait) of
+                  {select_read, {Info2, Ms2}} -> {select_read, socket:cancel(U2, Info2), Msgs({ok, Ms2})};
+                  Other2 -> Other2
+              end, socket:setopt(U2, otp, select_read, false)],
+    {ok, L} = socket:open(inet, stream, tcp),
+    ok = socket:bind(L, Loopback),
+    ok = socket:listen(L),
+    {ok, Addr} = socket:sockname(L),
+    {ok, C} = socket:open(inet, stream, tcp),
+    ok = socket:connect(C, Addr),
+    {ok, A} = socket:accept(L),
+    Huge = <<0:(64 bsl 20)/unit:8>>,
+    Partial = case socket:sendmmsg(C, [#{iov => [<<"st">>]}, #{iov => [<<"ream">>]}, #{iov => [Huge]}], [], infinity) of
+                  {ok, [Rest]} -> {ok, 0 < iolist_size(Rest), iolist_size(Rest) < byte_size(Huge)};
+                  Other3 -> Other3
+              end,
+    Parts = sorted(socket:recvmmsg(A, 3, 2, 0, [], 1000)),
+    Fill = fun F() ->
+                   case socket:sendmmsg(C, [#{iov => [<<0:65536/unit:8>>]}], [], nowait) of
+                       {select, {select_info, sendmmsg, H}} -> H;
+                       _ -> F()
+                   end
+           end,
+    H2 = Fill(),
+    drain(A),
+    Stream = [receive {'$socket', C, select, H2} -> selected after 1000 -> none end,
+              socket:shutdown(C, write), sorted(socket:recvmmsg(A, 2, 0, 0, [], 1000))],
+    Keys = [read_byte, read_pkg, read_pkg_max, read_fails, read_tries, write_pkg, write_byte, write_fails, write_tries],
+    Counters = [sorted(maps:with(Keys, maps:get(counters, socket:info(S)))) || S <- [U1, U2]],
+    [Dgram, Select, Partial, Parts, Stream, Counters].
 
-socket_recvmmsg() ->
-    {ok, U} = socket:open(inet, dgram, udp),
-    ok = socket:bind(U, #{family => inet, addr => {127, 0, 0, 1}, port => 0}),
-    erlang:display({socket_recvmmsg, socket:recvmmsg(U, 1, 0, 0, [], 0)}),
-    init:stop().
+%% Read the data of the stream socket `S` until no data comes in 200 ms.
+drain(S) ->
+    case socket:recv(S, 0, [], 200) of
+        {ok, _} -> drain(S);
+        {error, _} -> ok
+    end.
 
 %% Return `Term` with each map as the sorted list of its pairs: the order of
 %% the atom keys of a map follows the atom index, which differs between
