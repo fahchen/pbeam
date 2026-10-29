@@ -19,7 +19,7 @@ use crate::term::ProcessId;
 mod atomics;
 mod binary;
 mod chksum;
-mod erlang;
+pub(in crate::runtime) mod erlang;
 mod erts_internal;
 mod ets;
 mod file;
@@ -1547,10 +1547,11 @@ pub(crate) fn import_kind(module: &str, name: &str, arity: u32) -> ImportKind {
 mod tests;
 
 /// Return the extra reductions of a `process_info` item: `floor(Links / 4)`
-/// for `links` (`erl_bif_info.c:1777`), `floor(Messages / 4)` for `memory`
-/// (`erl_bif_info.c:2066-2067`) and for `total_heap_size` of a process with
-/// the message queue on the heap (`erl_bif_info.c:2032-2042`), and 0 for
-/// another item.
+/// for `links` (`erl_bif_info.c:1777`), `floor(Messages / 4)` for `messages`
+/// (`erl_bif_info.c:1735`), for `memory` (`erl_bif_info.c:2066-2067`), and
+/// for `total_heap_size` of a process with the message queue on the heap
+/// (`erl_bif_info.c:2032-2042`), `floor(Entries / 4)` for `dictionary`
+/// (`erl_bif_info.c:1969`), and 0 for another item.
 pub(crate) fn item_reductions(
     item: &Term,
     value: &Term,
@@ -1563,6 +1564,13 @@ pub(crate) fn item_reductions(
             .and_then(|elements| elements.get(1))
             .and_then(|links| links.proper_list())
             .map(|links| links.count())
+            .unwrap_or(0),
+        Term::Atom(_) if item == &Term::static_atom("messages") => messages,
+        Term::Atom(_) if item == &Term::static_atom("dictionary") => value
+            .tuple_elements()
+            .and_then(|elements| elements.get(1))
+            .and_then(|dictionary| dictionary.proper_list())
+            .map(|dictionary| dictionary.count())
             .unwrap_or(0),
         Term::Atom(_) if item == &Term::static_atom("memory") => messages,
         Term::Atom(_)

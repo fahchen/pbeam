@@ -138,14 +138,16 @@ fn compares_a_partially_bound_key_as_cmp_partly_bound() {
         cmp(&pair, &tuple(vec![tail, Term::Integer(6)])),
         Ordering::Less
     );
-    let error = Term::Reference(Reference(1).pid_reference());
-    assert!(
+    // An alias reference compares by its three reference numbers, so a
+    // partially bound alias key has an order (`src/term/order.rs`).
+    assert_eq!(
         cmp_partly_bound(
             &atoms,
-            &error,
+            &Term::Reference(Reference(1).pid_reference()),
             &Term::Reference(Reference(2).pid_reference())
         )
-        .is_err()
+        .unwrap(),
+        Ordering::Less
     );
 }
 
@@ -180,7 +182,9 @@ fn orders_the_partially_bound_keys_as_partly_bound_can_match() {
     ));
     let tail = Term::cons(Term::Integer(1), var.clone());
     assert!(!greater(&tail, &tail));
-    assert!(!lesser(
+    // An alias reference compares by its three reference numbers
+    // (`src/term/order.rs`), so the alias 1 is less than the alias 2.
+    assert!(lesser(
         &Term::Reference(Reference(1).pid_reference()),
         &Term::Reference(Reference(2).pid_reference())
     ));

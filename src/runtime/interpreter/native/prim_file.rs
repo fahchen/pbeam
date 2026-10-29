@@ -27,6 +27,7 @@ use std::{
     ffi::{CStr, c_int},
     fs::File,
     io::{IoSlice, SeekFrom},
+    os::fd::AsRawFd,
 };
 
 /// The functions of the ERTS `prim_file` NIF library, as `(name, arity)` in
@@ -85,6 +86,20 @@ pub(super) const FUNCTIONS: [(&str, u32); 33] = [
 /// ```
 pub(super) const BINDINGS: &[Binding] = &[
     Binding {
+        name: "advise_nif",
+        arity: 4,
+        job: Job::IoBound,
+        run: |scheduler, arguments| {
+            advise_nif(
+                scheduler,
+                &arguments[0],
+                &arguments[1],
+                &arguments[2],
+                &arguments[3],
+            )
+        },
+    },
+    Binding {
         name: "altname_nif",
         arity: 1,
         job: Job::IoBound,
@@ -113,6 +128,12 @@ pub(super) const BINDINGS: &[Binding] = &[
         arity: 0,
         job: Job::IoBound,
         run: |_, _| get_cwd_nif(),
+    },
+    Binding {
+        name: "get_handle_nif",
+        arity: 1,
+        job: Job::Normal,
+        run: |scheduler, arguments| get_handle_nif(scheduler, &arguments[0]),
     },
     Binding {
         name: "list_dir_nif",
@@ -621,6 +642,99 @@ fn seek_nif(
             position.map(|position| Term::Integer(position.cast_signed())),
         )
     })
+}
+
+/// Run `prim_file:advise_nif(Fd, Offset, Length, Advise)`, as the ERTS NIF
+/// `advise_nif` (`prim_file_nif.c:854-889`) does after
+/// [`file_handle_wrapper`]: an `Offset` or a `Length` that is not a number
+/// raises `error:badarg`; a float, an integer outside the `Sint64` range, or
+/// a negative integer gives `{error, einval}`; then an `Advise` that is not
+/// `normal`, `random`, `sequential`, `will_need`, `dont_need`, or `no_reuse`
+/// gives `{error, einval}` (`prim_file_nif.c:859-884`). Else the result is
+/// `ok` without a host call, as
+/// `efile_advise` does without `HAVE_POSIX_FADVISE`
+/// (`nifs/unix/unix_prim_file.c:570-597`): the advise is only a
+/// recommendation to the kernel.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // ok
+/// let result = advise_nif(&mut scheduler, &fd, &Term::Integer(0), &Term::Integer(0), &Term::static_atom("sequential"))?;
+/// // {error, einval}
+/// let result = advise_nif(&mut scheduler, &fd, &Term::Integer(0), &Term::Integer(0), &Term::static_atom("never"))?;
+/// ```
+///
+/// # Errors
+///
+/// A new result atom in a full atom table gives the error of
+/// `AtomTable::put`.
+fn advise_nif(
+    scheduler: &mut Scheduler,
+    fd: &Term,
+    offset: &Term,
+    length: &Term,
+    advise: &Term,
+) -> Result<BifResult, BeamError> {
+    let numbers = match (offset, length) {
+        (Term::Integer(offset), Term::Integer(length)) if *offset >= 0 && *length >= 0 => Ok(()),
+        (
+            Term::Integer(_) | Term::BigInt(_) | Term::Float(_),
+            Term::Integer(_) | Term::BigInt(_) | Term::Float(_),
+        ) => Err(Reject::Einval),
+        _ => Err(Reject::Badarg),
+    };
+    // `advise_nif_impl` reads the two numbers first and the advise after
+    // them (`prim_file_nif.c:859-884`), so a bad advise of a call with a
+    // bad number gives `einval` for the number.
+    let numbers = numbers.and_then(|()| match advise {
+        Term::Atom(advise)
+            if matches!(
+                scheduler.atoms.name_of(advise),
+                "normal" | "random" | "sequential" | "will_need" | "dont_need" | "no_reuse"
+            ) =>
+        {
+            Ok(())
+        }
+        _ => Err(Reject::Einval),
+    });
+    file_handle_wrapper(
+        scheduler,
+        fd,
+        numbers,
+        |_, ()| (),
+        |_, ()| Ok(BifResult::Value(Term::static_atom("ok"))),
+    )
+}
+
+/// Run `prim_file:get_handle_nif(Fd)`, as the ERTS NIF `get_handle_nif`
+/// (`prim_file_nif.c:989-994`) does after [`file_handle_wrapper`]: the
+/// result is the host file descriptor in the native-endian bytes of a C
+/// `int`, as `efile_get_handle` (`nifs/unix/unix_prim_file.c:103-113`)
+/// makes it. `prim_inet:sendfile/4` reads it. ERTS has no dirty job flag
+/// on this function (`prim_file_nif.c:215`), so it runs on the scheduler
+/// thread, and the resource state changes there as
+/// [`file_handle_wrapper`] changes it.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // <<3, 0, 0, 0>> when the host file descriptor of the resource is 3
+/// let result = get_handle_nif(&mut scheduler, &fd)?;
+/// ```
+fn get_handle_nif(scheduler: &mut Scheduler, fd: &Term) -> Result<BifResult, BeamError> {
+    let Term::Reference(reference) = fd else {
+        return Ok(BifResult::badarg());
+    };
+    let Some(data) = lock(&scheduler.node().resources.kind::<Files>()).get(*reference) else {
+        return Ok(BifResult::badarg());
+    };
+    let Some(file) = data.acquire() else {
+        return einval();
+    };
+    let handle = file.as_raw_fd().to_ne_bytes();
+    data.release(file);
+    Ok(BifResult::Value(Term::binary(handle.to_vec())))
 }
 
 /// Run `prim_file:read_info_nif(Path, FollowLinks)`, as the ERTS NIF

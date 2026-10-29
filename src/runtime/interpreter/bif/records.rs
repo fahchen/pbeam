@@ -275,9 +275,7 @@ pub(super) fn update(
         .iter()
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
-    pairs.sort_by(|(left, _), (right, _)| {
-        flatmap_order(left, right, atoms).unwrap_or(std::cmp::Ordering::Equal)
-    });
+    pairs.sort_by(|(left, _), (right, _)| flatmap_order(left, right, atoms));
     // One merge walk over the sorted keys and the sorted fields
     // (`erl_record.c:896-916`): a key that is not the next field stays and
     // becomes the `badfield` key.

@@ -916,7 +916,14 @@ impl Mailbox {
     }
 
     /// Return the messages in queue order, in all parts.
-    #[cfg(test)]
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let mut mailbox = Mailbox::default();
+    /// mailbox.push(Term::Integer(1));
+    /// assert_eq!(mailbox.messages(), vec![Term::Integer(1)]);
+    /// ```
     pub(super) fn messages(&self) -> Vec<Term> {
         let mut messages = Vec::new();
         let mut node = self.first;

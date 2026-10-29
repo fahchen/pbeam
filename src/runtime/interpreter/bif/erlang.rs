@@ -5278,12 +5278,20 @@ pub(super) fn process_info(
                     }
                     _ => None,
                 };
-                let (caller, atoms) = scheduler.current_process_and_atoms();
+                let (caller, code, atoms) = scheduler.current_process_code_and_atoms();
                 let messages = caller.mailbox.message_count();
+                let request = ProcessInfoRequest {
+                    code,
+                    atoms,
+                    current,
+                    messages,
+                    caller: true,
+                    registered_name: registered,
+                };
                 let info = match stacktrace {
                     Some(stacktrace) => stacktrace,
-                    None => caller
-                        .info(atoms, item, current, messages, registered.as_ref())?
+                    None => request
+                        .item(caller, item)?
                         .ok_or_else(|| unsupported(atoms))?,
                 };
                 let off_heap = caller.off_heap_message_queue;
@@ -5333,8 +5341,17 @@ pub(super) fn process_info(
     };
     let messages = target.mailbox.message_count();
     let registered = scheduler.registered_name_of(*id);
-    let values = target.info(&scheduler.atoms, item, 0, messages, registered.as_ref());
-    let info = values?.ok_or_else(|| unsupported(&scheduler.atoms))?;
+    let request = ProcessInfoRequest {
+        code: &scheduler.code,
+        atoms: &scheduler.atoms,
+        current: 0,
+        messages,
+        caller: false,
+        registered_name: registered,
+    };
+    let info = request
+        .item(target, item)?
+        .ok_or_else(|| unsupported(&scheduler.atoms))?;
     // A queued reply is built in the target process, but ERTS discards
     // the cost that `handle_process_info` returns
     // (`erl_proc_sig_queue.c:6796,7405,5425-5428`), so only the direct
@@ -5852,11 +5869,8 @@ struct ProcessInfoValues {
 ///
 /// A pid that no process has gives `undefined`. A read of another process
 /// needs the `process` capability with `inspect`, as for
-/// `erlang:process_info/2`. The caller first handles its own signals, and
-/// traps when the read uses up its reductions or a signal can end it, as
-/// `erlang:process_info/2` does. A read of another process with signals
-/// gives its current state without the ERTS process-info request, because
-/// `ProcessState::info` reads one atom item.
+/// `erlang:process_info/2`, and a live process of another scheduler is
+/// unsupported, because the read needs the state of its scheduler.
 ///
 /// # Examples
 ///
@@ -6028,23 +6042,127 @@ fn process_info_values(
     })
 }
 
+/// One `erlang:process_info/2` read: the tables of the scheduler that
+/// reads, the counts of the process, whether the caller reads itself, and
+/// its registered name. The signal path of another scheduler builds the
+/// request with `caller` false.
+pub(in crate::runtime) struct ProcessInfoRequest<'a> {
+    /// The code table of the scheduler, for the frames of the process.
+    pub(in crate::runtime) code: &'a CodeTable,
+    /// The atom table of the scheduler.
+    pub(in crate::runtime) atoms: &'a AtomTable,
+    /// The reductions of the current time slice of the process.
+    pub(in crate::runtime) current: u64,
+    /// The number of messages in the queue of the process.
+    pub(in crate::runtime) messages: usize,
+    /// True when the caller reads its own process.
+    pub(in crate::runtime) caller: bool,
+    /// The registered name of the process.
+    pub(in crate::runtime) registered_name: Option<Atom>,
+}
+
+impl ProcessInfoRequest<'_> {
+    /// Read `item` of `process` from the same item values that
+    /// `erlang:process_info/1` reports, so both arities agree. Return
+    /// `None` when the item is none that PBeam reads.
+    pub(in crate::runtime) fn item(
+        &self,
+        process: &ProcessState,
+        item: &Term,
+    ) -> Result<Option<Term>, BeamError> {
+        let values = process_info_values(
+            self.code,
+            process,
+            self.current,
+            self.messages,
+            self.caller,
+            self.registered_name.clone(),
+        )?;
+        let Term::Atom(name) = item else {
+            return Ok(None);
+        };
+        let atoms = self.atoms;
+        let value = match atoms.name_of(name) {
+            // A process without a name gives `[]`, not a tuple
+            // (`erl_bif_info.c:1616-1625`); the list form wraps it.
+            "registered_name" => {
+                return Ok(Some(match values.registered_name {
+                    Some(registered) => Term::tuple(vec![item.clone(), Term::Atom(registered)]),
+                    None => Term::nil(),
+                }));
+            }
+            "current_function" => match values.current_function {
+                Some(mfa_names) => mfa_term(atoms, mfa_names)?,
+                None => Term::static_atom("undefined"),
+            },
+            "initial_call" => mfa_term(atoms, values.initial_call)?,
+            "status" => Term::static_atom(values.status),
+            "message_queue_len" => Term::Integer(values.message_queue_len),
+            "links" => Term::list_from(values.links),
+            "dictionary" => Term::list_from(
+                values
+                    .dictionary
+                    .iter()
+                    .map(|(key, value)| Term::tuple(vec![key.clone(), value.clone()])),
+            ),
+            "trap_exit" => Term::static_atom(if values.trap_exit { "true" } else { "false" }),
+            "error_handler" => match &values.error_handler {
+                Some(handler) => Term::Atom(atoms.put(handler)?),
+                None => Term::static_atom("error_handler"),
+            },
+            "priority" => Term::static_atom(values.priority),
+            "group_leader" => Term::Pid(values.group_leader),
+            "total_heap_size" => Term::Integer(values.total_heap_size),
+            "heap_size" => Term::Integer(values.heap_size),
+            "stack_size" => Term::Integer(values.stack_size),
+            "reductions" => Term::Integer(values.reductions),
+            "garbage_collection" => garbage_collection_list(atoms, values.heap_flags)?,
+            "memory" => Term::Integer(
+                i64::try_from(std::mem::size_of::<ProcessState>() + process.allocated_bytes())
+                    .map_err(|_| error("the process memory exceeds the PBeam integer range"))?,
+            ),
+            // The list holds the messages that the count holds: for a
+            // request signal, the messages before it, as ERTS answers with
+            // the queue up to the request (erl_bif_info.c:1690-1736).
+            "messages" => {
+                Term::list_from(process.mailbox.messages().into_iter().take(self.messages))
+            }
+            "min_heap_size" => Term::Integer(values.heap_flags.min_heap_size),
+            "min_bin_vheap_size" => Term::Integer(values.heap_flags.min_bin_vheap_size),
+            "fullsweep_after" => Term::Integer(i64::from(values.heap_flags.fullsweep_after)),
+            "max_heap_size" => max_heap_size_map(
+                atoms,
+                values.heap_flags.max_heap_size,
+                values.heap_flags.max_heap_flags,
+            ),
+            _ => return Ok(None),
+        };
+        Ok(Some(Term::tuple(vec![item.clone(), value])))
+    }
+}
+
+/// Build the `{Module, Function, Arity}` tuple of an MFA item. The names
+/// of a loaded module come from its tables, and an undefined start MFA
+/// holds atoms. A name that the atom table does not hold is a runtime
+/// error.
+fn mfa_term(atoms: &AtomTable, mfa: MfaNames) -> Result<Term, BeamError> {
+    let (module, function, arity) = match mfa {
+        MfaNames::Names(module, function, arity) => (
+            Term::Atom(atoms.put(&module)?),
+            Term::Atom(atoms.put(&function)?),
+            arity,
+        ),
+        MfaNames::Atoms(module, function, arity) => {
+            (Term::Atom(module), Term::Atom(function), arity)
+        }
+    };
+    let arity =
+        i64::try_from(arity).map_err(|_| error("the arity exceeds the PBeam integer range"))?;
+    Ok(Term::tuple(vec![module, function, Term::Integer(arity)]))
+}
+
 /// Build the `erlang:process_info/1` list from the item values.
 fn process_info_term(atoms: &AtomTable, values: ProcessInfoValues) -> Result<Term, BeamError> {
-    let mfa = |atoms: &AtomTable, mfa: MfaNames| -> Result<Term, BeamError> {
-        let (module, function, arity) = match mfa {
-            MfaNames::Names(module, function, arity) => (
-                Term::Atom(atoms.put(&module)?),
-                Term::Atom(atoms.put(&function)?),
-                arity,
-            ),
-            MfaNames::Atoms(module, function, arity) => {
-                (Term::Atom(module), Term::Atom(function), arity)
-            }
-        };
-        let arity =
-            i64::try_from(arity).map_err(|_| error("the arity exceeds the PBeam integer range"))?;
-        Ok(Term::tuple(vec![module, function, Term::Integer(arity)]))
-    };
     let mut items = Vec::with_capacity(PROCESS_INFO_1_KEYS.len());
     if let Some(name) = values.registered_name {
         items.push(Term::tuple(vec![
@@ -6053,7 +6171,7 @@ fn process_info_term(atoms: &AtomTable, values: ProcessInfoValues) -> Result<Ter
         ]));
     }
     let current_function = match values.current_function {
-        Some(mfa_names) => mfa(atoms, mfa_names)?,
+        Some(mfa_names) => mfa_term(atoms, mfa_names)?,
         None => Term::static_atom("undefined"),
     };
     items.push(Term::tuple(vec![
@@ -6062,7 +6180,7 @@ fn process_info_term(atoms: &AtomTable, values: ProcessInfoValues) -> Result<Ter
     ]));
     items.push(Term::tuple(vec![
         Term::static_atom("initial_call"),
-        mfa(atoms, values.initial_call)?,
+        mfa_term(atoms, values.initial_call)?,
     ]));
     items.push(Term::tuple(vec![
         Term::static_atom("status"),

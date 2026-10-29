@@ -571,3 +571,118 @@ fn changes_names_directories_and_links_with_the_errors_of_erts() {
     );
     std::fs::remove_dir_all(&directory).unwrap();
 }
+
+#[test]
+fn advises_a_file_and_gives_its_host_handle_as_erts() {
+    // `advise_nif_impl` reads the two numbers, then the advise
+    // (prim_file_nif.c:859-884), so a call with a bad number and a bad
+    // advise gives einval for the number. `efile_get_handle` gives the host
+    // file descriptor in the native-endian bytes of a C `int`
+    // (nifs/unix/unix_prim_file.c:103-113). The pinned ERTS gives
+    // `[ok, {error, einval}, ok, {error, einval}, {error, badarg}]` for a
+    // file that it opened for read (measured).
+    let mut scheduler = scheduler();
+    let directory = scratch("advise");
+    let file = directory.join("file");
+    std::fs::write(&file, b"abc").unwrap();
+    let fd = open(&mut scheduler, &file, &["read"]);
+    let sequential = Term::Atom(scheduler.atoms.put("sequential").unwrap());
+    let never = Term::Atom(scheduler.atoms.put("never").unwrap());
+    let zero = Term::Integer(0);
+    let einval = "Value(Tuple([Atom(\"error\"), Atom(\"einval\")]))";
+    assert_eq!(
+        text(&mut scheduler, |s| advise_nif(
+            s,
+            &fd,
+            &zero,
+            &zero,
+            &sequential
+        )),
+        "Value(Atom(\"ok\"))"
+    );
+    // An advice that ERTS does not know gives einval.
+    assert_eq!(
+        text(&mut scheduler, |s| advise_nif(s, &fd, &zero, &zero, &never)),
+        einval
+    );
+    for offset in [
+        Term::Integer(-1),
+        Term::Float(0.0),
+        Term::BigInt(std::sync::Arc::new(9223372036854775808u64.into())),
+    ] {
+        assert_eq!(
+            text(&mut scheduler, |s| advise_nif(
+                s,
+                &fd,
+                &offset,
+                &zero,
+                &sequential
+            )),
+            einval
+        );
+    }
+    // A value that is not a number raises badarg.
+    assert_eq!(
+        text(&mut scheduler, |s| advise_nif(
+            s,
+            &fd,
+            &Term::binary(b"x".to_vec()),
+            &zero,
+            &sequential
+        )),
+        BADARG
+    );
+    // The handle is the host file descriptor of the resource, in the
+    // native-endian bytes of a C `int`, and two reads give the same bytes.
+    let first = text(&mut scheduler, |s| get_handle_nif(s, &fd));
+    assert_eq!(first, text(&mut scheduler, |s| get_handle_nif(s, &fd)));
+    let bytes = first
+        .strip_prefix("Value(Binary([")
+        .and_then(|rest| rest.strip_suffix("]))"))
+        .unwrap();
+    let bytes: Vec<u8> = bytes
+        .split(", ")
+        .map(|byte| byte.parse().unwrap())
+        .collect();
+    assert_eq!(bytes.len(), std::mem::size_of::<c_int>());
+    let mut handle = [0u8; std::mem::size_of::<c_int>()];
+    handle.copy_from_slice(&bytes);
+    assert!(c_int::from_ne_bytes(handle) >= 0);
+    // A closed resource gives einval, and a term that is not a file
+    // resource raises badarg.
+    assert_eq!(
+        text(&mut scheduler, |s| close_nif(s, &fd)),
+        "Value(Atom(\"ok\"))"
+    );
+    assert_eq!(
+        text(&mut scheduler, |s| advise_nif(
+            s,
+            &fd,
+            &zero,
+            &zero,
+            &sequential
+        )),
+        einval
+    );
+    let binding = BINDINGS
+        .iter()
+        .find(|binding| binding.name == "get_handle_nif")
+        .unwrap();
+    assert_eq!(binding.job, crate::runtime::Job::Normal);
+    let arguments = [fd.clone()];
+    assert_eq!(
+        text(&mut scheduler, |s| (binding.run)(s, &arguments)),
+        einval
+    );
+    let arguments = [Term::static_atom("ok")];
+    assert_eq!(
+        text(&mut scheduler, |s| (binding.run)(s, &arguments)),
+        BADARG
+    );
+    // ERTS 29.1.1: `prim_file:get_handle_nif(make_ref())` raises badarg, as
+    // `file_handle_wrapper` does for a reference that is not a file
+    // resource (prim_file_nif.c:323-325).
+    let other = Term::Reference(scheduler.make_ref().unwrap());
+    assert_eq!(text(&mut scheduler, |s| get_handle_nif(s, &other)), BADARG);
+    std::fs::remove_dir_all(&directory).unwrap();
+}
