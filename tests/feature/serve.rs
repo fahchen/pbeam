@@ -443,9 +443,16 @@ fn gives_the_command_line_arguments_of_the_executable_to_the_release() {
     fs::create_dir_all(&temporary).unwrap();
     let output = build_one_file(&directory, &clean);
     let port = free_port();
-    let mut child = without_erl_flags(&mut Command::new(&output))
+    // The run starts through `PATH`, so `PBEAM_EXECUTABLE` must not be the
+    // bare name of the command line.
+    let path = std::env::join_paths(std::iter::once(clean.clone()).chain(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    )))
+    .unwrap();
+    let mut child = without_erl_flags(&mut Command::new("plug_hello"))
         .args(["a", "erl", "--c"])
         .current_dir(&clean)
+        .env("PATH", path)
         .env("TMPDIR", &temporary)
         .env("PORT", port.to_string())
         .stdin(Stdio::null())
@@ -470,6 +477,7 @@ fn gives_the_command_line_arguments_of_the_executable_to_the_release() {
                 b"GET /release HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
             )
         });
+    let executable = request_executable(port);
     let status = stop_with_term(child);
     stdout_reader.join().unwrap();
     stderr_reader.join().unwrap();
@@ -505,6 +513,7 @@ fn gives_the_command_line_arguments_of_the_executable_to_the_release() {
         "[\"plug_hello\", \"0.1.0\", \"start\", \"plug_hello\", \"embedded\", \
          \"plug_hello\", \"none\", \"start\", \"start_clean\"]"
     );
+    assert_eq!(executable.unwrap(), executable_body(&output));
     fs::remove_dir_all(&directory).unwrap();
 }
 
@@ -558,7 +567,9 @@ fn serve_one_file() -> (String, String, String) {
     fs::create_dir_all(&temporary).unwrap();
     let output = build_one_file(&directory, &clean);
     let port = free_port();
-    let mut child = without_erl_flags(&mut Command::new(&output))
+    // The run starts through a relative path, which the child resolves in
+    // its working directory `clean`.
+    let mut child = without_erl_flags(&mut Command::new("./plug_hello"))
         .current_dir(&clean)
         .env("TMPDIR", &temporary)
         .env("PORT", port.to_string())
@@ -574,6 +585,7 @@ fn serve_one_file() -> (String, String, String) {
     let stderr_reader = collect(child.stderr.take().unwrap(), Arc::clone(&stderr));
     let stream = wait_for_server(&mut child, port);
     let response = stream.and_then(request);
+    let executable = request_executable(port);
     // SIGTERM reaches the boot of the extracted release, because the
     // launcher is the boot. The run removes its extraction at the exit.
     let status = stop_with_term(child);
@@ -602,6 +614,7 @@ fn serve_one_file() -> (String, String, String) {
     let (erts_status, erts_notice) = shutdown_on_erts();
     assert_eq!(status.code(), erts_status);
     assert_eq!(notice, erts_notice);
+    assert_eq!(executable.unwrap(), executable_body(&output));
     fs::remove_dir_all(&directory).unwrap();
     response.unwrap_or_else(|error| {
         let text = |bytes: &Arc<Mutex<Vec<u8>>>| {
@@ -865,6 +878,23 @@ fn request_argv(stream: TcpStream) -> Result<Response<String>, String> {
     let (status, headers, body) = exchange(stream, request)?;
     let body = String::from_utf8(body).map_err(|error| error.to_string())?;
     Ok((status, headers, body))
+}
+
+/// Send `GET /executable` to the server on `port` and return the body: the
+/// example answers it with `PBEAM_EXECUTABLE` of the release, as `inspect/1`
+/// writes it. The caller stops the server before it reads the result.
+fn request_executable(port: u16) -> Result<String, String> {
+    let stream = TcpStream::connect(("127.0.0.1", port)).map_err(|error| error.to_string())?;
+    let request = b"GET /executable HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    String::from_utf8(exchange(stream, request)?.2).map_err(|error| error.to_string())
+}
+
+/// Return the body of `GET /executable` for the executable `output`: its
+/// absolute path without symbolic links, as `inspect/1` writes the string.
+fn executable_body(output: &std::path::Path) -> String {
+    let path = fs::canonicalize(output).unwrap();
+    assert!(path.is_absolute());
+    format!("{:?}", path.to_str().unwrap())
 }
 
 /// Send the bytes of `request` and return the status line, the headers
