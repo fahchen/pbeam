@@ -1,6 +1,6 @@
 -module(port_probe).
 -export([exit_status/0, output/0, command/0, close/0, owner_exit/0, epipe/0, errors/0,
-         nul_name/0, spawn/0, options/0, sigchld_ignored/0, packet/0, packet_errors/0, eof/0, lines/0, monitor/0, fd/3, fd_steal/2, unsupported/1, terminal/0, high_fd/0, fd_closed/0, costs/1, measure/2, signals/0]).
+         nul_name/0, spawn/0, options/0, directions/0, cd_status/0, sigchld_ignored/0, packet/0, packet_errors/0, eof/0, lines/0, monitor/0, fd/3, fd_steal/2, unsupported/1, terminal/0, high_fd/0, fd_closed/0, costs/1, measure/2, signals/0]).
 
 %% Each result replaces a port with the atom port, because the port numbers
 %% of ERTS and PBeam differ.
@@ -515,25 +515,76 @@ fd_closed() ->
     Sent = port_command(Port, <<"x">>),
     Exit = receive {'EXIT', Port, Reason} -> [{'EXIT', port, Reason}] after 5000 -> [] end,
     High = catch_error(fun() -> open_port({fd, 2000000, 2000000}, [binary]) end),
-    [Idle, Sent, Exit, erlang:port_info(Port), High].
+    %% The in option keeps no write side, so a write fails with ebadf; the
+    %% out option keeps no read side (sys_drivers.c:385-401).
+    In = open_port({fd, 200, 200}, [binary, in]),
+    InSent = port_command(In, <<"x">>),
+    InExit = receive {'EXIT', In, InReason} -> InReason after 5000 -> none end,
+    Out = open_port({fd, 200, 200}, [binary, out]),
+    OutIdle = flush(),
+    OutClosed = port_close(Out),
+    [Idle, Sent, Exit, erlang:port_info(Port), High, [InSent, InExit, OutIdle, OutClosed]].
+
+%% The in and out options of open_port/2: in keeps the read side only and
+%% out the write side only (erl_bif_port.c:991-994, 1015-1016). The child
+%% setup program moves the output pipe to the child only with in and the
+%% input pipe only with out (erl_child_setup.c:315-338).
+directions() ->
+    process_flag(trap_exit, true),
+    %% in: the port sends the output of the program and its exit status.
+    In = open_port({spawn_executable, sh()},
+                   [in, binary, exit_status, {args, ["-c", "printf hi"]}]),
+    InData = receive {In, {data, Data}} -> Data after 2000 -> timeout end,
+    InStatus = receive {In, {exit_status, Status}} -> Status after 2000 -> timeout end,
+    %% in: a write to the port fails with ebadf, because the driver keeps
+    %% no write end (sys_drivers.c:1320-1329, 1145, 1177).
+    InWrite = open_port({spawn_executable, sh()},
+                        [in, binary, {args, ["-c", "sleep 1"]}]),
+    receive after 100 -> ok end,
+    InSent = port_command(InWrite, <<"x">>),
+    InExit = receive {'EXIT', InWrite, InReason} -> InReason after 2000 -> timeout end,
+    %% out: the port writes the input of the program and reads nothing;
+    %% the exit status of the child never arrives
+    %% (sys_drivers.c:746-753 with no ifd).
+    Out = open_port({spawn_executable, sh()},
+                    [out, binary, exit_status,
+                     {args, ["-c", "read Line; test \"x$Line\" = xhello"]}]),
+    OutSent = port_command(Out, <<"hello\n">>),
+    OutRead = receive {Out, Message} -> Message after 500 -> none end,
+    %% out: a write after the child exited fails with epipe
+    %% (sys_drivers.c:1180-1184).
+    receive after 500 -> ok end,
+    OutAgain = port_command(Out, <<"x">>),
+    OutExit = receive {'EXIT', Out, OutReason} -> OutReason after 2000 -> timeout end,
+    [InData, InStatus, InSent, InExit, OutSent, OutRead, OutAgain, OutExit, flush()].
+
+%% The exit status of a start that ran no program: the child setup
+%% program exits with the errno of a chdir it cannot do and of an execve
+%% that fails (erl_child_setup.c:302-306, 361-369).
+cd_status() ->
+    process_flag(trap_exit, true),
+    Missing = open_port({spawn_executable, sh()},
+                        [binary, exit_status, nouse_stdio, {args, ["-c", "printf never"]},
+                         {cd, "/pbeam_no_such_dir"}]),
+    MissingStatus = receive {Missing, {exit_status, NoDir}} -> NoDir after 2000 -> timeout end,
+    MissingExit = receive {'EXIT', Missing, MissingReason} -> MissingReason after 2000 -> timeout end,
+    File = open_port({spawn_executable, sh()}, [binary, exit_status, {cd, "/etc/hosts"}]),
+    FileStatus = receive {File, {exit_status, NotDir}} -> NotDir after 2000 -> timeout end,
+    %% The access check passes for a directory; the execve of the child
+    %% fails with eacces (sys_drivers.c:518-527, erl_child_setup.c:361-369).
+    Dir = open_port({spawn_executable, "/"}, [binary, exit_status]),
+    DirStatus = receive {Dir, {exit_status, Exec}} -> Exec after 2000 -> timeout end,
+    [MissingStatus, MissingExit, FileStatus, DirStatus, flush()].
 
 %% Each call stops the PBeam run with a runtime error.
 unsupported(line) ->
     open_port({spawn_executable, sh()}, [binary, {line, 1 bsl 31}]);
-unsupported(cd) ->
-    open_port({spawn_executable, sh()}, [binary, {cd, "/pbeam_no_such_dir"}]);
-unsupported(in) ->
-    open_port({spawn_executable, sh()}, [binary, in]);
-unsupported(out) ->
-    open_port({spawn_executable, sh()}, [binary, out]);
 unsupported(busy_limits) ->
     open_port({spawn_executable, sh()}, [binary, {busy_limits_port, {4096, 8192}}]);
 unsupported(empty_line) ->
     open_port({spawn_executable, sh()}, [binary, {line, 1 bsl 32}]);
 unsupported(fd_list) ->
     open_port({fd, 200, 200}, []);
-unsupported(exec) ->
-    open_port({spawn_executable, "/"}, [binary, exit_status]);
 unsupported(force) ->
     port_command(cat(), <<"x">>, [force]);
 unsupported(register) ->

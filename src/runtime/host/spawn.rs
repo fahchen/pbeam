@@ -10,10 +10,13 @@
 //! in one waiter thread for each child.
 
 use std::{
-    ffi::{CString, c_char, c_int, c_short},
-    fs::File,
+    ffi::{CString, OsStr, c_char, c_int, c_short},
+    fs::{self, File},
     io::{IoSlice, Write},
-    os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
+    os::{
+        fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
+        unix::ffi::OsStrExt,
+    },
     thread,
 };
 
@@ -54,6 +57,35 @@ pub(crate) struct Streams {
     pub(crate) stderr_to_stdout: bool,
 }
 
+/// Which pipe directions a port keeps: the `in` and `out` options of
+/// `open_port/2` as `read_write` holds them (`erl_bif_port.c:991-994`,
+/// `1015-1016`). `in` sets `DO_READ`, `out` sets `DO_WRITE`, and without
+/// both options the port keeps the two directions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ReadWrite {
+    /// `DO_READ`: the port reads the output of the child (`in`).
+    pub(crate) read: bool,
+    /// `DO_WRITE`: the port writes the input of the child (`out`).
+    pub(crate) write: bool,
+}
+
+impl ReadWrite {
+    /// The two directions, which `open_port/2` keeps without the `in` and
+    /// `out` options (`erl_bif_port.c:1015-1016`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(ReadWrite::both().read && ReadWrite::both().write);
+    /// ```
+    pub(crate) fn both() -> Self {
+        Self {
+            read: true,
+            write: true,
+        }
+    }
+}
+
 /// The environment and the working directory of a child: the `{env, Env}`
 /// and `{cd, Dir}` options of `open_port/2`.
 #[derive(Debug, Default)]
@@ -68,16 +100,11 @@ pub(crate) struct Setting {
 /// Why [`spawn`] did not start the program.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum SpawnError {
-    /// A pipe, the access check, or the fd limit failed with this `errno`
-    /// before the start, as `spawn_start` returns `ERL_DRV_ERROR_ERRNO`
+    /// A pipe or the access check failed with this `errno` before the
+    /// start, as `spawn_start` returns `ERL_DRV_ERROR_ERRNO`
     /// (`sys_drivers.c:484-526`). `open_port/2` raises the `erl_errno_id`
     /// atom of the value.
     Open(c_int),
-    /// `posix_spawn` failed with this `errno`: the fork or the `execve` of
-    /// the program failed. ERTS starts the port first, and the child exits
-    /// with the `errno` of the failed `execve` as its status
-    /// (`erl_child_setup.c:361-369`).
-    Start(c_int),
 }
 
 /// A program that [`spawn`] started, with the parent ends of its pipes.
@@ -87,13 +114,24 @@ pub(crate) enum SpawnError {
 /// write end of the status pipe until the child exits.
 #[derive(Debug)]
 pub(crate) struct Child {
-    /// The OS pid of the child, as `port_info/1` gives it in `os_pid`.
+    /// The OS pid of the child, as `port_info/1` gives it in `os_pid`. It
+    /// is 0 when the start failed before the program ran, where ERTS gives
+    /// the pid of the child that failed (`sys_drivers.c:1331`); row "Ports"
+    /// of `docs/erts-differences.md` records it.
     pub(crate) os_pid: libc::pid_t,
-    /// The write end of the input pipe, which is fd 0 or 3 of the child.
-    input: OwnedFd,
-    /// The read end of the output pipe, which is fd 1 or 4 of the child,
-    /// and fd 2 with `stderr_to_stdout`.
-    output: OwnedFd,
+    /// The write end of the input pipe, which is fd 0 or 3 of the child,
+    /// or `None` with the `in` option: ERTS closes the parent end after
+    /// the handshake (`sys_drivers.c:1320-1329`), and the child keeps the
+    /// standard input of the node (`erl_child_setup.c:317-321`,
+    /// `334-337`). A write returns `EBADF`, as the `writev` of the driver
+    /// on its closed fd does (`sys_drivers.c:1145`, `1177`).
+    input: Option<OwnedFd>,
+    /// The read end of the output pipe, which is fd 1 or 4 of the child
+    /// and fd 2 with `stderr_to_stdout`, or `None` with the `out` option:
+    /// ERTS closes the parent end after the handshake
+    /// (`sys_drivers.c:1307-1311`), and the child keeps the standard
+    /// output of the node (`erl_child_setup.c:323-327`, `330-333`).
+    output: Option<OwnedFd>,
     /// The read end of the status pipe. The waiter thread writes the wait
     /// status of the child to it, as `erl_child_setup` reports a
     /// `SIGCHLD` to ERTS (`erl_child_setup.c:396-420`).
@@ -133,9 +171,10 @@ pub(crate) fn spawn(
     arg0: &[u8],
     args: &[Vec<u8>],
     streams: Streams,
+    read_write: ReadWrite,
     setting: &Setting,
 ) -> Result<Child, SpawnError> {
-    start(path, arg0, args, streams, setting)
+    start(path, arg0, args, streams, read_write, setting)
 }
 
 /// Start the command `command` of `open_port({spawn, Command}, Settings)`
@@ -153,10 +192,18 @@ pub(crate) fn spawn(
 pub(crate) fn spawn_shell(
     command: &[u8],
     streams: Streams,
+    read_write: ReadWrite,
     setting: &Setting,
 ) -> Result<Child, SpawnError> {
     let line = [b"exec ".as_slice(), command].concat();
-    start(b"/bin/sh", b"sh", &[b"-c".to_vec(), line], streams, setting)
+    start(
+        b"/bin/sh",
+        b"sh",
+        &[b"-c".to_vec(), line],
+        streams,
+        read_write,
+        setting,
+    )
 }
 
 /// Start the program at the native path `path` with `argv[0]` `arg0` and
@@ -166,6 +213,7 @@ fn start(
     arg0: &[u8],
     args: &[Vec<u8>],
     streams: Streams,
+    read_write: ReadWrite,
     setting: &Setting,
 ) -> Result<Child, SpawnError> {
     let (output, child_output) = pipe().map_err(SpawnError::Open)?;
@@ -174,6 +222,31 @@ fn start(
     let path = c_string(path);
     // SAFETY: `path` is a NUL-terminated string.
     os_result(unsafe { libc::access(path.as_ptr(), libc::X_OK) }).map_err(SpawnError::Open)?;
+    // The child setup program enters the working directory before it
+    // moves the pipes: it prints the `spawn` line and exits with the
+    // `errno` of the failed `chdir` (`erl_child_setup.c:300-306`), so the
+    // port opens, its pipes close, and `exit_status` gives the `errno`.
+    if let Some((directory, errno)) = setting
+        .directory
+        .as_deref()
+        .and_then(|directory| enter_error(directory).map(|errno| (directory, errno)))
+    {
+        let mut stderr = std::io::stderr();
+        let _ = stderr.write_all(b"spawn: Could not cd to ");
+        let _ = stderr.write_all(directory);
+        let _ = stderr.write_all(b"\r\n");
+        let _ = stderr.flush();
+        drop(child_output);
+        drop(child_input);
+        return Ok(failed(
+            errno,
+            read_write,
+            input,
+            output,
+            status,
+            status_writer,
+        ));
+    }
     let directory = setting.directory.as_deref().map(c_string);
     let environment: Vec<CString> = setting
         .environment
@@ -190,23 +263,98 @@ fn start(
         .collect();
     argv.push(std::ptr::null());
     let (stdin, stdout) = if streams.use_stdio { (0, 1) } else { (3, 4) };
-    let mut targets = vec![
-        (child_output.as_raw_fd(), stdout),
-        (child_input.as_raw_fd(), stdin),
-    ];
+    // The child setup program moves the input pipe to the standard input
+    // or fd 3 only with `out`, and the output pipe to the standard output
+    // or fd 4 only with `in`; `stderr_to_stdout` moves the output pipe to
+    // fd 2 in each direction (`erl_child_setup.c:315-345`).
+    let mut targets = Vec::new();
+    if read_write.read {
+        targets.push((child_output.as_raw_fd(), stdout));
+    }
+    if read_write.write {
+        targets.push((child_input.as_raw_fd(), stdin));
+    }
     if streams.stderr_to_stdout {
         targets.push((child_output.as_raw_fd(), libc::STDERR_FILENO));
     }
-    let os_pid = posix_spawn(&path, &argv, &envp, directory.as_ref(), &targets)
-        .map_err(SpawnError::Start)?;
+    // A failed `execve` makes the child exit with its `errno`
+    // (`erl_child_setup.c:361-369`), so a `posix_spawn` that fails in the
+    // child gives the pipes and the status of a child that died at once.
+    let os_pid = match posix_spawn(&path, &argv, &envp, directory.as_ref(), &targets) {
+        Ok(os_pid) => os_pid,
+        Err(errno) => {
+            drop(child_output);
+            drop(child_input);
+            return Ok(failed(
+                errno,
+                read_write,
+                input,
+                output,
+                status,
+                status_writer,
+            ));
+        }
+    };
+    drop(child_output);
+    drop(child_input);
     let status_writer = File::from(status_writer);
     thread::spawn(move || wait(os_pid, status_writer));
     Ok(Child {
         os_pid,
-        input,
-        output,
+        // ERTS closes the parent end that its direction does not use
+        // after the handshake (`sys_drivers.c:1320-1329`).
+        input: read_write.write.then_some(input),
+        output: read_write.read.then_some(output),
         status,
     })
+}
+
+/// Return the child of a start that ran no program: the child setup
+/// program closed both pipes and exited with `errno` before the `execve`
+/// (`erl_child_setup.c:302-306`, `361-369`). The port reads the end of
+/// file of the output pipe with `in`, `exit_status` reads `errno` from
+/// the status pipe, and a write fails with `EPIPE`, as a write to the
+/// input pipe of a dead child does.
+fn failed(
+    errno: c_int,
+    read_write: ReadWrite,
+    input: OwnedFd,
+    output: OwnedFd,
+    status: OwnedFd,
+    status_writer: OwnedFd,
+) -> Child {
+    // The wait status of `exit(errno & 0xff)`, which `WEXITSTATUS` reads.
+    let wait_status = (errno & 0xff) << 8;
+    let _ = File::from(status_writer).write_all(&wait_status.to_ne_bytes());
+    Child {
+        os_pid: 0,
+        input: read_write.write.then_some(input),
+        output: read_write.read.then_some(output),
+        status,
+    }
+}
+
+/// Return the `errno` with which `chdir` refuses the directory `dir`, or
+/// `None` when the child can enter it, as the `chdir` of the child setup
+/// program does (`erl_child_setup.c:302-306`): `metadata` resolves the
+/// path as `chdir` does, a path that is not a directory gives `ENOTDIR`,
+/// and `access` with `X_OK` gives the errno of a directory that the user
+/// cannot search, with the rights of the user (root, ACLs).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(enter_error(b"/no/such/dir"), Some(libc::ENOENT));
+/// assert_eq!(enter_error(b"/tmp"), None);
+/// ```
+fn enter_error(dir: &[u8]) -> Option<c_int> {
+    match fs::metadata(OsStr::from_bytes(dir)) {
+        Err(error) => Some(error.raw_os_error().unwrap_or(libc::ENOENT)),
+        Ok(metadata) if !metadata.is_dir() => Some(libc::ENOTDIR),
+        Ok(_) => nix::unistd::access(OsStr::from_bytes(dir), nix::unistd::AccessFlags::X_OK)
+            .err()
+            .map(|error| error as c_int),
+    }
 }
 
 /// Start a port program of ERTS that PBeam runs in a thread, not as an
@@ -237,23 +385,24 @@ pub(crate) fn serve(
     });
     Ok(Child {
         os_pid: std::process::id().try_into().unwrap_or(0),
-        input,
-        output,
+        input: Some(input),
+        output: Some(output),
         status,
     })
 }
 
 impl Child {
     /// Return the fd that has input when the child writes output or closes
-    /// its output, for the `select` of the scheduler.
+    /// its output, for the `select` of the scheduler, or `None` with the
+    /// `out` option.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// assert!(child.output_fd() >= FIRST_PIPE_FD);
     /// ```
-    pub(crate) fn output_fd(&self) -> RawFd {
-        self.output.as_raw_fd()
+    pub(crate) fn output_fd(&self) -> Option<RawFd> {
+        self.output.as_ref().map(|fd| fd.as_raw_fd())
     }
 
     /// Return the fd that has input when the child exits, for the `select`
@@ -281,7 +430,11 @@ impl Child {
     /// assert_eq!(child.read_output(), Ok(Vec::new()));
     /// ```
     pub(crate) fn read_output(&self) -> Result<Vec<u8>, c_int> {
-        input::read(self.output_fd(), READ_SIZE)
+        // The port reads only with the `in` option, which keeps this end.
+        let output = self
+            .output_fd()
+            .expect("a port reads a child with the in option");
+        input::read(output, READ_SIZE)
     }
 
     /// Read the exit status of the child after the status pipe has input,
@@ -330,7 +483,13 @@ impl Child {
     /// assert_eq!(child.write_input(b"hello"), Ok(()));
     /// ```
     pub(crate) fn write_input(&self, bytes: &[u8]) -> Result<(), c_int> {
-        output::write_all(self.input.as_raw_fd(), &mut [IoSlice::new(bytes)])
+        // A port with the `in` option has no write end: the `writev` of
+        // the driver on its closed fd fails with `EBADF`
+        // (`sys_drivers.c:1145`, `1177`, `1180-1184`).
+        let Some(input) = &self.input else {
+            return Err(libc::EBADF);
+        };
+        output::write_all(input.as_raw_fd(), &mut [IoSlice::new(bytes)])
     }
 }
 
@@ -500,3 +659,7 @@ fn wait(pid: libc::pid_t, mut status: File) {
         let _ = status.write_all(&wait_status.to_ne_bytes());
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/runtime/host/spawn.rs"]
+mod tests;

@@ -159,11 +159,11 @@ impl Program {
         }
     }
 
-    /// Return the fd that the port reads.
-    pub(super) fn output_fd(&self) -> c_int {
+    /// Return the fd that the port reads, or `None` with the `out` option.
+    pub(super) fn output_fd(&self) -> Option<c_int> {
         match self {
             Program::Child(child) => child.output_fd(),
-            Program::Fds(fds) => fds.input,
+            Program::Fds(fds) => Some(fds.input),
         }
     }
 
@@ -190,6 +190,11 @@ impl Program {
 pub(super) enum Input {
     /// The port reads the pipe.
     Open,
+    /// The `out` option opened the port for writing only: ERTS closes the
+    /// read end after the handshake and keeps no read data
+    /// (`sys_drivers.c:1307-1311`), so no data message, no end of file,
+    /// and no exit status arrives.
+    Write,
     /// The pipe gave its end of file, and the port waits for the exit
     /// status of the child (`dd->alive == 1`, `sys_drivers.c:1232-1240`).
     Status,
@@ -495,9 +500,9 @@ impl Port {
     fn wait_fd(&self) -> Option<c_int> {
         match &self.driver {
             Driver::Spawn(spawn) => match spawn.input {
-                Input::Open => Some(spawn.program.output_fd()),
+                Input::Open => spawn.program.output_fd(),
+                Input::Write | Input::Ended => None,
                 Input::Status => spawn.program.child().map(Child::status_fd),
-                Input::Ended => None,
             },
             Driver::Inet(inet) => inet
                 .accept_fd()
@@ -743,7 +748,7 @@ pub(super) fn read(
             let owner = port.owner;
             let event = match &mut port.driver {
                 Driver::Spawn(spawn)
-                    if (spawn.input == Input::Open && spawn.program.output_fd() == fd)
+                    if (spawn.input == Input::Open && spawn.program.output_fd() == Some(fd))
                         || (spawn.input == Input::Status
                             && spawn.program.child().map(Child::status_fd) == Some(fd)) =>
                 {
