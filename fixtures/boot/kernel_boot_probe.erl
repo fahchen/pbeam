@@ -862,7 +862,7 @@ sockopt_host() ->
     ok = socket:connect(C, #{family => inet, addr => loopback, port => 9}),
     Mtu = [socket:setopt(U, {ip, mtu}, 1500), socket:getopt(U, {ip, mtu}), socket:getopt(C, {ip, mtu})],
     B = {socket, bindtodevice},
-    Device = [[socket:getopt(S, B), socket:setopt(S, B, "lo"), socket:getopt(S, B), socket:setopt(S, B, <<"lo">>),
+    Device = [[socket:getopt(S, B), socket:setopt(S, B, "lo"), socket:getopt(S, B), socket:setopt(S, B, <<"lo", 0>>),
                socket:setopt(S, B, ""), socket:getopt(S, B), socket:setopt(S, B, <<"lo", 0, "x">>), socket:getopt(S, B),
                socket:setopt(S, B, "abcdefghijklmno"), socket:setopt(S, B, "abcdefghijklmnop"),
                socket:setopt(S, B, <<"abcdefghijklmnopqrstu">>), socket:setopt(S, B, [108, 256]),
