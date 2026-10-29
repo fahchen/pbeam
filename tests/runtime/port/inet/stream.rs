@@ -4,7 +4,7 @@ use socket2::{Domain, Socket, Type};
 
 use super::{
     super::{Control, MAGIC},
-    Event, HIGH, Output, Receiver, Sender,
+    Event, HIGH, Output, Receiver, Sender, Waiter,
 };
 use crate::{
     runtime::{
@@ -25,6 +25,14 @@ fn output_bytes(tag: Reference, data: &[u8]) -> Vec<u8> {
     bytes.extend(header);
     bytes.extend(data);
     bytes
+}
+
+/// A send of `data` that arrived while the port was busy.
+fn waiter(caller: u64, tag: u64, data: &[u8]) -> Waiter {
+    Waiter {
+        sender: sender(caller, tag, None),
+        data: data.to_vec(),
+    }
 }
 
 /// A send that waits for the queue of the port, with the timer `timer`.
@@ -320,9 +328,9 @@ fn keeps_a_waiting_write_shutdown_over_a_later_shutdown_of_both_sides() {
     }
 }
 
-/// A send that arrives while the port is busy joins the queue and waits
-/// for its reply behind the send that the port is busy for, with no
-/// message (`set_busy_port`, inet_drv.c:13774-13784).
+/// A send that arrives while the port is busy waits with its bytes out of
+/// the queue for its reply behind the send that the port is busy for, with
+/// no message (`set_busy_port`, inet_drv.c:13783-13784).
 #[test]
 fn suspends_a_send_that_arrives_while_the_port_is_busy() {
     let (local, _peer) = Socket::pair(Domain::UNIX, Type::STREAM, None).unwrap();
@@ -333,8 +341,43 @@ fn suspends_a_send_that_arrives_while_the_port_is_busy() {
         .send(&output_bytes(Reference(4), b"wait"), ProcessId(3), SEED)
         .unwrap();
     assert_eq!(output, Output::Sent(Vec::new()));
-    assert_eq!(port.stream.waiters.len(), 1);
-    assert_eq!(port.stream.output.len(), HIGH + 4);
+    assert_eq!(
+        port.stream.waiters.make_contiguous(),
+        &[waiter(3, 4, b"wait")]
+    );
+    assert_eq!(port.stream.output.len(), HIGH);
+}
+
+/// A send to a busy port with `delay_send`, and a `delay_send` while a send
+/// waits, stop the run: the run of the send at the unbusy cannot give the
+/// error of `delay_send`.
+#[test]
+fn stops_a_delay_send_with_a_send_that_waits() {
+    let (local, _peer) = Socket::pair(Domain::UNIX, Type::STREAM, None).unwrap();
+    let mut port = Inet::new(SocketType::Stream).copy(local);
+    port.stream.busy = Some(sender(1, 2, None));
+    port.stream.waiters.push_back(waiter(3, 4, b"wait"));
+    let error = port
+        .control(MAGIC + 7, &[31, 0, 0, 0, 1], ProcessId(1))
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .starts_with("unsupported tcp_inet option delay_send while a send waits"),
+        "{error}"
+    );
+    port.stream.waiters.clear();
+    port.control(MAGIC + 7, &[31, 0, 0, 0, 1], ProcessId(1))
+        .unwrap();
+    let error = port
+        .send(&output_bytes(Reference(6), b"next"), ProcessId(5), SEED)
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .starts_with("unsupported tcp_inet output with delay_send to a busy port"),
+        "{error}"
+    );
 }
 
 /// A send whose queue reaches the high watermark with a finite
@@ -357,19 +400,19 @@ fn makes_a_finite_send_timeout_busy_without_a_reply() {
 }
 
 /// The send timer ends the busy send with `{error, timeout}` and runs the
-/// sends that arrived while the port was busy: a queue at the low
-/// watermark or below gives each caller `ok`, and a queue above it makes
-/// the first caller the send that waits (`tcp_inet_send_timeout`,
-/// inet_drv.c:12458-12480, 12529-12533; `tcp_sendv`, 13771-13792).
+/// sends that arrived while the port was busy: a queue whose size and the
+/// new bytes reach the high watermark makes the first one the send that
+/// waits, and an empty queue lets each write and give `ok`
+/// (`tcp_inet_send_timeout`, inet_drv.c:12458-12480, 12529-12533;
+/// `tcp_sendv`, 13771-13846).
 #[test]
 fn runs_the_waiters_at_the_expiry_of_the_send_timer() {
     let (local, _peer) = Socket::pair(Domain::UNIX, Type::STREAM, None).unwrap();
     let mut port = Inet::new(SocketType::Stream).copy(local);
-    // A queue above the low watermark keeps the first waiter busy.
     port.stream.busy = Some(sender(1, 2, Some((0, (1, 1)))));
-    port.stream.waiters.push_back(sender(3, 4, None));
-    port.stream.waiters.push_back(sender(5, 6, None));
-    port.stream.output.extend([0; HIGH]);
+    port.stream.waiters.push_back(waiter(3, 4, b"ab"));
+    port.stream.waiters.push_back(waiter(5, 6, b"cd"));
+    port.stream.output.extend([0; HIGH - 2]);
     assert_eq!(
         port.send_timeout_expired(),
         [Event::Replied {
@@ -378,8 +421,11 @@ fn runs_the_waiters_at_the_expiry_of_the_send_timer() {
         }]
     );
     assert_eq!(port.stream.busy, Some(sender(3, 4, None)));
-    assert_eq!(port.stream.waiters.make_contiguous(), &[sender(5, 6, None)]);
-    // A queue at the low watermark or below answers `ok` in order.
+    assert_eq!(port.stream.output.len(), HIGH);
+    assert_eq!(
+        port.stream.waiters.make_contiguous(),
+        &[waiter(5, 6, b"cd")]
+    );
     port.stream.output.clear();
     port.stream.busy = Some(sender(3, 4, Some((0, (2, 2)))));
     assert_eq!(
@@ -396,20 +442,20 @@ fn runs_the_waiters_at_the_expiry_of_the_send_timer() {
         ]
     );
     assert_eq!(port.stream.busy, None);
+    assert!(port.stream.output.is_empty());
 }
 
 /// The expiry of the send timer of a passive socket with
-/// `send_timeout_close` closes the socket without a message, so the next
-/// send gives `{error, enotconn}`, and a send that arrived while the port
-/// was busy gives the same (`tcp_inet_send_timeout`, inet_drv.c:12506-12521,
-/// 12681-12693).
+/// `send_timeout_close` closes the socket without a message, so the send
+/// that waited and the next send give `{error, enotconn}`
+/// (`tcp_inet_send_timeout`, inet_drv.c:12506-12521, 12681-12693).
 #[test]
 fn closes_a_passive_socket_at_the_expiry_with_send_timeout_close() {
     let (local, _peer) = Socket::pair(Domain::UNIX, Type::STREAM, None).unwrap();
     let mut port = Inet::new(SocketType::Stream).copy(local);
     port.send_timeout_close = 1;
     port.stream.busy = Some(sender(1, 2, Some((0, (1, 1)))));
-    port.stream.waiters.push_back(sender(3, 4, None));
+    port.stream.waiters.push_back(waiter(3, 4, b"wait"));
     assert_eq!(
         port.send_timeout_expired(),
         [
@@ -439,9 +485,9 @@ fn closes_a_passive_socket_at_the_expiry_with_send_timeout_close() {
 }
 
 /// The expiry of the send timer of an active socket with
-/// `send_timeout_close` sends `{tcp_closed, S}`, ends each send that
-/// arrived while the port was busy with `{error, closed}`, and ends the
-/// port with the reason `normal` (inet_drv.c:12484-12505).
+/// `send_timeout_close` sends `{tcp_closed, S}`, ends the port with the
+/// reason `normal` (inet_drv.c:12484-12505), and so ends each send that
+/// waited with `{error, einval}` (prim_inet.erl:625-628).
 #[test]
 fn closes_an_active_socket_at_the_expiry_with_send_timeout_close() {
     let (local, _peer) = Socket::pair(Domain::UNIX, Type::STREAM, None).unwrap();
@@ -449,7 +495,7 @@ fn closes_an_active_socket_at_the_expiry_with_send_timeout_close() {
     port.active = 1;
     port.send_timeout_close = 1;
     port.stream.busy = Some(sender(1, 2, Some((0, (1, 1)))));
-    port.stream.waiters.push_back(sender(3, 4, None));
+    port.stream.waiters.push_back(waiter(3, 4, b"wait"));
     assert_eq!(
         port.send_timeout_expired(),
         [
@@ -457,27 +503,27 @@ fn closes_an_active_socket_at_the_expiry_with_send_timeout_close() {
                 sender: sender(1, 2, Some((0, (1, 1)))),
                 result: Err("timeout".to_owned())
             },
+            Event::Closed,
             Event::Replied {
                 sender: sender(3, 4, None),
-                result: Err("closed".to_owned())
+                result: Err("einval".to_owned())
             },
-            Event::Closed,
             Event::Exit("normal".to_owned())
         ]
     );
 }
 
 /// The drain of the queue to the low watermark answers the send that the
-/// port is busy for with `ok`, cancels its timer, and runs the sends that
-/// arrived while the port was busy in order
-/// (inet_drv.c:14350-14359, 13783-13784).
+/// port is busy for with `ok` (inet_drv.c:14350-14359), and then the sends
+/// that arrived while the port was busy write their bytes in order and give
+/// `ok` (inet_drv.c:13783-13784, 13795-13846).
 #[test]
 fn answers_the_busy_send_and_its_waiters_when_the_queue_drains() {
     let (local, mut peer) = Socket::pair(Domain::UNIX, Type::STREAM, None).unwrap();
     let mut port = Inet::new(SocketType::Stream).copy(local);
     port.stream.busy = Some(sender(1, 2, Some((0, (1, 1)))));
-    port.stream.waiters.push_back(sender(3, 4, None));
-    port.stream.waiters.push_back(sender(5, 6, None));
+    port.stream.waiters.push_back(waiter(3, 4, &[5, 6]));
+    port.stream.waiters.push_back(waiter(5, 6, &[7]));
     port.stream.output.extend([1, 2, 3, 4]);
     assert_eq!(
         port.send_ready(),
@@ -501,7 +547,7 @@ fn answers_the_busy_send_and_its_waiters_when_the_queue_drains() {
     drop(port);
     let mut bytes = Vec::new();
     peer.read_to_end(&mut bytes).unwrap();
-    assert_eq!(bytes, [1, 2, 3, 4]);
+    assert_eq!(bytes, [1, 2, 3, 4, 5, 6, 7]);
 }
 
 /// A queue that stays above the low watermark makes the first send that
@@ -514,21 +560,23 @@ fn makes_the_first_waiter_the_busy_send_when_the_socket_blocks() {
     // The socket takes no bytes, as a peer that reads nothing does.
     let block = vec![0; HIGH * 4];
     while port.socket.as_ref().unwrap().send(&block).is_ok() {}
-    port.stream.waiters.push_back(sender(3, 4, None));
+    port.stream.waiters.push_back(waiter(3, 4, b"wait"));
     port.stream.output.extend([0; HIGH]);
     assert_eq!(port.send_ready(), Vec::new());
     assert_eq!(port.stream.busy, Some(sender(3, 4, None)));
+    assert_eq!(port.stream.output.len(), HIGH + 4);
 }
 
-/// The end of the connection ends the send that the port is busy for and
-/// the sends that arrived while it was busy with `{error, closed}` after
-/// the drop of the queue (inet_drv.c:12791-12801).
+/// The end of the connection ends the send that the port is busy for with
+/// `{error, closed}` after the drop of the queue (inet_drv.c:12791-12801),
+/// and the send that waited runs on the closed socket and gives
+/// `{error, enotconn}` (12681-12693).
 #[test]
 fn ends_the_busy_send_and_its_waiters_at_the_end_of_the_connection() {
     let (local, _peer) = Socket::pair(Domain::UNIX, Type::STREAM, None).unwrap();
     let mut port = Inet::new(SocketType::Stream).copy(local);
     port.stream.busy = Some(sender(1, 2, Some((0, (1, 1)))));
-    port.stream.waiters.push_back(sender(3, 4, None));
+    port.stream.waiters.push_back(waiter(3, 4, b"wait"));
     port.stream.output.extend([1, 2]);
     assert_eq!(
         port.receive_ended(None),
@@ -539,36 +587,34 @@ fn ends_the_busy_send_and_its_waiters_at_the_end_of_the_connection() {
             },
             Event::Replied {
                 sender: sender(3, 4, None),
-                result: Err("closed".to_owned())
+                result: Err("enotconn".to_owned())
             },
         ]
     );
-    assert_eq!(port.stream.waiters.len(), 0);
+    assert!(port.stream.waiters.is_empty());
 }
 
-/// A failed write ends each send that arrived while the port was busy
-/// with `{error, closed}` (`tcp_send_or_shutdown_error`,
-/// inet_drv.c:13663-13682), and cancels its send timer with the reply.
+/// A failed write of a passive socket ends the busy send with
+/// `{error, closed}` and closes the socket (`tcp_send_or_shutdown_error`,
+/// inet_drv.c:13613-13670), so the send that waited gives
+/// `{error, enotconn}` (12681-12693).
 #[test]
-fn ends_the_waiters_at_a_failed_write() {
+fn ends_the_busy_send_and_its_waiters_at_a_failed_write() {
     let (local, _peer) = Socket::pair(Domain::UNIX, Type::STREAM, None).unwrap();
     let mut port = Inet::new(SocketType::Stream).copy(local);
-    port.stream
-        .waiters
-        .push_back(sender(3, 4, Some((0, (1, 1)))));
+    port.stream.waiters.push_back(waiter(3, 4, b"wait"));
     assert_eq!(
-        port.send_failed(None),
-        [Event::Replied {
-            sender: sender(3, 4, Some((0, (1, 1)))),
-            result: Err("closed".to_owned())
-        }]
+        port.send_failed(Some(sender(1, 2, Some((0, (1, 1)))))),
+        [
+            Event::Replied {
+                sender: sender(1, 2, Some((0, (1, 1)))),
+                result: Err("closed".to_owned())
+            },
+            Event::Replied {
+                sender: sender(3, 4, None),
+                result: Err("enotconn".to_owned())
+            },
+        ]
     );
-    assert!(port.stream.closed_send);
-    assert_eq!(
-        port.send(&output_bytes(Reference(6), b"next"), ProcessId(5), SEED),
-        Ok(Output::Sent(vec![Event::Replied {
-            sender: sender(5, 6, None),
-            result: Err("closed".to_owned())
-        }]))
-    );
+    assert!(!port.stream.closed_send);
 }

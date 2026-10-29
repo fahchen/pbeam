@@ -39,8 +39,11 @@ const UDP_LOCAL: &[u8] = include_bytes!("../../fixtures/tcp/udp_local.beam");
 /// requests of `gen_tcp` (prim_inet.erl). `gen_tcp:controlling_process/2`
 /// calls `inet_db:lookup_socket/1` and `inet:tcp_controlling_process/2`.
 /// `timer` has `sleep/1`.
-const MODULES: [&str; 7] = [
+const MODULES: [&str; 8] = [
     "erlang",
+    // `erlang:demonitor/2` with `flush` traps to
+    // `erts_internal:flush_monitor_messages/3` after a port `DOWN`.
+    "erts_internal",
     "lists",
     "prim_inet",
     "gen_tcp",
@@ -1175,4 +1178,47 @@ fn sets_the_buffer_of_a_tcp_inet_port_from_recbuf_as_pinned_erts() {
     let expected = "{{100000,true},{100,true}}";
     assert_eq!(erts_text("udp_probe", "stream_buffer"), expected, "ERTS");
     assert_eq!(pbeam_text("udp_probe", "stream_buffer"), expected, "PBeam");
+}
+
+#[test]
+fn runs_a_send_that_waits_when_the_busy_port_drains_as_pinned_erts() {
+    // The busy send gets `ok` at the low watermark of a queue without the
+    // bytes of the send that waits behind it, which join the queue only when
+    // that send runs (inet_drv.c:13771-13792, 14350-14359).
+    for (name, (text, reads)) in ["ERTS", "PBeam"]
+        .into_iter()
+        .zip(transfer_runs("busy_drain"))
+    {
+        assert_eq!(text, "[ok,ok,[['EXIT',port,killed]]]", "{name}");
+        assert_eq!(
+            reads.iter().map(Vec::len).collect::<Vec<_>>(),
+            [(16 << 19) + 4],
+            "{name} reads"
+        );
+    }
+}
+
+#[test]
+fn ends_a_send_that_waits_behind_a_busy_port_as_pinned_erts() {
+    // The end of the port gives the send that waits `{error, einval}`
+    // (prim_inet.erl:625-628), and a passive close gives `{error, enotconn}`
+    // when it runs (inet_drv.c:12681-12693).
+    for (function, expected) in [
+        (
+            "busy_end",
+            "[{error,timeout},{error,einval},[[tcp_closed,port]]]",
+        ),
+        (
+            "busy_kill",
+            "[{error,closed},{error,einval},[['EXIT',port,killed]]]",
+        ),
+        (
+            "busy_reset",
+            "[{error,closed},{error,enotconn},{error,enotconn},[]]",
+        ),
+    ] {
+        for (name, (text, _)) in ["ERTS", "PBeam"].into_iter().zip(transfer_runs(function)) {
+            assert_eq!(text, expected, "{function} {name}");
+        }
+    }
 }

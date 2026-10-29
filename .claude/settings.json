@@ -1,0 +1,13 @@
+{
+  "extraKnownMarketplaces": {
+    "beautiful-rust": {
+      "source": {
+        "source": "github",
+        "repo": "morganlinton/BeautifulRust"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "beautiful-rust@beautiful-rust": true
+  }
+}
