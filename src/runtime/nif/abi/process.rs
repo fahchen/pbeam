@@ -23,7 +23,7 @@ use crate::AtomTable;
 use crate::Term;
 use crate::runtime::scheduler::node::Node;
 use crate::runtime::signal::Signal;
-use crate::term::ProcessId;
+use crate::term::{ProcessId, Reference};
 
 thread_local! {
     /// The context of the NIF call or of the load callback that runs on the
@@ -359,7 +359,11 @@ pub(super) unsafe extern "C" fn enif_monitor_process(
     let Some(node) = node().filter(|node| node.owner(target).is_some()) else {
         return 1;
     };
-    let reference = super::resource::add_monitor(data, down);
+    // ERTS takes the monitor reference from the counter of `make_ref/0`
+    // (`erl_nif.c:3957`), so it is never the reference of another monitor
+    // of the target.
+    let reference = Reference(node.next_reference());
+    super::resource::add_monitor(data, down, reference);
     node.send_signal(
         0,
         target,

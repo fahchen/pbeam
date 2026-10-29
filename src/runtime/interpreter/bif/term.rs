@@ -2132,8 +2132,8 @@ impl Decoder<'_> {
         // `dec_term` gives the live magic reference, or an ordinary
         // reference with the same numbers when the magic binary is gone
         // (`external.c:4845-4851`). The two compare equal, and PBeam keys its
-        // tables and resources by the magic value, so the magic value finds
-        // the live object.
+        // tables by the magic value, so the magic value finds the live table.
+        // A live resource object gives its resource term.
         let magic = numbers[1] & MAGIC_REFERENCE_BIT != 0;
         if numbers[1] & !(REF_NUMBER_1_MASK | MAGIC_REFERENCE_BIT) != REF_THREAD {
             return Err(DecodeError::Unsupported("a reference of another scheduler"));
@@ -2146,11 +2146,12 @@ impl Decoder<'_> {
         // PBeam cannot hold such an ordinary reference.
         Reference::ordinary(value)
             .map(|reference| {
-                Term::Reference(if magic {
-                    self.live_magic(reference.magic_reference())
-                } else {
-                    reference
-                })
+                if !magic {
+                    return Term::Reference(reference);
+                }
+                let reference = reference.magic_reference();
+                crate::runtime::nif::abi::find_resource(self.atoms, reference)
+                    .unwrap_or_else(|| Term::Reference(self.live_magic(reference)))
             })
             .ok_or(DecodeError::Unsupported(
                 "a reference with the high bit of its third number",

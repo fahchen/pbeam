@@ -272,11 +272,12 @@ fn async_option(options: &Term) -> Option<ReadReply> {
 /// (`erl_hl_timer.c:2272-2295`); the reply comes later. A read changes no
 /// state, so the message and its value are the same.
 fn read(context: &mut BifContext<'_>, reference: &Term, reply: ReadReply) -> BifResult {
-    let Term::Reference(reference) = reference else {
+    // A resource term is a magic reference (`erl_nif.c:3197-3204`).
+    let Some(id) = reference.reference() else {
         return BifResult::badarg();
     };
     let scheduler = &mut *context.scheduler;
-    let result = match scheduler.node().timer_end(*reference) {
+    let result = match scheduler.node().timer_end(id) {
         Some(end) => Term::Integer(Timers::time_left(scheduler.timers.now(), end)),
         None => Term::static_atom("false"),
     };
@@ -286,7 +287,7 @@ fn read(context: &mut BifContext<'_>, reference: &Term, reply: ReadReply) -> Bif
     let caller = scheduler.current_process_mut().id;
     let message = Term::tuple(vec![
         Term::static_atom("read_timer"),
-        Term::Reference(*reference),
+        reference.clone(),
         result,
     ]);
     scheduler.deliver(caller, message);

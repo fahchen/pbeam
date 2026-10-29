@@ -7,7 +7,7 @@
     socket_open_netns/0,
     socket_bind_unspec/0,
     socket_bind_family_number/0,
-    socket_option_1/0, socket_option_2/0, socket_option_3/0,
+    socket_option_1/0,
     spawn/0,
     spawn_system_process/0,
     spawn_link/0,
@@ -1173,8 +1173,6 @@ socket_bind_family_number() ->
 %% Each socket_option_N/0 reaches a socket option form that PBeam does not
 %% set or get yet, and the run stops.
 socket_option_1() -> prim_socket:setopt(option_socket(), {otp, debug}, true).
-socket_option_2() -> prim_socket:setopt(option_socket(), {otp, select_read}, true).
-socket_option_3() -> prim_socket:setopt(option_socket(), {otp, rcvbuf}, {2, 50}).
 
 option_socket() ->
     ok = prim_socket:init(),
