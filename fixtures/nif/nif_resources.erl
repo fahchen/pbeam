@@ -39,8 +39,9 @@ results(Path) ->
     %% A and B stay live until here, so no collection before drops them.
     Live = [probe(5, A), probe(6, B)],
     Monitors = monitors(),
+    Magic = magic(),
     [Load, Outside, Types, Gets, Same, Text, Hashes, Maps, External, Ets, Lifetimes, Live,
-     Monitors].
+     Monitors, Magic].
 
 %% Load the library `Path` and return each case whose result is not the
 %% result of the pinned ERTS, as {Index, Result, Expected}.
@@ -105,6 +106,32 @@ monitors() ->
      Log, VictimResult, VictimLog, downs(), probe(17, 0), is_reference(Object),
      is_reference(Pair), is_reference(VictimObject)].
 
+%% A resource term is a magic reference: it sorts with the references of
+%% make_ref/0 by its creation, the BIFs of an alias, a monitor, or a timer
+%% take it as a reference that is none of them, and binary_to_term/1 of
+%% it gives the live resource.
+magic() ->
+    Before = make_ref(),
+    C = probe(2, 40),
+    Order = [Before < C, later_ref(C, 1 bsl 19)],
+    Sends = [C ! hello, erlang:send(C, hi), exit(C, kill), exit(C, normal)],
+    Monitors = [demonitor(C), demonitor(C, [info]), demonitor(C, [flush]), unalias(C)],
+    Timers = [erlang:cancel_timer(C), erlang:read_timer(C), erlang:cancel_timer(C, [{info, false}]),
+              erlang:cancel_timer(C, [{async, true}]), erlang:read_timer(C, [{async, true}])],
+    Messages = receive_all(),
+    Decoded = binary_to_term(term_to_binary(C)),
+    [Order, Sends, Monitors, Timers, [M =:= {T, C, false} || {T, _, _} = M <- Messages],
+     length(Messages), Decoded =:= C, probe(5, Decoded)].
+
+%% Return true when one of the next N references of make_ref/0 is greater
+%% than Ref: the magic marker of Ref is below the counter bits of the
+%% second reference number (erl_bif_unique.h:102-105).
+later_ref(_, 0) -> false;
+later_ref(Ref, N) -> make_ref() > Ref orelse later_ref(Ref, N - 1).
+
+receive_all() ->
+    receive Message -> [Message | receive_all()] after 0 -> [] end.
+
 %% Return the messages of the down callback, in their order.
 downs() ->
     receive {down, Id} -> [Id | downs()] after 0 -> [] end.
@@ -137,7 +164,9 @@ expected() ->
      [[], ok, [1011], [10], [20], [30]],
      [1, 2],
      [0, 1, {0, 0, true, true, 0, 1}, 0, -1, [8, 2005, 2006], 0, [2005], [5, 6, 5], {true, 2},
-      true, true, true]].
+      true, true, true],
+     [[true, true], [hello, hi, true, true], [true, false, true, false], [false, false, ok, ok, ok],
+      [true, true], 2, true, 40]].
 
 probe(_Kind, _Arg) ->
     erlang:nif_error(not_loaded).
