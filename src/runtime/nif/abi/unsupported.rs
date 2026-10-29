@@ -5,9 +5,7 @@
 //! process on the first name that `dlsym` does not find
 //! (`rustler-0.38.0/src/sys/nif_filler.rs:35`). Each executable of PBeam
 //! therefore exports each name of the 130-name API that another module of
-//! the ABI layer implements or that this module stubs; the 12 names that
-//! the watch run calls are still missing until task #1291 Group A adds
-//! them. A call of one of these stubs records the runtime error `the NIF
+//! the ABI layer implements or that this module stubs. A call of one of these stubs records the runtime error `the NIF
 //! called <name>, which PBeam does not implement yet`, which the NIF call
 //! gives when it returns, and returns the default value that the C ABI
 //! gives a caller that ignores the result (`THE_NON_VALUE` for a term, 0
