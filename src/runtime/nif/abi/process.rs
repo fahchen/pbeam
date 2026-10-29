@@ -357,7 +357,7 @@ pub unsafe extern "C" fn enif_monitor_process(
     // (`erl_nif.c:3957`), so it is never the reference of another monitor
     // of the target.
     let reference = Reference(node.next_reference());
-    super::resource::add_monitor(data, down, reference, &node);
+    super::resource::add_monitor(data, down, reference);
     node.send_signal(
         0,
         target,

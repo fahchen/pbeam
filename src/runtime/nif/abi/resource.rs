@@ -287,15 +287,25 @@ fn monitors() -> std::sync::MutexGuard<'static, BTreeMap<(u64, usize), Monitored
     MONITORS.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Add the monitor `reference` of the node `node` to the object at `data`
-/// with the down callback `down`.
-pub(super) fn add_monitor(data: usize, down: DownFn, reference: Reference, node: &Node) {
+/// Add the monitor `reference` to the object at `data` with the down
+/// callback `down`, under the node of the type of the object.
+pub(super) fn add_monitor(data: usize, down: DownFn, reference: Reference) {
     let object = lock()
         .get(&data)
         .map(|entry| entry.object.clone())
         .unwrap_or_default();
-    let key = (reference.0, std::ptr::from_ref(node).addr());
+    let key = (reference.0, node_of(&object));
     monitors().insert(key, Monitored { object, data, down });
+}
+
+/// Return the address of the node of the type of `object`, or 0 when the
+/// object is gone. An object in its destructor has no monitors
+/// (`erl_nif.c:2974-3030`), and no node has the address 0, so its key finds
+/// no monitor. The upgraded `Arc` drops after each lock is released.
+fn node_of(object: &Weak<Resource>) -> usize {
+    object
+        .upgrade()
+        .map_or(0, |object| object.kind.loading.node.as_ptr().addr())
 }
 
 /// Remove the monitor `monitor` of the object at `data` and return true,
@@ -304,13 +314,8 @@ pub(super) fn add_monitor(data: usize, down: DownFn, reference: Reference, node:
 pub(super) fn demonitor(data: usize, monitor: Reference) -> bool {
     // The entry compares the address and does not take the object, so no
     // drop of the object runs its destructor while the table is locked.
-    // An object in its destructor has no monitors (`erl_nif.c:2974-3030`),
-    // and no node has the address 0, so its key finds no monitor.
-    let node = lock()
-        .get(&data)
-        .and_then(|entry| entry.object.upgrade())
-        .map_or(0, |object| object.kind.loading.node.as_ptr().addr());
-    let key = (monitor.0, node);
+    let object = lock().get(&data).map(|entry| entry.object.clone());
+    let key = (monitor.0, object.as_ref().map_or(0, node_of));
     let mut monitors = monitors();
     let owned = monitors.get(&key).is_some_and(|entry| entry.data == data);
     owned && monitors.remove(&key).is_some()
