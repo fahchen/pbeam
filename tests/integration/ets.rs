@@ -1424,10 +1424,9 @@ fn orders_the_alias_keys_of_an_ordered_set() {
         panic!("the object is a tuple: {:?}", object[0]);
     };
     assert_eq!(pair[1], Term::Integer(2));
-    assert!(matches!(
-        run("unordered_first").unwrap().term,
-        Term::Reference(_)
-    ));
+    // ERTS 29.1.1: the first key of two aliases of one process is the
+    // first alias.
+    assert_eq!(run("unordered_first").unwrap().term, atom("true"));
     assert_eq!(
         run("cleared").unwrap().term,
         Term::list_from([Term::Integer(1), Term::Integer(2)])
