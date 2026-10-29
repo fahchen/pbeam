@@ -515,7 +515,15 @@ fd_closed() ->
     Sent = port_command(Port, <<"x">>),
     Exit = receive {'EXIT', Port, Reason} -> [{'EXIT', port, Reason}] after 5000 -> [] end,
     High = catch_error(fun() -> open_port({fd, 2000000, 2000000}, [binary]) end),
-    [Idle, Sent, Exit, erlang:port_info(Port), High].
+    %% The in option keeps no write side, so a write fails with ebadf; the
+    %% out option keeps no read side (sys_drivers.c:385-401).
+    In = open_port({fd, 200, 200}, [binary, in]),
+    InSent = port_command(In, <<"x">>),
+    InExit = receive {'EXIT', In, InReason} -> InReason after 5000 -> none end,
+    Out = open_port({fd, 200, 200}, [binary, out]),
+    OutIdle = flush(),
+    OutClosed = port_close(Out),
+    [Idle, Sent, Exit, erlang:port_info(Port), High, [InSent, InExit, OutIdle, OutClosed]].
 
 %% The in and out options of open_port/2: in keeps the read side only and
 %% out the write side only (erl_bif_port.c:991-994, 1015-1016). The child
@@ -529,7 +537,7 @@ directions() ->
     InData = receive {In, {data, Data}} -> Data after 2000 -> timeout end,
     InStatus = receive {In, {exit_status, Status}} -> Status after 2000 -> timeout end,
     %% in: a write to the port fails with ebadf, because the driver keeps
-    %% no write end (sys_drivers.c:1307-1321, 1145, 1177).
+    %% no write end (sys_drivers.c:1320-1329, 1145, 1177).
     InWrite = open_port({spawn_executable, sh()},
                         [in, binary, {args, ["-c", "sleep 1"]}]),
     receive after 100 -> ok end,
