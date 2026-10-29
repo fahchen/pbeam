@@ -276,3 +276,23 @@ fn ends_the_socket_when_a_waiting_shutdown_fails() {
     assert_eq!(port.stream.pending_shutdown, None);
     assert!(port.stream.closed_send);
 }
+
+/// A waiting write shutdown stays over a later shutdown of both sides, and
+/// a `how` that is not 0, 1, or 2 gives `ok` and adds nothing while the
+/// queue holds bytes (`TCP_ADDF_PENDING_SHUT_WR`, inet_drv.c:12362-12368,
+/// 13968-13969).
+#[test]
+fn keeps_a_waiting_write_shutdown_over_a_later_shutdown_of_both_sides() {
+    let (local, _peer) = Socket::pair(Domain::UNIX, Type::STREAM, None).unwrap();
+    let mut port = Inet::new(SocketType::Stream).copy(local);
+    port.stream.output.extend([1, 2, 3]);
+    for how in [3, 1, 2] {
+        assert_eq!(
+            port.control(MAGIC + 44, &[how], ProcessId(1)).unwrap(),
+            Control::Reply(vec![1]),
+            "{how}"
+        );
+        let expected = if how == 3 { None } else { Some(1) };
+        assert_eq!(port.stream.pending_shutdown, expected, "{how}");
+    }
+}

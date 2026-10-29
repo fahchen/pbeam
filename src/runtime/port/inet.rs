@@ -484,8 +484,15 @@ impl Inet {
             return error_reply("einval");
         };
         if how != SHUT_READ && self.stream.output_size() > 0 {
-            self.stream.pending_shutdown =
-                matches!(how, SHUT_WRITE | SHUT_READ_WRITE).then_some(how);
+            // ERTS adds the flag of each request, and the queue end runs
+            // the write shutdown when its flag is set (inet_drv.c:12362-12367,
+            // 13968-13969), so a write request stays over a later both. Another
+            // `how` gives `ok` and adds no flag.
+            if how == SHUT_WRITE
+                || (how == SHUT_READ_WRITE && self.stream.pending_shutdown.is_none())
+            {
+                self.stream.pending_shutdown = Some(how);
+            }
             return vec![OK];
         }
         self.shutdown(how)
@@ -495,9 +502,7 @@ impl Inet {
     /// reply, as `sock_shutdown` gives it (inet_drv.c:12368-12377). A how
     /// that is not 0, 1, or 2 gives `einval`.
     fn shutdown(&mut self, how: u8) -> Vec<u8> {
-        let Some(socket) = self.socket.as_ref() else {
-            return error_reply("enotconn");
-        };
+        let socket = self.socket.as_ref().expect("a connected port has a socket");
         let how = match how {
             SHUT_READ => std::net::Shutdown::Read,
             SHUT_WRITE => std::net::Shutdown::Write,
