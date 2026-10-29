@@ -397,6 +397,20 @@ impl AtomTable {
             .map(Arc::as_ref)
     }
 
+    /// Return the atom at `index`, or `None` for an index that the table
+    /// does not hold.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let table = AtomTable::new();
+    /// assert_eq!(table.atom_at(506), table.get("ok"));
+    /// assert_eq!(table.atom_at(1048576), None);
+    /// ```
+    pub(crate) fn atom_at(&self, index: u32) -> Option<Atom> {
+        self.name(index).map(|_| Atom { index })
+    }
+
     /// Return the name of `atom` from this table. Read it with
     /// `AtomTable::name` at the index of the atom.
     ///

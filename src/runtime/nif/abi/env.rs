@@ -8,6 +8,14 @@
 //! valid only in the call of its env, as an ERTS process-bound term is
 //! valid only until the NIF returns (`erl_nif.h`, "ERL_NIF_TERM").
 //!
+//! The handle of an atom of `enif_make_atom` is the exception: it is
+//! [`ATOM_HANDLE`] plus the index of the atom, and it names the same atom
+//! in each env of the node, as an ERTS atom is an immediate term
+//! (`make_atom`, `erl_term.h:300`). A library can thus keep the atoms of
+//! its load callback in static variables and return them from later
+//! calls, as exqlite 0.37.0 does (`sqlite3_nif.c:13-20`, `1428`). A handle
+//! never reaches [`ATOM_HANDLE`], because no env has that many terms.
+//!
 //! The env of a dirty NIF is the same: the dirty thread makes it for the
 //! call, and its terms go back to the process with the result, as the
 //! terms of a dirty NIF are on the heap of its process in ERTS
@@ -34,6 +42,10 @@ use crate::term::{MAX_ATOM_CHARACTERS, ProcessId};
 
 /// `THE_NON_VALUE`: the handle that no term has.
 const NON_VALUE: NifTerm = 0;
+
+/// The bit of the handle of an atom of `enif_make_atom`: the other bits
+/// are the index of the atom in the atom table of the node.
+const ATOM_HANDLE: NifTerm = 1 << (NifTerm::BITS - 1);
 
 /// `ERL_NIF_LATIN1` of `ErlNifCharEncoding` (`erl_nif.h:195-198`).
 const LATIN1: c_int = 1;
@@ -265,8 +277,13 @@ impl Env {
 
     /// Return the term of `handle`, or `None` for `THE_NON_VALUE` and for a
     /// handle that no term of the env has. The term of a binary of
-    /// `enif_make_new_binary` has the bytes that the NIF wrote so far.
+    /// `enif_make_new_binary` has the bytes that the NIF wrote so far. An
+    /// atom handle gives its atom in each env of the node.
     pub(super) fn get(&self, handle: NifTerm) -> Option<Term> {
+        if handle & ATOM_HANDLE != 0 {
+            let index = u32::try_from(handle ^ ATOM_HANDLE).ok();
+            return index.and_then(|index| self.atoms.atom_at(index).map(Term::Atom));
+        }
         self.slot(handle).map(|slot| match slot {
             Slot::Term(term) => term.clone(),
             Slot::Buffer(bytes) => Term::binary(bytes.clone()),
@@ -294,7 +311,8 @@ impl Env {
     /// Return the atom of the C string `name`, as `enif_make_atom` makes it
     /// with the Latin-1 encoding (`erl_nif.c:2080-2114`): each byte is one
     /// character, and a name of more than 255 characters raises
-    /// `error:badarg` and gives `THE_NON_VALUE` (`atom.c:271-277`).
+    /// `error:badarg` and gives `THE_NON_VALUE` (`atom.c:271-277`). The
+    /// handle is the atom handle of the atom, which adds no term to the env.
     ///
     /// # Examples
     ///
@@ -308,7 +326,7 @@ impl Env {
         }
         let name: String = name.iter().copied().map(char::from).collect();
         match self.atoms.put(&name) {
-            Ok(atom) => self.make(Term::Atom(atom)),
+            Ok(atom) => ATOM_HANDLE | atom.index() as NifTerm,
             // ERTS stops the node when the atom table is full
             // (`index.c:86-91`); PBeam gives a runtime error.
             Err(failure) => {
