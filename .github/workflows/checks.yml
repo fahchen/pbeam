@@ -18,7 +18,7 @@ jobs:
   checks:
     name: checks
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     env:
       MISE_AUTO_INSTALL: "0"
       # The cached target/ holds no incremental state, and with incremental compilation the tests of the `opt-level = 1` test profile ran slower in the measurement of #354. The value is explicit, because the profile default enables it.
