@@ -448,7 +448,9 @@ fn gives_the_release_variables_of_the_mix_release_script() {
     fs::write(root.join("releases/0.1.0/start.boot"), b"").unwrap();
     let executable = Path::new("/usr/local/bin/suikou-cli");
     let variables = release_variables(&root, "0.1.0", executable, |name| {
-        (name == "RELEASE_TMP").then(|| OsString::from("/tmp/own"))
+        // An environment value of `RELEASE_VSN` does not change the boot,
+        // so the version of the boot stays.
+        matches!(name, "RELEASE_TMP" | "RELEASE_VSN").then(|| OsString::from("/tmp/own"))
     });
     let text = |value: &OsString| value.to_str().unwrap().to_owned();
     let pairs = variables
