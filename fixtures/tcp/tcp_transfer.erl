@@ -1,5 +1,5 @@
 -module(tcp_transfer).
--export([main/1, reset/1, busy_close/1, unsupported/2]).
+-export([main/1, reset/1, busy_close/1, busy_timeout/1, unsupported/2]).
 
 %% Receives and sends on an accepted socket in passive mode, as
 %% gen_tcp:recv/3 and gen_tcp:send/2 call prim_inet:recv/3 and
@@ -114,15 +114,29 @@ unsupported(Path, Case) ->
         length -> erlang:port_control(S, 42 + ?MAGIC, [0, 0, 0, 0, 255, 255, 255, 255]);
         header -> erlang:port_command(S, <<0, 1, 0>>);
         delay_send -> ok = prim_inet:setopts(S, [{delay_send, true}]), prim_inet:send(S, "x");
-        send_timeout -> ok = prim_inet:setopts(S, [{send_timeout, 1000}]), queue(S),
-                        prim_inet:send(S, "x");
-        busy -> queue(S),
-                Parent = self(),
-                spawn(fun() -> Parent ! sent, prim_inet:send(S, "x") end),
-                receive sent -> ok end,
-                prim_inet:send(S, "y");
         term -> term_to_binary(S, [local])
     end.
+
+%% The send timer of a port whose queue no longer drains ends the send that
+%% waits with {error, timeout}, and `send_timeout_close` closes the socket:
+%% without a message in passive mode, so the next send gives enotconn
+%% (inet_drv.c:12458-12534).
+busy_timeout(Path) ->
+    {S, Busy} = busy_send(Path),
+    Sent = receive {Busy, Result} -> Result after 3000 -> missing end,
+    [Sent, prim_inet:send(S, "x"), flush()].
+
+%% Fill the queue of the socket of a new connection and start a send from
+%% another process, which waits for the queue.
+busy_send(Path) ->
+    process_flag(trap_exit, true),
+    {_, S} = connection(Path),
+    queue(S),
+    ok = prim_inet:setopts(S, [{send_timeout, 500}, {send_timeout_close, true}]),
+    Parent = self(),
+    Busy = spawn(fun() -> Parent ! {self(), prim_inet:send(S, <<"tail">>)} end),
+    receive after 50 -> ok end,
+    {S, Busy}.
 
 queue(S) -> ok = prim_inet:send(S, double(<<"0123456789abcdef">>, 19)).
 

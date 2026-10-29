@@ -1233,6 +1233,9 @@ impl Scheduler {
                 Timer::SocketReceive { port, key } => {
                     self.tcp_receive_timeout(port, (self.index, key));
                 }
+                Timer::SocketSend { port, key } => {
+                    self.tcp_send_timeout(port, (self.index, key));
+                }
             }
         }
     }
