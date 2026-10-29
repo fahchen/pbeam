@@ -70,6 +70,11 @@ macro_rules! preloaded_atoms {
     (@const $position:expr;) => {};
     (@const $position:expr; $constant:ident = $name:literal, $($rest:tt)*) => {
         #[doc = concat!("The preloaded atom `", $name, "`.")]
+        #[expect(
+            clippy::as_conversions,
+            clippy::cast_possible_truncation,
+            reason = "a const cannot call `try_from`, and `STATIC_ATOM_COUNT` is 1150"
+        )]
         pub(crate) const $constant: Atom = Atom {
             index: STATIC_ATOM_COUNT as u32 + $position,
         };

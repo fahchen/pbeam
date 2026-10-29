@@ -361,7 +361,13 @@ pub(crate) fn compare_integer_float(integer: i64, float: f64) -> Ordering {
     }
     let whole = float.trunc();
     // The whole part is in the i64 range, so the cast is exact.
-    integer.cmp(&(whole as i64)).then_with(|| {
+    #[expect(
+        clippy::as_conversions,
+        clippy::cast_possible_truncation,
+        reason = "the whole part is in the i64 range, so the cast is exact"
+    )]
+    let whole_integer = whole as i64;
+    integer.cmp(&whole_integer).then_with(|| {
         let fraction = float - whole;
         0.0.partial_cmp(&fraction).expect("a float term is finite")
     })

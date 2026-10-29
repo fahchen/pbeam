@@ -337,7 +337,7 @@ fn read_chunks(bytes: &[u8]) -> Result<HashMap<Vec<u8>, &[u8]>, BeamError> {
     if bytes.len() < CONTAINER_HEADER_SIZE || &bytes[..WORD_SIZE] != b"FOR1" {
         return Err(error("invalid BEAM container header"));
     }
-    let container_size = read_u32(&bytes[WORD_SIZE..WORD_SIZE * 2])? as usize;
+    let container_size = to_usize(read_u32(&bytes[WORD_SIZE..WORD_SIZE * 2])?);
     if container_size != bytes.len() - WORD_SIZE * 2
         || &bytes[WORD_SIZE * 2..CONTAINER_HEADER_SIZE] != b"BEAM"
     {
@@ -352,7 +352,7 @@ fn read_chunks(bytes: &[u8]) -> Result<HashMap<Vec<u8>, &[u8]>, BeamError> {
         }
         let header_end = cursor + CHUNK_HEADER_SIZE;
         let chunk_id = &bytes[cursor..cursor + WORD_SIZE];
-        let chunk_size = read_u32(&bytes[cursor + WORD_SIZE..header_end])? as usize;
+        let chunk_size = to_usize(read_u32(&bytes[cursor + WORD_SIZE..header_end])?);
         let padding = (CHUNK_ALIGNMENT - (chunk_size % CHUNK_ALIGNMENT)) % CHUNK_ALIGNMENT;
         if chunk_size > bytes.len() - header_end || padding > bytes.len() - header_end - chunk_size
         {
@@ -485,7 +485,7 @@ fn decode(
 /// assert_eq!(table.get("a"), Some(atoms[0].clone()));
 /// ```
 fn parse_atoms(data: &[u8], atom_table: &AtomTable) -> Result<Vec<Atom>, BeamError> {
-    let signed_atom_count = read_u32(data)? as i32;
+    let signed_atom_count = read_u32(data)?.cast_signed();
     let atom_count = usize::try_from(
         signed_atom_count
             .checked_neg()
@@ -498,7 +498,7 @@ fn parse_atoms(data: &[u8], atom_table: &AtomTable) -> Result<Vec<Atom>, BeamErr
     let mut atoms = Vec::with_capacity(atom_count);
     let mut cursor = WORD_SIZE;
     for _ in 0..atom_count {
-        let atom_name_length = read_operand(data, &mut cursor, TAG_UNSIGNED)? as usize;
+        let atom_name_length = word_to_usize(read_operand(data, &mut cursor, TAG_UNSIGNED)?);
         if atom_name_length > data.len() - cursor {
             return Err(error("truncated atom name"));
         }
@@ -567,7 +567,7 @@ fn parse_exports(
     atoms: &[Atom],
     atom_table: &AtomTable,
 ) -> Result<Vec<Export>, BeamError> {
-    let export_count = read_u32(data)? as usize;
+    let export_count = to_usize(read_u32(data)?);
     let expected_table_size = WORD_SIZE
         .checked_add(
             export_count
@@ -581,7 +581,7 @@ fn parse_exports(
     let mut exports = Vec::with_capacity(export_count);
     let mut seen = HashSet::new();
     for entry in data[WORD_SIZE..].chunks(EXPORT_ENTRY_SIZE) {
-        let atom_index = read_u32(&entry[..WORD_SIZE])? as usize;
+        let atom_index = to_usize(read_u32(&entry[..WORD_SIZE])?);
         let arity = read_u32(&entry[WORD_SIZE..WORD_SIZE * 2])?;
         let label = read_u32(&entry[WORD_SIZE * 2..])?;
         let name = atom_table.name_of(atom_at(atoms, atom_index)?).to_owned();
@@ -608,7 +608,7 @@ fn parse_imports(
     atoms: &[Atom],
     atom_table: &AtomTable,
 ) -> Result<Vec<(String, String, u32)>, BeamError> {
-    let import_count = read_u32(data)? as usize;
+    let import_count = to_usize(read_u32(data)?);
     let expected_size = WORD_SIZE
         .checked_add(
             import_count
@@ -622,8 +622,8 @@ fn parse_imports(
     data[WORD_SIZE..]
         .chunks(IMPORT_ENTRY_SIZE)
         .map(|entry| {
-            let module = read_u32(&entry[..WORD_SIZE])? as usize;
-            let function = read_u32(&entry[WORD_SIZE..WORD_SIZE * 2])? as usize;
+            let module = to_usize(read_u32(&entry[..WORD_SIZE])?);
+            let function = to_usize(read_u32(&entry[WORD_SIZE..WORD_SIZE * 2])?);
             Ok((
                 atom_table.name_of(atom_at(atoms, module)?).to_owned(),
                 atom_table.name_of(atom_at(atoms, function)?).to_owned(),
@@ -663,8 +663,8 @@ fn parse_lambdas(
         let bytes = &entry[position * WORD_SIZE..(position + 1) * WORD_SIZE];
         i32::from_be_bytes(bytes.try_into().expect("a FunT entry has six fields"))
     };
-    let count =
-        usize::try_from(read_u32(data)? as i32).map_err(|_| error("negative BEAM lambda count"))?;
+    let count = usize::try_from(read_u32(data)?.cast_signed())
+        .map_err(|_| error("negative BEAM lambda count"))?;
     let entries = &data[WORD_SIZE..];
     // ERTS also hashes the entries into the module MD5, and it rejects
     // bytes that are not whole entries (`beam_file.c:1773-1802`).
@@ -697,13 +697,16 @@ fn parse_lambdas(
             let lambda = Lambda::new(
                 module.clone(),
                 index,
-                position as i32,
+                i32::try_from(position).expect("a lambda table has fewer than 2^31 entries"),
                 old_unique,
-                label as u32,
-                arity as u32,
+                label.cast_unsigned(),
+                arity.cast_unsigned(),
             )
             .with_uniq(uniq);
-            Ok((Arc::new(lambda), free_count as usize))
+            Ok((
+                Arc::new(lambda),
+                usize::try_from(free_count).expect("the free count is not negative"),
+            ))
         })
         .collect()
 }
@@ -770,7 +773,7 @@ fn parse_literals(data: &[u8], atom_table: &AtomTable) -> Result<Vec<Option<Term
     if read_u32(&data[..WORD_SIZE])? != 0 {
         return Err(error("compressed BEAM literal tables are unsupported"));
     }
-    let literal_count = read_u32(&data[WORD_SIZE..WORD_SIZE * 2])? as usize;
+    let literal_count = to_usize(read_u32(&data[WORD_SIZE..WORD_SIZE * 2])?);
     if literal_count > (data.len() - WORD_SIZE * 2) / WORD_SIZE {
         return Err(error("BEAM literal count exceeds chunk size"));
     }
@@ -778,7 +781,7 @@ fn parse_literals(data: &[u8], atom_table: &AtomTable) -> Result<Vec<Option<Term
     let mut cursor = WORD_SIZE * 2;
     let mut literals = Vec::with_capacity(literal_count);
     for _ in 0..literal_count {
-        let literal_size = read_u32(&data[cursor..])? as usize;
+        let literal_size = to_usize(read_u32(&data[cursor..])?);
         cursor += WORD_SIZE;
         let literal_end = cursor
             .checked_add(literal_size)
@@ -877,11 +880,11 @@ fn read_external_term(
         let tag = take(data, cursor, 1)?[0];
         let mut term = match tag {
             ETF_BINARY_EXT => {
-                let size = read_u32(take(data, cursor, WORD_SIZE)?)? as usize;
+                let size = to_usize(read_u32(take(data, cursor, WORD_SIZE)?)?);
                 Term::binary(take(data, cursor, size)?.to_vec())
             }
             ETF_BIT_BINARY_EXT => {
-                let size = read_u32(take(data, cursor, WORD_SIZE)?)? as usize;
+                let size = to_usize(read_u32(take(data, cursor, WORD_SIZE)?)?);
                 let trailing = usize::from(take(data, cursor, 1)?[0]);
                 // ERTS rejects a trailing bit count outside 1 to 8 and an
                 // empty byte list (`external.c:4913-4917`).
@@ -893,7 +896,7 @@ fn read_external_term(
             }
             ETF_STRING_EXT => {
                 let size_bytes = take(data, cursor, 2)?;
-                let size = u16::from_be_bytes([size_bytes[0], size_bytes[1]]) as usize;
+                let size = usize::from(u16::from_be_bytes([size_bytes[0], size_bytes[1]]));
                 let characters = take(data, cursor, size)?
                     .iter()
                     .map(|&byte| Term::Integer(i64::from(byte)));
@@ -942,7 +945,7 @@ fn read_external_term(
                 let count = if tag == ETF_SMALL_BIG_EXT {
                     usize::from(take(data, cursor, 1)?[0])
                 } else {
-                    read_u32(take(data, cursor, WORD_SIZE)?)? as usize
+                    to_usize(read_u32(take(data, cursor, WORD_SIZE)?)?)
                 };
                 // Any sign byte but 0 is negative, and leading zero bytes
                 // are stripped (`external.c:4471-4486`).
@@ -963,7 +966,7 @@ fn read_external_term(
                 ])))
             }
             ETF_SMALL_ATOM_UTF8_EXT => {
-                let size = take(data, cursor, 1)?[0] as usize;
+                let size = usize::from(take(data, cursor, 1)?[0]);
                 let name = std::str::from_utf8(take(data, cursor, size)?)
                     .map_err(|_| error("invalid UTF-8 in BEAM atom literal"))?;
                 Term::Atom(atom_table.put(name)?)
@@ -983,7 +986,7 @@ fn read_external_term(
                 let count = read_u32(take(data, cursor, WORD_SIZE)?)?;
                 // ERTS rejects a tuple literal above `ERTS_MAX_TUPLE_SIZE`
                 // (`external.c:6284-6289`, `erl_term.h:318-323`).
-                if count as usize > MAX_TUPLE_SIZE {
+                if to_usize(count) > MAX_TUPLE_SIZE {
                     return Err(error("BEAM tuple literal exceeds the maximum tuple size"));
                 }
                 match count {
@@ -1138,7 +1141,7 @@ fn read_value(data: &[u8], cursor: &mut usize, atoms: &[Atom]) -> Result<Term, B
             Ok(Term::Integer(sign_extend(first_byte, payload)))
         }
         TAG_ATOM => {
-            let index = read_operand(data, cursor, TAG_ATOM)? as usize;
+            let index = word_to_usize(read_operand(data, cursor, TAG_ATOM)?);
             if index == 0 {
                 return Ok(Term::nil());
             }
@@ -1180,7 +1183,7 @@ fn read_huge_integer(data: &[u8], cursor: &mut usize) -> Result<Term, BeamError>
         .ok_or_else(|| error("truncated BEAM integer operand"))?;
     let value = BigInt::from_signed_bytes_be(&data[*cursor..end]);
     *cursor = end;
-    if value.magnitude().bits() <= (count as u64 - 2) * 8 {
+    if value.magnitude().bits() <= (u64::try_from(count).expect("a usize fits in u64") - 2) * 8 {
         return Err(error("BEAM integer operand is not normalized"));
     }
     // `bytes_to_big` gives no term for more digits than a bignum holds, and
@@ -1209,13 +1212,13 @@ fn read_huge_integer(data: &[u8], cursor: &mut usize) -> Result<Term, BeamError>
 fn sign_extend(first_byte: u8, payload: u64) -> i64 {
     let extended = COMPACT_EXTENDED_FLAG | COMPACT_SIGN_FLAG;
     if first_byte & extended != extended {
-        return payload as i64;
+        return payload.cast_signed();
     }
     // A payload of 9 or more bytes fails in `read_integer_after_first`, so the
     // size code here is 0..=6 and the payload has 2..=8 bytes.
     let payload_bits = u32::from(first_byte >> 5) * 8 + 16;
     let shift = u64::BITS - payload_bits;
-    ((payload << shift) as i64) >> shift
+    (payload << shift).cast_signed() >> shift
 }
 
 /// Return the atom at a one-based BEAM atom index.
@@ -1301,7 +1304,7 @@ fn read_integer(data: &[u8], cursor: &mut usize, expected_tag: u8) -> Result<i12
         )));
     }
     let value = read_integer_after_first(data, cursor, first)?;
-    Ok(value as i128)
+    Ok(i128::from(value))
 }
 
 /// Read the integer payload after its first compact-operand byte.
@@ -1319,7 +1322,7 @@ fn read_integer_after_first(
     first_byte: u8,
 ) -> Result<u64, BeamError> {
     if first_byte & COMPACT_EXTENDED_FLAG == 0 {
-        return Ok((first_byte >> COMPACT_SHORT_VALUE_SHIFT) as u64);
+        return Ok(u64::from(first_byte >> COMPACT_SHORT_VALUE_SHIFT));
     }
     if first_byte & COMPACT_SIGN_FLAG == 0 {
         let low_value_byte = *data
@@ -1327,11 +1330,11 @@ fn read_integer_after_first(
             .ok_or_else(|| error("truncated BEAM operand"))?;
         *cursor += 1;
         return Ok(
-            (((first_byte & COMPACT_HIGH_BITS_MASK) as u64) << COMPACT_HIGH_VALUE_SHIFT)
-                | low_value_byte as u64,
+            (u64::from(first_byte & COMPACT_HIGH_BITS_MASK) << COMPACT_HIGH_VALUE_SHIFT)
+                | u64::from(low_value_byte),
         );
     }
-    let size_code = (first_byte >> 5) as usize;
+    let size_code = usize::from(first_byte >> 5);
     let byte_count = if size_code == 7 {
         usize::try_from(read_operand(data, cursor, TAG_UNSIGNED)?)
             .map_err(|_| error("BEAM integer operand is too large"))?
@@ -1390,7 +1393,7 @@ fn parse_records(
     let header = |index: usize| {
         data.get(index * WORD_SIZE..)
             .and_then(|bytes| read_u32(bytes).ok())
-            .map(|word| word as i32)
+            .map(u32::cast_signed)
             .ok_or_else(bad)
     };
     // A version other than 0 fails the load (`beam_file.c:1341-1347`).
@@ -1421,10 +1424,10 @@ fn parse_records(
             .then_some(())
             .ok_or_else(bad)?;
         let count = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
-        (count % 2 == 0 && count as usize <= data.len())
+        (count % 2 == 0 && usize::try_from(count).is_ok_and(|count| count <= data.len()))
             .then_some(())
             .ok_or_else(bad)?;
-        let mut fields = Vec::with_capacity(count as usize / 2);
+        let mut fields = Vec::with_capacity(word_to_usize(count) / 2);
         for _ in 0..count / 2 {
             let key = atom(&mut cursor)?;
             let default = match data.get(cursor).map(|b| b & COMPACT_TAG_MASK) {
@@ -1453,6 +1456,16 @@ fn parse_records(
         )));
     }
     Ok(records)
+}
+
+/// A `u32` field as `usize`, which holds every `u32` on a 64-bit host.
+fn to_usize(value: u32) -> usize {
+    usize::try_from(value).expect("a u32 fits in usize")
+}
+
+/// A `u64` operand as `usize`, which holds every `u64` on a 64-bit host.
+fn word_to_usize(value: u64) -> usize {
+    usize::try_from(value).expect("a u64 fits in usize")
 }
 
 /// Read one unsigned, big-endian 32-bit field.

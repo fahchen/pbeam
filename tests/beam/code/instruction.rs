@@ -251,23 +251,25 @@ fn rejects_unsupported_select_val_forms() {
 #[test]
 fn prepares_the_select_value_choices_by_shape() {
     let atoms = AtomTable::new();
+    let limit_signed = i64::try_from(SELECT_VALUE_LINEAR_LIMIT).unwrap();
+    let limit_unsigned = u64::try_from(SELECT_VALUE_LINEAR_LIMIT).unwrap();
     let choices = |values: &[i64]| -> Vec<(Term, u32)> {
         values
             .iter()
             .enumerate()
-            .map(|(index, value)| (Term::Integer(*value), index as u32))
+            .map(|(index, value)| (Term::Integer(*value), u32::try_from(index).unwrap()))
             .collect()
     };
 
     // The boundary: a list of exactly the limit keeps the linear walk.
-    let limit: Vec<i64> = (0..SELECT_VALUE_LINEAR_LIMIT as i64).collect();
+    let limit: Vec<i64> = (0..limit_signed).collect();
     assert!(matches!(
         prepare_select_value_choices(choices(&limit), &atoms),
         SelectValueChoices::Linear(_)
     ));
 
     // One choice more takes the term order.
-    let mut values: Vec<i64> = (0..=SELECT_VALUE_LINEAR_LIMIT as i64).collect();
+    let mut values: Vec<i64> = (0..=limit_signed).collect();
     values.reverse();
     let large = choices(&values);
     let SelectValueChoices::Ordered(ordered) = prepare_select_value_choices(large.clone(), &atoms)
@@ -286,7 +288,7 @@ fn prepares_the_select_value_choices_by_shape() {
 
     // A duplicate choice keeps the linear form and its encoded order, so the
     // interpreter still gives the first match.
-    let mut duplicate_values: Vec<i64> = (0..SELECT_VALUE_LINEAR_LIMIT as i64).collect();
+    let mut duplicate_values: Vec<i64> = (0..limit_signed).collect();
     duplicate_values.push(0);
     let duplicate = choices(&duplicate_values);
     let SelectValueChoices::Linear(kept) = prepare_select_value_choices(duplicate.clone(), &atoms)
@@ -297,8 +299,13 @@ fn prepares_the_select_value_choices_by_shape() {
 
     // Two different references have a term order, so a large list of
     // distinct references takes the ordered form.
-    let references: Vec<(Term, u32)> = (0..=SELECT_VALUE_LINEAR_LIMIT as u64)
-        .map(|index| (Term::Reference(Reference(index)), index as u32))
+    let references: Vec<(Term, u32)> = (0..=limit_unsigned)
+        .map(|index| {
+            (
+                Term::Reference(Reference(index)),
+                u32::try_from(index).unwrap(),
+            )
+        })
         .collect();
     assert!(matches!(
         prepare_select_value_choices(references, &atoms),
@@ -307,11 +314,11 @@ fn prepares_the_select_value_choices_by_shape() {
     // Two different alias references have a PBeam term order
     // (`src/term/order.rs`), so a large list of distinct aliases also takes
     // the ordered form.
-    let aliases: Vec<(Term, u32)> = (0..=SELECT_VALUE_LINEAR_LIMIT as u64)
+    let aliases: Vec<(Term, u32)> = (0..=limit_unsigned)
         .map(|index| {
             (
                 Term::Reference(Reference(index).pid_reference()),
-                index as u32,
+                u32::try_from(index).unwrap(),
             )
         })
         .collect();

@@ -81,6 +81,11 @@ fn read_binary_view(name: &str, bytes: &Binary) {
 /// `runs` timed runs. The caller performs exactly `operations` operations.
 /// The timer stops before the value of `body` drops, so a measured copy does
 /// not hold the release of its result.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "a benchmark converts a nanosecond count and an operation count to the nearest f64"
+)]
 fn measure<T>(runs: usize, operations: usize, mut body: impl FnMut() -> T) -> f64 {
     let mut best = f64::INFINITY;
     for _ in 0..runs {
@@ -114,6 +119,11 @@ pub(super) fn clone_drop<T: Clone>(name: &str, held: &T, operations: usize) {
 /// container, and the storage that the copy allocates itself, and no
 /// allocation of the container. The release of the copies is outside the
 /// timed region.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "a benchmark converts a nanosecond count and an operation count to the nearest f64"
+)]
 pub(super) fn deep_copy<T>(name: &str, operations: usize, mut copy: impl FnMut() -> T) {
     let mut kept: Vec<T> = Vec::with_capacity(operations);
     let mut best = f64::INFINITY;

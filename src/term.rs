@@ -1392,6 +1392,11 @@ impl Reference {
     ///     [33174, 1537736705, 2506053249]
     /// );
     /// ```
+    #[expect(
+        clippy::as_conversions,
+        clippy::cast_possible_truncation,
+        reason = "each number is a masked or shifted field of the 64-bit reference, the cast keeps the low 32 bits"
+    )]
     pub(crate) fn numbers(self) -> [u32; 3] {
         let Reference(value) = self;
         let magic = if value & MAGIC_REFERENCE_MARKER != 0 {

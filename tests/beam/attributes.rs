@@ -589,7 +589,10 @@ fn attr_chunk(bytes: &[u8]) -> Option<&[u8]> {
     let mut pos = 12;
     while pos + 8 <= bytes.len() {
         let id = &bytes[pos..pos + 4];
-        let size = u32::from_be_bytes(bytes[pos + 4..pos + 8].try_into().unwrap()) as usize;
+        let size = usize::try_from(u32::from_be_bytes(
+            bytes[pos + 4..pos + 8].try_into().unwrap(),
+        ))
+        .unwrap();
         if id == b"Attr" {
             return bytes.get(pos + 8..pos + 8 + size);
         }

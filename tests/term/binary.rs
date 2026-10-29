@@ -510,7 +510,8 @@ fn reads_a_byte_range_of_an_appended_binary_from_the_chunks_of_the_range() {
     assert_eq!(chunk_span(ends, 3995, 4000), 998..1000);
     assert_eq!(chunk_span(ends, 4, 8), 1..2);
     assert_eq!(chunk_span(ends, 7, 7), 0..0);
-    assert_eq!(binary.byte_runs(7, 7), [] as [&[u8]; 0]);
+    let no_runs: [&[u8]; 0] = [];
+    assert_eq!(binary.byte_runs(7, 7), no_runs);
 }
 
 /// Return the bitstring of the first `size` bits of `bytes`, at offset 0.

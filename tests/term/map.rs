@@ -590,12 +590,13 @@ fn drains_the_pairs_of_a_map_only_from_the_last_copy() {
         let mut map = integers(1..=size);
         let mut copy = map.clone();
         map.drain_into(&mut pending);
-        assert_eq!(pending, [] as [crate::term::Term; 0]);
-        assert_eq!(copy.len(), size as usize);
+        let no_terms: [crate::term::Term; 0] = [];
+        assert_eq!(pending, no_terms);
+        assert_eq!(copy.len(), usize::try_from(size).unwrap());
         // `Term::drop` drops the map after `drain_into`.
         drop(map);
         copy.drain_into(&mut pending);
-        assert_eq!(pending.len(), 2 * size as usize);
+        assert_eq!(pending.len(), 2 * usize::try_from(size).unwrap());
         // The last holder takes the form, so the map has no form after the
         // drain, as a tuple has no array after `Tuple::take_last`.
         assert!(copy.repr.is_none());
@@ -696,7 +697,7 @@ fn builds_the_same_map_from_pairs_in_any_order() {
 
 #[test]
 fn splits_a_leaf_into_nodes_until_the_hashes_differ() {
-    let leaf = |key: i64| (key as u64, Term::Integer(key), Term::Integer(key));
+    let leaf = |key: i64| (key.cast_unsigned(), Term::Integer(key), Term::Integer(key));
     // 0x101 and 0x201 select the same slot at levels 0 and 1, and slots 1 and 2 at level 2.
     let child = Node::split(0, leaf(0x201), leaf(0x101), &test_atom_table());
     let (bitmap, children) = node_of(&child);
@@ -1061,6 +1062,11 @@ const MAP_COST_KEY_SUM: i64 = MAP_COST_KEYS * (MAP_COST_KEYS + 1) / 2;
 /// ```rust,ignore
 /// cost("nothing", 1.0, 0, || 0);
 /// ```
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "a benchmark converts small counts to i64 and counts and nanosecond times to f64"
+)]
 fn cost(name: &str, calls: f64, expected: i64, body: impl Fn() -> i64) {
     let mut best = f64::MAX;
     for _ in 0..MAP_COST_RUNS {
@@ -1084,6 +1090,12 @@ fn cost(name: &str, calls: f64, expected: i64, body: impl Fn() -> i64) {
 #[expect(
     clippy::too_many_lines,
     reason = "table of measurements: one `cost` call for each map operation, and the calls share the map"
+)]
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    reason = "a benchmark converts small counts to i64 and counts and nanosecond times to f64"
 )]
 fn records_the_map_operation_cost() {
     // Each key is its own value, so a read and a walk consume an integer and
@@ -1296,6 +1308,11 @@ fn put_maps(pairs: &[(Term, Term)]) -> Vec<Map> {
 /// Both paths replace the value of a key that every map already holds, so
 /// the timer compares one operation with the same operation. The maps are
 /// built before the timer, and the allocation of the maps stays out of it.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "a benchmark converts small counts to i64 and counts and nanosecond times to f64"
+)]
 fn put_cost(name: &str, pairs: &[(Term, Term)], body: impl Fn(&mut Map) -> i64) -> f64 {
     let mut maps = put_maps(pairs);
     let mut best = f64::MAX;
@@ -1323,6 +1340,11 @@ fn put_cost(name: &str, pairs: &[(Term, Term)], body: impl Fn(&mut Map) -> i64) 
 /// Each number is the minimum of [`MAP_COST_RUNS`] runs, in nanosecond for
 /// each call.
 #[test]
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_wrap,
+    reason = "a benchmark converts small counts to i64 and counts and nanosecond times to f64"
+)]
 fn prints_the_cost_of_a_map_put() {
     println!(
         "map put cost: minimum of {MAP_COST_RUNS} runs of {PUT_COST_ROUNDS} rounds, in nanosecond for each call"
@@ -1508,15 +1530,15 @@ fn counts_the_terms_of_the_values_of_a_drain() {
     // The walk of a drain queues the keys and the values of its leaves, and
     // it flushes that queue before a caller reads the number. A value that
     // holds a long list therefore gives the bytes of that list.
-    let width = 1024;
+    let width: i64 = 1024;
     let mut direct = crate::term::LiveBytes::new();
-    direct.term(&Term::list_from((0..width as i64).map(Term::Integer)));
+    direct.term(&Term::list_from((0..width).map(Term::Integer)));
     let expected = direct.bytes();
     assert!(expected > 0, "a list of cells holds live bytes");
     let mut map = Map::from_pairs(
         vec![(
             Term::Integer(0),
-            Term::list_from((0..width as i64).map(Term::Integer)),
+            Term::list_from((0..width).map(Term::Integer)),
         )],
         &test_atom_table(),
     )

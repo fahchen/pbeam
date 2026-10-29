@@ -111,7 +111,7 @@ impl ConsRef {
     /// assert_ne!(cell.identity(), ConsRef::new(Term::Integer(1), Term::nil()).identity());
     /// ```
     pub(super) fn identity(&self) -> usize {
-        Arc::as_ptr(self.arc()) as usize
+        Arc::as_ptr(self.arc()).addr()
     }
 }
 

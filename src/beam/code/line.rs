@@ -96,6 +96,11 @@ impl LineTable {
     /// A truncated chunk, an item that is not an atom or an integer, a file
     /// index after the last file name, a line that does not fit a word, or a
     /// file name that is not UTF-8 is an error.
+    #[expect(
+        clippy::as_conversions,
+        clippy::cast_possible_truncation,
+        reason = "ERTS keeps the file index and the line as `Sint32` and cuts the word to 32 bits (`beam_file.h:112-115`)"
+    )]
     pub(super) fn parse(data: &[u8], module: &str) -> Result<Self, BeamError> {
         let corrupt = || error("corrupt BEAM line table");
         let field = |index: usize| {
@@ -106,9 +111,10 @@ impl LineTable {
         if field(0)? != LINE_CHUNK_VERSION {
             return Ok(Self::default());
         }
-        let declared_entries = field(2)? as usize;
-        let item_count = field(3)? as usize + 1;
-        let name_count = field(4)? as usize + 1;
+        let declared_entries = usize::try_from(field(2)?).expect("a u32 fits in usize");
+        let item_count = usize::try_from(field(3)?).expect("a u32 fits in usize") + 1;
+        let name_count = usize::try_from(field(4)?).expect("a u32 fits in usize") + 1;
+        let name_limit = i64::try_from(name_count).expect("a name count is at most 2^32");
         let mut cursor = LINE_HEADER_SIZE;
         // ERTS keeps the file index and the line of each item as `Sint32`
         // (`beam_file.h:112-115`; `beam_file.c:513`, `528-529`).
@@ -134,7 +140,7 @@ impl LineTable {
                 // 0, so the index of the count passes (`beam_file.c:222-224`,
                 // `475`, `512-517`).
                 TAG_ATOM
-                    if value <= i64::MAX as u64 && i64::from(value as i32) <= name_count as i64 =>
+                    if i64::try_from(value).is_ok() && i64::from(value as i32) <= name_limit =>
                 {
                     file = value as i32;
                 }
@@ -152,8 +158,10 @@ impl LineTable {
                 // A 16-bit table keeps the low 16 bits of the location
                 // (`jit/asm_load.c:857-870`).
                 let location = if wide { location } else { location & 0xFFFF };
-                (location != 0)
-                    .then_some(((location >> FILE_SHIFT) as usize, location & LINE_LIMIT))
+                (location != 0).then_some((
+                    usize::try_from(location >> FILE_SHIFT).expect("a u32 fits in usize"),
+                    location & LINE_LIMIT,
+                ))
             })
             .collect();
         let mut files = vec![charlist(&format!("{module}.erl"))];
@@ -317,6 +325,11 @@ impl LineTable {
 /// assert_eq!(make_location(1, 5), (1 << 24) | 5);
 /// assert_eq!(make_location(-1, 5), 0);
 /// ```
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_sign_loss,
+    reason = "`MAKE_LOCATION` reads the `Sint32` values as unsigned words (`beam_code.h:31-41`)"
+)]
 fn make_location(file: i32, line: i32) -> u32 {
     let (file, line) = (file as u32, line as u32);
     if file < FILE_LIMIT && line < LINE_LIMIT {

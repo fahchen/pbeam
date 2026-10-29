@@ -592,7 +592,10 @@ fn preloads_the_fixed_atoms_of_runtime_paths_after_the_static_atoms() {
     let count = table.read_indices().len();
     for (position, (atom, name)) in (1150..).zip(constants) {
         assert_eq!(atom.index, position);
-        assert_eq!(PRELOADED_ATOM_NAMES[(position - 1150) as usize], name);
+        assert_eq!(
+            PRELOADED_ATOM_NAMES[usize::try_from(position - 1150).unwrap()],
+            name
+        );
         assert!(Atom::from_static(name).is_none(), "{name} is static");
         assert_eq!(table.get(name), Some(atom.clone()));
         assert_eq!(table.name_of(&atom), name);

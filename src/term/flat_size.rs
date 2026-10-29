@@ -62,7 +62,9 @@ pub(crate) fn flat_size(term: &Term) -> usize {
             Term::Integer(_) if term.small_integer().is_some() => 0,
             // One 64-bit digit and the header (`copy.c:244-246`).
             Term::Integer(_) => 2,
-            Term::BigInt(value) => value.bits().div_ceil(64) as usize + 1,
+            Term::BigInt(value) => {
+                usize::try_from(value.bits().div_ceil(64)).expect("a digit count fits in usize") + 1
+            }
             Term::Float(_) => FLOAT_WORDS,
             Term::Reference(reference) if reference.is_pid_reference() => PID_REFERENCE_WORDS,
             Term::Reference(_) | Term::Resource(_) => REFERENCE_WORDS,

@@ -81,7 +81,7 @@ impl Tuple {
     /// assert_ne!(tuple.identity(), Tuple::from(vec![Term::Integer(1)]).identity());
     /// ```
     pub(super) fn identity(&self) -> usize {
-        Arc::as_ptr(self.arc()) as usize
+        Arc::as_ptr(self.arc()).addr()
     }
 
     /// Return the array of the tuple for a change. This is the receiver of

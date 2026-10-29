@@ -95,6 +95,11 @@ impl Term {
     /// assert_eq!(Term::from_bigint(BigInt::from(1) << 1024).number_float(), None);
     /// assert_eq!(Term::nil().number_float(), None);
     /// ```
+    #[expect(
+        clippy::as_conversions,
+        clippy::cast_precision_loss,
+        reason = "ERTS converts an integer term to the nearest float, and Rust `as` rounds to nearest"
+    )]
     pub(crate) fn number_float(&self) -> Option<f64> {
         match self {
             Term::Integer(value) => Some(*value as f64),

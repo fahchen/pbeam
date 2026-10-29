@@ -95,7 +95,11 @@ fn counts_the_units_of_one_key_as_erts() {
         let keys: Vec<&Term> = keys.iter().collect();
         let units = from_list_units(&keys, &crate::term::test_atom_table()).unwrap();
         // The check loop of the BIF adds one unit for each pair.
-        count + units.iter().map(|&unit| unit as usize).sum::<usize>()
+        count
+            + units
+                .iter()
+                .map(|&unit| usize::try_from(unit).unwrap())
+                .sum::<usize>()
     };
     assert_eq!(units(33) / 40, 8);
     assert_eq!(units(400) / 40, 99);

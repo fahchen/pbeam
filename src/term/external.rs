@@ -132,7 +132,14 @@ pub(crate) fn iov_block_hash(bytes: &[u8], last: usize, seed: u32) -> u32 {
     }
     let rest = &rest[..rest.len().min(last)];
     // The low byte of `c` holds the length (erl_term_hashing.c:484-503).
-    c = c.wrapping_add(bytes.len() as u32);
+    #[expect(
+        clippy::as_conversions,
+        clippy::cast_possible_truncation,
+        reason = "the hash adds the low 32 bits of the length, as `erl_term_hashing.c:484-503` does"
+    )]
+    {
+        c = c.wrapping_add(bytes.len() as u32);
+    }
     a = a.wrapping_add(word(&rest[..rest.len().min(4)]));
     b = b.wrapping_add(word(rest.get(4..rest.len().min(8)).unwrap_or(&[])));
     c = c.wrapping_add(word(rest.get(8..).unwrap_or(&[])) << 8);

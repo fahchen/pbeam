@@ -140,7 +140,7 @@ impl NameTable {
     /// assert_eq!(names.name(names.intern("main")), "main");
     /// ```
     fn name(&self, id: NameId) -> &str {
-        &self.names[id.0 as usize]
+        &self.names[usize::try_from(id.0).expect("a name identity fits in usize")]
     }
 }
 
@@ -431,8 +431,10 @@ fn resolve(
             let label = *target;
             match function_starts.get(&label) {
                 Some(Some(entry)) => {
-                    *function = entry.function as u32;
-                    *target = entry.start as u32;
+                    *function = u32::try_from(entry.function)
+                        .expect("a BEAM Code chunk holds fewer than 2^32 functions");
+                    *target = u32::try_from(entry.start)
+                        .expect("a BEAM Code chunk holds fewer than 2^32 instructions");
                 }
                 Some(None) => {
                     return Err(error(format!("entry label {label} has no function info")));
@@ -534,8 +536,8 @@ fn resolve_branch(target: &mut u32, jump_targets: &LabelMap<usize>) -> Result<()
         .copied()
         .ok_or_else(|| error(format!("missing BEAM label {label}")))?;
     // A BEAM `Code` chunk is at most 2^32 - 1 bytes, so its instruction
-    // index is below 2^32 and the cast keeps every value.
-    *target = index as u32;
+    // index is below 2^32 and the conversion keeps every value.
+    *target = u32::try_from(index).expect("an instruction index is below 2^32");
     Ok(())
 }
 

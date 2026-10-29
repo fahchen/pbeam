@@ -52,6 +52,10 @@ const SMALL_INTEGER_TAG_BITS: u32 = 4;
 /// The number of path elements in one ERTS bignum digit
 /// (`PATH_ELEMS_PER_DIGIT`, `erl_map.c:3635`). A path element has
 /// `SLOT_BITS` bits.
+#[expect(
+    clippy::as_conversions,
+    reason = "a const cannot call `try_from`, and the value is 16"
+)]
 const PATH_ELEMS_PER_DIGIT: usize = (u64::BITS / SLOT_BITS) as usize;
 
 /// One key operation of [`Map::update`].
@@ -473,7 +477,7 @@ impl Map {
     /// assert_ne!(map.identity(), Map::new().identity());
     /// ```
     pub(super) fn identity(&self) -> usize {
-        Arc::as_ptr(self.arc()) as usize
+        Arc::as_ptr(self.arc()).addr()
     }
 
     /// Return the handle of the form for a change. This is the receiver of
@@ -892,7 +896,7 @@ impl Map {
     ) -> Result<Option<Chunk<'_>>, BeamError> {
         let hamt = match &**self.arc() {
             Repr::Flat(pairs) => {
-                let size = pairs.len() as u64;
+                let size = u64::try_from(pairs.len()).expect("a usize fits in u64");
                 let path = path.small_integer().map(unsigned_val);
                 return Ok(path.filter(|path| *path <= size).map(|_| Chunk {
                     pairs: pairs.iter().map(|(key, value)| (key, value)).collect(),
@@ -913,7 +917,7 @@ impl Map {
                 (path, limit)
             }
             // A positive bignum of one digit.
-            Term::Integer(value) if *value > 0 => (*value as u64, usize::MAX),
+            Term::Integer(value) if *value > 0 => (value.cast_unsigned(), usize::MAX),
             _ => return Ok(None),
         };
         limit = limit.min(budget).min(hamt.size);
@@ -1026,7 +1030,7 @@ fn merge_walk(
     fn slots<'a>(keys: &[(u64, &'a Term)], level: u32) -> [Vec<(u64, &'a Term)>; 16] {
         let mut slots: [Vec<(u64, &Term)>; 16] = Default::default();
         for &(hash, key) in keys {
-            slots[slot(hash, level) as usize].push((hash, key));
+            slots[to_usize(slot(hash, level))].push((hash, key));
         }
         slots
     }
@@ -1353,7 +1357,7 @@ impl Hamt {
         loop {
             let slot = slot(hash, level);
             let bit = 1 << slot;
-            let index = (node.bitmap & (bit - 1)).count_ones() as usize;
+            let index = to_usize((node.bitmap & (bit - 1)).count_ones());
             if node.bitmap & bit == 0 {
                 node.bitmap |= bit;
                 node.children.insert(index, Child::Leaf(key, value));
@@ -1441,7 +1445,7 @@ impl Node {
         if self.bitmap & bit == 0 {
             return None;
         }
-        Some(&self.children[(self.bitmap & (bit - 1)).count_ones() as usize])
+        Some(&self.children[to_usize((self.bitmap & (bit - 1)).count_ones())])
     }
 
     /// Return true when the node uses all 16 slots. A hashmap root with all
@@ -1556,6 +1560,13 @@ pub(crate) fn flatmap_order(left: &Term, right: &Term, atoms: &AtomTable) -> Ord
     }
 }
 
+/// A `u32` count or slot as `usize`, which holds every `u32` on a 64-bit
+/// host.
+#[inline]
+fn to_usize(value: u32) -> usize {
+    usize::try_from(value).expect("a u32 fits in usize")
+}
+
 /// Return the slot that a hash selects at a HAMT level. Level 0 uses the
 /// lowest four bits.
 ///
@@ -1565,6 +1576,10 @@ pub(crate) fn flatmap_order(left: &Term, right: &Term, atoms: &AtomTable) -> Ord
 /// assert_eq!(slot(0x21, 0), 1);
 /// assert_eq!(slot(0x21, 1), 2);
 /// ```
+#[expect(
+    clippy::as_conversions,
+    reason = "the mask keeps four bits, so the cast keeps every value"
+)]
 fn slot(hash: u64, level: u32) -> u32 {
     ((hash >> (SLOT_BITS * level)) & SLOT_MASK) as u32
 }
@@ -1579,7 +1594,7 @@ fn slot(hash: u64, level: u32) -> u32 {
 /// assert_eq!(unsigned_val(-1), (1 << 60) - 1);
 /// ```
 fn unsigned_val(value: i64) -> u64 {
-    value as u64 & (u64::MAX >> SMALL_INTEGER_TAG_BITS)
+    value.cast_unsigned() & (u64::MAX >> SMALL_INTEGER_TAG_BITS)
 }
 
 /// Return the element of an `erts_internal:map_next/3` path at a node
@@ -1597,7 +1612,8 @@ fn path_element(path: u64, depth: usize) -> usize {
     if depth >= PATH_ELEMS_PER_DIGIT {
         return 0;
     }
-    ((path >> (SLOT_BITS as usize * depth)) & SLOT_MASK) as usize
+    usize::try_from((path >> (to_usize(SLOT_BITS) * depth)) & SLOT_MASK)
+        .expect("a path element is below 16")
 }
 
 /// Return the integer of the path elements of a next pair, root first, as
@@ -1622,10 +1638,9 @@ fn path_element(path: u64, depth: usize) -> usize {
 fn encode_path(elements: &[usize]) -> Result<i64, BeamError> {
     let depth = elements.len();
     let value = if depth < PATH_ELEMS_PER_DIGIT {
-        let value = elements
-            .iter()
-            .rev()
-            .fold(0, |value, element| (value << SLOT_BITS) | *element as i64);
+        let value = elements.iter().rev().fold(0, |value, element| {
+            (value << SLOT_BITS) | i64::try_from(*element).expect("a path element is below 16")
+        });
         let bignum = depth + 1 >= PATH_ELEMS_PER_DIGIT;
         (!bignum || Term::Integer(value).small_integer().is_none()).then_some(value)
     } else {

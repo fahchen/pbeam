@@ -88,7 +88,9 @@ impl RecordDef {
         let order_tuple = Term::tuple(
             order
                 .iter()
-                .map(|&index| Term::Integer(index as i64))
+                .map(|&index| {
+                    Term::Integer(i64::try_from(index).expect("a field index fits in i64"))
+                })
                 .collect(),
         );
         let mut tuple = vec![

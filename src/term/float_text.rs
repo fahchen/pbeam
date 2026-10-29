@@ -59,7 +59,7 @@ pub(crate) fn shortest(value: f64) -> Vec<u8> {
         return text;
     }
     let (digits, scientific_exponent) = shortest_digits(value.abs());
-    let length = digits.len() as i32;
+    let length = i32::try_from(digits.len()).expect("a shortest float has at most 17 digits");
     let exponent = scientific_exponent - (length - 1);
     let output = digits
         .iter()
@@ -80,15 +80,25 @@ pub(crate) fn shortest(value: f64) -> Vec<u8> {
         let whole = length + exponent;
         if exponent >= 0 {
             text.extend_from_slice(&digits);
-            text.extend(std::iter::repeat_n(b'0', exponent as usize));
+            text.extend(std::iter::repeat_n(
+                b'0',
+                usize::try_from(exponent).expect("the exponent is not negative"),
+            ));
             text.extend_from_slice(b".0");
         } else if whole > 0 {
-            text.extend_from_slice(&digits[..whole as usize]);
+            text.extend_from_slice(
+                &digits[..usize::try_from(whole).expect("the whole part is positive")],
+            );
             text.push(b'.');
-            text.extend_from_slice(&digits[whole as usize..]);
+            text.extend_from_slice(
+                &digits[usize::try_from(whole).expect("the whole part is positive")..],
+            );
         } else {
             text.extend_from_slice(b"0.");
-            text.extend(std::iter::repeat_n(b'0', (-whole) as usize));
+            text.extend(std::iter::repeat_n(
+                b'0',
+                usize::try_from(-whole).expect("the whole part is not positive"),
+            ));
             text.extend_from_slice(&digits);
         }
     } else {
@@ -264,11 +274,24 @@ pub(crate) fn fixed(value: f64, decimals: i32, zeros: TrailingZeros) -> Option<V
     }
     if decimals == 0 {
         // `round_int64` is C `lround`, which rounds half away from zero.
-        text.extend_from_slice((magnitude.round() as u64).to_string().as_bytes());
+        #[expect(
+            clippy::as_conversions,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "the magnitude is at most 2^53 here, so the rounded float is an exact u64"
+        )]
+        let rounded = magnitude.round() as u64;
+        text.extend_from_slice(rounded.to_string().as_bytes());
         return Some(text);
     }
     let whole = magnitude.floor();
     let fraction = ((magnitude - whole) * POW10[decimals]).round();
+    #[expect(
+        clippy::as_conversions,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the whole part and the fraction are non-negative floats of at most 2^53 here, so the casts are exact"
+    )]
     let (whole, fraction) = if fraction >= POW10[decimals] {
         (whole as u64 + 1, 0)
     } else {

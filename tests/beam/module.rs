@@ -95,12 +95,12 @@ fn assemble_empty_beam() -> Vec<u8> {
     let mut body = b"BEAM".to_vec();
     for (id, data) in chunks {
         body.extend(id);
-        body.extend((data.len() as u32).to_be_bytes());
+        body.extend(u32::try_from(data.len()).unwrap().to_be_bytes());
         body.extend(&data);
         body.resize(body.len() + (4 - data.len() % 4) % 4, 0);
     }
     let mut result = b"FOR1".to_vec();
-    result.extend((body.len() as u32).to_be_bytes());
+    result.extend(u32::try_from(body.len()).unwrap().to_be_bytes());
     result.extend(body);
     result
 }

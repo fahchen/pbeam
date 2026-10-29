@@ -148,6 +148,11 @@ fn common_depth(first: u64, second: u64) -> u32 {
 /// ```rust,ignore
 /// assert_eq!(hash_64_to_32_shift(0), 720_020_139);
 /// ```
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "the hash is the low 32 bits of the mixed key, as C `hash_64_to_32_shift` returns it"
+)]
 fn hash_64_to_32_shift(key: u64) -> u32 {
     let mut key = (!key).wrapping_add(key << 18);
     key ^= key >> 31;
@@ -203,12 +208,16 @@ fn qsort_units(
         let part = &mut nodes[start..start + length];
         if length <= QSORT_CUT_OFF {
             selection_sort(part, compare)?;
-            units.push(length as u32 * fit_in_bits(length) * 2);
+            units.push(
+                u32::try_from(length).expect("a part below the cut-off is short")
+                    * fit_in_bits(length)
+                    * 2,
+            );
             continue;
         }
-        let base = (offset + start) as u64 * HXNODE_BYTES;
-        let key = seed.wrapping_add(base).wrapping_sub(length as u64);
-        let pivot = hash_64_to_32_shift(key) as usize % length;
+        let base = to_u64(offset + start) * HXNODE_BYTES;
+        let key = seed.wrapping_add(base).wrapping_sub(to_u64(length));
+        let pivot = to_usize(hash_64_to_32_shift(key)) % length;
         let (first_end, second_start) = partition(part, pivot, units, compare)?;
         parts.push((start + second_start, length - second_start, seed + 1));
         parts.push((start, first_end, seed + 1));
@@ -325,6 +334,16 @@ fn slow_partition(
         }
     }
     Ok((pivot_start, pivot_end))
+}
+
+/// A `u32` count as `usize`, which holds every `u32` on a 64-bit host.
+fn to_usize(value: u32) -> usize {
+    usize::try_from(value).expect("a u32 fits in usize")
+}
+
+/// A `usize` count as `u64`, which holds every `usize`.
+fn to_u64(value: usize) -> u64 {
+    u64::try_from(value).expect("a usize fits in u64")
 }
 
 /// Add the units of the loop steps of one loop of a YCF `-f` function.
@@ -463,7 +482,7 @@ fn chunked_units(nodes: &[HxNode], groups: usize, units: &mut Vec<u32>) {
     let top = HAMT_MAX_LEVEL - 1;
     if groups == 1 {
         // A chain of nodes down to the collision node (`erl_map.c:965-983`).
-        loop_steps(units, top as usize, 0);
+        loop_steps(units, to_usize(top), 0);
         return;
     }
     let mut stack: Vec<u64> = Vec::new();
@@ -480,7 +499,7 @@ fn chunked_units(nodes: &[HxNode], groups: usize, units: &mut Vec<u32>) {
         slot = mask_slot(previous, level);
     }
     if nodes[index].skip > 1 {
-        loop_steps(units, (top - level) as usize, 0);
+        loop_steps(units, to_usize(top - level), 0);
     }
     stack.extend([0, 1 << slot]);
     for _ in 0..groups - 2 {
@@ -490,7 +509,7 @@ fn chunked_units(nodes: &[HxNode], groups: usize, units: &mut Vec<u32>) {
         let next = nodes[index + nodes[index].skip].hx;
         let next_level = common_depth(current, next);
         if nodes[index].skip > 1 {
-            loop_steps(units, (top - level.max(next_level)) as usize, 1);
+            loop_steps(units, to_usize(top - level.max(next_level)), 1);
         }
         match level.cmp(&next_level) {
             Ordering::Less => {
@@ -509,7 +528,7 @@ fn chunked_units(nodes: &[HxNode], groups: usize, units: &mut Vec<u32>) {
                 while next_level != level {
                     loop_steps(units, 1, 1);
                     bitmap |= 1 << mask_slot(current, level);
-                    let children = bitmap.count_ones() as usize - 1;
+                    let children = to_usize(bitmap.count_ones()) - 1;
                     loop_steps(units, children, 2);
                     for _ in 0..children {
                         pop(&mut stack);
@@ -527,13 +546,13 @@ fn chunked_units(nodes: &[HxNode], groups: usize, units: &mut Vec<u32>) {
     let mut last_level = common_depth(previous, current);
     index += nodes[index].skip;
     if nodes[index].skip > 1 {
-        loop_steps(units, (top - last_level) as usize, 0);
+        loop_steps(units, to_usize(top - last_level), 0);
     }
     let mut bitmap = pop(&mut stack);
     while last_level > 0 {
         loop_steps(units, 1, 0);
         bitmap |= 1 << mask_slot(current, last_level);
-        let children = bitmap.count_ones() as usize - 1;
+        let children = to_usize(bitmap.count_ones()) - 1;
         loop_steps(units, children, 1);
         for _ in 0..children {
             pop(&mut stack);
@@ -542,7 +561,7 @@ fn chunked_units(nodes: &[HxNode], groups: usize, units: &mut Vec<u32>) {
         last_level -= 1;
     }
     bitmap |= 1 << mask_slot(current, 0);
-    loop_steps(units, bitmap.count_ones() as usize - 1, 0);
+    loop_steps(units, to_usize(bitmap.count_ones()) - 1, 0);
 }
 
 #[cfg(test)]

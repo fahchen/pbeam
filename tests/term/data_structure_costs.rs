@@ -122,6 +122,11 @@ fn report_allocations(rows: &[(&str, usize, usize)]) {
 
 /// Return the nanoseconds for each operation of `body`, as the minimum of
 /// [`RUNS`] timed runs. The caller performs exactly `operations` operations.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "a benchmark converts a nanosecond count and an operation count to the nearest f64"
+)]
 fn measure(operations: usize, mut body: impl FnMut() -> u64) -> f64 {
     let mut best = f64::INFINITY;
     for _ in 0..RUNS {
@@ -159,7 +164,11 @@ fn compared(left: &Term, right: &Term) -> usize {
 /// assert!(matches!(tuple_of(1), Term::Tuple(_)));
 /// ```
 fn tuple_of(len: usize) -> Term {
-    Term::tuple((0..len).map(|value| Term::Integer(value as i64)).collect())
+    Term::tuple(
+        (0..len)
+            .map(|value| Term::Integer(i64::try_from(value).unwrap()))
+            .collect(),
+    )
 }
 
 /// Return a tuple of `len` elements that holds one nested tuple of the same

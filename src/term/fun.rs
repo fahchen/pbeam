@@ -533,7 +533,7 @@ impl Fun {
     /// assert_eq!(fun.identity(), fun.clone().identity());
     /// ```
     pub(super) fn identity(&self) -> usize {
-        Arc::as_ptr(self.arc()) as usize
+        Arc::as_ptr(self.arc()).addr()
     }
 }
 

@@ -165,7 +165,8 @@ impl MatchState {
     /// assert_eq!(MatchState::new(Binary::from(&[1][..])).position(), 0);
     /// ```
     pub(crate) fn position(&self) -> usize {
-        self.position.load(Ordering::Relaxed) as usize
+        usize::try_from(self.position.load(Ordering::Relaxed))
+            .expect("a position inside a binary fits in usize")
     }
 
     /// Set the bit position of the next segment, as `bs_set_position`
@@ -181,7 +182,7 @@ impl MatchState {
     /// assert_eq!(context.remaining_bits(), 8);
     /// ```
     pub(crate) fn set_position(&self, position: usize) {
-        self.position.store(position as u64, Ordering::Relaxed);
+        self.position.store(wide(position), Ordering::Relaxed);
     }
 
     /// Move the position by `size` bits, as the `skip` command of
@@ -203,7 +204,7 @@ impl MatchState {
         let size = usize::try_from(size)
             .ok()
             .filter(|&size| size <= self.remaining_bits())?;
-        self.position.fetch_add(size as u64, Ordering::Relaxed);
+        self.position.fetch_add(wide(size), Ordering::Relaxed);
         Some(())
     }
 
@@ -321,7 +322,7 @@ impl MatchState {
         if segment_bits(self.bytes.bit_bytes(), start, size) != segment_bits(text, 0, size) {
             return false;
         }
-        self.position.fetch_add(size as u64, Ordering::Relaxed);
+        self.position.fetch_add(wide(size), Ordering::Relaxed);
         true
     }
 
@@ -391,14 +392,16 @@ impl MatchState {
             .iter()
             .fold(0_u64, |raw, &byte| raw << 8 | u64::from(byte));
         let value = match size {
-            16 => half_float(raw as u16),
-            32 => f64::from(f32::from_bits(raw as u32)),
+            16 => half_float(u16::try_from(raw).expect("a 16-bit segment is 2 bytes")),
+            32 => f64::from(f32::from_bits(
+                u32::try_from(raw).expect("a 32-bit segment is 4 bytes"),
+            )),
             _ => f64::from_bits(raw),
         };
         if !value.is_finite() {
             return None;
         }
-        self.skip(size as u64)?;
+        self.skip(wide(size))?;
         Some(value)
     }
 
@@ -466,8 +469,7 @@ impl MatchState {
             }
             _ => return None,
         };
-        self.position
-            .fetch_add((size * 8) as u64, Ordering::Relaxed);
+        self.position.fetch_add(wide(size * 8), Ordering::Relaxed);
         Some(code_point)
     }
 
@@ -552,6 +554,12 @@ impl MatchState {
     }
 }
 
+/// A `usize` bit count or position as `u64`, which holds every `usize`.
+#[inline]
+fn wide(value: usize) -> u64 {
+    u64::try_from(value).expect("a usize fits in u64")
+}
+
 /// Return `size` bits of `bytes` from the bit offset `start`, packed in
 /// bytes first bit first. The last byte holds the last `size % 8` bits in
 /// its high bits, and its other bits are 0. The bits are in `bytes`.
@@ -570,7 +578,13 @@ fn segment_bits(bytes: &[u8], start: usize, size: usize) -> Vec<u8> {
         .map(|index| {
             let next = bytes.get(index + 1).copied().unwrap_or(0);
             // A shift of 0 takes no bit of the next byte.
-            (bytes[index] << shift) | (u16::from(next) >> (8 - shift)) as u8
+            #[expect(
+                clippy::as_conversions,
+                clippy::cast_possible_truncation,
+                reason = "the shifted next byte fits in u8: a shift of 0 gives 0, else the shift of a u8 is below 256"
+            )]
+            let carried = (u16::from(next) >> (8 - shift)) as u8;
+            (bytes[index] << shift) | carried
         })
         .collect();
     if let Some(last) = bits.last_mut() {
