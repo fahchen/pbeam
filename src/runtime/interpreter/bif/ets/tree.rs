@@ -3,7 +3,7 @@
 //! walk, as in ERTS, so it does not depend on the layout of the table.
 
 use super::{
-    AtomTable, BeamError, BifContext, BifResult, MatchSpec, Reference, Table, Term, Value,
+    AtomTable, BeamError, BifContext, BifResult, MatchSpec, Reference, Table, Term, Value, to_i64,
 };
 use crate::runtime::ets::range::{KeyRange, cmp_partly_bound, key_range};
 use crate::term::Direction;
@@ -369,7 +369,7 @@ pub(super) fn reverse(
         result = Term::cons(head.clone(), result);
         list = tail.clone();
     }
-    let reductions = (REVERSE_ITERATIONS / 10 - left / 10) as i32;
+    let reductions = i32::try_from(REVERSE_ITERATIONS / 10 - left / 10).unwrap_or(i32::MAX);
     context
         .scheduler
         .current_process_mut()
@@ -641,7 +641,7 @@ pub(super) fn select_delete(
                 Some(object) if deletes(atoms, spec, object) => Some(object[key].clone()),
                 _ => None,
             };
-            let count = doomed.iter().count() as i64;
+            let count = to_i64(doomed.iter().count());
             if let Some(doomed) = doomed {
                 table.delete(atoms, &doomed);
             }
@@ -766,7 +766,7 @@ fn delete_turn(
     for key in &doomed {
         table.delete(atoms, key);
     }
-    let count = count + doomed.len() as i64;
+    let count = count + to_i64(doomed.len());
     let reductions = TREE_ITERATIONS - max;
     if max > 0 {
         return Ok((DeleteTurn::Done(count), reductions));

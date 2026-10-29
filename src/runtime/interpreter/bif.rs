@@ -1610,3 +1610,33 @@ pub(crate) fn item_reductions(
     };
     i32::try_from(count / 4).unwrap_or(i32::MAX)
 }
+
+/// Convert a length, count, or position that the caller bounds to `u64`.
+pub(super) fn to_u64<T: TryInto<u64>>(value: T) -> u64
+where
+    T::Error: std::fmt::Debug,
+{
+    value
+        .try_into()
+        .expect("a bounded length, count, or position fits in u64")
+}
+
+/// Convert a length, count, or position that the caller bounds to `i64`.
+pub(super) fn to_i64<T: TryInto<i64>>(value: T) -> i64
+where
+    T::Error: std::fmt::Debug,
+{
+    value
+        .try_into()
+        .expect("a bounded length, count, or position fits in i64")
+}
+
+/// Convert a length, count, or position that the caller bounds to `usize`.
+pub(super) fn to_usize<T: TryInto<usize>>(value: T) -> usize
+where
+    T::Error: std::fmt::Debug,
+{
+    value
+        .try_into()
+        .expect("a bounded length, count, or position fits in usize")
+}

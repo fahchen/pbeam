@@ -11,6 +11,7 @@ use super::{
     current_function, denial, error, erts_internal, io_service, is_bif, mfa_stacktrace,
     other_process_denial,
 };
+use super::{to_i64, to_u64, to_usize};
 use crate::beam::code::Instruction;
 use crate::runtime::capability;
 use crate::runtime::dirty::DIRTY_IO_THREADS;
@@ -140,9 +141,9 @@ pub(super) fn nodes(
     // ERTS charges one reduction for each 10 nodes of a result of more than
     // 10 nodes (`dist.c:6465-6468`).
     if names.len() > 10 {
-        scheduler
-            .current_process_mut()
-            .bump_reductions((names.len() / 10) as i32);
+        scheduler.current_process_mut().bump_reductions(
+            i32::try_from(names.len() / 10).expect("ERTS counts the nodes of a list in an `int`"),
+        );
     }
     let atoms = &scheduler.atoms;
     Value(Term::list_from(names.into_iter().map(|(name, kind)| {
@@ -502,7 +503,10 @@ fn process_heap_flag(
     };
     let old = if flag.is_static("fullsweep_after") {
         // `max_gen_gcs` is a `Uint16` (`erl_process.h:1145`).
-        i64::from(std::mem::replace(&mut flags.fullsweep_after, size as u16))
+        i64::from(std::mem::replace(
+            &mut flags.fullsweep_after,
+            max_gen_gcs(size),
+        ))
     } else if flag.is_static("min_heap_size") {
         std::mem::replace(&mut flags.min_heap_size, minimum(node.min_heap_size)?)
     } else {
@@ -536,6 +540,28 @@ const UNSUPPORTED_SYSTEM_FLAGS: &[&str] = &[
 /// (`error.h:206`). `system_flag(backtrace_depth, Depth)` sets a larger
 /// depth to this value (`bif.c:5108-5115`).
 const MAX_BACKTRACE_SIZE: i64 = 64;
+
+/// The value of `max_gen_gcs`, a `Uint16` of ERTS (`erl_process.h:1145`): keep
+/// the low 16 bits of the number.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the `Uint16` of ERTS keeps the low 16 bits of the number"
+)]
+fn max_gen_gcs(value: i64) -> u16 {
+    value as u16
+}
+
+/// A number as the C `int` of ERTS keeps it: the low 32 bits.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "the C `int` of ERTS keeps the low 32 bits of the number"
+)]
+fn c_int(value: i64) -> i32 {
+    value as i32
+}
 
 /// Run `erlang:system_flag(Item, Value)` as ERTS `system_flag_2`
 /// (`bif.c:4972-5304`) does for the items `system_logger`, `debug_flags`,
@@ -651,7 +677,7 @@ pub(super) fn system_flag(
                 let new = next_heap_size(size).ok_or_else(|| no_heap_size(size))?;
                 // ERTS keeps `H_MIN_SIZE` and `BIN_VH_MIN_SIZE` as `int`
                 // (`erl_init.c:110-111`), so the value wraps to 32 bits.
-                let new = i64::from(new as i32);
+                let new = i64::from(c_int(new));
                 let mut flags = scheduler.node().heap_flags_mut();
                 let HeapFlags {
                     min_heap_size,
@@ -679,9 +705,9 @@ pub(super) fn system_flag(
                 Value(old)
             }
             ("backtrace_depth", Some(depth)) => {
-                let depth = depth.min(MAX_BACKTRACE_SIZE) as usize;
+                let depth = to_usize(depth.min(MAX_BACKTRACE_SIZE));
                 let old = scheduler.node().swap_backtrace_depth(depth);
-                Value(Term::Integer(old as i64))
+                Value(Term::Integer(to_i64(old)))
             }
             (name, _) => {
                 return Err(error(format!(
@@ -1858,7 +1884,7 @@ pub(super) fn spawn_opt(
                 if let Some(count) = value.small_integer().filter(|count| *count >= 0) =>
             {
                 // `max_gen_gcs` is a `Uint16` (`erl_process.h:1145`).
-                heap.fullsweep_after = count as u16;
+                heap.fullsweep_after = max_gen_gcs(count);
                 use_heap = true;
             }
             (_, Some(("max_heap_size", value)))
@@ -2130,7 +2156,9 @@ pub(super) fn append_chunk(
     let per_reduction = if right.is_nil() { 32 } else { 60 };
     let budget = per_reduction * process.bif_reductions_or_zero();
     let walked = elements.by_ref().take(budget).count();
-    process.bump_reductions((walked / per_reduction) as i32);
+    process.bump_reductions(
+        i32::try_from(walked / per_reduction).expect("the walk reads at most the budget"),
+    );
     let rest = elements.rest();
     if rest.is_nonempty_list() {
         return Ok(BifResult::TrapBif {
@@ -2199,14 +2227,16 @@ pub(super) fn length(
         return Ok(BifResult::TrapBif {
             module: "erlang",
             function: "length",
-            arguments: vec![rest.clone(), Term::Integer(count + counted as i64)],
+            arguments: vec![rest.clone(), Term::Integer(count + to_i64(counted))],
         });
     }
     if !rest.is_nil() {
         return Ok(BifResult::badarg());
     }
-    process.bump_reductions((counted / 16) as i32);
-    Ok(Value(Term::Integer(count + counted as i64)))
+    process.bump_reductions(
+        i32::try_from(counted / 16).expect("the count reads at most 16 cells for each reduction"),
+    );
+    Ok(Value(Term::Integer(count + to_i64(counted))))
 }
 
 /// Run `erlang:binary_part/3`: return the `length` bytes of a binary from
@@ -2249,14 +2279,14 @@ pub(super) fn binary_part(binary: &Term, start: &Term, length: &Term) -> BifResu
         };
         (start, length)
     } else {
-        (start, *length as u64)
+        (start, length.cast_unsigned())
     };
     // The start is below 2^63 and the length is at most 2^63, so the sum
     // does not overflow.
     let end = start + length;
     // A bitstring whose size is not a whole number of bytes raises
     // `badarg` (`erts_binary_part`, `erl_bif_binary.c:1995-1997`).
-    if !bytes.bit_size().is_multiple_of(8) || end > (bytes.bit_size() / 8) as u64 {
+    if !bytes.bit_size().is_multiple_of(8) || end > to_u64(bytes.bit_size() / 8) {
         return BifResult::badarg();
     }
     // ERTS makes a sub-binary that refers to the source
@@ -2264,7 +2294,7 @@ pub(super) fn binary_part(binary: &Term, start: &Term, length: &Term) -> BifResu
     // `erl_bif_binary.c:2508-2530`), so the part shares the bytes of the
     // source and keeps their offset.
     Value(Term::Binary(
-        bytes.bits(start as usize * 8, end as usize * 8),
+        bytes.bits(to_usize(start) * 8, to_usize(end) * 8),
     ))
 }
 
@@ -2285,7 +2315,7 @@ pub(super) fn binary_part(binary: &Term, start: &Term, length: &Term) -> BifResu
 /// ```
 pub(super) fn bit_size(term: &Term) -> BifResult {
     match term {
-        Term::Binary(bytes) => Value(Term::Integer(bytes.bit_size() as i64)),
+        Term::Binary(bytes) => Value(Term::Integer(to_i64(bytes.bit_size()))),
         _ => BifResult::badarg(),
     }
 }
@@ -2306,7 +2336,7 @@ pub(super) fn bit_size(term: &Term) -> BifResult {
 /// ```
 pub(super) fn byte_size(term: &Term) -> BifResult {
     match term {
-        Term::Binary(bytes) => Value(Term::Integer(bytes.bit_size().div_ceil(8) as i64)),
+        Term::Binary(bytes) => Value(Term::Integer(to_i64(bytes.bit_size().div_ceil(8)))),
         _ => BifResult::badarg(),
     }
 }
@@ -2318,8 +2348,8 @@ pub(super) fn byte_size(term: &Term) -> BifResult {
 /// In a guard, the `gc_bif` instruction goes to its fail label instead.
 pub(super) fn size(term: &Term) -> BifResult {
     match term {
-        Term::Tuple(elements) => Value(Term::Integer(elements.len() as i64)),
-        Term::Binary(bytes) => Value(Term::Integer((bytes.bit_size() / 8) as i64)),
+        Term::Tuple(elements) => Value(Term::Integer(to_i64(elements.len()))),
+        Term::Binary(bytes) => Value(Term::Integer(to_i64(bytes.bit_size() / 8))),
         _ => BifResult::badarg(),
     }
 }
@@ -2361,11 +2391,11 @@ pub(super) fn tl(list: &Term) -> BifResult {
 pub(super) fn split_binary(binary: &Term, position: &Term) -> BifResult {
     match (binary, position) {
         (Term::Binary(binary), Term::Integer(at))
-            if (0..=(binary.bit_size() / 8) as i64).contains(at) =>
+            if (0..=to_i64(binary.bit_size() / 8)).contains(at) =>
         {
             // The right part of a bitstring keeps the bits after the whole
             // bytes (`split_binary_2`, `binary.c:488-512`).
-            let at = *at as usize;
+            let at = to_usize(*at);
             let (left, right) = binary.bit_bytes().split_at(at);
             let right = Binary::from(right.to_vec()).bits(0, binary.bit_size() - at * 8);
             Value(Term::tuple(vec![
@@ -2384,10 +2414,18 @@ const B2L_BYTES_PER_REDUCTION: usize = 256;
 /// The budget of a call of `erlang:binary_to_list/1,3` that runs in one
 /// chunk after a short budget, as ERTS `B2L_MIN_EXEC_REDS`
 /// (`binary.c:38`).
+#[expect(
+    clippy::as_conversions,
+    reason = "a const cannot call `try_from`, and `CONTEXT_REDS` is 4000"
+)]
 const B2L_MIN_EXEC_REDS: usize = CONTEXT_REDS as usize / 4;
 
 /// The budget at or below which `erlang:binary_to_list/1,3` switches out
 /// before a short binary, as ERTS `B2L_RESCHED_REDS` (`binary.c:39`).
+#[expect(
+    clippy::as_conversions,
+    reason = "a const cannot call `try_from`, and `CONTEXT_REDS` is 4000"
+)]
 const B2L_RESCHED_REDS: usize = CONTEXT_REDS as usize / 40;
 
 /// Run `erlang:binary_to_list/1`, as ERTS `binary_to_list_1`
@@ -2449,19 +2487,19 @@ pub(super) fn binary_to_list_3(
         return Ok(BifResult::badarg());
     };
     let bits = binary.bit_size();
-    let size = (bits / 8) as i64;
+    let size = to_i64(bits / 8);
     if bits % 8 != 0 || *first < 1 || *last > size || last < first {
         return Ok(BifResult::badarg());
     }
     let arguments = vec![term.clone(), start.clone(), stop.clone()];
-    let length = (last - first + 1) as usize;
+    let length = to_usize(last - first + 1);
     b2l_start(
         scheduler,
         "binary_to_list",
         arguments,
         binary,
-        *first as usize - 1..*first as usize - 1 + length,
-        size as usize,
+        to_usize(*first) - 1..to_usize(*first) - 1 + length,
+        to_usize(size),
         Term::nil(),
     )
 }
@@ -2532,6 +2570,12 @@ pub(super) fn bitstring_to_list(
 /// # Errors
 ///
 /// Return the invariant error of [`ProcessState::bif_reductions_left`].
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "ERTS passes the `Uint` cost to `BUMP_REDS` as an `int` (`binary.c:265-266`), which wraps"
+)]
 fn b2l_start(
     scheduler: &mut Scheduler,
     bif: &'static str,
@@ -2543,10 +2587,10 @@ fn b2l_start(
 ) -> Result<BifResult, BeamError> {
     let (offset, length) = (bytes.start, bytes.len());
     let process = scheduler.current_process_mut();
-    let one_chunk = (size as u64)
+    let one_chunk = to_u64(size)
         < process
             .bif_reductions_unsigned()
-            .wrapping_mul(B2L_BYTES_PER_REDUCTION as u64);
+            .wrapping_mul(to_u64(B2L_BYTES_PER_REDUCTION));
     if !one_chunk {
         // Only a budget of 0 or more does not make one chunk.
         let reds_left = process.bif_reductions_left()?;
@@ -2600,7 +2644,10 @@ pub(super) fn b2l_chunk(
     reds_left: usize,
 ) -> BifResult {
     let size = ((reds_left + 1) * B2L_BYTES_PER_REDUCTION).min(remaining);
-    process.bump_reductions(((size - 1) / B2L_BYTES_PER_REDUCTION + 1) as i32);
+    process.bump_reductions(
+        i32::try_from((size - 1) / B2L_BYTES_PER_REDUCTION + 1)
+            .expect("a chunk costs at most the reductions left plus 1"),
+    );
     let rest = remaining - size;
     let list = b2l_cons(binary, offset + rest, offset + remaining, tail);
     if rest == 0 {
@@ -2611,8 +2658,8 @@ pub(super) fn b2l_chunk(
         function: "binary_to_list_continue",
         arguments: vec![
             Term::Binary(binary.clone()),
-            Term::Integer(offset as i64),
-            Term::Integer(rest as i64),
+            Term::Integer(to_i64(offset)),
+            Term::Integer(to_i64(rest)),
             list,
         ],
     }
@@ -2899,6 +2946,12 @@ pub(super) fn integer_to_binary_2(
 /// cost with the `int` budget, which C converts to a `Uint`
 /// (`bif.c:3289`, `binary.c:98`), so a negative budget makes no runtime
 /// error.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "ERTS passes the `Uint` cost to `BUMP_REDS` as an `int` (`bif.c:3289-3296`), which wraps"
+)]
 fn integer_digits(
     process: &mut ProcessState,
     term: &Term,
@@ -2913,7 +2966,7 @@ fn integer_digits(
     if term.small_integer().is_none() {
         let value = term.bigint().expect("the term is an integer");
         let cost = big_integer_estimate(value.bits(), value.sign(), base) / DIGITS_PER_RED;
-        if cost as u64 > process.bif_reductions_unsigned() {
+        if to_u64(cost) > process.bif_reductions_unsigned() {
             // ponytail: no dirty scheduler; see "Scheduling" in docs/erts-differences.md.
             return Err(error(format!(
                 "unsupported erlang:{name} of a bignum of {} bits with {} reductions left: ERTS runs it on a dirty CPU scheduler",
@@ -2932,7 +2985,8 @@ fn integer_digits(
     let mut magnitude = value.unsigned_abs();
     let mut digits = Vec::new();
     loop {
-        let digit = (magnitude % u64::from(base)) as u32;
+        let digit =
+            u32::try_from(magnitude % u64::from(base)).expect("a remainder is below the base");
         digits.push(char::from_digit(digit, base).map_or('0', |digit| digit.to_ascii_uppercase()));
         magnitude /= u64::from(base);
         if magnitude == 0 {
@@ -2961,6 +3015,13 @@ fn integer_digits(
 /// // 2^63 - 1 in base 2: lg 62, 63 / 1.0 + 1 = 64, then the null byte.
 /// assert_eq!(big_integer_estimate(63, Sign::Plus, 2), 65);
 /// ```
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    reason = "ERTS computes the digit count with a `double` and truncates it to a `Uint` (`big.c:4087-4092`), as the saturating `as` of Rust does"
+)]
 fn big_integer_estimate(bits: u64, sign: num_bigint::Sign, base: u32) -> usize {
     /// `lg2_lookup` (`big.c:4087-4092`): the rounded `log2` of each base
     /// from 2 to 36.
@@ -3429,7 +3490,7 @@ pub(super) fn system_info(scheduler: &mut Scheduler, item: &Term) -> Result<BifR
         }
         Term::Atom(atom) if atoms.name_of(atom) == "endian" => Ok(Value(Term::static_atom(ENDIAN))),
         Term::Atom(atom) if atom.is_static("wordsize") => {
-            Ok(Value(Term::Integer(size_of::<usize>() as i64)))
+            Ok(Value(Term::Integer(to_i64(size_of::<usize>()))))
         }
         Term::Atom(atom) if atoms.name_of(atom) == "debug_compiled" => {
             Ok(Value(Term::static_atom("false")))
@@ -3591,7 +3652,7 @@ fn system_info_tuple(
     match elements {
         // `erl_bif_info.c:2520-2527`.
         [selector, which] if name(selector) == "wordsize" => match name(which) {
-            "internal" | "external" => Ok(Value(Term::Integer(size_of::<usize>() as i64))),
+            "internal" | "external" => Ok(Value(Term::Integer(to_i64(size_of::<usize>())))),
             _ => Ok(BifResult::badarg()),
         },
         // `erl_bif_info.c:2541-2546`, `erl_cpu_topology.c:1619-1638`.
@@ -4871,7 +4932,8 @@ fn local_send_result(scheduler: &mut Scheduler, value: Term) -> BifResult {
 pub(super) fn bump_reductions(scheduler: &mut Scheduler, reductions: &Term) -> BifResult {
     match reductions.small_integer() {
         Some(value) if value >= 0 => {
-            let value = value.min(i64::from(CONTEXT_REDS)) as i32;
+            let value = i32::try_from(value.min(i64::from(CONTEXT_REDS)))
+                .expect("a value up to `CONTEXT_REDS` is an `i32`");
             scheduler.current_process_mut().bump_reductions(value);
             Value(Term::static_atom("true"))
         }
@@ -5094,7 +5156,7 @@ pub(super) fn hibernate(module: &Term, function: &Term, arguments: &Term) -> Bif
     let (Term::Atom(_), Term::Atom(_)) = (module, function) else {
         return BifResult::badarg();
     };
-    let limit = MAX_ARG as usize + 1;
+    let limit = to_usize(MAX_ARG) + 1;
     let (count, rest) = match arguments.list_iter() {
         Some(mut cells) => (cells.by_ref().take(limit).count(), cells.rest()),
         None => (0, arguments),
@@ -5134,9 +5196,13 @@ pub(super) fn hibernate(module: &Term, function: &Term, arguments: &Term) -> Bif
 /// ```
 pub(super) fn make_fun(module: &Term, function: &Term, arity: &Term) -> BifResult {
     match (module, function, arity.small_integer()) {
-        (Term::Atom(module), Term::Atom(function), Some(arity @ 0..=MAX_ARG)) => Value(Term::Fun(
-            Fun::external(module.clone(), function.clone(), arity as u32),
-        )),
+        (Term::Atom(module), Term::Atom(function), Some(arity @ 0..=MAX_ARG)) => {
+            Value(Term::Fun(Fun::external(
+                module.clone(),
+                function.clone(),
+                u32::try_from(arity).expect("the arity is in 0..=255"),
+            )))
+        }
         _ => BifResult::badarg(),
     }
 }
@@ -5649,7 +5715,7 @@ pub(super) fn function_exported(
         return BifResult::badarg();
     };
     let (module, name) = (atoms.name_of(module), atoms.name_of(name));
-    let exported = u32::try_from(arity as i32).is_ok_and(|arity| {
+    let exported = u32::try_from(c_int(arity)).is_ok_and(|arity| {
         let exported_by_code = code.get(module).is_some_and(|loaded| {
             loaded
                 .tables
@@ -5979,9 +6045,9 @@ pub(super) fn process_info_1(
                 )?
             };
             let info = process_info_term(&scheduler.atoms, values)?;
-            scheduler
-                .current_process_mut()
-                .bump_reductions(PROCESS_INFO_1_KEYS.len() as i32);
+            scheduler.current_process_mut().bump_reductions(
+                i32::try_from(PROCESS_INFO_1_KEYS.len()).expect("the key list is short"),
+            );
             Ok(Value(info))
         });
     }
@@ -6013,7 +6079,7 @@ pub(super) fn process_info_1(
     let info = process_info_term(&scheduler.atoms, values)?;
     scheduler
         .current_process_mut()
-        .bump_reductions(PROCESS_INFO_1_KEYS.len() as i32);
+        .bump_reductions(i32::try_from(PROCESS_INFO_1_KEYS.len()).expect("the key list is short"));
     Ok(Value(info))
 }
 
@@ -6041,7 +6107,7 @@ fn process_info_values(
                 } => Some(MfaNames::Names(
                     module.clone(),
                     name.clone(),
-                    *arity as usize,
+                    usize::try_from(*arity).expect("a u32 fits in usize"),
                 )),
                 _ => None,
             })
@@ -7548,6 +7614,10 @@ const PTAB_INDICES_PER_RED: u64 = 25;
 /// (`ERTS_PTAB_LIST_BIF_MIN_START_REDS`, `erl_ptab.c:44-46`), and the
 /// maximum reductions of one step through the deleted processes
 /// (`ERTS_PTAB_LIST_INSPECT_DELETED_MAX_REDS`, `erl_ptab.c:52-54`).
+#[expect(
+    clippy::as_conversions,
+    reason = "a const cannot call `try_from`, and the quotient is 40"
+)]
 const PTAB_CHUNK_REDS: usize = (PTAB_CHUNK / PTAB_INDICES_PER_RED) as usize;
 /// Deleted processes for one reduction
 /// (`ERTS_PTAB_LIST_BIF_INSPECT_DELETED_PER_RED`, `erl_ptab.c:50`).
@@ -7629,7 +7699,7 @@ pub(super) fn processes(scheduler: &mut Scheduler) -> Result<BifResult, BeamErro
         pid_ix: 0,
         result: Term::Nil,
     };
-    if scheduler.current_process().bif_reductions_signed() < PTAB_CHUNK_REDS as i64 {
+    if scheduler.current_process().bif_reductions_signed() < to_i64(PTAB_CHUNK_REDS) {
         return Ok(ptab_list_trap(scheduler, state));
     }
     ptab_list(scheduler, state)
@@ -7715,9 +7785,9 @@ pub(super) fn ptab_list(
     }
     loop {
         let left = scheduler.current_process().bif_reductions_left()?;
-        let have = match state.tix.cmp(&(PTAB_SIZE as i64)) {
+        let have = match state.tix.cmp(&(to_i64(PTAB_SIZE))) {
             std::cmp::Ordering::Less => {
-                let end = (state.tix as u64 + PTAB_CHUNK).min(PTAB_SIZE);
+                let end = (to_u64(state.tix) + PTAB_CHUNK).min(PTAB_SIZE);
                 let ids = if std::mem::take(&mut start) {
                     scheduler.ptab_list_start(end)
                 } else {
@@ -7730,12 +7800,14 @@ pub(super) fn ptab_list(
                         ptab_list_push(&mut state.found, &mut state.pid_ix, id);
                     }
                 }
-                let reds = (end - state.tix as u64) / PTAB_INDICES_PER_RED;
-                state.tix = end as i64;
-                let have = left.saturating_sub(reds as usize);
+                let reds = (end - to_u64(state.tix)) / PTAB_INDICES_PER_RED;
+                state.tix = to_i64(end);
+                let have = left.saturating_sub(to_usize(reds));
                 let next = (end + PTAB_CHUNK).min(PTAB_SIZE) - end;
-                scheduler.current_process_mut().bump_reductions(reds as i32);
-                if (next / PTAB_INDICES_PER_RED) as usize > have {
+                scheduler.current_process_mut().bump_reductions(
+                    i32::try_from(reds).expect("a chunk costs at most 40 reductions"),
+                );
+                if to_usize(next / PTAB_INDICES_PER_RED) > have {
                     0
                 } else {
                     have
@@ -7761,7 +7833,10 @@ pub(super) fn ptab_list(
                     scheduler.ptab_list_end();
                     state.tix += 1;
                 }
-                scheduler.current_process_mut().bump_reductions(reds as i32);
+                scheduler.current_process_mut().bump_reductions(
+                    i32::try_from(reds)
+                        .expect("the deleted processes cost at most `PTAB_CHUNK_REDS`"),
+                );
                 left.saturating_sub(reds)
             }
             std::cmp::Ordering::Greater => {
@@ -7769,7 +7844,7 @@ pub(super) fn ptab_list(
                 // start: the gone pids, the last first, then the found pids, as
                 // `ptab_list_bif_engine` conses its pid array from the end
                 // (`erl_ptab.c:1201-1254`).
-                let conses = (PTAB_CONSES_PER_RED * left).min(state.pid_ix as usize);
+                let conses = (PTAB_CONSES_PER_RED * left).min(to_usize(state.pid_ix));
                 for _ in 0..conses {
                     let list = if state.gone.is_nil() {
                         &mut state.found
@@ -7785,13 +7860,15 @@ pub(super) fn ptab_list(
                     PTAB_CELLS.set(PTAB_CELLS.get() + 1);
                     state.result = Term::cons(pid, std::mem::replace(&mut state.result, Term::Nil));
                 }
-                state.pid_ix -= conses as i64;
+                state.pid_ix -= to_i64(conses);
                 let reds = conses / PTAB_CONSES_PER_RED;
-                scheduler.current_process_mut().bump_reductions(reds as i32);
+                scheduler.current_process_mut().bump_reductions(
+                    i32::try_from(reds).expect("the cells cost at most the reductions left"),
+                );
                 left - reds
             }
         };
-        if state.tix > PTAB_SIZE as i64 && state.pid_ix == 0 {
+        if state.tix > to_i64(PTAB_SIZE) && state.pid_ix == 0 {
             return Ok(Value(state.result));
         }
         if have == 0 {

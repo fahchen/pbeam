@@ -2,6 +2,7 @@
 
 use super::BifResult::Value;
 use super::{AtomTable, BeamError, BifContext, BifResult, ProcessId, Term, error};
+use super::{to_i64, to_u64, to_usize};
 use crate::runtime::ets::pattern::{MatchSpec, SpecError};
 use crate::runtime::ets::{
     Access, Busy, EtsTables, ITERATIONS_PER_RED, InsertKind, Lacking, Table, TableOptions,
@@ -21,6 +22,17 @@ pub(super) use tree::SelectOrder;
 /// (`DB_WRITE_CONCURRENCY_MIN_LOCKS` and `DB_WRITE_CONCURRENCY_MAX_LOCKS`,
 /// `erl_db.c:65-66`).
 const LOCKS: std::ops::RangeInclusive<i64> = 1..=32768;
+
+/// The key position as the C `int` of ERTS keeps it, which is the low 32
+/// bits of the number (`erl_db_util.h:346`, `erl_db.c:2597-2710`).
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "the C `int` of ERTS keeps the low 32 bits of the number"
+)]
+fn c_int(value: i64) -> i32 {
+    value as i32
+}
 
 /// Run up to `units` units of the steps of the list insert that took the
 /// table `table`, as `ets_insert_2_list_continue` runs the steps of a
@@ -218,7 +230,7 @@ pub(super) fn new(
                 [Term::Atom(key), value] => match (context.scheduler.atoms.name_of(key), value) {
                     ("keypos", value) => match value.small_integer() {
                         // The C `int` keeps the low 32 bits (`erl_db_util.h:346`).
-                        Some(value) if value > 0 => keypos = value as i32,
+                        Some(value) if value > 0 => keypos = c_int(value),
                         _ => return Ok(BifResult::badarg()),
                     },
                     ("write_concurrency", Term::Atom(value))
@@ -299,7 +311,7 @@ pub(super) fn new(
     // `auto` table under contention.
     if fine && table_type != TableType::OrderedSet {
         made.set_locks(match &concurrency {
-            Term::Tuple(locks) => locks[1].small_integer().unwrap_or(64) as usize,
+            Term::Tuple(locks) => to_usize(locks[1].small_integer().unwrap_or(64)),
             _ => 64,
         });
     }
@@ -621,7 +633,7 @@ pub(super) fn insert_list(
     let caller = process.id;
     // A `long` count, and YCF yields when it is 0 or less (`erl_db.c:2258`,
     // `ycf_yield_fun.c:592-610`): a negative budget does what 0 does.
-    let budget = ITERATIONS_PER_RED * process.bif_reductions_or_zero() as i64;
+    let budget = ITERATIONS_PER_RED * to_i64(process.bif_reductions_or_zero());
     let mut units = Units { left: budget };
     // The tuples of the checked list, for the insert. The walk is part of
     // the units of the insert.
@@ -668,7 +680,7 @@ pub(super) fn insert_list(
         if matches!(check, Check::Done(_))
             && bag.is_none()
             && done == count
-            && count as i64 <= units.left
+            && to_i64(count) <= units.left
             && !locked
         {
             // A second call completes the list insert that holds the
@@ -692,7 +704,7 @@ pub(super) fn insert_list(
             let tuples = tuples();
             if !matches!(new, New::No) {
                 let held = first_held(&context.scheduler.atoms, &table, &tuples, keypos)?;
-                units.left -= held.unwrap_or(count) as i64;
+                units.left -= to_i64(held.unwrap_or(count));
                 if held.is_some() {
                     break 'work Some(Value(Term::static_atom("false")));
                 }
@@ -706,7 +718,7 @@ pub(super) fn insert_list(
                 keypos,
                 InsertKind::Insert,
             )?;
-            units.left -= 2 * count as i64;
+            units.left -= 2 * to_i64(count);
             break 'work Some(Value(Term::static_atom("true")));
         }
         let mut took = false;
@@ -780,7 +792,7 @@ pub(super) fn insert_list(
             // (`erl_db.c:1927-1949`, `2091-2107`). The call traps between
             // the objects, and its next turn runs the steps that remain.
             let (used, _) = step_inserting(&mut *context, &table, units.left, Some(caller));
-            done += used as usize;
+            done += to_usize(used);
             units.left -= used;
             match context.scheduler.ets.shared().take_result(caller) {
                 Some(value) => break 'work Some(Value(value)),
@@ -797,12 +809,14 @@ pub(super) fn insert_list(
         ))
     };
     let process = context.scheduler.current_process_mut();
-    process.bump_reductions(((budget - units.left) / ITERATIONS_PER_RED) as i32);
+    process.bump_reductions(
+        i32::try_from((budget - units.left) / ITERATIONS_PER_RED).unwrap_or(i32::MAX),
+    );
     Ok(result.unwrap_or_else(|| {
         let mut arguments = vec![
             table,
             objects.clone(),
-            Term::Integer(done as i64),
+            Term::Integer(to_i64(done)),
             Term::Integer(i64::from(keypos)),
             // A refused insert keeps no `bag` steps, and the slot keeps the
             // cause of the refusal.
@@ -871,7 +885,7 @@ impl New {
             New::No => None,
             New::Unlocked => Some(Term::static_atom("true")),
             New::Locked { walk, found } => Some(Term::tuple(vec![
-                Term::Integer(walk as i64),
+                Term::Integer(to_i64(walk)),
                 Term::static_atom(if found { "true" } else { "false" }),
             ])),
         }
@@ -887,7 +901,7 @@ impl New {
     pub(super) fn from_term(term: &Term) -> New {
         match term {
             Term::Tuple(elements) => New::Locked {
-                walk: elements[0].small_integer().expect("a trap keeps the walk") as usize,
+                walk: to_usize(elements[0].small_integer().expect("a trap keeps the walk")),
                 found: elements[1] == Term::static_atom("true"),
             },
             _ => New::Unlocked,
@@ -923,7 +937,7 @@ impl Check {
     fn into_term(self) -> Term {
         match self {
             Check::Rest(rest) => Term::tuple(vec![rest]),
-            Check::Done(count) => Term::Integer(count as i64),
+            Check::Done(count) => Term::Integer(to_i64(count)),
         }
     }
 
@@ -938,7 +952,9 @@ impl Check {
     pub(super) fn from_term(term: &Term) -> Check {
         match term {
             Term::Tuple(elements) => Check::Rest(elements[0].clone()),
-            count => Check::Done(count.small_integer().expect("a trap keeps the count") as usize),
+            count => Check::Done(to_usize(
+                count.small_integer().expect("a trap keeps the count"),
+            )),
         }
     }
 }
@@ -966,10 +982,10 @@ impl Units {
     /// assert_eq!((done, units.left), (3, 0));
     /// ```
     fn run(&mut self, done: &mut usize, end: usize) -> bool {
-        let units = (end - *done) as i64;
+        let units = to_i64(end - *done);
         let limit = self.left.max(1);
         if units >= limit {
-            *done += limit as usize;
+            *done += to_usize(limit);
             self.left -= limit;
             return false;
         }
@@ -1016,7 +1032,7 @@ impl Units {
                 break false;
             }
         };
-        *done += walked as usize;
+        *done += to_usize(walked);
         if walked >= limit {
             self.left -= limit;
             return None;
@@ -1084,7 +1100,7 @@ fn first_held(
     // The check makes the key position at least 1 for each object.
     let held = (tuples.iter()).position(|elements| {
         table
-            .object(atoms, &elements[keypos as usize - 1])
+            .object(atoms, &elements[to_usize(keypos) - 1])
             .is_some()
     });
     Ok(held.map(|index| index + 1))
@@ -1148,7 +1164,7 @@ fn valid_objects<'a>(
 /// ```
 fn valid_object(object: &Term, keypos: i32) -> Option<&[Term]> {
     match object {
-        Term::Tuple(elements) if elements.len() as u64 >= i64::from(keypos) as u64 => {
+        Term::Tuple(elements) if to_u64(elements.len()) >= i64::from(keypos).cast_unsigned() => {
             Some(elements.as_ref())
         }
         _ => None,
@@ -1221,7 +1237,7 @@ pub(super) fn lookup_element(
             },
         });
     }
-    let position = index as i32;
+    let position = c_int(index);
     if position == 0 {
         // ponytail: ERTS crashes here; see "ETS tables" in docs/erts-differences.md.
         return Err(error(format!(
@@ -1427,7 +1443,7 @@ pub(super) fn delete_object(
     let Term::Tuple(elements) = object else {
         return Ok(BifResult::badarg());
     };
-    if elements.len() < found.keypos() as usize {
+    if elements.len() < usize::try_from(found.keypos()).unwrap_or(usize::MAX) {
         return Ok(BifResult::badarg());
     }
     found.erase_object(&context.scheduler.atoms, elements);
@@ -1841,7 +1857,7 @@ pub(super) fn info(
     let value = match item {
         Term::Atom(atom) if atom.is_static("type") => Term::static_atom(found.table_type().name()),
         Term::Atom(atom) if atom.is_static("size") => Term::from_bigint(BigInt::from(found.size())),
-        Term::Atom(atom) if atom.is_static("memory") => Term::Integer(found.memory_words() as i64),
+        Term::Atom(atom) if atom.is_static("memory") => Term::Integer(to_i64(found.memory_words())),
         Term::Atom(atom) if atom.is_static("owner") => Term::Pid(found.owner()),
         Term::Atom(atom) if atom.is_static("heir") => {
             found.heir().map_or(Term::static_atom("none"), Term::Pid)
@@ -2048,7 +2064,7 @@ fn select_objects(
     let caller = context.scheduler.current_process_mut().id;
     let chunk = match limit.map(Term::small_integer) {
         None => 0,
-        Some(Some(chunk)) if chunk > 0 => chunk as usize,
+        Some(Some(chunk)) if chunk > 0 => to_usize(chunk),
         Some(_) => return Ok(BifResult::badarg()),
     };
     let reds = context
@@ -2074,7 +2090,7 @@ fn select_objects(
         return Ok(BifResult::badarg());
     };
     if table.table_type() == TableType::OrderedSet {
-        let chunk = chunk as i64;
+        let chunk = to_i64(chunk);
         let turn = tree::first_turn(atoms, &table, &compiled, chunk, order)?;
         drop(table);
         drop(ets);
@@ -2145,10 +2161,10 @@ fn select_trap_arguments(id: Reference, spec: &Term, chunk: usize) -> Vec<Term> 
         Term::Reference(id),
         spec.clone(),
         Term::Integer(0),
-        Term::Integer(chunk as i64),
+        Term::Integer(to_i64(chunk)),
         Term::nil(),
         Term::Integer(0),
-        Term::Integer(u64::MAX as i64),
+        Term::Integer(u64::MAX.cast_signed()),
     ]
 }
 
@@ -2193,11 +2209,11 @@ pub(super) fn match_trap(
             let arguments = vec![
                 Term::Reference(id),
                 spec.clone(),
-                Term::Integer(bucket as i64),
-                Term::Integer(state.chunk as i64),
+                Term::Integer(to_i64(bucket)),
+                Term::Integer(to_i64(state.chunk)),
                 state.matches.clone(),
-                Term::Integer(state.got as i64),
-                Term::Integer(state.writes as i64),
+                Term::Integer(to_i64(state.got)),
+                Term::Integer(state.writes.cast_signed()),
             ];
             return Ok(retry(context, lacking, "select_trap", arguments));
         }
@@ -2325,13 +2341,13 @@ pub(super) fn select_continue(
     };
     let spec = match_specification_of(compiled);
     let compiled = compiled.clone();
-    if *next >= 0 && *next as usize >= bucket {
+    if *next >= 0 && to_usize(*next) >= bucket {
         return Ok(BifResult::badarg());
     }
     let state = MatchState {
-        chunk: *chunk as usize,
+        chunk: to_usize(*chunk),
         matches: rest.clone(),
-        got: *size as usize,
+        got: to_usize(*size),
         writes,
         resumed: true,
     };
@@ -2341,7 +2357,7 @@ pub(super) fn select_continue(
         return match_end(context, id, &compiled, state, *next, MATCH_ITERATIONS);
     }
     let table = found;
-    let mut bucket = *next as usize;
+    let mut bucket = to_usize(*next);
     let mut state = state;
     let mut iterations = MATCH_ITERATIONS;
     let end = match_walk(
@@ -2521,7 +2537,7 @@ fn match_walk(
         };
         *bucket = next;
         if state.chunk > 0 && state.got >= state.chunk {
-            break Some(*bucket as i64);
+            break Some(to_i64(*bucket));
         }
         if *iterations <= 0 {
             break None;
@@ -2558,11 +2574,11 @@ fn match_finish(
                 arguments: vec![
                     Term::Reference(id),
                     spec.clone(),
-                    Term::Integer(bucket as i64),
-                    Term::Integer(state.chunk as i64),
+                    Term::Integer(to_i64(bucket)),
+                    Term::Integer(to_i64(state.chunk)),
                     state.matches,
-                    Term::Integer(state.got as i64),
-                    Term::Integer(state.writes as i64),
+                    Term::Integer(to_i64(state.got)),
+                    Term::Integer(state.writes.cast_signed()),
                 ],
             })
         }
@@ -2621,12 +2637,12 @@ fn match_end(
     }
     if !rest.is_empty() || next >= 0 {
         let program = context.scheduler.make_magic_ref()?;
-        let size = rest.len() as i64;
+        let size = to_i64(rest.len());
         (context.scheduler.ets.exclusive()).remember_program(program, compiled.clone());
         let continuation = Term::tuple(vec![
             Term::Reference(id),
             Term::Integer(next),
-            Term::Integer(state.chunk as i64),
+            Term::Integer(to_i64(state.chunk)),
             Term::Reference(program),
             Term::list_from(rest),
             Term::Integer(size),
@@ -2854,7 +2870,12 @@ pub(super) fn update_element(
     // unsigned arity with the C `int` key position, so a negative key
     // position rejects each default (`erl_db.c:1481-1488`).
     let default_elements = match default {
-        Some(Term::Tuple(elements)) if elements.len() as u32 >= keypos as u32 => Some(elements),
+        Some(Term::Tuple(elements))
+            if u32::try_from(elements.len()).expect("a tuple arity is below 2^32")
+                >= keypos.cast_unsigned() =>
+        {
+            Some(elements)
+        }
         Some(_) => return Ok(denied("default")),
         None => None,
     };
@@ -2996,7 +3017,12 @@ pub(super) fn update_counter(
     // ERTS compares the unsigned arity with the C `int` key position
     // (`erl_db.c:1721-1722`).
     let default_elements = match default {
-        Some(Term::Tuple(elements)) if elements.len() as u32 >= keypos as u32 => Some(elements),
+        Some(Term::Tuple(elements))
+            if u32::try_from(elements.len()).expect("a tuple arity is below 2^32")
+                >= keypos.cast_unsigned() =>
+        {
+            Some(elements)
+        }
         Some(_) => return Ok(denied("default")),
         None => None,
     };
@@ -3028,7 +3054,7 @@ pub(super) fn update_counter(
         (None, None) => return Ok(denied("badkey")),
         (None, Some(elements)) => {
             let mut object = elements.as_ref().to_vec();
-            object[keypos as usize - 1] = key.clone();
+            object[to_usize(keypos) - 1] = key.clone();
             object
         }
     };
@@ -3175,7 +3201,7 @@ pub(super) fn info_all(context: &mut BifContext<'_>, table: &Term) -> Result<Bif
         ("read_concurrency", Term::from(found.read_concurrency())),
         ("write_concurrency", found.write_concurrency().clone()),
         ("compressed", Term::from(found.compressed())),
-        ("memory", Term::Integer(found.memory_words() as i64)),
+        ("memory", Term::Integer(to_i64(found.memory_words()))),
         ("owner", Term::Pid(found.owner())),
         (
             "heir",
@@ -3455,7 +3481,7 @@ pub(super) fn select_count_trap(
     let Some(compiled) = compile_spec(atoms, spec)? else {
         return Ok(BifResult::badarg());
     };
-    let writes = found.writes() as i64;
+    let writes = found.writes().cast_signed();
     // The continuation keeps the table identifier, as ERTS does, so a
     // rename while the count traps does not change it.
     let id = ets
@@ -3487,7 +3513,7 @@ pub(super) fn select_count_trap(
         };
         let mut walk = None;
         match (resume, compiled.bound_key(keypos)) {
-            (Some((Term::Integer(bucket), ..)), _) => walk = Some(*bucket as usize),
+            (Some((Term::Integer(bucket), ..)), _) => walk = Some(to_usize(*bucket)),
             _ if compiled.matches_nothing(keypos) => {}
             (_, Some(key)) => {
                 if let Some(bucket) = found.key_bucket(atoms, key) {
@@ -3503,7 +3529,7 @@ pub(super) fn select_count_trap(
             read(bucket, &mut iterations);
             match found.next_bucket(bucket) {
                 Some(next) if iterations <= 0 => {
-                    trap = Some((Term::Integer(next as i64), Term::Nil));
+                    trap = Some((Term::Integer(to_i64(next)), Term::Nil));
                 }
                 next => walk = next,
             }
@@ -3621,7 +3647,7 @@ pub(super) fn select_replace_trap(
     let Some(compiled) = compile_spec(atoms, spec)? else {
         return Ok(BifResult::badarg());
     };
-    if resume.is_some_and(|(_, _, _, before)| before != taken.writes() as i64) {
+    if resume.is_some_and(|(_, _, _, before)| before != taken.writes().cast_signed()) {
         // ponytail: ERTS fixes the table; see "ETS tables" in docs/erts-differences.md.
         return Err(error(
             "unsupported ets:select_replace/2 on a table that changed while the replace trapped",
@@ -3645,7 +3671,7 @@ pub(super) fn select_replace_trap(
     } else {
         replace_hash(atoms, &mut taken, &compiled, keypos, resume, &mut got)
     };
-    let writes = taken.writes() as i64;
+    let writes = taken.writes().cast_signed();
     drop(taken);
     drop(ets);
     let process = context.scheduler.current_process_mut();
@@ -3701,7 +3727,7 @@ fn replace_hash(
     };
     let mut walk = None;
     match (resume, compiled.bound_key(keypos)) {
-        (Some((Term::Integer(bucket), ..)), _) => walk = Some(*bucket as usize),
+        (Some((Term::Integer(bucket), ..)), _) => walk = Some(to_usize(*bucket)),
         _ if compiled.matches_nothing(keypos) => {}
         (_, Some(key)) => {
             if let Some(bucket) = table.key_bucket(atoms, key) {
@@ -3717,7 +3743,7 @@ fn replace_hash(
         read(table, bucket, &mut iterations);
         match table.next_bucket(bucket) {
             Some(next) if iterations <= 0 => {
-                trap = Some((Term::Integer(next as i64), Term::Nil));
+                trap = Some((Term::Integer(to_i64(next)), Term::Nil));
             }
             next => walk = next,
         }

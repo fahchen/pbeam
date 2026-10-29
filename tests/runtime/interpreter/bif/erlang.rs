@@ -507,7 +507,11 @@ fn charges_a_quarter_reduction_for_each_group_of_four_links() {
     let links = |count: usize| {
         Term::list_from(
             (0..count)
-                .map(|index| Term::Pid(ProcessId(index as u64)))
+                .map(|index| {
+                    Term::Pid(ProcessId(
+                        u64::try_from(index).expect("a count fits in u64"),
+                    ))
+                })
                 .collect::<Vec<_>>(),
         )
     };
