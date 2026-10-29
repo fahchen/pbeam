@@ -27,10 +27,10 @@ use super::{BeamError, BifResult, Scheduler, Term};
 
 /// The column of the host OS in the tables of this file.
 #[cfg(target_os = "macos")]
-const HOST: usize = 0;
+pub(super) const HOST: usize = 0;
 /// The column of the host OS in the tables of this file.
 #[cfg(target_os = "linux")]
-const HOST: usize = 1;
+pub(super) const HOST: usize = 1;
 
 /// The host file that `getprotoent` reads.
 const PROTOCOLS_FILE: &str = "/etc/protocols";
@@ -48,7 +48,7 @@ const FEATURES: [(&str, [bool; 2]); 5] = [
 
 /// The rows of `esock_msg_flags` (`prim_socket_nif.c:526-624`), as
 /// `(name, flag)`. A flag that the host does not define is 0.
-const MSG_FLAGS: [(&str, [i32; 2]); 12] = [
+pub(super) const MSG_FLAGS: [(&str, [i32; 2]); 12] = [
     ("cmsg_cloexec", [0, 1_073_741_824]),
     ("confirm", [0, 2048]),
     ("ctrunc", [32, 8]),
@@ -105,7 +105,7 @@ const IOCTL_FLAGS: [(&str, [i32; 2]); 34] = [
 /// The requests of `esock_supports_ioctl_requests`
 /// (`prim_socket_nif.c:5509-5626`), in source order, as `(name, request)`.
 /// `None` is a request that the host does not define.
-const IOCTL_REQUESTS: [(&str, [Option<u32>; 2]); 20] = [
+pub(super) const IOCTL_REQUESTS: [(&str, [Option<u32>; 2]); 20] = [
     ("gifconf", [Some(3_222_038_820), Some(35090)]),
     ("nread", [Some(1_074_030_207), Some(21531)]),
     ("atmark", [Some(1_074_033_415), Some(35077)]),

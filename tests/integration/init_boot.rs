@@ -513,6 +513,29 @@ fn sets_msfilter_and_gets_pktoptions_as_pinned_erts() {
 }
 
 #[test]
+fn receives_with_the_otp_options_select_read_and_rcvbuf_count_as_pinned_erts() {
+    // `kernel_boot_probe:sockopt_select_read/0` runs `{otp, select_read}`
+    // `true` and `{otp, rcvbuf}` `{N, Size}` (prim_socket_nif.c:8193-8222,
+    // 11838-11844): `{more, Bin}` until N buffers came
+    // (unix_socket_syncio.c:10050-10137), `{select_read, ...}` of
+    // `nif_recv/4` and `nif_recvfrom/4` with a reference and its select
+    // message (unix_socket_syncio.c:3967-3970, 10122-10125, 10275-10310),
+    // and an accepted socket, which inherits `rNum` but not `selectRead`
+    // (unix_socket_syncio.c:2843-2850).
+    let (reference, status, node) = run_kernel_boot(
+        "sockopt_select_read",
+        Inetrc::Unset,
+        &["{sockopt_select_read,"],
+    );
+    assert_eq!(status, Some(0), "ERTS");
+    assert!(
+        reference.contains("[{more,<<\"0123\">>},{ok,<<\"4567\">>},{ok,<<\"89abcdef\">>}]"),
+        "{reference}"
+    );
+    assert_eq!(node, reference, "PBeam");
+}
+
+#[test]
 fn sets_and_gets_the_otp_socket_options_and_linger_as_pinned_erts() {
     // `kernel_boot_probe:sockopt_otp/0` runs the handlers of
     // `esock_setopt_otp` and `esock_getopt_otp`
@@ -604,6 +627,52 @@ fn sends_and_receives_on_datagram_and_stream_sockets_with_addresses_as_pinned_er
 }
 
 #[test]
+fn checks_the_ioctl_arguments_as_pinned_erts() {
+    // `kernel_boot_probe:socket_ioctl/0` runs `prim_socket:ioctl/2,3,4`
+    // and `socket:ioctl/2,3`. `nif_ioctl` gives `badarg` for a term that is
+    // not a socket or a request that is not an `unsigned long`, and
+    // `{error, closed}` (prim_socket_nif.c:13794-13877); a request outside
+    // the switch of its argument count gives `{error, enotsup}`
+    // (unix_socket_syncio.c:5400-5402, 5512-5514, 5597-5599).
+    let (reference, status, node) =
+        run_kernel_boot("socket_ioctl", Inetrc::Unset, &["{socket_ioctl,"]);
+    assert_eq!(status, Some(0), "ERTS");
+    assert_eq!(
+        reference.trim_end(),
+        "{socket_ioctl,[{error,badarg},{error,badarg},{error,badarg},{error,enotsup},{error,enotsup},{error,enotsup},{error,enotsup},{error,enotsup},{error,enotsup},{error,{invalid,{ioctl_request,foo}}},{error,badarg},{error,{invalid,{ioctl_request,tcp_info}}}],[{error,closed},{error,closed},{error,{invalid,{ioctl_request,foo}}}]}",
+        "ERTS"
+    );
+    assert_eq!(node, reference, "PBeam");
+}
+
+#[test]
+fn sends_a_file_on_an_inet_socket_as_pinned_erts() {
+    // `kernel_boot_probe:socket_sendfile/0` runs `socket:sendfile/2,3,4,5`
+    // and `prim_socket:sendfile/4,5` and `sendfile_deferred_close/1`. The
+    // argument checks of `nif_sendfile` (prim_socket_nif.c:6914-7034), the
+    // start, the continue, and the deferred close of `unix_essio`
+    // (unix_socket_syncio.c:3531-3785), the `sendfile(2)` loop
+    // (unix_socket_syncio.c:9156-9345), its results and counters
+    // (unix_socket_syncio.c:9348-9497, prim_socket_nif.c:4958-4989), and
+    // the file copy of `prim_file_nif_dyncall_dup` (prim_file_nif.c:426-460)
+    // give the ERTS result.
+    let (reference, status, node) =
+        run_kernel_boot("socket_sendfile", Inetrc::Unset, &["{socket_sendfile,"]);
+    assert_eq!(status, Some(0), "ERTS");
+    assert!(
+        reference.starts_with("{socket_sendfile,[true,true,true,{ok,0},{error,einval}],"),
+        "{reference}"
+    );
+    assert!(
+        reference.contains(
+            ",[{ok,8000000},8000000,true,1,8000000,8000000,0],[true,{error,{invalid,state}}],[{error,closed},{error,closed}]}"
+        ),
+        "{reference}"
+    );
+    assert_eq!(node, reference, "PBeam");
+}
+
+#[test]
 fn receives_with_flags_on_inet_sockets_as_pinned_erts() {
     // `kernel_boot_probe:socket_recvfrom_flags/0` runs `socket:recvfrom/4`
     // with the flag peek on inet and inet6 datagram sockets and an inet
@@ -622,6 +691,74 @@ fn receives_with_flags_on_inet_sockets_as_pinned_erts() {
         ),
         "{reference}"
     );
+    assert_eq!(node, reference, "PBeam");
+}
+
+#[test]
+fn raises_notsup_for_the_sctp_functions_as_pinned_erts() {
+    // `kernel_boot_probe:socket_sctp/0` runs `socket:peeloff/2`,
+    // `prim_socket:socknames/2`, and `prim_socket:peernames/2`. The pinned
+    // ERTS builds of macOS and of the Linux CI host have no `HAVE_SCTP`, so
+    // `nif_peeloff/2`, `nif_socknames/2`, and `nif_peernames/2` raise
+    // `error:notsup` before any argument check (prim_socket_nif.c:6419-6421,
+    // 13608-13610, 13767-13769).
+    let (reference, status, node) =
+        run_kernel_boot("socket_sctp", Inetrc::Unset, &["{socket_sctp,"]);
+    assert_eq!(status, Some(0), "ERTS");
+    assert_eq!(
+        reference.trim_end(),
+        "{socket_sctp,[{error,notsup},{error,notsup},{error,notsup},{error,notsup}]}"
+    );
+    assert_eq!(node, reference, "PBeam");
+}
+
+#[test]
+fn sends_and_receives_messages_with_control_data_as_pinned_erts() {
+    // `kernel_boot_probe:socket_msg/0` runs `socket:sendmsg/2,3,4` and
+    // `socket:recvmsg/1,2,3,4,5` on the NIFs `nif_sendmsg/5` and
+    // `nif_recvmsg/5` (prim_socket_nif.c:6619-6675, 7265-7429;
+    // unix_socket_syncio.c:3099-3355, 3987-4105, 7214-7713, 9021-9142): the
+    // control messages of the tables of prim_socket_nif.c:15645-15758 that
+    // the host sends and gives, the `{invalid, ctrl}` cases, a truncated
+    // datagram, a short control buffer, a stream socket, and the counters.
+    let (reference, status, node) = run_kernel_boot("socket_msg", Inetrc::Unset, &["{socket_msg,"]);
+    assert_eq!(status, Some(0), "ERTS");
+    assert!(
+        reference.starts_with(
+            "{socket_msg,[{error,timeout},ok,{ok,[{addr,true},{ctrl,[]},{flags,[]},{iov,[<<\"hello\">>]}]},"
+        ),
+        "{reference}"
+    );
+    assert_eq!(node, reference, "PBeam");
+}
+
+#[test]
+fn sends_and_receives_several_messages_as_pinned_erts() {
+    // `kernel_boot_probe:socket_mmsg/0` runs `socket:sendmmsg/4` and
+    // `socket:recvmmsg/6` on the NIFs `nif_sendmmsg/4` and `nif_recvmmsg/6`
+    // (prim_socket_nif.c:6691-6760, 7447-7540). The argument checks come
+    // first on each host. macOS has no `sendmmsg(2)` and `recvmmsg(2)`, so
+    // the NIFs then raise `error:notsup` (unix_socket_syncio.c:4297-4309,
+    // 4526-4537). Linux sends and receives the messages
+    // (unix_socket_syncio.c:4111-4295, 4320-4524): control messages, a
+    // failed first and later message, a partial message, a select, `zero`,
+    // `{otp, select_read}`, the flags peek and trunc, the parts of a stream,
+    // the end of a stream, and the counters.
+    let (reference, status, node) =
+        run_kernel_boot("socket_mmsg", Inetrc::Unset, &["{socket_mmsg,"]);
+    assert_eq!(status, Some(0), "ERTS");
+    assert!(
+        reference.starts_with(
+            "{socket_mmsg,[{error,badarg},{error,badarg},{invalid,{integer_range,0}},{invalid,{integer_range,4294967296}},{invalid,{integer_range,-1}},{error,badarg},{invalid,{integer_range,-1}},{invalid,{integer_range,-1}}],"
+        ),
+        "{reference}"
+    );
+    if cfg!(target_os = "macos") {
+        assert!(
+            reference.ends_with(",[{error,notsup},{error,notsup}]}\r\n"),
+            "{reference}"
+        );
+    }
     assert_eq!(node, reference, "PBeam");
 }
 
@@ -688,8 +825,9 @@ fn stops_the_run_at_the_socket_calls_that_pbeam_does_not_support() {
     // address that it did not decode (prim_socket_nif.c:6122-6143), and it
     // passes the flags of a recvfrom to `recvfrom(2)`
     // (unix_socket_syncio.c:3925-3927), which PBeam does only on inet and
-    // inet6 sockets without `MSG_ERRQUEUE`. These calls stop the run with a
-    // runtime error (row "NIF stubs").
+    // inet6 sockets without `MSG_ERRQUEUE`. ERTS runs an ioctl request with
+    // `ioctl(2)` (unix_socket_syncio.c:5364-5602). These calls stop the run
+    // with a runtime error (row "NIF stubs").
     let mut probes = vec![
         (
             "socket_acceptors",
@@ -702,6 +840,10 @@ fn stops_the_run_at_the_socket_calls_that_pbeam_does_not_support() {
         (
             "socket_recvfrom_local_flags",
             "prim_socket:nif_recvfrom/4: the flags 2 on a socket of the domain 1 are not supported",
+        ),
+        (
+            "socket_ioctl_raw",
+            "prim_socket:nif_ioctl/2: the request gifconf needs ioctl(2), which PBeam does not run",
         ),
     ];
     if cfg!(target_os = "linux") {

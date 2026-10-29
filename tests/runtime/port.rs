@@ -20,6 +20,7 @@ fn stops_the_read_select_of_an_fd_port_after_a_failed_read() {
             output: 1,
         }),
         input: Input::Open,
+        queue: OutputQueue::new(4096, 8192),
     };
     let mut input = 0;
     assert!(read_spawn(&mut spawn, &mut input).is_none());
