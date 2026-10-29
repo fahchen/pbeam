@@ -77,9 +77,7 @@ pub(crate) enum Insert {
 /// ```
 fn flatmap_holds(pairs: &[(Term, Term)], key: &Term, atoms: &AtomTable) -> bool {
     pairs
-        .binary_search_by(|(existing, _)| {
-            flatmap_order(existing, key, atoms).unwrap_or(Ordering::Equal)
-        })
+        .binary_search_by(|(existing, _)| flatmap_order(existing, key, atoms))
         .is_ok()
 }
 
@@ -664,33 +662,14 @@ impl Map {
     ///     (Term::static_atom("abs"), Term::Integer(1)),
     ///     (Term::static_atom("value"), Term::Integer(2)),
     /// ];
-    /// Map::sort_pairs(&mut pairs, &atoms)?;
+    /// Map::sort_pairs(&mut pairs, &atoms);
     /// // value has atom index 745, abs has atom index 762, and an atom
     /// // comes before a tuple.
     /// assert_eq!(pairs[0].0, Term::static_atom("value"));
     /// assert_eq!(pairs[2].0, Term::tuple(vec![]));
     /// ```
-    ///
-    /// # Errors
-    ///
-    /// Sort the pairs in the flatmap key order.
-    ///
-    /// Return a runtime error when the order depends on an alias reference,
-    /// which has no PBeam term order. Compiled code cannot get this error:
-    /// the ERTS loader sorts only literal keys, and a literal cannot hold a
-    /// reference.
-    pub(crate) fn sort_pairs(
-        pairs: &mut [(Term, Term)],
-        atoms: &AtomTable,
-    ) -> Result<(), BeamError> {
-        let mut failure = None;
-        pairs.sort_by(|(left, _), (right, _)| {
-            flatmap_order(left, right, atoms).unwrap_or_else(|error| {
-                failure.get_or_insert(error);
-                Ordering::Equal
-            })
-        });
-        failure.map_or(Ok(()), Err)
+    pub(crate) fn sort_pairs(pairs: &mut [(Term, Term)], atoms: &AtomTable) {
+        pairs.sort_by(|(left, _), (right, _)| flatmap_order(left, right, atoms));
     }
 
     /// Set a key to a value. Replace the value when the key exists. A
@@ -1145,9 +1124,7 @@ fn update_flat(
     }
     if pairs.len() + added.len() <= SMALL_MAP_LIMIT {
         for (_, key, value) in operations {
-            match pairs.binary_search_by(|(existing, _)| {
-                flatmap_order(existing, &key, atoms).expect("supported map keys have a term order")
-            }) {
+            match pairs.binary_search_by(|(existing, _)| flatmap_order(existing, &key, atoms)) {
                 Ok(index) => pairs[index].1 = value,
                 Err(index) => pairs.insert(index, (key, value)),
             }
@@ -1562,26 +1539,17 @@ impl Node {
 ///
 /// // true has index 1 and abs_path has index 26.
 /// let (abs_path, true_) = (Term::static_atom("abs_path"), Term::static_atom("true"));
-/// assert_eq!(flatmap_order(&true_, &abs_path, &atoms)?, Ordering::Less);
+/// assert_eq!(flatmap_order(&true_, &abs_path, &atoms), Ordering::Less);
 /// let list = |atom: &Term| Term::list_from([atom.clone()]);
-/// assert_eq!(flatmap_order(&list(&true_), &list(&abs_path), &atoms)?, Ordering::Greater);
-/// assert_eq!(flatmap_order(&Term::Integer(1), &true_, &atoms)?, Ordering::Less);
+/// assert_eq!(flatmap_order(&list(&true_), &list(&abs_path), &atoms), Ordering::Greater);
+/// assert_eq!(flatmap_order(&Term::Integer(1), &true_, &atoms), Ordering::Less);
 /// // An integer is less than a float in the exact order.
-/// assert_eq!(flatmap_order(&Term::Float(1.0), &Term::Integer(2), &atoms)?, Ordering::Greater);
+/// assert_eq!(flatmap_order(&Term::Float(1.0), &Term::Integer(2), &atoms), Ordering::Greater);
 /// ```
-///
-/// # Errors
-///
-/// Return a runtime error when the order depends on two different
-/// references, which have no PBeam term order.
-pub(crate) fn flatmap_order(
-    left: &Term,
-    right: &Term,
-    atoms: &AtomTable,
-) -> Result<Ordering, BeamError> {
+pub(crate) fn flatmap_order(left: &Term, right: &Term, atoms: &AtomTable) -> Ordering {
     match (left, right) {
-        (Term::Atom(left), Term::Atom(right)) => Ok(left.index().cmp(&right.index())),
-        _ => left.compare_exact(right, atoms),
+        (Term::Atom(left), Term::Atom(right)) => left.index().cmp(&right.index()),
+        _ => left.order_exact(right, atoms),
     }
 }
 
@@ -1680,10 +1648,11 @@ fn encode_path(elements: Vec<usize>) -> Result<i64, BeamError> {
 /// (`erl_term_hashing.c:1878-1893`): its type and arity, then its elements.
 /// A binary key hashes with the binary path of `make_internal_hash`. A pid
 /// key hashes with the pid path of `make_internal_hash`, and a port key with
-/// its immediate word (`erl_term_hashing.c:2211-2213`). An ordinary
-/// reference key and a resource key hash with the reference path
-/// (`erl_term_hashing.c`); an alias reference has no comparison order, so
-/// it is not a supported key. A map key hashes with the flatmap or
+/// its immediate word (`erl_term_hashing.c:2211-2213`). A reference key and a
+/// resource key hash with the reference path (`erl_term_hashing.c`); the
+/// two pid words of an ERTS alias reference are absent from a PBeam
+/// reference, so an alias key hashes its three PBeam numbers (row "Map
+/// keys" of docs/erts-differences.md). A map key hashes with the flatmap or
 /// hashmap path of `make_internal_hash`, and its keys and values must be
 /// such keys too. A fun key hashes with the fun path of
 /// `make_internal_hash` (`erl_term_hashing.c:1987-2017`), and its free
@@ -1704,7 +1673,7 @@ fn encode_path(elements: Vec<usize>) -> Result<i64, BeamError> {
 /// assert!(map_hash(&Term::Float(1.0)).is_some());
 /// assert!(map_hash(&Term::list_from([Term::binary(vec![])])).is_some());
 /// assert!(map_hash(&Term::tuple(vec![Term::Port(PortId(0))])).is_some());
-/// assert_eq!(map_hash(&Term::Reference(Reference(0).pid_reference())), None);
+/// assert!(map_hash(&Term::Reference(Reference(0).pid_reference())).is_some());
 /// let improper = |tail| Term::cons(Term::Integer(1), tail);
 /// assert!(map_hash(&improper(Term::Integer(2))).is_some());
 /// assert!(map_hash(&improper(Term::Map(Map::new()))).is_some());
@@ -1721,7 +1690,7 @@ fn map_hash(key: &Term) -> Option<u64> {
         | Term::Pid(_)
         | Term::Port(_)
         | Term::Resource(_) => {}
-        Term::Reference(reference) if !reference.is_pid_reference() => {}
+        Term::Reference(_) => {}
         Term::Cons(_) | Term::Tuple(_) | Term::Map(_) | Term::Fun(_) | Term::Record(_) => {
             let mut pending = vec![key];
             while let Some(term) = pending.pop() {
@@ -1733,7 +1702,7 @@ fn map_hash(key: &Term) -> Option<u64> {
                     | Term::Pid(_)
                     | Term::Port(_)
                     | Term::Resource(_) => {}
-                    Term::Reference(reference) if !reference.is_pid_reference() => {}
+                    Term::Reference(_) => {}
                     Term::Cons(cell) => pending.extend([&cell.tail, &cell.head]),
                     Term::Tuple(elements) => pending.extend(elements.iter()),
                     Term::Map(map) => {

@@ -15,7 +15,7 @@ use std::collections::BTreeSet;
 use std::ops::Bound;
 use std::sync::Arc;
 
-use crate::error::{BeamError, error};
+use crate::error::BeamError;
 use crate::term::{AtomTable, Term};
 
 /// The keys of an `ordered_set` table in the ERTS term order, as the tree
@@ -25,11 +25,6 @@ use crate::term::{AtomTable, Term};
 pub(super) struct KeyOrder {
     atoms: Arc<AtomTable>,
     keys: BTreeSet<OrderKey>,
-    /// Whether a key of the table has no PBeam order with another key, so
-    /// `keys` is not current. The order of two different alias references
-    /// is the only such case (`src/term/order.rs`). A walk then returns a
-    /// runtime error, and a key lookup compares each object.
-    unordered: bool,
 }
 
 /// A key of the order with the atom table to compare it.
@@ -153,7 +148,6 @@ impl KeyOrder {
         KeyOrder {
             atoms,
             keys: BTreeSet::new(),
-            unordered: false,
         }
     }
 
@@ -173,20 +167,9 @@ impl KeyOrder {
         self.keys.pop_last();
     }
 
-    /// Remove each key, and make the order current.
+    /// Remove each key.
     pub(super) fn clear(&mut self) {
         self.keys.clear();
-        self.unordered = false;
-    }
-
-    /// Return the runtime error of an order that is not current.
-    pub(super) fn check(&self) -> Result<(), BeamError> {
-        if self.unordered {
-            return Err(error(
-                "unsupported term order of an alias reference in an ordered_set key (see \"ETS tables\" in docs/erts-differences.md)",
-            ));
-        }
-        Ok(())
     }
 
     /// Return the stored key equal to `key` in the arithmetic term order,
@@ -194,11 +177,9 @@ impl KeyOrder {
     ///
     /// # Errors
     ///
-    /// Return a runtime error when the order is not current or a key has no
-    /// PBeam order: the order of two different alias references is the only
-    /// such comparison (`src/term/order.rs`).
+    /// Return the error of a key comparison, which no current key has
+    /// (`src/term/order.rs`).
     pub(super) fn find(&self, atoms: &AtomTable, key: &Term) -> Result<Option<&Term>, BeamError> {
-        self.check()?;
         let probe = Probe::new(|stored: &Term| key.compare(stored, atoms));
         let found = self.keys.get(&probe as &dyn Locate).map(|key| &key.term);
         probe.result(found)
@@ -218,7 +199,6 @@ impl KeyOrder {
         key: &Term,
         forward: bool,
     ) -> Result<Box<dyn Iterator<Item = &'a Term> + 'a>, BeamError> {
-        self.check()?;
         let probe = Probe::new(|stored: &Term| key.compare(stored, atoms));
         let place = &probe as &dyn Locate;
         let keys: Box<dyn Iterator<Item = &'a Term>> = if forward {
@@ -250,7 +230,6 @@ impl KeyOrder {
         &self,
         below: impl Fn(&Term) -> Result<bool, BeamError>,
     ) -> Result<(Option<&Term>, Option<&Term>), BeamError> {
-        self.check()?;
         let probe = Probe::new(|stored: &Term| {
             Ok(if below(stored)? {
                 Ordering::Greater
@@ -270,27 +249,16 @@ impl KeyOrder {
         probe.result((before.map(|key| &key.term), after.map(|key| &key.term)))
     }
 
-    /// Put the key `key` in place of an equal key. A key with no order
-    /// makes the order stale.
-    pub(super) fn put(&mut self, atoms: &AtomTable, key: Term) {
-        if self.find(atoms, &key).is_err() {
-            self.unordered = true;
-            return;
-        }
+    /// Put the key `key` in place of an equal key.
+    pub(super) fn put(&mut self, key: Term) {
         let atoms = Arc::clone(&self.atoms);
         self.keys.replace(OrderKey { term: key, atoms });
     }
 
-    /// Remove the key `key`. A key with no order makes the order stale.
+    /// Remove the key `key`.
     pub(super) fn remove(&mut self, atoms: &AtomTable, key: &Term) {
-        if self.check().is_err() {
-            return;
-        }
         let probe = Probe::new(|stored: &Term| key.compare(stored, atoms));
-        let removed = self.keys.remove(&probe as &dyn Locate);
-        if probe.result(removed).is_err() {
-            self.unordered = true;
-        }
+        self.keys.remove(&probe as &dyn Locate);
     }
 }
 
