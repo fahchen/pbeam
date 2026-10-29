@@ -19,11 +19,9 @@ fn gives_the_default_value_of_each_unimplemented_function() {
     unsafe {
         result |= enif_binary_to_term(null_mut(), null(), 0, null_mut(), 0) as c_int;
         result |= enif_compare(0, 0);
-        result |= enif_compare_monitors(null(), null());
         result |= enif_consume_timeslice(null_mut(), 0);
         result |= enif_convert_time_unit(0, 0, 0) as c_int;
         result |= enif_cpu_time(null_mut()) as c_int;
-        result |= enif_demonitor_process(null_mut(), null_mut(), null());
         result |= (!enif_dlopen(null(), None, null_mut()).is_null()) as c_int;
         result |= (!enif_dlsym(null_mut(), null(), None, null_mut()).is_null()) as c_int;
         result |= enif_dynamic_resource_call(null_mut(), 0, 0, 0, null());

@@ -10,8 +10,8 @@
 //! run used the same library, built on macOS:
 //!
 //! ```text
-//! cc -bundle -undefined dynamic_lookup -Ivendor/erts/include -o /tmp/pbeam1289/nif_resources.so fixtures/nif/nif_resources.c
-//! mise run erts-eval --pa $PWD/fixtures/nif 'nif_resources:mismatches("/tmp/pbeam1289/nif_resources")'
+//! cc -bundle -undefined dynamic_lookup -Ivendor/erts/include -o /tmp/pbeam1291/nif_resources.so fixtures/nif/nif_resources.c
+//! mise run erts-eval --pa $PWD/fixtures/nif 'nif_resources:mismatches("/tmp/pbeam1291/nif_resources")'
 //! []
 //! ```
 

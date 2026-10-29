@@ -24,7 +24,7 @@ mod resource;
 pub(crate) mod thread;
 mod unsupported;
 
-pub(crate) use resource::Resource;
+pub(crate) use resource::{Resource, monitor_down};
 
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 

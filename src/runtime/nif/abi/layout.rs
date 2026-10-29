@@ -13,7 +13,7 @@ use std::mem::{offset_of, size_of};
 
 use super::env::Env;
 use super::resource::DtorFn;
-use crate::term::ProcessId;
+use crate::term::{ProcessId, Reference};
 
 /// `ERL_NIF_TERM`: an `ErlNifUInt`, which is an `unsigned long` on LP64.
 pub(super) type NifTerm = usize;
@@ -166,6 +166,21 @@ pub(super) type DlErrHandler = unsafe extern "C" fn(*mut c_void, *const c_char);
 pub(super) struct ErlNifMonitor {
     /// The words of the monitor. Only the ABI layer reads them.
     pub(super) words: [usize; 4],
+}
+
+impl ErlNifMonitor {
+    /// Return the `ErlNifMonitor` of the monitor reference `reference`: its
+    /// number in the first word.
+    pub(super) fn of(reference: Reference) -> Self {
+        Self {
+            words: [reference.0 as usize, 0, 0, 0],
+        }
+    }
+
+    /// Return the monitor reference of the `ErlNifMonitor`.
+    pub(super) fn reference(&self) -> Reference {
+        Reference(self.words[0] as u64)
+    }
 }
 
 /// `ErlNifPort` (`erl_nif.h:205-207`): an opaque local port. Only the ABI

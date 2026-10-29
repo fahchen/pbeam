@@ -22,6 +22,7 @@ use super::layout::{ErlNifMonitor, ErlNifPid, NifTerm};
 use crate::AtomTable;
 use crate::Term;
 use crate::runtime::scheduler::node::Node;
+use crate::runtime::signal::Signal;
 use crate::term::ProcessId;
 
 thread_local! {
@@ -143,7 +144,6 @@ pub(super) fn record_unsupported(name: &str) {
     });
 }
 
-/// Return true when the local process `pid` exists and does not exit, as
 /// Return the node of the NIF call that runs on the thread, or else the
 /// node of the loaded NIF libraries ([`RUN`]), as ERTS finds its process
 /// table from each thread.
@@ -152,6 +152,7 @@ fn node() -> Option<Arc<Node>> {
         .or_else(|| with_run(|run| Arc::clone(&run.node)))
 }
 
+/// Return true when the local process `pid` exists and does not exit, as
 /// `erts_proc_lookup` and `erts_pid2proc_opt` find it
 /// (`erl_nif.c:2323-2338`, `877-901`).
 fn alive(pid: ProcessId) -> bool {
@@ -312,14 +313,15 @@ pub unsafe extern "C" fn enif_send(
 }
 
 /// `int enif_monitor_process(ErlNifEnv*, void*, const ErlNifPid*,
-/// ErlNifMonitor*)`: watch the process `to_pid` for the resource object
+/// ErlNifMonitor*)`: monitor the process `to_pid` for the resource object
 /// `obj` and return 0, or return -1 when the type of the object has no
 /// down callback, and 1 when the process does not exist, as ERTS gives for
 /// a monitor signal that it cannot send (`erl_nif.c:3933-3990`).
 ///
-/// PBeam does not run the down callback of the type yet: it writes a
-/// monitor of zero words, which `enif_demonitor_process` and
-/// `enif_compare_monitors` do not use.
+/// The monitor signal goes through the inbox of the scheduler of the
+/// process, as ERTS sends it with the sender `am_system`
+/// (`erl_nif.c:3968-3969`). The exit of the process runs the down callback
+/// ([`super::resource::monitor_down`]).
 ///
 /// # Safety
 ///
@@ -335,21 +337,76 @@ pub unsafe extern "C" fn enif_monitor_process(
 ) -> c_int {
     // SAFETY: the C API gives a valid `ErlNifPid`.
     let target = unsafe { to_pid.read() }.process();
-    with_context(|context| {
-        if !super::resource::has_down(obj.expose_provenance()) {
-            return -1;
-        }
-        if context.node.live_owner(target).is_none() {
-            return 1;
-        }
-        if !monitor.is_null() {
-            // SAFETY: the C API requires that a `monitor` that is not NULL
-            // points to a writable `ErlNifMonitor`.
-            unsafe { monitor.write(ErlNifMonitor { words: [0; 4] }) };
-        }
-        0
-    })
-    .unwrap_or(1)
+    let data = obj.expose_provenance();
+    let Some(down) = super::resource::down_of(data) else {
+        return -1;
+    };
+    // ERTS sends the signal to a process that exits too, and the exit runs
+    // the down callback (`erl_proc_sig_queue.c`, `erl_process.c:13829-13831`).
+    let Some(node) = node().filter(|node| node.owner(target).is_some()) else {
+        return 1;
+    };
+    let reference = super::resource::add_monitor(data, down);
+    node.send_signal(
+        0,
+        target,
+        None,
+        Signal::NifMonitor { monitor: reference },
+        None,
+    );
+    if !monitor.is_null() {
+        // SAFETY: the C API requires that a `monitor` that is not NULL
+        // points to a writable `ErlNifMonitor`.
+        unsafe { monitor.write(ErlNifMonitor::of(reference)) };
+    }
+    0
+}
+
+/// `int enif_demonitor_process(ErlNifEnv*, void*, const ErlNifMonitor*)`:
+/// remove the monitor `monitor` of the resource object `obj` and return 0,
+/// or return 1 when the object has no such monitor, because the down
+/// callback ran or a demonitor removed it before (`erl_nif.c:3998-4031`).
+///
+/// ERTS also sends a demonitor signal to the process. PBeam keeps the
+/// target monitor in the process, and its exit finds no monitor and runs
+/// no down callback.
+///
+/// # Safety
+///
+/// `obj` is the data of a live resource object and `monitor` points to a
+/// valid `ErlNifMonitor`, as the C API requires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn enif_demonitor_process(
+    _env: *mut Env,
+    obj: *mut c_void,
+    monitor: *const ErlNifMonitor,
+) -> c_int {
+    // SAFETY: the C API gives a valid `ErlNifMonitor`.
+    let reference = unsafe { monitor.read() }.reference();
+    c_int::from(!super::resource::demonitor(
+        obj.expose_provenance(),
+        reference,
+    ))
+}
+
+/// `int enif_compare_monitors(const ErlNifMonitor*, const ErlNifMonitor*)`:
+/// compare the bytes of two monitors as `sys_memcmp` does
+/// (`erl_nif.c:4033-4038`), and return a negative number, 0, or a positive
+/// number.
+///
+/// # Safety
+///
+/// `monitor1` and `monitor2` point to valid `ErlNifMonitor`s, as the C
+/// API requires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn enif_compare_monitors(
+    monitor1: *const ErlNifMonitor,
+    monitor2: *const ErlNifMonitor,
+) -> c_int {
+    // SAFETY: the C API gives valid `ErlNifMonitor`s.
+    let [one, two] = [monitor1, monitor2].map(|monitor| unsafe { monitor.read() }.words);
+    let bytes = |words: [usize; 4]| words.map(usize::to_ne_bytes);
+    bytes(one).cmp(&bytes(two)) as c_int
 }
 
 #[cfg(test)]

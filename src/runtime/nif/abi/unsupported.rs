@@ -56,11 +56,9 @@ macro_rules! unsupported_functions {
 unsupported_functions! {
     enif_binary_to_term(_env: *mut Env, _data: *const u8, _sz: usize, _term: *mut NifTerm, _opts: c_uint) -> usize = 0;
     enif_compare(_lhs: NifTerm, _rhs: NifTerm) -> c_int = 0;
-    enif_compare_monitors(_one: *const ErlNifMonitor, _other: *const ErlNifMonitor) -> c_int = 0;
     enif_consume_timeslice(_env: *mut Env, _percent: c_int) -> c_int = 0;
     enif_convert_time_unit(_time: i64, _from: c_int, _to: c_int) -> i64 = 0;
     enif_cpu_time(_env: *mut Env) -> NifTerm = THE_NON_VALUE;
-    enif_demonitor_process(_env: *mut Env, _obj: *mut c_void, _monitor: *const ErlNifMonitor) -> c_int = 0;
     enif_dlopen(_lib: *const c_char, _err_handler: Option<DlErrHandler>, _err_arg: *mut c_void) -> *mut c_void = std::ptr::null_mut();
     enif_dlsym(_handle: *mut c_void, _symbol: *const c_char, _err_handler: Option<DlErrHandler>, _err_arg: *mut c_void) -> *mut c_void = std::ptr::null_mut();
     enif_dynamic_resource_call(_env: *mut Env, _module: NifTerm, _name: NifTerm, _rsrc: NifTerm, _call_data: *const c_void) -> c_int = 0;

@@ -27,9 +27,19 @@
  *   12  enif_make_resource of a pointer that is not a resource object
  *   13  a new object of e with the id 5 and enif_monitor_process of the
  *       pid Arg: {Result, Term}
+ *   14  a new object of e with the id 6, two enif_monitor_process of the
+ *       pid Arg, enif_compare_monitors, and two enif_demonitor_process of
+ *       the first monitor: {Result1, Result2, Same, Differ, Demonitor,
+ *       Again, Term}
+ *   15  a new object of e with the id 7, enif_monitor_process of the pid
+ *       Arg, and enif_release_resource with no term: the monitor result
+ *   16  enif_monitor_process of a new object of a, which has no down
+ *       callback, and the pid Arg: the monitor result
+ *   17  the load results of enif_init_resource_type: {FIsNull, TriedF}
  *
  * The load callback also opens the type e with enif_init_resource_type,
- * whose down callback adds 2000 + the id of the object to the log.
+ * whose down callback adds 2000 + the id of the object to the log, and the
+ * type f with only ERL_NIF_RT_TAKEOVER.
  */
 #include <stddef.h>
 #include "erl_nif.h"
@@ -38,8 +48,8 @@ typedef struct {
     int id;
 } object;
 
-static ErlNifResourceType *type_a, *type_b, *type_c, *type_d, *type_e;
-static ErlNifResourceFlags tried_a = -1, tried_b = -1, tried_c = -1;
+static ErlNifResourceType *type_a, *type_b, *type_c, *type_d, *type_e, *type_f;
+static ErlNifResourceFlags tried_a = -1, tried_b = -1, tried_c = -1, tried_f = -1;
 static int log_ids[64];
 static unsigned log_len;
 static void *kept;
@@ -75,6 +85,7 @@ static int load(ErlNifEnv *env, void **priv, ERL_NIF_TERM info)
     type_c = enif_open_resource_type(env, NULL, "c", dtor_a, ERL_NIF_RT_TAKEOVER, &tried_c);
     type_d = enif_open_resource_type(env, NULL, "d", NULL, ERL_NIF_RT_CREATE, NULL);
     type_e = enif_init_resource_type(env, "e", &init, ERL_NIF_RT_CREATE, NULL);
+    type_f = enif_init_resource_type(env, "f", &init, ERL_NIF_RT_TAKEOVER, &tried_f);
     return 0;
 }
 
@@ -128,6 +139,54 @@ static ERL_NIF_TERM probe(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
         enif_release_resource(monitored);
         return enif_make_tuple(env, 2, enif_make_int(env, result), term);
     }
+    case 14: {
+        ErlNifPid pid;
+        ErlNifMonitor first, second;
+        object *monitored;
+        ERL_NIF_TERM results[7];
+        if (!enif_get_local_pid(env, argv[1], &pid)) {
+            return enif_make_badarg(env);
+        }
+        monitored = enif_alloc_resource(type_e, sizeof(object));
+        monitored->id = 6;
+        results[0] = enif_make_int(env, enif_monitor_process(env, monitored, &pid, &first));
+        results[1] = enif_make_int(env, enif_monitor_process(env, monitored, &pid, &second));
+        results[2] = boolean(env, enif_compare_monitors(&first, &first) == 0);
+        results[3] = boolean(env, enif_compare_monitors(&first, &second) != 0);
+        results[4] = enif_make_int(env, enif_demonitor_process(env, monitored, &first));
+        results[5] = enif_make_int(env, enif_demonitor_process(env, monitored, &first));
+        results[6] = enif_make_resource(env, monitored);
+        enif_release_resource(monitored);
+        return enif_make_tuple_from_array(env, results, 7);
+    }
+    case 15: {
+        ErlNifPid pid;
+        object *monitored;
+        int result;
+        if (!enif_get_local_pid(env, argv[1], &pid)) {
+            return enif_make_badarg(env);
+        }
+        monitored = enif_alloc_resource(type_e, sizeof(object));
+        monitored->id = 7;
+        result = enif_monitor_process(env, monitored, &pid, NULL);
+        enif_release_resource(monitored);
+        return enif_make_int(env, result);
+    }
+    case 16: {
+        ErlNifPid pid;
+        void *plain;
+        int result;
+        if (!enif_get_local_pid(env, argv[1], &pid)) {
+            return enif_make_badarg(env);
+        }
+        plain = enif_alloc_resource(type_a, sizeof(object));
+        ((object *)plain)->id = 8;
+        result = enif_monitor_process(env, plain, &pid, NULL);
+        enif_release_resource(plain);
+        return enif_make_int(env, result);
+    }
+    case 17:
+        return enif_make_tuple(env, 2, boolean(env, type_f == NULL), enif_make_int(env, tried_f));
     case 0:
         return enif_make_tuple(env, 6, boolean(env, type_a != NULL), enif_make_int(env, tried_a),
                                enif_make_int(env, tried_b), boolean(env, type_c == NULL),

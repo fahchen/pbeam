@@ -115,6 +115,8 @@ static EXPORTS: Exports = Exports {
     make_map_from_arrays: enif_make_map_from_arrays,
     init_resource_type: enif_init_resource_type,
     monitor_process: process::enif_monitor_process,
+    demonitor_process: process::enif_demonitor_process,
+    compare_monitors: process::enif_compare_monitors,
     thread_type: thread::enif_thread_type,
 };
 
@@ -197,6 +199,8 @@ struct Exports {
     ) -> *const ResourceType,
     monitor_process:
         unsafe extern "C" fn(*mut Env, *mut c_void, *const ErlNifPid, *mut ErlNifMonitor) -> c_int,
+    demonitor_process: unsafe extern "C" fn(*mut Env, *mut c_void, *const ErlNifMonitor) -> c_int,
+    compare_monitors: unsafe extern "C" fn(*const ErlNifMonitor, *const ErlNifMonitor) -> c_int,
     thread_type: extern "C" fn() -> c_int,
 }
 

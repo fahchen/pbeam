@@ -104,6 +104,14 @@ pub(super) enum Signal {
         /// The reference of the file resource.
         file: Reference,
     },
+    /// `ERTS_SIG_Q_OP_MONITOR` of a resource monitor of a NIF library:
+    /// `enif_monitor_process` (`erl_nif.c:3957-3989`). The receiver adds
+    /// the target monitor for 2, as for [`Signal::TtyMonitor`]. At exit it
+    /// runs the down callback of the monitor (`erl_process.c:13829-13831`).
+    NifMonitor {
+        /// The reference of the monitor.
+        monitor: Reference,
+    },
     /// `ERTS_SIG_Q_OP_MONITOR` of a resource monitor: `essio_open_with_protocol`
     /// monitors the caller of `prim_socket:nif_open/4` as the owner of the
     /// socket (`unix_socket_syncio.c:1785-1788`). At exit it closes the
@@ -353,6 +361,7 @@ impl Signal {
             }
             | Signal::TtyMonitor { tty: _ }
             | Signal::FileMonitor { file: _ }
+            | Signal::NifMonitor { monitor: _ }
             | Signal::SocketMonitor { socket: _ }
             | Signal::PortLink { port: _ }
             | Signal::PortUnlink { port: _ }

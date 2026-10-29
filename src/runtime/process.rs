@@ -155,6 +155,9 @@ pub(super) enum TargetMonitor {
     /// A monitor that the file resource with this reference holds
     /// (`ERTS_MON_TYPE_RESOURCE`, `prim_file_nif.c:541-570`).
     File(Reference),
+    /// A monitor of a resource object of a NIF library, with the reference
+    /// of the monitor (`ERTS_MON_TYPE_RESOURCE`, `erl_nif.c:3957-3989`).
+    Nif(Reference),
     /// A monitor that the socket resource with this reference holds on its
     /// owner (`ERTS_MON_TYPE_RESOURCE`, `unix_socket_syncio.c:1785-1788`).
     Socket(Reference),
