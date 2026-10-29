@@ -1,4 +1,8 @@
 //! `io_lib:format/2` with `~p` and `~w` under the PBeam boot.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 #[path = "../common/boot.rs"]
 mod boot;
 #[expect(

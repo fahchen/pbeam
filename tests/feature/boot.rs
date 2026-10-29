@@ -1,5 +1,9 @@
 //! Boots the `pbeam` binary like `erl` (standard IO servers, logger, application controller,
 //! `init:stop`, bindir flag) and compares it with the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::{
     env, fs,

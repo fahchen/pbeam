@@ -1,5 +1,9 @@
 //! Runs `erts_debug:size` on PBeam and compares it with the pinned ERTS. It also checks the terms
 //! that PBeam cannot size.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::process::Command;
 

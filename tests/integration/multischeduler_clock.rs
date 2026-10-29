@@ -2,6 +2,10 @@
 //! two threads, exchange `erlang:monotonic_time/0,1`,
 //! `erlang:time_offset/0,1`, and the time support settings, and each root
 //! returns `ok` when the values agree as on `erl +S 2`.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 #[path = "../common/mod.rs"]
 mod common;

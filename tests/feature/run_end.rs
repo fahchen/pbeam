@@ -1,4 +1,8 @@
 //! Checks how a `pbeam` run ends: root exit, `halt` status code and crash dump slogan.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::{
     process::{Command, Stdio},

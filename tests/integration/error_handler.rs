@@ -2,6 +2,10 @@
 //! `error_handler:undefined_function/3` (`beam_common.c:1294-1342`), and
 //! `erlang:process_flag(error_handler, Module)` sets the module of that call
 //! (`process_flag_2`, `bif.c:2045-2051`).
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 #[path = "../common/mod.rs"]
 mod common;

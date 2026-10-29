@@ -872,6 +872,10 @@ pub(super) fn is_utf8_error(rc: c_int) -> bool {
 /// # Errors
 ///
 /// Return the PCRE2 message and offset of a pattern that does not compile.
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "a failed PCRE2 allocation is out of memory, not a compile error of the pattern"
+)]
 pub(super) fn compile(
     pattern: &[u8],
     options: u32,

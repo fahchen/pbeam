@@ -4,6 +4,10 @@
 //! test policy that holds back one operation or limits one constraint is
 //! the oracle of each denial, which ERTS does not have. The default policy
 //! gives the pinned ERTS results.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::{
     collections::BTreeSet,

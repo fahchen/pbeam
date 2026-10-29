@@ -1,5 +1,9 @@
 //! Runs the `prim_file` read NIFs (files, directories, links, current directory) on PBeam and
 //! compares them with the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::{
     env,

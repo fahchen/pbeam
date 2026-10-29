@@ -881,11 +881,11 @@ all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 
 # Panics: return errors, and give every intentional panic a reason.
-unwrap_used = "allow"        # #1350 turns on: use ?, or expect("why this cannot fail")
-expect_used = "allow"        # expect with a reason is the sanctioned form
-panic_in_result_fn = "allow" # #1350 turns on: a fn returning Result shouldn't also panic
-missing_panics_doc = "warn"  # [lib] document reachable panics under # Panics
-missing_errors_doc = "warn"  # [lib] document failures under # Errors
+unwrap_used = "warn"        # use ?, or expect("why this cannot fail")
+expect_used = "allow"       # expect with a reason is the sanctioned form
+panic_in_result_fn = "warn" # a fn returning Result shouldn't also panic
+missing_panics_doc = "warn" # [lib] document reachable panics under # Panics
+missing_errors_doc = "warn" # [lib] document failures under # Errors
 
 # Suppressions must explain themselves and expire when no longer needed.
 allow_attributes = "allow"                # #1352 turns on: prefer #[expect] over #[allow] (needs rust-version 1.81+)
@@ -924,8 +924,6 @@ module_inception = "allow"        # a leaf module named after its main item is f
 enum_glob_use = "allow"           # use Enum::* inside a function that matches on it
 
 # m23 allow list: lints of the groups above with a hit on main. The named task removes the line and fixes the hits.
-# #1350
-manual_assert = "allow"
 # #1351
 cast_possible_wrap = "allow"
 cast_precision_loss = "allow"

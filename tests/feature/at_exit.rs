@@ -1,5 +1,9 @@
 //! Runs the `at_exit` callbacks and the logger flush at the end of a `pbeam` run and compares the
 //! output with the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::fmt::Write as _;
 use std::{

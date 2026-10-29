@@ -24,6 +24,10 @@
 //! [`gives_the_erts_error_of_each_bad_entry`]. ERTS loads a 2.17 library,
 //! an upgrade callback, and a module without `-nifs`, and
 //! PBeam does not support them yet.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 #[path = "../common/mod.rs"]
 mod common;

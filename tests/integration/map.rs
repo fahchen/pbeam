@@ -1,5 +1,9 @@
 //! Runs map construction, matching, comparison and the flatmap and hashmap limits on PBeam and
 //! compares them with the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::process::Command;
 

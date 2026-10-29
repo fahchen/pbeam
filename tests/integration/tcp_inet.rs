@@ -1,5 +1,9 @@
 //! Runs the `tcp_inet` port requests (reply bytes, socket options, linger) on PBeam and compares
 //! them with the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::{
     io::{Read, Write},

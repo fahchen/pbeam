@@ -1,5 +1,9 @@
 //! Runs the `bs_create_bin` instruction (string, binary, integer, UTF and append segments) on PBeam
 //! and compares it with the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::{process::Command, sync::Arc};
 

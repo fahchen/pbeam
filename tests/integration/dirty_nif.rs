@@ -12,6 +12,10 @@
 //! {{ok,{message_queue_len,0},{message_queue_len,1},{status,running},true,ok},
 //!  {killed,killed,no_late}}
 //! ```
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 #[path = "../common/mod.rs"]
 mod common;

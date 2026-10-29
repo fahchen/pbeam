@@ -1,4 +1,8 @@
 //! Checks that a failed stdout write through `user_drv` raises `terminated`.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::{process::Command, time::Duration};
 

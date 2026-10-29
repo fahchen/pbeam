@@ -1,6 +1,10 @@
 //! `erlang:processes/0` and `process_info(Pid, group_leader)`, which the
 //! `application_master` of `kernel` calls when the kernel application stops
 //! (application_master.erl:439-453).
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 #[path = "../common/mod.rs"]
 mod common;
 

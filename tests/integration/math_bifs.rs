@@ -1,4 +1,8 @@
 //! Runs the `math` BIFs of the C library on PBeam and checks that each one costs one reduction.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::process::Command;
 

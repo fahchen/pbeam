@@ -1,6 +1,10 @@
 //! The release build and the ERTS version check of `mix pbeam.build`: the
 //! task builds the release itself, and it stops on a release of another
 //! ERTS version.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::{
     fs,

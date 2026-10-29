@@ -1,6 +1,10 @@
 //! Two scheduler threads share one node. A root on each thread exchanges
 //! messages: the ping root sends a burst to the pong root, and the pong root
 //! reports whether the burst arrived in the order of the sender.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 #[path = "../common/mod.rs"]
 mod common;

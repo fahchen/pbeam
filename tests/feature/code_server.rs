@@ -1,5 +1,9 @@
 //! Runs the code server, the crypto functions and other native functions through the `pbeam` binary
 //! and compares the results with the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::process::{Command, Output, Stdio};
 

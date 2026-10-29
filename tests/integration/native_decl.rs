@@ -1,5 +1,9 @@
 //! Reads the persisted native declarations of a compiled module and checks that each call path
 //! reaches the registered native.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use pbeam_runtime::{
     BeamModule, BeamProgram, Binding, Job, Library, NativeResult, NifContext, Term,

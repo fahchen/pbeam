@@ -1,5 +1,9 @@
 //! Checks the scheduling of processes by priority on PBeam against the pinned ERTS with one
 //! scheduler.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 #[path = "../common/mod.rs"]
 mod common;

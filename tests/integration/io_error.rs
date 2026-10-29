@@ -1,4 +1,8 @@
 //! Checks that the exit of a writer process surfaces as an IO protocol error on PBeam.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::process::Command;
 

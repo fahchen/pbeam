@@ -1,5 +1,9 @@
 //! Runs the `binary` module functions on PBeam and checks which results share bytes with their
 //! source.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::process::{Command, Stdio};
 

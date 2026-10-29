@@ -1,5 +1,9 @@
 //! Runs the BIFs in body position (comparison, negation, bit operations, type tests) on PBeam and
 //! compares them with the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::process::Command;
 

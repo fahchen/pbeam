@@ -1,5 +1,9 @@
 //! Runs `erlang:hibernate` as an instruction and as a BIF on PBeam and compares them with the
 //! pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 #[path = "../common/mod.rs"]
 mod common;

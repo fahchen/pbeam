@@ -3,6 +3,10 @@
 //! node, and reports them. PBeam has no garbage collector, so the values
 //! change only what the BIFs report (row "Heap limit" in
 //! `docs/erts-differences.md`).
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 #[path = "../common/mod.rs"]
 mod common;

@@ -1,4 +1,8 @@
 //! Checks that calls into each pinned OTP IO module resolve on PBeam.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::process::Command;
 

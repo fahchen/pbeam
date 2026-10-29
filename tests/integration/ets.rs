@@ -1,5 +1,9 @@
 //! Runs the ETS table functions (lookup, insert, delete, owner exit) on PBeam and compares them
 //! with the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::process::Command;
 use std::sync::Arc;

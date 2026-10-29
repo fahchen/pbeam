@@ -4,6 +4,10 @@
 //! The test profile holds debug assertions, so the constants scale the runs
 //! down and the check gate stays short. The release profile of `cargo test`
 //! holds the measurement runs.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::{hint::black_box, time::Instant};
 

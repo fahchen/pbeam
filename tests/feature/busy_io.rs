@@ -1,4 +1,8 @@
 //! Checks that socket and port input and output progress while a process always can run.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::{
     io::{BufRead, BufReader, Read, Write},

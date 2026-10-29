@@ -1,4 +1,8 @@
 //! Runs a compiled process probe with reference matching and cleanup on PBeam.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::process::Command;
 

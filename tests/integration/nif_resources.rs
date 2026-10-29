@@ -14,6 +14,10 @@
 //! mise run erts-eval --pa $PWD/fixtures/nif 'nif_resources:mismatches("/tmp/pbeam1291/nif_resources")'
 //! []
 //! ```
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 #[path = "../common/mod.rs"]
 mod common;

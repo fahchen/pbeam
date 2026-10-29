@@ -1,5 +1,9 @@
 //! The errors of the `pbeam_bundle` tool: the usage, the input files, and
 //! the output file.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::{
     fs,

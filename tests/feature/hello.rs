@@ -1,5 +1,9 @@
 //! Runs the compiled Elixir greeting fixtures through the `pbeam` binary and checks its output, its
 //! errors and its help text.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::{
     path::{Path, PathBuf},

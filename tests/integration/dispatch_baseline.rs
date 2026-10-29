@@ -14,6 +14,10 @@
 //! numbers but proves that the probes and the ERTS reference run. The test
 //! profile holds debug assertions, so the constants scale the loop lengths
 //! and the runs down and the gate stays short.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::fmt::Write as _;
 use std::{

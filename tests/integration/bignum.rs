@@ -1,5 +1,9 @@
 //! Runs bignum literals, arithmetic, comparison, text and bit operations on PBeam and compares them
 //! with the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::{process::Command, sync::Arc};
 

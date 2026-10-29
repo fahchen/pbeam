@@ -10,6 +10,10 @@
 //! The bundle test builds the release of the project, whose bundle ships
 //! `lib/bcrypt_elixir-3.3.2/priv/bcrypt_nif.so`, and runs the one-file
 //! executable with the entry `BcryptFixture.main/0`.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::path::Path;
 use std::process::Command;

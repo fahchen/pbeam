@@ -6,6 +6,10 @@
 //! twice, at two lengths, and divides the difference by the length
 //! difference. The constant cost of one run cancels, so the result is the
 //! allocation count of one iteration.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::{alloc::System, cell::Cell, hint::black_box};
 

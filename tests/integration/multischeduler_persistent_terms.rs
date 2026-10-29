@@ -1,6 +1,10 @@
 //! Persistent terms of a node with more than one scheduler thread. Each
 //! root of `persistent_terms` returns `ok` when its result is the result
 //! of the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 #[path = "../common/mod.rs"]
 mod common;

@@ -3,6 +3,10 @@
 //! `pbeam_cap:revoke/2` raises `error:undef` there. The pinned ERTS run
 //! gives the results of the permitted part, and the revocations of the
 //! default policy and of a test policy are the oracle of each denial.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 #[path = "../common/mod.rs"]
 mod common;

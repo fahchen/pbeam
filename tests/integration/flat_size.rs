@@ -1,5 +1,9 @@
 //! Runs `erts_debug:flat_size` on PBeam and compares the sizes of each term kind with the pinned
 //! ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::process::Command;
 

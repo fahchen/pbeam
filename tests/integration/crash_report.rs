@@ -1,5 +1,9 @@
 //! Checks that the error report of a crash goes where the system logger says, as the pinned ERTS
 //! does.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::process::Command;
 

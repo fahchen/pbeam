@@ -10,6 +10,10 @@
 //! thread of the library sends (`enif_send` with no caller env). The line
 //! has the base names of the paths, so the temporary directory does not
 //! change it. The PBeam line is the line of the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 #[path = "../common/mix_bundle.rs"]
 mod mix_bundle;

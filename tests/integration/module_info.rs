@@ -1,5 +1,9 @@
 //! Runs `module_info` of preloaded and loaded modules on PBeam and compares the results with the
 //! pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::process::Command;
 

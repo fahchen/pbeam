@@ -1,5 +1,9 @@
 //! Loads the pinned `io_lib` modules and runs the BIFs of the `io_start` probe (list tail,
 //! booleans, key member) on PBeam against the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::process::Command;
 

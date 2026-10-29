@@ -1,5 +1,9 @@
 //! Runs the `gen_tcp` calls (listen, accept, connect, peer name, local family) through the `pbeam`
 //! binary and compares them with the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::{
     io::{BufRead, BufReader, Read, Write},

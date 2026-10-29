@@ -2,6 +2,10 @@
 //! `erts_parse_spawn_opts` (`erl_process.c:12222-12434`), sets the start
 //! flags of the new process, and raises `badarg` for each option that is not
 //! valid (`bif.c:1039-1051`).
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 #[path = "../common/mod.rs"]
 mod common;

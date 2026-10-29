@@ -267,7 +267,9 @@ pub fn register_library(library: &'static Library) -> Result<(), RegistrationErr
             return Err(RegistrationError::DuplicateBinding { name, arity });
         }
     }
-    let mut registry = REGISTRY.write().unwrap();
+    let mut registry = REGISTRY
+        .write()
+        .expect("no registration panics while it holds the lock");
     let linked = crate::runtime::interpreter::has_static_library(library.module);
     if linked || registry.iter().any(|found| found.module == library.module) {
         return Err(RegistrationError::Duplicate);
@@ -278,7 +280,9 @@ pub fn register_library(library: &'static Library) -> Result<(), RegistrationErr
 
 /// Return the registered library of `module`, or `None`.
 pub(crate) fn library(module: &str) -> Option<&'static Library> {
-    let registry = REGISTRY.read().unwrap();
+    let registry = REGISTRY
+        .read()
+        .expect("no registration panics while it holds the lock");
     registry
         .iter()
         .find(|library| library.module == module)

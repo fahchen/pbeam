@@ -1,4 +1,8 @@
 //! Checks that the file and line of each stack frame on PBeam match the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::process::Command;
 

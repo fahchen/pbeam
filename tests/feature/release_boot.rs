@@ -1,6 +1,10 @@
 //! Boot the release fixture `fixtures/release_boot` with `pbeam erl` and
 //! with the pinned `erl`, and compare the results. Check the errors of the
 //! `erl` options and variables that `pbeam erl` does not support.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::{
     os::unix::process::ExitStatusExt,

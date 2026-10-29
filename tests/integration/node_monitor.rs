@@ -2,6 +2,10 @@
 //! `{monitor_nodes, Options}` (`bif.c:2032-2044`, `2202-2227`;
 //! `erts_monitor_nodes`, `dist.c:6731-6845`), and `erlang:nodes/0,1,2`
 //! (`dist.c:6240-6476`) on a node that is not alive.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::process::Command;
 

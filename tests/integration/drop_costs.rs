@@ -18,6 +18,10 @@
 //! runs; its numbers are not the report numbers. The test profile holds
 //! debug assertions, so the constants scale the population down and the
 //! gate stays short.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::{
     hint::black_box,

@@ -1,4 +1,8 @@
 //! Checks the magic marker of each kind of reference on PBeam against the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::process::Command;
 

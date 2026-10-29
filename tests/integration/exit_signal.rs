@@ -1,5 +1,9 @@
 //! Checks the order of link and monitor signals and the `exit/2` and `exit/3` signals on PBeam
 //! against the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::process::Command;
 

@@ -1,5 +1,9 @@
 //! Runs a BIF as the initial call of a process on PBeam and compares the result with the pinned
 //! ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 #[path = "../common/mod.rs"]
 mod common;

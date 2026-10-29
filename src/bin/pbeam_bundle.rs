@@ -410,7 +410,11 @@ fn build_executable(runtime: &Path, bundle: &Path, output: &Path) -> Result<(), 
         .map_err(|error| format!("cannot read the bundle {}: {error}", bundle.display()))?;
     file.extend_from_slice(&bundle);
     file.extend_from_slice(MAGIC);
-    file.extend_from_slice(&u64::try_from(bundle.len()).unwrap().to_le_bytes());
+    file.extend_from_slice(
+        &u64::try_from(bundle.len())
+            .expect("a bundle length fits in u64")
+            .to_le_bytes(),
+    );
     write_output(output, &file, 0o755)
 }
 

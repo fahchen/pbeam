@@ -1,5 +1,9 @@
 //! Runs the BIFs of the `logger_start` probe (list reverse, map keys, ETS keys and access rights)
 //! on PBeam and compares them with the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::process::Command;
 

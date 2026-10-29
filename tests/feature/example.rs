@@ -22,6 +22,10 @@
 //! Each other module loads on demand through the pinned `error_handler` and
 //! `code_server`, so the output order of two processes that race is the
 //! order of an interactive-mode ERTS run (#428).
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::fmt::Write as _;
 use std::{
@@ -1012,7 +1016,9 @@ fn open_terminal() -> Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd), std::
             return Err(std::io::Error::last_os_error());
         }
         for fd in [master, slave] {
-            assert_eq!(libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC), 0);
+            if libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
         }
 
         (

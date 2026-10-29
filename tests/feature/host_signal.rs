@@ -1,5 +1,9 @@
 //! Checks how the `pbeam` binary handles host signals (the signal server, the break menu,
 //! `SIGUSR1`) and compares it with the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::{
     ffi::c_int,
@@ -534,13 +538,12 @@ fn read_until(fd: &OwnedFd, output: &mut Vec<u8>, text: &[u8]) {
     let start = Instant::now();
     let mut buffer = [0; 4096];
     while !output.windows(text.len()).any(|window| window == text) {
-        if start.elapsed() >= RUN_TIME_LIMIT {
-            panic!(
-                "no {:?} in the output {:?}",
-                String::from_utf8_lossy(text),
-                String::from_utf8_lossy(output)
-            );
-        }
+        assert!(
+            start.elapsed() < RUN_TIME_LIMIT,
+            "no {:?} in the output {:?}",
+            String::from_utf8_lossy(text),
+            String::from_utf8_lossy(output)
+        );
         // SAFETY: `read` writes at most the length of `buffer` into it.
         let count = unsafe { libc::read(fd.as_raw_fd(), buffer.as_mut_ptr().cast(), buffer.len()) };
         match usize::try_from(count) {

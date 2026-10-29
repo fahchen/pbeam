@@ -1,5 +1,9 @@
 //! Checks that a registered native MFA reaches Rust and that an unregistered MFA resolves to BEAM
 //! code.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use pbeam_runtime::{
     Atom, BeamProgram, Binding, Job, Library, NativeResult, NifContext, Term, register_library,

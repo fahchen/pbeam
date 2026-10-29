@@ -1,5 +1,9 @@
 //! Checks the IO request that PBeam sends to a group leader and the group leader errors, against
 //! the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::process::Command;
 

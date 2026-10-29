@@ -1,4 +1,8 @@
 //! Checks the log event that the default logger handler writes after the boot.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::{
     process::{Command, Stdio},

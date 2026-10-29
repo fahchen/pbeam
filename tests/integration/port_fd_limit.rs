@@ -1,4 +1,8 @@
 //! Checks that PBeam runs a port whose pipes have fds at or above `FD_SETSIZE`.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::os::fd::{FromRawFd, OwnedFd};
 

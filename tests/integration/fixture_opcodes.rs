@@ -2,6 +2,10 @@
 //! sequences of compiled fixtures. Each test here checks that a fixture
 //! still has these bytes, so a recompiled fixture that changes them fails
 //! a test.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::fs;
 

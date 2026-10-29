@@ -1,5 +1,9 @@
 //! Runs the BIFs of the `event_bif` probe (integer to list, iolist size, remainder, minimum,
 //! printable range) on PBeam and compares them with the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 #[path = "../common/mod.rs"]
 mod common;

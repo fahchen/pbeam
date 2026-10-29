@@ -2,6 +2,10 @@
 //! `sha256/1` declaration of an Elixir module computes the digest with the
 //! `openssl` crate, and the declarations are checked against the registry
 //! before a run.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use pbeam_runtime::{
     BeamError, BeamProgram, Binding, Job, Library, NativeResult, NifContext, Term, register_library,

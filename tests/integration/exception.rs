@@ -1,5 +1,9 @@
 //! Checks `try` and `catch` of error and exit exceptions, and the stack trace of a caught error, on
 //! PBeam.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::process::Command;
 

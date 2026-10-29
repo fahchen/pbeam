@@ -1,5 +1,9 @@
 //! Checks `function_clause` errors, their arguments and their stack frames on PBeam against the
 //! pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::process::Command;
 

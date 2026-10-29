@@ -1,5 +1,9 @@
 //! Loads BEAM containers with atom and small integer constants and checks the errors for malformed
 //! containers.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::sync::OnceLock;
 

@@ -9,6 +9,10 @@
 //! run also serve `GET /` with `accept-encoding: zstd` first, which makes
 //! Bandit compress the body with `zstd:compress/2` and a context, and
 //! compare the compressed response.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::fmt::Write as _;
 use std::{

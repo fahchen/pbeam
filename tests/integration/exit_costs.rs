@@ -1,5 +1,9 @@
 //! Checks the reduction costs of a process exit on PBeam against the pinned ERTS with one
 //! scheduler.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::process::Command;
 

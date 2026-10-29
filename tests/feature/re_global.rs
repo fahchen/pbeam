@@ -7,6 +7,10 @@
 //! beam_common.c:1294-1342), which loads the pinned `re` module and enters
 //! its Erlang helper (`error_handler.erl:85-98`). The probe makes its first
 //! `re` call before the run loads `re`, so both runs take that path.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::process::{Command, Output, Stdio};
 

@@ -29,6 +29,10 @@
 //!
 //! After the load of `extension_bare`, which has no `nif_start`, ERTS runs
 //! the NIF for an external call and the BEAM body for a local call.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 #[path = "../common/mod.rs"]
 mod common;

@@ -1,5 +1,9 @@
 //! Runs the Unicode IO BIFs (`characters_to_list` and related) on PBeam and compares them with the
 //! pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 #[path = "../common/mod.rs"]
 mod common;

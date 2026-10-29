@@ -130,7 +130,11 @@ fn trailer(bytes: &[u8]) -> Trailer<'_> {
     if &bytes[end..end + MAGIC.len()] != MAGIC {
         return Trailer::Absent;
     }
-    let length = u64::from_le_bytes(bytes[end + MAGIC.len()..].try_into().unwrap()) as usize;
+    let length = u64::from_le_bytes(
+        bytes[end + MAGIC.len()..]
+            .try_into()
+            .expect("the trailer ends with 8 length bytes"),
+    ) as usize;
     match end.checked_sub(length) {
         Some(start) => Trailer::Bundle(&bytes[start..end]),
         None => Trailer::Invalid,

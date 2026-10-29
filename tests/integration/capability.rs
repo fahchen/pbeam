@@ -1,6 +1,10 @@
 //! Capability checks at spawn. The default policy gives the pinned ERTS
 //! results. A test policy that holds back one operation or one module is
 //! the oracle of each denial, which ERTS does not have.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::{collections::BTreeSet, process::Command};
 

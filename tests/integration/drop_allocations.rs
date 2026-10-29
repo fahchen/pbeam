@@ -10,6 +10,10 @@
 //! and drops one term of each shape. A term that needs no walk must allocate
 //! nothing at all. A term whose walk needs a stack keeps its allocation, and
 //! the report prints the count and names the structure that keeps it.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::{alloc::System, cell::Cell, hint::black_box};
 

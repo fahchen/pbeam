@@ -5,6 +5,10 @@
 //! `erlang:system_info(scheduler_id)` after each yield, so the result of
 //! `busy` names each scheduler that ran a worker: a result with scheduler 2
 //! proves a steal.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 #[path = "../common/mod.rs"]
 mod common;

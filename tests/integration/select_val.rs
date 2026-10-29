@@ -14,6 +14,10 @@
 //! `cargo test --locked --release --test select_val records_the_select_val_cost -- --nocapture --test-threads=1`.
 //! The check gate runs the same tests under the test profile, which measures
 //! slower numbers but proves that the probes and the ERTS reference run.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::fmt::Write as _;
 use std::{

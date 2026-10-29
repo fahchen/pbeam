@@ -1,5 +1,9 @@
 //! Runs the `zlib` functions (deflate, inflate, flush, one-shot) on PBeam and compares the bytes
 //! with the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::process::Command;
 
