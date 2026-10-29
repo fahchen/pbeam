@@ -1,6 +1,6 @@
 %% The module of the NIF library fixtures/nif/nif_messages.c: probe/2 and
 %% dirty_probe/2 run the process, message, and mutex enif calls of their
-%% first argument.
+%% first argument, and probe 11 sends from a thread of the library.
 -module(nif_messages).
 -export([results/1, mismatches/1, call/3]).
 
@@ -25,7 +25,8 @@ results(Path) ->
     NoEnv = [probe(10, {no_env, [1]}), flush()],
     Dirty = [dirty_probe(0, 5), flush(), dirty_probe(1, echo()), echoed(),
              dirty_probe(1, Dead), dirty_probe(1, self)],
-    [ToSelf, Received, Pids, Others, Order, Mutexes, AllocSelf, Loader, NoEnv, Dirty].
+    Thread = [probe(11, self()), receive_n(3), probe(11, Dead), receive_n(1)],
+    [ToSelf, Received, Pids, Others, Order, Mutexes, AllocSelf, Loader, NoEnv, Dirty, Thread].
 
 %% Load the library `Path` and return each case whose result is not the
 %% result of the pinned ERTS, as {Index, Result, Expected}.
@@ -53,6 +54,11 @@ echo() ->
 echoed() ->
     receive {echo, Message} -> Message after 1000 -> timeout end.
 
+%% Wait for `N` messages and return them, in their order. The wait has no
+%% timeout: the thread of probe 11 sends while the process waits.
+receive_n(0) -> [];
+receive_n(N) -> receive Message -> [Message | receive_n(N - 1)] end.
+
 %% Return the messages in the mailbox, in their order.
 flush() ->
     receive Message -> [Message | flush()] after 0 -> [] end.
@@ -72,4 +78,5 @@ expected() ->
      is_null,
      [1, [loaded]],
      [1, [{no_env, [1]}]],
-     [{1, 1}, [{dirty, 5}], 1, {dirty, 0}, 0, not_pid]].
+     [{1, 1}, [{dirty, 5}], 1, {dirty, 0}, 0, not_pid],
+     [ok, [{thread, 7}, bare, {sent, 1, 1, 0}], ok, [{sent, 0, 0, 0}]]].

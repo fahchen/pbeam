@@ -90,6 +90,13 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ## Runtime
 
+### Give the OS pid of the child of a failed port start
+
+- **Now:** a spawn port whose start runs no program (a `cd` that `chdir` refuses, an `execve` that fails) has the `os_pid` 0, because PBeam starts the program with `posix_spawn`, which fails before a child exists, or checks the directory before the start. ERTS forks the child in `erl_child_setup`, and the driver records its pid (`erts/emulator/sys/unix/sys_drivers.c:1331`), so a port with `out`, which stays open after such a start, gives that pid in `port_info/2`. Row "Ports" of `docs/erts-differences.md` records it.
+- **Option:** a fork-based start that makes a child for each start and reports the failure as its exit status, as `erl_child_setup.c:302-306` and `361-369` do.
+- **Trigger:** a consumer that reads `os_pid` after a failed start.
+- **Source:** the review of PR #1334 (#1203) and the owner decision of 2026-10-29.
+
 ### Free magic-reference resources when the last reference term is dropped
 
 - **Now:** the compiled programs of ETS select continuations, the compiled binary patterns, and the atomics and counters arrays stay until the run ends, where ERTS frees each one with the last reference term (`erl_db_util.h:617-619`). A `Reference` term is a plain `u64`, so PBeam cannot see when the last term goes.
@@ -169,9 +176,9 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Run the other port options and port kinds
 
-- `open_port/2` runs only `{spawn_executable, Name}` with `binary`, `exit_status`, `use_stdio`, `nouse_stdio`, `stderr_to_stdout`, and `{args, Args}` (#302). Each other option (#1202 added `{line, L}`, `line`, `stream`, and the list data mode; #1203 added `{env, Env}`, `{arg0, A}`, `{cd, Dir}`, `{parallelism, B}`, and `hide`), the port kind `spawn_driver`, the port BIFs other than `port_command/2`, `port_close/1`, and `port_info/1`, and a name of a port give a runtime error (#1205 added the messages and exit signals of a port, and `erlang:port_call/3`) (row "Ports" of `docs/erts-differences.md`).
+- `open_port/2` runs only `{spawn_executable, Name}` with `binary`, `exit_status`, `use_stdio`, `nouse_stdio`, `stderr_to_stdout`, and `{args, Args}` (#302). Each other option (#1202 added `{line, L}`, `line`, `stream`, and the list data mode; #1203 added `{env, Env}`, `{arg0, A}`, `{cd, Dir}`, `{parallelism, B}`, `hide`, `in`, and `out`), the port kind `spawn_driver`, the port BIFs other than `port_command/2`, `port_close/1`, and `port_info/1`, and a name of a port give a runtime error (#1205 added the messages and exit signals of a port, and `erlang:port_call/3`) (row "Ports" of `docs/erts-differences.md`).
 - `port_command/2` writes with a blocking write; ERTS queues the data that does not fit in the pipe and marks the port busy (sys_drivers.c:1140-1203). A port program keeps each fd of PBeam that is not close-on-exec. After `os:set_signal(sigchld, ignore)`, the host reaps each program, and a port with `exit_status` returns a runtime error; ERTS reaps its programs in `erl_child_setup` (erl_child_setup.c:396-420). For the same reason, the `pbeam` binary keeps `SIG_DFL` for `SIGCHLD` at the start, where ERTS sets `SIG_IGN` (row "OS signals"). A reaper process as `erl_child_setup` would remove both differences.
-- **Trigger:** a consumer uses another option, port kind, or port BIF, for example `in`, `out`, or `erlang:register/2` of a port, or writes more data than the pipe holds to a program that writes back, or reads the exit status of a port after `os:set_signal(sigchld, ignore)`.
+- **Trigger:** a consumer uses another option, port kind, or port BIF, for example `erlang:register/2` of a port, or writes more data than the pipe holds to a program that writes back, or reads the exit status of a port after `os:set_signal(sigchld, ignore)`.
 - **Source:** PR for #302.
 
 ### Run the crash dump of `SIGUSR1`

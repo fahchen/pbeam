@@ -38,7 +38,9 @@ results(Path) ->
     Lifetimes = lifetimes(),
     %% A and B stay live until here, so no collection before drops them.
     Live = [probe(5, A), probe(6, B)],
-    [Load, Outside, Types, Gets, Same, Text, Hashes, Maps, External, Ets, Lifetimes, Live].
+    Monitors = monitors(),
+    [Load, Outside, Types, Gets, Same, Text, Hashes, Maps, External, Ets, Lifetimes, Live,
+     Monitors].
 
 %% Load the library `Path` and return each case whose result is not the
 %% result of the pinned ERTS, as {Index, Result, Expected}.
@@ -76,6 +78,37 @@ lifetimes() ->
 
 %% Collect the garbage, wait for the scheduled destructors, and return
 %% the log of the destructor calls.
+%% enif_monitor_process of a live process gives 0, and of a process that
+%% is not alive 1. The exit of the live process runs the down callback of
+%% each monitor that a demonitor did not remove, while a reference keeps
+%% its object.
+monitors() ->
+    {Live, Reference} = spawn_monitor(fun() -> receive stop -> ok end end),
+    {LiveResult, Object} = probe(13, Live),
+    {Dead, DeadReference} = spawn_monitor(fun() -> ok end),
+    receive {'DOWN', DeadReference, process, _, _} -> ok end,
+    {DeadResult, _} = probe(13, Dead),
+    {First, Second, Same, Differ, Demonitor, Again, Pair} = probe(14, Live),
+    Released = probe(15, Live),
+    NoDown = probe(16, Live),
+    Live ! stop,
+    receive {'DOWN', Reference, process, _, _} -> ok end,
+    Log = log(),
+    %% The kill reaches the victim before the monitor signal on PBeam, which
+    %% sends the monitor signal through the inbox of the scheduler.
+    {Victim, VictimReference} = spawn_monitor(fun() -> receive stop -> ok end end),
+    {VictimResult, VictimObject} = probe(13, Victim),
+    exit(Victim, kill),
+    receive {'DOWN', VictimReference, process, _, _} -> ok end,
+    VictimLog = log(),
+    [LiveResult, DeadResult, {First, Second, Same, Differ, Demonitor, Again}, Released, NoDown,
+     Log, VictimResult, VictimLog, downs(), probe(17, 0), is_reference(Object),
+     is_reference(Pair), is_reference(VictimObject)].
+
+%% Return the messages of the down callback, in their order.
+downs() ->
+    receive {down, Id} -> [Id | downs()] after 0 -> [] end.
+
 log() ->
     erlang:garbage_collect(),
     receive after 50 -> ok end,
@@ -102,7 +135,9 @@ expected() ->
      [true, false],
      [true, true],
      [[], ok, [1011], [10], [20], [30]],
-     [1, 2]].
+     [1, 2],
+     [0, 1, {0, 0, true, true, 0, 1}, 0, -1, [8, 2005, 2006], 0, [2005], [5, 6, 5], {true, 2},
+      true, true, true]].
 
 probe(_Kind, _Arg) ->
     erlang:nif_error(not_loaded).

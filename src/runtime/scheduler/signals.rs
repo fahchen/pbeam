@@ -698,6 +698,12 @@ impl Scheduler {
                 }
                 2
             }
+            Signal::NifMonitor { monitor } => {
+                self.handled(id, node)
+                    .monitored_by
+                    .push(TargetMonitor::Nif(monitor));
+                2
+            }
             Signal::SocketMonitor { socket } => {
                 // One entry per socket: `Sockets::monitor_down` handles each
                 // role of the process (owner, closer, connector, acceptor,
@@ -1041,6 +1047,10 @@ impl Scheduler {
                 Signal::FileMonitor { file } => {
                     count += 4;
                     lock(&self.node().resources.kind::<Files>()).monitor_down(file);
+                }
+                Signal::NifMonitor { monitor } => {
+                    count += 4;
+                    crate::runtime::nif::abi::monitor_down(monitor, id);
                 }
                 Signal::SocketMonitor { socket } => {
                     count += 4;

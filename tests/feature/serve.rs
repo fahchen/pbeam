@@ -460,6 +460,16 @@ fn gives_the_command_line_arguments_of_the_executable_to_the_release() {
     let stderr_reader = collect(child.stderr.take().unwrap(), Arc::clone(&stderr));
     let stream = wait_for_server(&mut child, port);
     let response = stream.and_then(|stream| request_argv_after_cli(port, stream));
+    // The launcher exports the `RELEASE_*` variables of `bin/plug_hello`
+    // (#1311).
+    let release = TcpStream::connect(("127.0.0.1", port))
+        .map_err(|error| error.to_string())
+        .and_then(|stream| {
+            exchange(
+                stream,
+                b"GET /release HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            )
+        });
     let status = stop_with_term(child);
     stdout_reader.join().unwrap();
     stderr_reader.join().unwrap();
@@ -488,6 +498,12 @@ fn gives_the_command_line_arguments_of_the_executable_to_the_release() {
         "stdout: {}\nstderr: {}",
         text(&stdout),
         text(&stderr)
+    );
+    let (_status_line, _headers, release) = release.unwrap();
+    assert_eq!(
+        String::from_utf8(release).unwrap(),
+        "[\"plug_hello\", \"0.1.0\", \"start\", \"plug_hello\", \"embedded\", \
+         \"plug_hello\", \"none\", \"start\", \"start_clean\"]"
     );
     fs::remove_dir_all(&directory).unwrap();
 }

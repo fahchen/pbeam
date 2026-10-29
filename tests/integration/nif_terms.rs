@@ -91,3 +91,17 @@ fn stops_the_run_for_a_term_that_no_enif_call_made() {
         "the NIF used the term 0x3039, which no enif call of the call made"
     );
 }
+
+#[test]
+fn stops_the_run_for_an_enif_function_that_pbeam_does_not_implement() {
+    // ERTS gives 0 for the compare of a term with itself. The stub of
+    // `src/runtime/nif/abi/unsupported.rs` records the runtime error.
+    let path = build("unsupported");
+    let failure = execute("call", &path, vec![Term::Integer(27), Term::Integer(1)]).unwrap_err();
+    assert!(
+        failure
+            .to_string()
+            .ends_with("the NIF called enif_compare, which PBeam does not implement yet"),
+        "{failure}"
+    );
+}

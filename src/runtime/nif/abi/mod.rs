@@ -21,8 +21,10 @@ mod layout;
 mod mutex;
 mod process;
 mod resource;
+pub(crate) mod thread;
+mod unsupported;
 
-pub(crate) use resource::Resource;
+pub(crate) use resource::{Resource, monitor_down};
 
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 
@@ -200,9 +202,11 @@ impl Library {
 
     /// Run the load callback with `info` for the process `caller`, and
     /// return its veto, or 0 when the library has no load callback
-    /// (`erl_nif.c:4980-4987`). The callback runs in no context of
-    /// [`process`], so `enif_alloc_env` gives NULL and `enif_send` gives 0
-    /// in it.
+    /// (`erl_nif.c:4980-4987`). The callback runs in no thread-local
+    /// context of [`process`], but the run of `caller` is the run that a
+    /// thread of the library finds from then on, so `enif_alloc_env` and
+    /// `enif_send` work in it, as ERTS finds its global tables from each
+    /// thread (`erl_nif.c:669-675`, `2296-2338`).
     ///
     /// # Examples
     ///
@@ -211,6 +215,8 @@ impl Library {
     /// assert_eq!(library.load(caller, &Term::Integer(7)), 7);
     /// ```
     pub(crate) fn load(&self, caller: Caller<'_>, info: &Term) -> i32 {
+        process::enter_run(caller.atoms, caller.node);
+        caller.node.load_nif_library();
         self.load.map_or(0, |load| {
             let mut env = Env::load(caller.atoms, caller.process, info, &self.handle);
             // PBeam has no `enif_priv_data` yet, so no call reads the

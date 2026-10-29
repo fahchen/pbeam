@@ -32,6 +32,13 @@ mix test --cover --warnings-as-errors
   MIX_ENV='test' mix compile --warnings-as-errors
   mix test --cover --warnings-as-errors
 )
+# The fs_notify fixture fetches fs_notify from Hex and builds its NIF library from source with rustler and the host cargo (config :rustler_precompiled, force_build_all: true). Its entry module has the same gates.
+(
+  cd fixtures/fs_notify
+  mix deps.get --check-locked
+  MIX_ENV='test' mix compile --warnings-as-errors
+  mix test --cover --warnings-as-errors
+)
 
 # Only the exact empty bootstrap is exempt; any Rust source addition enables coverage.
 rust_sources=$(git ls-files --cached --others --exclude-standard -- '*.rs')

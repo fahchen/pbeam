@@ -228,6 +228,35 @@ fn runs_the_env_arg0_cd_hide_and_parallelism_options_as_pinned_erts() {
 }
 
 #[test]
+fn runs_the_in_and_out_options_as_pinned_erts() {
+    // `in` sets DO_READ and `out` sets DO_WRITE (erl_bif_port.c:991-994),
+    // and without both options the port keeps the two directions
+    // (erl_bif_port.c:1015-1016). The driver closes the parent end of the
+    // missing direction after the handshake (sys_drivers.c:1320-1329), so
+    // a write to an `in` port fails with ebadf (sys_drivers.c:1145, 1177)
+    // and an `out` port sends no data message and no exit status
+    // (sys_drivers.c:746-753), and a write after the child exited fails
+    // with epipe (sys_drivers.c:1180-1184).
+    assert_runs(
+        "directions()",
+        "[<<104,105>>,0,true,ebadf,true,none,true,epipe,[{'EXIT',port,normal}]]",
+    );
+}
+
+#[test]
+fn gives_the_exit_status_of_a_start_that_ran_no_program_as_pinned_erts() {
+    // The child setup program exits with the errno of a chdir it cannot do
+    // (erl_child_setup.c:302-306) and of an execve that fails
+    // (erl_child_setup.c:361-369), so `exit_status` gives the errno: enoent
+    // for a missing directory, enotdir for a file, and eacces for the
+    // execve of a directory.
+    assert_runs(
+        "cd_status()",
+        "[2,normal,20,13,[{'EXIT',port,normal},{'EXIT',port,normal}]]",
+    );
+}
+
+#[test]
 fn runs_the_command_of_a_spawn_port_as_pinned_erts() {
     // `{spawn, Command}` runs `sh -c "exec Command"` (sys_drivers.c:474-475,
     // 528-544; erl_child_setup.c:364-366), so `exit 3` after the `exec` of
@@ -360,7 +389,7 @@ fn opens_a_port_on_an_fd_that_is_not_open_as_pinned_erts() {
     // port opens, and its write fails with `ebadf` (sys_drivers.c:1180-1184).
     assert_runs(
         "fd_closed()",
-        "[[],true,[{'EXIT',port,ebadf}],undefined,{error,einval}]",
+        "[[],true,[{'EXIT',port,ebadf}],undefined,{error,einval},[true,ebadf,[],true]]",
     );
 }
 
@@ -373,12 +402,6 @@ fn stops_the_run_for_each_port_part_that_is_not_implemented() {
             "unsupported open_port/2 option {line, L} whose low 32 bits are not positive",
         ),
         (
-            "cd",
-            "unsupported open_port/2 of a program that posix_spawn does not start: enoent",
-        ),
-        ("in", "unsupported open_port/2 option in"),
-        ("out", "unsupported open_port/2 option out"),
-        (
             "busy_limits",
             "unsupported open_port/2 option busy_limits_port",
         ),
@@ -389,10 +412,6 @@ fn stops_the_run_for_each_port_part_that_is_not_implemented() {
         (
             "fd_list",
             "unsupported open_port/2 without the binary option",
-        ),
-        (
-            "exec",
-            "unsupported open_port/2 of a program that posix_spawn does not start: eacces",
         ),
         ("force", "unsupported erlang:port_command/3 options"),
         ("register", "unsupported erlang:register/2 with a port"),

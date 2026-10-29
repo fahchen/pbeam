@@ -50,7 +50,16 @@ cases() ->
      {13, 1},
      {14, {my, reason}}, {14, badarg},
      {15, {my, reason}},
-     {17, [abc | 8]}].
+     {17, [abc | 8]},
+     {18, a}, {18, []}, {18, [1]}, {18, 1},
+     {19, 0}, {19, 1 bsl 64 - 1}, {19, 1 bsl 64}, {19, -1}, {19, a},
+     {20, [#{a => 1} | a]}, {20, [#{a => 1} | b]}, {20, [a | a]},
+     {21, b}, {21, a},
+     {22, x},
+     {23, 2}, {23, 255}, {23, 256}, {23, 0},
+     {24, 0},
+     {25, 0},
+     {26, [1 | 2]}, {26, [2 | 2]}, {26, [2 | 3]}, {26, [0 | 2]}].
 
 %% The results of probes/1 on the pinned ERTS (OTP 29.1.1), in the order of
 %% cases/0.
@@ -81,7 +90,16 @@ expected() ->
      {[], [1, a, 1], [1 | a], [], [1, a], {}},
      {error, {my, reason}}, {error, badarg},
      {error, {my, reason}},
-     {0, <<"xxxxxxxx">>}].
+     {0, <<"xxxxxxxx">>},
+     {true, false, false}, {false, true, true}, {false, false, true}, {false, false, false},
+     {0, 0}, {4294967295, 4294967295}, Bad, Bad, Bad,
+     1, none, none,
+     #{a => 1, b => 2}, duplicate,
+     {x, x, x},
+     aa, list_to_atom(duplicate(255, $a)), none, '',
+     1,
+     cleared,
+     'Ã©', 'é', none, none].
 
 duplicate(0, _) -> [];
 duplicate(N, Element) -> [Element | duplicate(N - 1, Element)].
