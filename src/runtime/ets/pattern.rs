@@ -174,20 +174,17 @@ impl Pattern {
         let mut values = vec![None; self.variables];
         let mut terms: Vec<&Term> = Vec::new();
         let mut code = self.code.iter();
-        match self.code.first() {
+        if let Some(Step::Tuple(size)) = self.code.first() {
             // The object is a tuple, so a tuple pattern reads its elements
             // with no new tuple.
-            Some(Step::Tuple(size)) => {
-                if *size != object.len() {
-                    return None;
-                }
-                code.next();
-                terms.extend(object.iter().rev());
+            if *size != object.len() {
+                return None;
             }
-            _ => {
-                whole = Term::tuple(object.to_vec());
-                terms.push(&whole);
-            }
+            code.next();
+            terms.extend(object.iter().rev());
+        } else {
+            whole = Term::tuple(object.to_vec());
+            terms.push(&whole);
         }
         for step in code {
             let term = terms.pop().expect("each step has a term");

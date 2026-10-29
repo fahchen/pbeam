@@ -117,7 +117,10 @@ pub fn run_release_bundle(release: &Release) -> String {
     let mut stderr = String::new();
     std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut stderr).unwrap();
     assert_eq!(
-        line.ok().flatten().map(|line| line + "\n").as_deref(),
+        line.ok()
+            .flatten()
+            .map(|line| format!("{line}\n"))
+            .as_deref(),
         Some(expected.as_str()),
         "status: {status:?}\nstdout: {rest:?}\nstderr: {stderr}"
     );

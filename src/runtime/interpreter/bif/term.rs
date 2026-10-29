@@ -1043,23 +1043,12 @@ fn check_sysname(input: &[u8], index: &mut usize, local: bool) -> Result<(), Dec
             *index += 1;
             Ok(())
         }
-        100 => {
+        100 | 118 => {
             *index += 1;
             let length = check_number(input, index, 2)? as usize;
             check_atom_name(input, index, length)
         }
-        118 => {
-            *index += 1;
-            let length = check_number(input, index, 2)? as usize;
-            check_atom_name(input, index, length)
-        }
-        115 => {
-            *index += 1;
-            let length = usize::from(*input.get(*index).ok_or(DecodeError::Badarg)?);
-            *index += 1;
-            check_atom_name(input, index, length)
-        }
-        119 => {
+        115 | 119 => {
             *index += 1;
             let length = usize::from(*input.get(*index).ok_or(DecodeError::Badarg)?);
             *index += 1;
@@ -1082,25 +1071,20 @@ fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
         let tag = *input.get(index).ok_or(DecodeError::Badarg)?;
         index += 1;
         let mut complete = true;
+        #[expect(
+            clippy::match_same_arms,
+            reason = "tag 117 is the old local fun tag, which the decoder names as its own case, so the size check keeps an arm for it apart from the wildcard"
+        )]
         match tag {
             97 => check_skip(input, &mut index, 1)?,
             98 => check_skip(input, &mut index, 4)?,
             99 => check_skip(input, &mut index, FLOAT_TEXT_SIZE)?,
             70 => check_skip(input, &mut index, 8)?,
-            100 => {
+            100 | 118 => {
                 let length = check_number(input, &mut index, 2)? as usize;
                 check_atom_name(input, &mut index, length)?;
             }
-            115 => {
-                let length = usize::from(*input.get(index).ok_or(DecodeError::Badarg)?);
-                index += 1;
-                check_atom_name(input, &mut index, length)?;
-            }
-            118 => {
-                let length = check_number(input, &mut index, 2)? as usize;
-                check_atom_name(input, &mut index, length)?;
-            }
-            119 => {
+            115 | 119 => {
                 let length = usize::from(*input.get(index).ok_or(DecodeError::Badarg)?);
                 index += 1;
                 check_atom_name(input, &mut index, length)?;
@@ -1175,7 +1159,7 @@ fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
                 let length = check_number(input, &mut index, 4)? as usize;
                 check_skip(input, &mut index, 1 + length)?;
             }
-            88 => {
+            88 | 120 => {
                 check_sysname(input, &mut index, local)?;
                 check_skip(input, &mut index, 12)?;
             }
@@ -1184,15 +1168,11 @@ fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
                 check_skip(input, &mut index, 8)?;
                 check_tiny_creation(input, &mut index)?;
             }
-            120 => {
-                check_sysname(input, &mut index, local)?;
-                check_skip(input, &mut index, 12)?;
-            }
             89 => {
                 check_sysname(input, &mut index, local)?;
                 check_skip(input, &mut index, 8)?;
             }
-            102 => {
+            102 | 101 => {
                 check_sysname(input, &mut index, local)?;
                 check_skip(input, &mut index, 4)?;
                 check_tiny_creation(input, &mut index)?;
@@ -1213,11 +1193,6 @@ fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
                 check_sysname(input, &mut index, local)?;
                 check_tiny_creation(input, &mut index)?;
                 check_skip(input, &mut index, 4 * count)?;
-            }
-            101 => {
-                check_sysname(input, &mut index, local)?;
-                check_skip(input, &mut index, 4)?;
-                check_tiny_creation(input, &mut index)?;
             }
             113 => {
                 frames.push(CheckFrame {
@@ -1300,7 +1275,6 @@ fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
                         break;
                     }
                     frames.pop();
-                    continue;
                 }
                 CheckKind::Local { hash, start, prior } => {
                     frames.pop();
@@ -1308,7 +1282,6 @@ fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
                     if external::block_hash(&input[start..index], seed) != hash {
                         return Err(DecodeError::Badarg);
                     }
-                    continue;
                 }
             }
         }
@@ -1704,7 +1677,6 @@ impl Decoder<'_> {
                             list = Term::cons(head, list);
                         }
                         term = list;
-                        continue;
                     }
                     FrameKind::Map => {
                         frame.items.push(term);
@@ -1754,7 +1726,6 @@ impl Decoder<'_> {
                         if external::block_hash(&self.input[start..self.pos], self.seed) != hash {
                             return Err(DecodeError::Badarg);
                         }
-                        continue;
                     }
                 }
             }

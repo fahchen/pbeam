@@ -1057,7 +1057,7 @@ fn frees_a_clear_after_the_last_unfix() {
     let (done, charge) = table.step_clear(&atoms, ProcessId(0), 300, i64::MAX);
     assert!(done);
     assert!(charge > 0);
-    assert!(!table.clear.is_some());
+    assert!(table.clear.is_none());
     assert_eq!(table.object_count(), 0);
     assert_eq!(table.deleted_objects, 0);
     assert!(table.next_key(&atoms, &Term::Integer(0)).is_none());
@@ -1333,7 +1333,7 @@ fn marks_the_buckets_of_a_fixed_clear_in_turns() {
         table.step_clear(&atoms, ProcessId(0), 300, i64::MAX),
         (true, 30)
     );
-    assert!(!table.clear.is_some());
+    assert!(table.clear.is_none());
     assert_eq!(table.object_count(), 0);
     assert_eq!(table.fixdels, 1);
 }

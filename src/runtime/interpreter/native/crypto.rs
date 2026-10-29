@@ -943,9 +943,8 @@ fn hash_nif(
         }
         return c_error(scheduler, "badarg", "hash.c", 111, 0, "Bad digest type");
     };
-    let data = match data.binary_bytes() {
-        Some(data) => data,
-        _ => return c_error(scheduler, "badarg", "hash.c", 118, 1, "Not iolist"),
+    let Some(data) = data.binary_bytes() else {
+        return c_error(scheduler, "badarg", "hash.c", 118, 1, "Not iolist");
     };
     Ok(BifResult::Value(Term::binary(hash.digest(data))))
 }
@@ -1168,13 +1167,11 @@ fn pbkdf2_hmac_nif(
             return c_error(scheduler, "badarg", "pbkdf2_hmac.c", line, 0, message);
         }
     };
-    let password = match password.binary_bytes() {
-        Some(password) => password,
-        _ => return c_error(scheduler, "badarg", "pbkdf2_hmac.c", 43, 1, "Not binary"),
+    let Some(password) = password.binary_bytes() else {
+        return c_error(scheduler, "badarg", "pbkdf2_hmac.c", 43, 1, "Not binary");
     };
-    let salt = match salt.binary_bytes() {
-        Some(salt) => salt,
-        _ => return c_error(scheduler, "badarg", "pbkdf2_hmac.c", 46, 2, "Not binary"),
+    let Some(salt) = salt.binary_bytes() else {
+        return c_error(scheduler, "badarg", "pbkdf2_hmac.c", 46, 2, "Not binary");
     };
     // The C code allocates the key before it calls `PKCS5_PBKDF2_HMAC`
     // (pbkdf2_hmac.c:55-61), and takes the key length as a `size_t`, so a

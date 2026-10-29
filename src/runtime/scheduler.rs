@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    os::{fd::AsRawFd, unix::net::UnixStream},
+    os::unix::net::UnixStream,
     sync::Arc,
     time::Duration,
 };
@@ -1368,7 +1368,7 @@ impl Scheduler {
         for &((fd, direction), _) in &owned {
             match direction {
                 poll::Direction::Write => writes.push(fd),
-                _ => reads.push(fd),
+                poll::Direction::Read => reads.push(fd),
             }
         }
         let (readiness, writable) = input::wait(&reads, &writes, timeout);
@@ -1592,7 +1592,6 @@ impl Scheduler {
         loop {
             match read() {
                 Ok(bytes) if !bytes.is_empty() => return bytes[0],
-                Ok(_) => return 0,
                 Err(libc::EAGAIN) => {
                     // A read with no data is retried (`sys.c:1051-1071`).
                     // A second break stops the run while the read waits, as
@@ -1601,7 +1600,7 @@ impl Scheduler {
                         return 0;
                     }
                 }
-                Err(_) => return 0,
+                Ok(_) | Err(_) => return 0,
             }
         }
     }
@@ -1692,7 +1691,7 @@ impl Scheduler {
             match key {
                 b'a' | b'q' | b'*' => return Err(BeamError::Halt(0)),
                 b'c' | b'm' => return Ok(()),
-                b'\n' => continue,
+                b'\n' => {}
                 b'A' => {
                     return Err(error(
                         "unsupported break command A: PBeam writes no crash dump (see \"OS signals\" in docs/erts-differences.md)",
@@ -2146,10 +2145,11 @@ impl Scheduler {
         reference: crate::term::Reference,
     ) -> Option<(&mut Code, &Arc<AtomTable>)> {
         if !self.regex_codes.0.contains_key(&reference) {
-            let bytes = lock(&self.node.resources.kind::<RegexSources>())
-                .0
-                .get(&reference)?
-                .clone();
+            let bytes = Arc::clone(
+                lock(&self.node.resources.kind::<RegexSources>())
+                    .0
+                    .get(&reference)?,
+            );
             if let Deserialized::Code(code) = pcre2::deserialize(&bytes) {
                 self.regex_codes.0.insert(reference, code);
             }

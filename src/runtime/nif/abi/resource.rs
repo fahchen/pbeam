@@ -244,7 +244,7 @@ fn monitors() -> std::sync::MutexGuard<'static, BTreeMap<u64, Monitored>> {
 pub(super) fn add_monitor(data: usize, down: DownFn) -> Reference {
     let object = lock()
         .get(&data)
-        .map(|entry| entry.object.clone())
+        .map(|entry| Weak::clone(&entry.object))
         .unwrap_or_default();
     let reference = Reference(NEXT_MONITOR.fetch_add(1, Ordering::Relaxed));
     monitors().insert(reference.0, Monitored { object, data, down });

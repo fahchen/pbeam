@@ -228,7 +228,7 @@ fn clears_the_current_reader_and_writer_at_their_exit() {
         state.reader = Some(pending.clone());
         state.writer = Some(pending.clone());
     });
-    let poll = scheduler.node().poll.clone();
+    let poll = Arc::clone(&scheduler.node().poll);
     let sockets = scheduler.node().resources.kind::<Sockets>();
     let (aborted, registry) = lock(&sockets).monitor_down(key, other, &poll);
     assert!(aborted.is_empty() && registry.is_none());

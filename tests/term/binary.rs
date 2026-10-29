@@ -400,7 +400,7 @@ fn joins_the_arrays_of_a_chunked_prefix_in_one_array() {
     assert_eq!(second.bit_bytes()[5], 2);
     assert_eq!(second.bit_bytes()[4100], 3);
     // The joined array is built once and shared by each later read.
-    let joined = second.backing().clone();
+    let joined = Arc::clone(second.backing());
     assert!(joined.is_empty());
     assert_eq!(second.backing().len(), 0);
     assert_eq!(second.to_bytes(), second.to_bytes());

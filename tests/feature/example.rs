@@ -23,6 +23,7 @@
 //! `code_server`, so the output order of two processes that race is the
 //! order of an interactive-mode ERTS run (#428).
 
+use std::fmt::Write as _;
 use std::{
     path::Path,
     process::{Command, Output, Stdio},
@@ -210,8 +211,10 @@ fn runs_fairness_as_pinned_erts_with_one_scheduler() {
         "b 18670..20000",
     ]
     .iter()
-    .map(|line| format!("{line}\\n"))
-    .collect();
+    .fold(String::new(), |mut text, line| {
+        let _ = write!(text, "{line}\\n");
+        text
+    });
 
     let erts = run_example(&["fairness", "--erts"], None);
     let pbeam = run_example(&["fairness", "--no-build"], None);
@@ -973,6 +976,8 @@ fn open_terminal() -> Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd), std::
         ws_ypixel: 0,
     };
     let (master, slave) = unsafe {
+        use std::os::fd::FromRawFd;
+
         let result = libc::openpty(
             &raw mut master,
             &raw mut slave,
@@ -986,7 +991,6 @@ fn open_terminal() -> Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd), std::
         for fd in [master, slave] {
             assert_eq!(libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC), 0);
         }
-        use std::os::fd::FromRawFd;
 
         (
             std::os::fd::OwnedFd::from_raw_fd(master),
@@ -1012,6 +1016,9 @@ fn open_terminal() -> Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd), std::
 #[test]
 #[cfg(target_os = "macos")]
 fn restores_the_terminal_before_the_result_of_terra_counter_as_interactive_erts() {
+    use std::fs;
+    use std::path::PathBuf;
+
     // Terra Counter sends its result to `main/0` after its terminal owner
     // restores the terminal (Terra `30dea566` `lib/terra/runtime.ex:282-288`,
     // `356-359`). In an interactive-mode ERTS run, the first `IO.inspect/1`
@@ -1080,9 +1087,6 @@ fn restores_the_terminal_before_the_result_of_terra_counter_as_interactive_erts(
     // The run uses no installed OTP: `PATH` holds no `erl` or `elixir`,
     // `HOME` is an empty directory, and the variable `PBEAM_OTP_ROOT` is
     // unset.
-    use std::fs;
-    use std::path::PathBuf;
-
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let directory = std::env::temp_dir().join(format!(
         "pbeam-one-file-{}-terra_counter",

@@ -224,7 +224,7 @@ fn isolated_find_executable() {
             &[program.host_term(Term::Integer(1 << 60))],
         )
         .unwrap();
-    let results = [main, bifs, names].map(|term| text(&term.term, term.atoms()) + "\n");
+    let results = [main, bifs, names].map(|term| format!("{}\n", text(&term.term, term.atoms())));
     fs::write(env::var_os(RESULT).unwrap(), results.concat()).unwrap();
 }
 

@@ -188,9 +188,8 @@ const NODES_MONITOR_CONNECTION_ID: u8 = 1 << 4;
 /// assert_eq!(nodes_monitor_key(&Term::Integer(1)), None);
 /// ```
 fn nodes_monitor_key(options: &Term) -> Option<u8> {
-    let options = match options {
-        Term::Map(options) => options,
-        _ => return options.is_nil().then_some(0),
+    let Term::Map(options) = options else {
+        return options.is_nil().then_some(0);
     };
     let mut key = NODES_MONITOR_INFO_MAP;
     for (option, value) in options.iter() {
@@ -1197,10 +1196,8 @@ pub(super) fn raise(depth: usize, class: &Term, reason: &Term, stacktrace: &Term
     let location = |location: &Term| location.is_list();
     let frame = |frame: &Term| match frame {
         Term::Tuple(elements) => match elements.as_ref() {
-            [Term::Fun(_), _] => true,
-            [Term::Fun(_), _, place] => location(place),
-            [Term::Atom(_), Term::Atom(_), _] => true,
-            [Term::Atom(_), Term::Atom(_), _, place] => location(place),
+            [Term::Fun(_), _] | [Term::Atom(_), Term::Atom(_), _] => true,
+            [Term::Fun(_), _, place] | [Term::Atom(_), Term::Atom(_), _, place] => location(place),
             _ => false,
         },
         _ => false,
@@ -7609,77 +7606,81 @@ pub(super) fn ptab_list(
     }
     loop {
         let left = scheduler.current_process().bif_reductions_left()?;
-        let have = if state.tix < PTAB_SIZE as i64 {
-            let end = (state.tix as u64 + PTAB_CHUNK).min(PTAB_SIZE);
-            let ids = if std::mem::take(&mut start) {
-                scheduler.ptab_list_start(end)
-            } else {
-                scheduler.ptab_list_chunk(end)
-            };
-            for id in ids {
-                #[cfg(test)]
-                PTAB_CELLS.set(PTAB_CELLS.get() + 1);
-                if Some(id) != hidden {
-                    ptab_list_push(&mut state.found, &mut state.pid_ix, id);
-                }
-            }
-            let reds = (end - state.tix as u64) / PTAB_INDICES_PER_RED;
-            state.tix = end as i64;
-            let have = left.saturating_sub(reds as usize);
-            let next = (end + PTAB_CHUNK).min(PTAB_SIZE) - end;
-            scheduler.current_process_mut().bump_reductions(reds as i32);
-            if (next / PTAB_INDICES_PER_RED) as usize > have {
-                0
-            } else {
-                have
-            }
-        } else if state.tix == PTAB_SIZE as i64 {
-            let max = left.min(PTAB_CHUNK_REDS);
-            let (mut reds, mut taken) = (0, 0);
-            while reds < max
-                && let Some((entry, free)) = scheduler.ptab_list_deleted()
-            {
-                #[cfg(test)]
-                PTAB_CELLS.set(PTAB_CELLS.get() + 1);
-                taken += 1;
-                reds += usize::from(taken % PTAB_DELETED_PER_RED == 0) + usize::from(free);
-                if let Some(id) = entry
-                    && Some(id) != hidden
-                {
-                    ptab_list_push(&mut state.gone, &mut state.pid_ix, id);
-                }
-            }
-            if scheduler.ptab_list_deleted_done() {
-                scheduler.ptab_list_end();
-                state.tix += 1;
-            }
-            scheduler.current_process_mut().bump_reductions(reds as i32);
-            left.saturating_sub(reds)
-        } else {
-            // The result cells come from the end of the result to its
-            // start: the gone pids, the last first, then the found pids, as
-            // `ptab_list_bif_engine` conses its pid array from the end
-            // (`erl_ptab.c:1201-1254`).
-            let conses = (PTAB_CONSES_PER_RED * left).min(state.pid_ix as usize);
-            for _ in 0..conses {
-                let list = if state.gone.is_nil() {
-                    &mut state.found
+        let have = match state.tix.cmp(&(PTAB_SIZE as i64)) {
+            std::cmp::Ordering::Less => {
+                let end = (state.tix as u64 + PTAB_CHUNK).min(PTAB_SIZE);
+                let ids = if std::mem::take(&mut start) {
+                    scheduler.ptab_list_start(end)
                 } else {
-                    &mut state.gone
+                    scheduler.ptab_list_chunk(end)
                 };
-                let (pid, tail) = list
-                    .cons_cell()
-                    .expect("the result has a pid for each cell");
-                let pid = pid.clone();
-                *list = tail.clone();
-                #[cfg(test)]
-                PTAB_CELLS.set(PTAB_CELLS.get() + 1);
-                state.result = Term::cons(pid, std::mem::replace(&mut state.result, Term::Nil));
+                for id in ids {
+                    #[cfg(test)]
+                    PTAB_CELLS.set(PTAB_CELLS.get() + 1);
+                    if Some(id) != hidden {
+                        ptab_list_push(&mut state.found, &mut state.pid_ix, id);
+                    }
+                }
+                let reds = (end - state.tix as u64) / PTAB_INDICES_PER_RED;
+                state.tix = end as i64;
+                let have = left.saturating_sub(reds as usize);
+                let next = (end + PTAB_CHUNK).min(PTAB_SIZE) - end;
+                scheduler.current_process_mut().bump_reductions(reds as i32);
+                if (next / PTAB_INDICES_PER_RED) as usize > have {
+                    0
+                } else {
+                    have
+                }
             }
-            state.pid_ix -= conses as i64;
-            let reds = conses / PTAB_CONSES_PER_RED;
-            scheduler.current_process_mut().bump_reductions(reds as i32);
-            left - reds
+            std::cmp::Ordering::Equal => {
+                let max = left.min(PTAB_CHUNK_REDS);
+                let (mut reds, mut taken) = (0, 0);
+                while reds < max
+                    && let Some((entry, free)) = scheduler.ptab_list_deleted()
+                {
+                    #[cfg(test)]
+                    PTAB_CELLS.set(PTAB_CELLS.get() + 1);
+                    taken += 1;
+                    reds += usize::from(taken % PTAB_DELETED_PER_RED == 0) + usize::from(free);
+                    if let Some(id) = entry
+                        && Some(id) != hidden
+                    {
+                        ptab_list_push(&mut state.gone, &mut state.pid_ix, id);
+                    }
+                }
+                if scheduler.ptab_list_deleted_done() {
+                    scheduler.ptab_list_end();
+                    state.tix += 1;
+                }
+                scheduler.current_process_mut().bump_reductions(reds as i32);
+                left.saturating_sub(reds)
+            }
+            std::cmp::Ordering::Greater => {
+                // The result cells come from the end of the result to its
+                // start: the gone pids, the last first, then the found pids, as
+                // `ptab_list_bif_engine` conses its pid array from the end
+                // (`erl_ptab.c:1201-1254`).
+                let conses = (PTAB_CONSES_PER_RED * left).min(state.pid_ix as usize);
+                for _ in 0..conses {
+                    let list = if state.gone.is_nil() {
+                        &mut state.found
+                    } else {
+                        &mut state.gone
+                    };
+                    let (pid, tail) = list
+                        .cons_cell()
+                        .expect("the result has a pid for each cell");
+                    let pid = pid.clone();
+                    *list = tail.clone();
+                    #[cfg(test)]
+                    PTAB_CELLS.set(PTAB_CELLS.get() + 1);
+                    state.result = Term::cons(pid, std::mem::replace(&mut state.result, Term::Nil));
+                }
+                state.pid_ix -= conses as i64;
+                let reds = conses / PTAB_CONSES_PER_RED;
+                scheduler.current_process_mut().bump_reductions(reds as i32);
+                left - reds
+            }
         };
         if state.tix > PTAB_SIZE as i64 && state.pid_ix == 0 {
             return Ok(Value(state.result));

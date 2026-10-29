@@ -15,6 +15,7 @@
 //! profile holds debug assertions, so the constants scale the loop lengths
 //! and the runs down and the gate stays short.
 
+use std::fmt::Write as _;
 use std::{
     collections::HashMap,
     hint::black_box,
@@ -287,18 +288,20 @@ fn erts_expression() -> String {
              erlang:monotonic_time(nanosecond) - S end || _ <- lists:seq(1, 9)]) end, ",
     );
     for probe in probes() {
-        expression.push_str(&format!(
+        let _ = write!(
+            expression,
             "io:format(\"result {} ~w~n\", [{}]), ",
             probe.key(),
             call_text(&probe)
-        ));
+        );
     }
     for probe in probes() {
-        expression.push_str(&format!(
+        let _ = write!(
+            expression,
             "io:format(\"time {} ~b~n\", [Run(fun() -> {} end)]), ",
             probe.key(),
             call_text(&probe)
-        ));
+        );
     }
     expression.push_str("halt().");
     expression

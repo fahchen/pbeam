@@ -690,7 +690,7 @@ fn command_client(path: PathBuf, stop: Arc<AtomicBool>) -> thread::JoinHandle<Ve
                 }
                 std::fs::write(&temporary, step).unwrap();
                 std::fs::rename(&temporary, &ack).unwrap();
-                done = step.to_owned();
+                step.clone_into(&mut done);
             }
             thread::sleep(Duration::from_millis(2));
         }

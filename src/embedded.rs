@@ -420,7 +420,7 @@ fn temp_directory(base: &Path) -> Result<PathBuf, String> {
         let directory = base.join(format!("pbeam-embedded-{}-{attempt}", std::process::id()));
         match fs::DirBuilder::new().mode(0o700).create(&directory) {
             Ok(()) => return Ok(directory),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => {
                 return Err(format!(
                     "cannot make {}: {error}",
@@ -452,6 +452,10 @@ fn bundle_path(directory: &Path, name: &str) -> Result<PathBuf, String> {
 /// in `releases/*/consolidated/`; both come before the lib directories, so
 /// a consolidated protocol comes before the unconsolidated protocol of the
 /// same name.
+#[expect(
+    clippy::unnecessary_debug_formatting,
+    reason = "the error message quotes the release path with `{:?}`, and the message must stay the same"
+)]
 fn resolve_module(root: &Path, module: &str) -> Result<PathBuf, String> {
     let file = format!("{module}.beam");
     let pbeam = root.join("pbeam").join(&file);

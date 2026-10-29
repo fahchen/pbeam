@@ -286,7 +286,7 @@ impl From<BeamError> for Exit {
     fn from(run_error: BeamError) -> Self {
         match run_error {
             BeamError::Halt(status) => Self::Halt(status),
-            run_error => Self::Error(run_error.to_string()),
+            run_error @ BeamError::Runtime(_) => Self::Error(run_error.to_string()),
         }
     }
 }

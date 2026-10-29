@@ -3233,6 +3233,10 @@ fn reads_bs_create_bin_segments_and_rejects_malformed_lists() {
 /// ```rust,ignore
 /// assert_eq!(arm_field_bytes(&Instruction::Label(1)), size_of::<u32>());
 /// ```
+#[expect(
+    clippy::match_same_arms,
+    reason = "each variant has its own arm that names every field, so a changed field is a compile error; merged arms would hide that"
+)]
 fn arm_field_bytes(instruction: &Instruction) -> usize {
     use std::mem::size_of_val;
     match instruction {

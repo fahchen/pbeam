@@ -767,7 +767,7 @@ impl Map {
         // `pairs` holds the flatmap pairs, or the pairs of the current collision child.
         let (mut pairs, mut nodes) = match &**self.arc() {
             Repr::Flat(pairs) => (pairs.iter(), Vec::new()),
-            Repr::Hash(hamt) => (Default::default(), vec![hamt.root.children.iter()]),
+            Repr::Hash(hamt) => (std::slice::Iter::default(), vec![hamt.root.children.iter()]),
         };
         std::iter::from_fn(move || {
             loop {
@@ -956,13 +956,6 @@ impl Map {
     /// assert_eq!(big.merge_steps(&big.clone()), Some(0));
     /// ```
     pub(crate) fn merge_steps(&self, other: &Map) -> Option<usize> {
-        let both_flat = matches!(
-            (&**self.arc(), &**other.arc()),
-            (Repr::Flat(_), Repr::Flat(_))
-        );
-        if both_flat || self.len() == 0 || other.len() == 0 {
-            return None;
-        }
         fn hashes(map: &Map) -> Vec<(u64, &Term)> {
             map.iter()
                 .map(|(key, _)| {
@@ -972,6 +965,14 @@ impl Map {
                     )
                 })
                 .collect()
+        }
+
+        let both_flat = matches!(
+            (&**self.arc(), &**other.arc()),
+            (Repr::Flat(_), Repr::Flat(_))
+        );
+        if both_flat || self.len() == 0 || other.len() == 0 {
+            return None;
         }
         // The tree of a flatmap is new (`map_merge_mixed`), so it shares no node.
         let roots = match (&**self.arc(), &**other.arc()) {
@@ -1019,6 +1020,14 @@ fn merge_walk(
     nodes: Option<(&Node, &Node)>,
     level: u32,
 ) -> usize {
+    fn slots<'a>(keys: &[(u64, &'a Term)], level: u32) -> [Vec<(u64, &'a Term)>; 16] {
+        let mut slots: [Vec<(u64, &Term)>; 16] = Default::default();
+        for &(hash, key) in keys {
+            slots[slot(hash, level) as usize].push((hash, key));
+        }
+        slots
+    }
+
     if nodes.is_some_and(|(first, second)| std::ptr::eq(first, second)) || level == HAMT_MAX_LEVEL {
         return 0;
     }
@@ -1026,13 +1035,6 @@ fn merge_walk(
         && first == second
     {
         return 0;
-    }
-    fn slots<'a>(keys: &[(u64, &'a Term)], level: u32) -> [Vec<(u64, &'a Term)>; 16] {
-        let mut slots: [Vec<(u64, &Term)>; 16] = Default::default();
-        for &(hash, key) in keys {
-            slots[slot(hash, level) as usize].push((hash, key));
-        }
-        slots
     }
     // The nodes of the two maps in a slot, when both maps have a node there.
     let below = |slot| {
@@ -1685,8 +1687,8 @@ fn map_hash(key: &Term) -> Option<u64> {
         | Term::Float(_)
         | Term::Pid(_)
         | Term::Port(_)
-        | Term::Resource(_) => {}
-        Term::Reference(_) => {}
+        | Term::Resource(_)
+        | Term::Reference(_) => {}
         Term::Cons(_) | Term::Tuple(_) | Term::Map(_) | Term::Fun(_) | Term::Record(_) => {
             let mut pending = vec![key];
             while let Some(term) = pending.pop() {
@@ -1697,8 +1699,8 @@ fn map_hash(key: &Term) -> Option<u64> {
                     | Term::Float(_)
                     | Term::Pid(_)
                     | Term::Port(_)
-                    | Term::Resource(_) => {}
-                    Term::Reference(_) => {}
+                    | Term::Resource(_)
+                    | Term::Reference(_) => {}
                     Term::Cons(cell) => pending.extend([&cell.tail, &cell.head]),
                     Term::Tuple(elements) => pending.extend(elements.iter()),
                     Term::Map(map) => {

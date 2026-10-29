@@ -3622,6 +3622,10 @@ impl BeamProgram {
         let list = read(process, &Operand::X(1))?;
         // ERTS `apply_fun` raises with the BIF frame of `erlang:apply/2`
         // and its two arguments (`beam_common.c:1734-1762`).
+        #[expect(
+            clippy::match_same_arms,
+            reason = "the guard arm between the two `badarg` arms must win for an improper list with too many elements, so the `badarg` arms cannot merge"
+        )]
         let (arguments, failure) = match list.list_elements() {
             None => (Vec::new(), Some("badarg")),
             Some((arguments, _)) if arguments.len() > APPLY_FUN_MAX_ARGUMENTS => {

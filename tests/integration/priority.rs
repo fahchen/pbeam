@@ -1,6 +1,7 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+use std::fmt::Write as _;
 use std::process::Command;
 
 use common::pinned_beam;
@@ -116,9 +117,9 @@ fn schedules_processes_by_priority_as_pinned_erts_with_one_scheduler() {
         reference.status.success() && reference.stderr.is_empty(),
         "{reference:?}"
     );
-    let expected: String = RESULTS
-        .iter()
-        .map(|(_, result)| format!("{result}\n"))
-        .collect();
+    let expected: String = RESULTS.iter().fold(String::new(), |mut text, (_, result)| {
+        let _ = writeln!(text, "{result}");
+        text
+    });
     assert_eq!(String::from_utf8(reference.stdout).unwrap(), expected);
 }

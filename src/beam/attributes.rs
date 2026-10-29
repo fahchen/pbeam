@@ -487,7 +487,7 @@ impl<'a> Cursor<'a> {
                 // A pid, a port, or a reference: the walk reads the node as
                 // one more term and adds the identity bytes to its atom tag
                 // (`external.c:6194-6248`).
-                88 => {
+                88 | 120 => {
                     self.extra = 12;
                     remaining += 1;
                 }
@@ -495,19 +495,11 @@ impl<'a> Cursor<'a> {
                     self.extra = 9;
                     remaining += 1;
                 }
-                120 => {
-                    self.extra = 12;
-                    remaining += 1;
-                }
                 89 => {
                     self.extra = 8;
                     remaining += 1;
                 }
-                102 => {
-                    self.extra = 5;
-                    remaining += 1;
-                }
-                101 => {
+                102 | 101 => {
                     self.extra = 5;
                     remaining += 1;
                 }

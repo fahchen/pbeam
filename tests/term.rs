@@ -330,7 +330,7 @@ fn formats_and_compares_maps_by_their_pairs() {
     };
     let forty = hash(&mut (1..=40));
     assert_eq!(forty, hash(&mut (1..=40).rev()));
-    assert_eq!(format!("{:?}", forty), format!("{forty:?}"));
+    assert_eq!(format!("{forty:?}"), format!("{forty:?}"));
     assert!(
         debug_term(&forty, &test_atom_table())
             .starts_with("Map([(Integer(18), Atom(\"v\")), (Integer(4), ")

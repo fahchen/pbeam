@@ -6,6 +6,7 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+use std::fmt::Write as _;
 use std::process::Command;
 
 use common::pinned_beam;
@@ -94,10 +95,10 @@ fn accepts_each_spawn_option_as_pinned_erts() {
         .output()
         .unwrap();
     assert!(reference.status.success(), "{reference:?}");
-    let expected: String = results
-        .iter()
-        .map(|(_, result)| format!("{result}\n"))
-        .collect();
+    let expected: String = results.iter().fold(String::new(), |mut text, (_, result)| {
+        let _ = writeln!(text, "{result}");
+        text
+    });
     assert_eq!(String::from_utf8(reference.stdout).unwrap(), expected);
 }
 

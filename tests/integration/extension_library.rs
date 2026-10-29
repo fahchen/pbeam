@@ -376,11 +376,6 @@ fn gives_the_atoms_of_the_run_on_the_scheduler_and_static_atoms_on_a_dirty_threa
 
 #[test]
 fn rejects_a_duplicate_library_and_a_binding_outside_the_functions() {
-    program();
-    assert_eq!(
-        register_library(&PROBE_LIBRARY),
-        Err(RegistrationError::Duplicate)
-    );
     static PRIM_TTY: Library = Library {
         module: "prim_tty",
         functions: &[],
@@ -388,10 +383,7 @@ fn rejects_a_duplicate_library_and_a_binding_outside_the_functions() {
         load: None,
         unbound_fails: false,
     };
-    assert_eq!(
-        register_library(&PRIM_TTY),
-        Err(RegistrationError::Duplicate)
-    );
+
     static UNLISTED: Library = Library {
         module: "extension_unlisted",
         functions: &[("add", 1)],
@@ -399,13 +391,7 @@ fn rejects_a_duplicate_library_and_a_binding_outside_the_functions() {
         load: None,
         unbound_fails: false,
     };
-    assert_eq!(
-        register_library(&UNLISTED),
-        Err(RegistrationError::UnlistedBinding {
-            name: "add",
-            arity: 2
-        })
-    );
+
     static DOUBLED: Library = Library {
         module: "extension_doubled",
         functions: &[("add", 2)],
@@ -413,6 +399,23 @@ fn rejects_a_duplicate_library_and_a_binding_outside_the_functions() {
         load: None,
         unbound_fails: false,
     };
+
+    program();
+    assert_eq!(
+        register_library(&PROBE_LIBRARY),
+        Err(RegistrationError::Duplicate)
+    );
+    assert_eq!(
+        register_library(&PRIM_TTY),
+        Err(RegistrationError::Duplicate)
+    );
+    assert_eq!(
+        register_library(&UNLISTED),
+        Err(RegistrationError::UnlistedBinding {
+            name: "add",
+            arity: 2
+        })
+    );
     assert_eq!(
         register_library(&DOUBLED),
         Err(RegistrationError::DuplicateBinding {

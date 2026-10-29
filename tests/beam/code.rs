@@ -55,7 +55,7 @@ fn puts_atu8_atoms_into_the_table_in_chunk_order() {
     chunk.extend([0x40, b'z', b'e', b't', b'a', 0x20, b'o', b'k']);
     chunk.extend([0x50, b'a', b'l', b'p', b'h', b'a']);
     let atoms = parse_atoms(&chunk, &table).unwrap();
-    let indices: Vec<_> = atoms.iter().map(|atom| atom.index()).collect();
+    let indices: Vec<_> = atoms.iter().map(crate::term::Atom::index).collect();
     assert_eq!(indices, [1167, 506, 1168]);
     assert_eq!(table.name_of(&atoms[2]), "alpha");
     assert_eq!(table.get("zeta"), Some(atoms[0].clone()));

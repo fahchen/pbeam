@@ -180,7 +180,7 @@ fn isolated_prim_file_read() {
         .unwrap();
     fs::write(
         env::var_os(RESULT).unwrap(),
-        text(&result.term, result.atoms()) + "\n",
+        format!("{}\n", text(&result.term, result.atoms())),
     )
     .unwrap();
 }

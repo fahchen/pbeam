@@ -30,7 +30,7 @@ fn gives_the_block_hash_of_erts() {
 fn encodes_a_local_reference_as_erts() {
     // `#Ref<0.198992582.3052142593.51154>` on the pinned ERTS gives these
     // bytes after its hash.
-    let reference = Reference((198_992_582u64 << 32) | (3_052_142_593 & 0xFFFC_0000) | 51154);
+    let reference = Reference((198_992_582u64 << 32) | (0xB5EC_0001 & 0xFFFC_0000) | 0xC7D2);
     let bytes = local_reference(reference, 7);
     assert_eq!(bytes[..2], [131, 121]);
     assert_eq!(

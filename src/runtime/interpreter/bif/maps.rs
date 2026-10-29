@@ -207,6 +207,13 @@ pub(super) fn from_list(
     done: usize,
     atoms: &AtomTable,
 ) -> Result<BifResult, BeamError> {
+    fn pair(element: &Term) -> Option<(&Term, &Term)> {
+        match element {
+            Term::Tuple(pair) if pair.len() == 2 => Some((&pair[0], &pair[1])),
+            _ => None,
+        }
+    }
+
     /// `iterations_per_red` of `maps_from_list_1` (`erl_map.c:606`).
     const PER_REDUCTION: usize = 40;
     /// `MAP_SMALL_MAP_LIMIT` in a release build (`erl_map.h:93-97`).
@@ -216,12 +223,6 @@ pub(super) fn from_list(
     };
     let elements: Vec<&Term> = elements.collect();
     let proper = tail.is_none();
-    fn pair(element: &Term) -> Option<(&Term, &Term)> {
-        match element {
-            Term::Tuple(pair) if pair.len() == 2 => Some((&pair[0], &pair[1])),
-            _ => None,
-        }
-    }
     let pairs = elements
         .iter()
         .map(|element| pair(element))

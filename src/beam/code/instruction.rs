@@ -3580,17 +3580,17 @@ fn skip_unsupported_instruction(
 /// ```
 fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
     match opcode {
-        OPCODE_TEST_HEAP => Some(2),
-        OPCODE_BIF0 => Some(2),
-        OPCODE_TEST_EXACT_EQ => Some(3),
-        OPCODE_TEST_TAGGED_TUPLE => Some(4),
-        OPCODE_TEST_IS_ATOM
+        OPCODE_TEST_HEAP
+        | OPCODE_BIF0
+        | OPCODE_TEST_IS_ATOM
         | OPCODE_TEST_IS_PID
         | OPCODE_TEST_IS_BINARY
         | OPCODE_TEST_IS_LIST
-        | OPCODE_TEST_IS_MAP => Some(2),
+        | OPCODE_TEST_IS_MAP
+        | OPCODE_PUT_TUPLE2 => Some(2),
+        OPCODE_TEST_EXACT_EQ => Some(3),
+        OPCODE_TEST_TAGGED_TUPLE => Some(4),
         OPCODE_PUT_MAP_ASSOC => Some(5),
-        OPCODE_PUT_TUPLE2 => Some(2),
         OPCODE_INIT_YREGS => Some(1),
         _ => None,
     }

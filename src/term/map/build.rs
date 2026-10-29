@@ -492,29 +492,33 @@ fn chunked_units(nodes: &[HxNode], groups: usize, units: &mut Vec<u32>) {
         if nodes[index].skip > 1 {
             loop_steps(units, (top - level.max(next_level)) as usize, 1);
         }
-        if level < next_level {
-            while level < next_level {
-                loop_steps(units, 1, 1);
-                stack.push(bitmap | (1 << mask_slot(current, level)));
-                level += 1;
-                bitmap = 0;
-            }
-            stack.extend([0, 1 << mask_slot(current, level)]);
-        } else if level == next_level {
-            stack.extend([0, bitmap | (1 << mask_slot(current, level))]);
-        } else {
-            while next_level != level {
-                loop_steps(units, 1, 1);
-                bitmap |= 1 << mask_slot(current, level);
-                let children = bitmap.count_ones() as usize - 1;
-                loop_steps(units, children, 2);
-                for _ in 0..children {
-                    pop(&mut stack);
+        match level.cmp(&next_level) {
+            Ordering::Less => {
+                while level < next_level {
+                    loop_steps(units, 1, 1);
+                    stack.push(bitmap | (1 << mask_slot(current, level)));
+                    level += 1;
+                    bitmap = 0;
                 }
-                bitmap = pop(&mut stack);
-                level -= 1;
+                stack.extend([0, 1 << mask_slot(current, level)]);
             }
-            stack.extend([0, bitmap]);
+            Ordering::Equal => {
+                stack.extend([0, bitmap | (1 << mask_slot(current, level))]);
+            }
+            Ordering::Greater => {
+                while next_level != level {
+                    loop_steps(units, 1, 1);
+                    bitmap |= 1 << mask_slot(current, level);
+                    let children = bitmap.count_ones() as usize - 1;
+                    loop_steps(units, children, 2);
+                    for _ in 0..children {
+                        pop(&mut stack);
+                    }
+                    bitmap = pop(&mut stack);
+                    level -= 1;
+                }
+                stack.extend([0, bitmap]);
+            }
         }
         previous = current;
         current = next;

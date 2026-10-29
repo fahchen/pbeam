@@ -229,8 +229,6 @@ fn compare_pair<'a>(
         (Term::Float(float), Term::BigInt(big)) if !exact => {
             compare_big_float(big, *float).reverse()
         }
-        (Term::BigInt(_), Term::Float(_)) => Ordering::Less,
-        (Term::Float(_), Term::BigInt(_)) => Ordering::Greater,
         (Term::Float(left), Term::Float(right)) if exact => {
             exact_sortable(*left).cmp(&exact_sortable(*right))
         }
@@ -244,8 +242,8 @@ fn compare_pair<'a>(
         (Term::Float(float), Term::Integer(integer)) if !exact => {
             compare_integer_float(*integer, *float).reverse()
         }
-        (Term::Integer(_), Term::Float(_)) => Ordering::Less,
-        (Term::Float(_), Term::Integer(_)) => Ordering::Greater,
+        (Term::BigInt(_) | Term::Integer(_), Term::Float(_)) => Ordering::Less,
+        (Term::Float(_), Term::BigInt(_) | Term::Integer(_)) => Ordering::Greater,
         (Term::Atom(left), Term::Atom(right)) => atoms.name_of(left).cmp(atoms.name_of(right)),
         (Term::Binary(left), Term::Binary(right)) => left.cmp(right),
         (Term::Pid(left), Term::Pid(right)) => left.0.cmp(&right.0),

@@ -5072,7 +5072,7 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
         .exclusive()
         .table_by_id(Reference(0))
         .expect("the table is live")
-        .step_busy(&scheduler.atoms.clone(), 4);
+        .step_busy(&Arc::clone(&scheduler.atoms), 4);
     scheduler.current_process_mut().fcalls = 1;
     let result = program
         .bif_trap(

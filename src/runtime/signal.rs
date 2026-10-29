@@ -305,8 +305,7 @@ impl Signal {
     /// ```
     pub(super) fn visit_terms(&self, visit: &mut impl FnMut(&Term)) {
         match self {
-            Signal::Exit { reason, .. } => visit(reason),
-            Signal::MonitorDown { reason, .. } => visit(reason),
+            Signal::Exit { reason, .. } | Signal::MonitorDown { reason, .. } => visit(reason),
             Signal::ProcessInfo { item, .. } => visit(item),
             Signal::AliasMessage { message, .. } => visit(message),
             Signal::CheckProcessCode { tag, .. } => visit(tag),
@@ -339,8 +338,8 @@ impl Signal {
                 linked: _,
                 normal_kills: _,
                 alias: _,
-            } => pending.push(std::mem::replace(reason, Term::Nil)),
-            Signal::MonitorDown {
+            }
+            | Signal::MonitorDown {
                 reference: _,
                 reason,
             } => pending.push(std::mem::replace(reason, Term::Nil)),

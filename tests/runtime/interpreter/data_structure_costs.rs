@@ -372,6 +372,10 @@ fn prints_the_size_of_every_structure() {
 /// Print the cost of every derivation that the audit names.
 #[test]
 fn prints_the_cost_of_every_derivation() {
+    struct Position {
+        index: usize,
+    }
+
     let atoms = AtomTable::new();
     let tuple_1000 = tuple_of(1000);
     let tuple_32 = tuple_of(32);
@@ -411,9 +415,6 @@ fn prints_the_cost_of_every_derivation() {
 
     // The counterfactual of a stored value: one field read of a plain
     // structure, which is the shape that a resolved code position takes.
-    struct Position {
-        index: usize,
-    }
     let position = Position { index: 12 };
     report(
         "stored_position_read",

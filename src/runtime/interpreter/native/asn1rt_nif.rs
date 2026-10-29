@@ -12,6 +12,7 @@
 
 use super::bif::iodata_bytes;
 use super::*;
+use std::cmp::Ordering;
 
 /// The functions of the `asn1rt_nif` NIF library, as `(name, arity)` in
 /// the order of `nif_funcs` (`asn1_erl_nif.c:1343-1347`).
@@ -157,36 +158,42 @@ impl Per<'_> {
     fn insert_most_sign_bits(&mut self, no_bits: i32, val: i32) {
         let unused = self.unused;
         self.or(shr(val, 8 - unused));
-        if no_bits < unused {
-            self.unused -= no_bits;
-        } else if no_bits == unused {
-            self.unused = 8;
-            self.advance();
-        } else {
-            self.advance();
-            self.or(shl(val, unused));
-            self.unused = 8 - (no_bits - unused);
+        match no_bits.cmp(&unused) {
+            Ordering::Less => self.unused -= no_bits,
+            Ordering::Equal => {
+                self.unused = 8;
+                self.advance();
+            }
+            Ordering::Greater => {
+                self.advance();
+                self.or(shl(val, unused));
+                self.unused = 8 - (no_bits - unused);
+            }
         }
     }
 
     /// `per_insert_least_sign_bits` (`asn1_erl_nif.c:529-553`).
     fn insert_least_sign_bits(&mut self, no_bits: i32, val: i32) -> i32 {
         let unused = self.unused;
-        if no_bits < unused {
-            self.or(shl(val, unused - no_bits));
-            self.unused -= no_bits;
-            0
-        } else if no_bits == unused {
-            self.or(val);
-            self.unused = 8;
-            self.advance();
-            1
-        } else {
-            self.or(shr(val, no_bits - unused));
-            self.advance();
-            self.or(shl(val, 8 - (no_bits - unused)));
-            self.unused = 8 - (no_bits - unused);
-            1
+        match no_bits.cmp(&unused) {
+            Ordering::Less => {
+                self.or(shl(val, unused - no_bits));
+                self.unused -= no_bits;
+                0
+            }
+            Ordering::Equal => {
+                self.or(val);
+                self.unused = 8;
+                self.advance();
+                1
+            }
+            Ordering::Greater => {
+                self.or(shr(val, no_bits - unused));
+                self.advance();
+                self.or(shl(val, 8 - (no_bits - unused)));
+                self.unused = 8 - (no_bits - unused);
+                1
+            }
         }
     }
 
@@ -226,31 +233,35 @@ impl Per<'_> {
     /// `Bin`.
     fn insert_bits_as_bits(&mut self, desired_no: i32, no_bytes: i32) -> i32 {
         let unused = self.unused;
-        if desired_no == no_bytes * 8 {
-            self.insert_octets_unaligned(no_bytes, unused)
-        } else if desired_no < no_bytes * 8 {
-            self.insert_octets_unaligned(desired_no / 8, unused);
-            let val = self.next();
-            self.insert_most_sign_bits(desired_no % 8, val);
-            ceil(desired_no, 8)
-        } else {
-            self.insert_octets_unaligned(no_bytes, unused);
-            self.pad_bits(desired_no - no_bytes * 8);
-            ceil(desired_no, 8)
+        match desired_no.cmp(&(no_bytes * 8)) {
+            Ordering::Equal => self.insert_octets_unaligned(no_bytes, unused),
+            Ordering::Less => {
+                self.insert_octets_unaligned(desired_no / 8, unused);
+                let val = self.next();
+                self.insert_most_sign_bits(desired_no % 8, val);
+                ceil(desired_no, 8)
+            }
+            Ordering::Greater => {
+                self.insert_octets_unaligned(no_bytes, unused);
+                self.pad_bits(desired_no - no_bytes * 8);
+                ceil(desired_no, 8)
+            }
         }
     }
 
     /// `per_insert_octets_as_bits_exact_len` (`asn1_erl_nif.c:621-651`).
     fn insert_octets_as_bits_exact_len(&mut self, desired_len: i32, in_len: i32) -> Option<i32> {
-        if desired_len == in_len {
-            self.insert_octets_as_bits(in_len)
-        } else if desired_len > in_len {
-            let ret = self.insert_octets_as_bits(in_len)?;
-            Some(ret + self.pad_bits(desired_len - in_len))
-        } else {
-            let ret = self.insert_octets_as_bits(desired_len)?;
-            self.ip += (in_len - desired_len) as usize;
-            Some(ret)
+        match desired_len.cmp(&in_len) {
+            Ordering::Equal => self.insert_octets_as_bits(in_len),
+            Ordering::Greater => {
+                let ret = self.insert_octets_as_bits(in_len)?;
+                Some(ret + self.pad_bits(desired_len - in_len))
+            }
+            Ordering::Less => {
+                let ret = self.insert_octets_as_bits(desired_len)?;
+                self.ip += (in_len - desired_len) as usize;
+                Some(ret)
+            }
         }
     }
 
@@ -317,17 +328,19 @@ impl Per<'_> {
         let val = self.next();
         let no_bits = 8 - in_unused;
         self.or(shr(val, 8 - unused));
-        if no_bits < unused {
-            self.unused = unused - no_bits;
-        } else if no_bits == unused {
-            self.advance();
-            ret += 1;
-            self.unused = 8;
-        } else {
-            self.advance();
-            ret += 1;
-            self.or(shl(val, unused));
-            self.unused = 8 - (no_bits - unused);
+        match no_bits.cmp(&unused) {
+            Ordering::Less => self.unused = unused - no_bits,
+            Ordering::Equal => {
+                self.advance();
+                ret += 1;
+                self.unused = 8;
+            }
+            Ordering::Greater => {
+                self.advance();
+                ret += 1;
+                self.or(shl(val, unused));
+                self.unused = 8 - (no_bits - unused);
+            }
         }
         Some(ret)
     }

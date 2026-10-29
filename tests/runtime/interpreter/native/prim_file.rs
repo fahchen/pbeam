@@ -419,6 +419,8 @@ fn reads_writes_seeks_and_closes_a_file_resource_as_erts() {
 
 #[test]
 fn changes_names_directories_and_links_with_the_errors_of_erts() {
+    use std::os::unix::fs::PermissionsExt;
+
     // Each binding of the write and metadata paths marshals the path with
     // `efile_marshal_path` before its host call (prim_file_nif.c:1149-1249,
     // 1282-1296, 1389-1404), and `unix_prim_file.c` gives the Unix
@@ -564,7 +566,6 @@ fn changes_names_directories_and_links_with_the_errors_of_erts() {
         )),
         "Value(Atom(\"ok\"))"
     );
-    use std::os::unix::fs::PermissionsExt;
     assert_eq!(
         std::fs::metadata(&sticky).unwrap().permissions().mode() & 0o7777,
         0o777

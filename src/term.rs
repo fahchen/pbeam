@@ -940,6 +940,10 @@ impl Term {
                 // Exact equality compares the bits, so `0.0 =:= -0.0` is
                 // false (`eq`, `utils.c:1422-1433`). A float term is never
                 // a NaN, so equal bits are the only equal floats.
+                #[expect(
+                    clippy::float_cmp,
+                    reason = "arithmetic equality (`==`) compares floats exactly, so `0.0 == -0.0` holds"
+                )]
                 (Term::Float(left), Term::Float(right)) if arith => left == right,
                 (Term::Float(left), Term::Float(right)) => left.to_bits() == right.to_bits(),
                 (Term::Integer(integer), Term::Float(float))

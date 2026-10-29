@@ -435,7 +435,7 @@ impl ZStream {
                 };
                 if self.inflate_learned_bits.is_none()
                     && self.inflate_window_bits >= 0
-                    && self.inflate_window_bits & 15 == 0
+                    && self.inflate_window_bits.trailing_zeros() >= 4
                 {
                     // The header can arrive in parts, so keep its first two
                     // bytes until the window size is known.

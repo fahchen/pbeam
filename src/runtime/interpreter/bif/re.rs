@@ -425,9 +425,8 @@ fn import_fallback(
         return Ok(BifResult::badopt());
     }
     let unicode = parsed.flags & FLAG_UNICODE != 0;
-    let code = match pcre2::compile(source, parsed.compile, parsed.newline, parsed.bsr) {
-        Ok(code) => code,
-        Err(_) => return Ok(BifResult::badarg()),
+    let Ok(code) = pcre2::compile(source, parsed.compile, parsed.newline, parsed.bsr) else {
+        return Ok(BifResult::badarg());
     };
     Ok(Value(compile_result(context, code, unicode.into())?))
 }

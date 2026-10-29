@@ -150,18 +150,15 @@ fn bounds_the_work_of_each_step_of_overlapping_reads() {
         active.retain(|reader| {
             let (step, cost) = work(&table, |table| table.next_deleted(*reader));
             max = max.max(cost);
-            match step {
-                Some((entry, free)) => {
-                    listed[reader.0 as usize] += usize::from(entry.is_some());
-                    frees += usize::from(free);
-                    true
-                }
-                None => {
-                    assert!(table.deleted_done(*reader));
-                    let ((), cost) = work(&table, |table| table.end_list(*reader));
-                    max = max.max(cost);
-                    false
-                }
+            if let Some((entry, free)) = step {
+                listed[reader.0 as usize] += usize::from(entry.is_some());
+                frees += usize::from(free);
+                true
+            } else {
+                assert!(table.deleted_done(*reader));
+                let ((), cost) = work(&table, |table| table.end_list(*reader));
+                max = max.max(cost);
+                false
             }
         });
     }

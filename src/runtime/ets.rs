@@ -1585,7 +1585,7 @@ impl Table {
 
     /// Set the atom that `ets:new/2` gave the table.
     pub(super) fn set_name(&mut self, name: &str) {
-        self.name = name.to_owned();
+        name.clone_into(&mut self.name);
     }
 
     /// Return the owner.

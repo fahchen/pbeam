@@ -112,6 +112,10 @@ pub(super) fn keysearch(
 /// assert!(key_equal(&Term::Float(1.0), &Term::Integer(1)));
 /// assert!(!key_equal(&Term::Integer(1), &Term::Integer(2)));
 /// ```
+#[expect(
+    clippy::float_cmp,
+    reason = "a small integer equals a float only when the float is exactly that integer, as `eq` in `utils.c` compares"
+)]
 fn key_equal(key: &Term, element: &Term) -> bool {
     match (key.small_integer(), element) {
         (Some(key), Term::Float(element)) => key as f64 == *element,

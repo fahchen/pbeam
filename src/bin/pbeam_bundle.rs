@@ -16,7 +16,7 @@
 //! directory.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env, fs,
     io::Write,
     path::{Path, PathBuf},
@@ -344,6 +344,10 @@ fn check_nifs(directory: &Path) -> Result<(), String> {
 /// // NIF function has no PBeam binding; a call runs the BEAM stub body".
 /// assert!(nif_gate(root, &missing_binding_files).is_ok());
 /// ```
+#[expect(
+    clippy::case_sensitive_file_extension_comparisons,
+    reason = "the OTP build writes the suffix `.beam` in lower case, and the match must stay exact"
+)]
 fn nif_gate(root: &Path, files: &BTreeMap<String, Vec<u8>>) -> Result<(), String> {
     let mut failures = Vec::new();
     for (name, bytes) in files.iter().filter(|(name, _)| name.ends_with(".beam")) {
@@ -381,6 +385,10 @@ fn nif_gate(root: &Path, files: &BTreeMap<String, Vec<u8>>) -> Result<(), String
 ///     [PathBuf::from("/r/lib/a-1/priv/a_nif.so")]
 /// );
 /// ```
+#[expect(
+    clippy::case_sensitive_file_extension_comparisons,
+    reason = "the OTP build writes the suffix `.so` in lower case, and the match must stay exact"
+)]
 fn shipped_libraries(root: &Path, beam: &str, files: &BTreeMap<String, Vec<u8>>) -> Vec<PathBuf> {
     let ebin = Path::new(beam).parent().unwrap_or(Path::new(""));
     if ebin.file_name() != Some(std::ffi::OsStr::new("ebin")) {
@@ -464,7 +472,7 @@ fn start_modules(
     let list = fs::read_to_string(start_list)
         .map_err(|error| format!("cannot read {}: {error}", start_list.display()))?;
     let mut modules = Vec::new();
-    let mut erts_directories = BTreeMap::new();
+    let mut erts_directories = BTreeSet::new();
     for line in list.lines().filter(|line| !line.is_empty()) {
         let path = Path::new(line);
         let name = resource_name(path)?;
@@ -474,14 +482,14 @@ fn start_modules(
         if name.starts_with("lib/erts-")
             && let Some(parent) = path.parent()
         {
-            erts_directories.insert(parent.to_owned(), ());
+            erts_directories.insert(parent.to_owned());
         }
         resources.insert(name, bytes);
     }
     // The release carries each application of OTP. The erts application is
     // the exception: copy all of it, because the boot loads modules that the
     // start set does not name.
-    for directory in erts_directories.keys() {
+    for directory in &erts_directories {
         for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
             let path = entry.map_err(|error| error.to_string())?.path();
             let name = resource_name(&path)?;

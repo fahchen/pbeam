@@ -129,7 +129,7 @@ impl NodePoll {
                     .expect("the poll wake socket is non-blocking");
             }
             let node = Arc::downgrade(node);
-            let _ = poll.node.set(node.clone());
+            let _ = poll.node.set(Weak::clone(&node));
             thread::Builder::new()
                 .name("pbeam-poll".into())
                 .spawn(move || run(&node, reader))

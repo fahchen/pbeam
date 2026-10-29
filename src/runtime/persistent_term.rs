@@ -408,11 +408,10 @@ impl PersistentTerms {
     pub(super) fn put_cost(&self, key: &Term, value: &Term) -> Option<usize> {
         match &self.buckets[self.lookup(key)] {
             Some((_, existing)) if existing == value => None,
-            Some(_) => Some(0),
             None if 100 * self.num_entries >= LOAD_FACTOR * self.buckets.len() => {
                 Some(3 * self.buckets.len())
             }
-            None => Some(0),
+            Some(_) | None => Some(0),
         }
     }
 

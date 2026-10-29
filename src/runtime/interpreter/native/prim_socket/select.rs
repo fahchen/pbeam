@@ -414,7 +414,7 @@ pub(super) fn cancel(
     };
     let caller = scheduler.current_process().id;
     let name = scheduler.atoms.name_of(operation).to_owned();
-    let poll = scheduler.node().poll.clone();
+    let poll = Arc::clone(&scheduler.node().poll);
     let mut state = lock(&socket);
     // The `connect` cancel gives `{error, not_found}`; the others give
     // `not_found` (`unix_socket_syncio.c:4967-5132`, `5144-5355`). The

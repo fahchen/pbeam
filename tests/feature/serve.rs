@@ -10,6 +10,7 @@
 //! Bandit compress the body with `zstd:compress/2` and a context, and
 //! compare the compressed response.
 
+use std::fmt::Write as _;
 use std::{
     fs,
     io::{BufRead, BufReader, Read, Write},
@@ -908,7 +909,7 @@ fn exchange(mut stream: TcpStream, request: &[u8]) -> Result<Response<Vec<u8>>, 
             content_length = value.trim().parse::<usize>().ok();
         }
         if name != "date" {
-            headers.push_str(&format!("{name}: {}\n", value.trim()));
+            let _ = writeln!(headers, "{name}: {}", value.trim());
         }
     }
     let length = content_length.ok_or("the response has no content-length header")?;

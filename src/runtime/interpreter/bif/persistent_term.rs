@@ -370,13 +370,6 @@ fn erase_trap(
     mut first: usize,
     mut second: usize,
 ) -> BifResult {
-    /// `ITERATIONS_PER_RED` of `persistent_term_erase_1`
-    /// (`erl_bif_persistent.c:419`).
-    const ITERATIONS_PER_RED: usize = 32;
-    let process = scheduler.current_process_mut();
-    // `MAX(1, max_iterations)` of a `long` that a negative budget makes
-    // negative (`erl_bif_persistent.c:284`, `429-430`).
-    let limit = (ITERATIONS_PER_RED * process.bif_reductions_or_zero()).max(1);
     // Use at most `limit` slots of one copy in this call, and return true
     // when the copy does not end.
     fn step(remaining: &mut usize, limit: usize, copied: &mut usize) -> bool {
@@ -388,6 +381,14 @@ fn erase_trap(
         *copied += done;
         *remaining > 0
     }
+
+    /// `ITERATIONS_PER_RED` of `persistent_term_erase_1`
+    /// (`erl_bif_persistent.c:419`).
+    const ITERATIONS_PER_RED: usize = 32;
+    let process = scheduler.current_process_mut();
+    // `MAX(1, max_iterations)` of a `long` that a negative budget makes
+    // negative (`erl_bif_persistent.c:284`, `429-430`).
+    let limit = (ITERATIONS_PER_RED * process.bif_reductions_or_zero()).max(1);
     let mut copied = 0;
     let trapped = step(&mut first, limit, &mut copied) || step(&mut second, limit, &mut copied);
     scheduler.node().persistent_terms().copy_step(limit);

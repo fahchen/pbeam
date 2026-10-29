@@ -15,6 +15,7 @@
 //! The check gate runs the same tests under the test profile, which measures
 //! slower numbers but proves that the probes and the ERTS reference run.
 
+use std::fmt::Write as _;
 use std::{
     collections::HashMap,
     hint::black_box,
@@ -140,27 +141,31 @@ fn erts_expression() -> String {
              S = erlang:monotonic_time(nanosecond), _ = F(), \
              erlang:monotonic_time(nanosecond) - S end || _ <- lists:seq(1, 9)]) end, ",
     );
-    expression.push_str(&format!(
+    let _ = write!(
+        expression,
         "io:format(\"result ordered_loop ~w~n\", [M:ordered_loop({LENGTH}, 0)]), \
          io:format(\"result nibble_loop ~w~n\", [M:nibble_loop({LENGTH}, 0)]), \
          io:format(\"result linear_loop ~w~n\", [M:linear_loop({LENGTH}, 0)]), "
-    ));
+    );
     for value in -1..=257 {
-        expression.push_str(&format!(
+        let _ = write!(
+            expression,
             "io:format(\"result bucket_{value} ~w~n\", [M:bucket({value})]), "
-        ));
+        );
     }
     for value in -1..=17 {
-        expression.push_str(&format!(
+        let _ = write!(
+            expression,
             "io:format(\"result nibble_{value} ~w~n\", [M:nibble({value})]), "
-        ));
+        );
     }
-    expression.push_str(&format!(
+    let _ = write!(
+        expression,
         "io:format(\"time ordered_loop ~b~n\", [Run(fun() -> M:ordered_loop({LENGTH}, 0) end)]), \
          io:format(\"time nibble_loop ~b~n\", [Run(fun() -> M:nibble_loop({LENGTH}, 0) end)]), \
          io:format(\"time linear_loop ~b~n\", [Run(fun() -> M:linear_loop({LENGTH}, 0) end)]), \
          halt()."
-    ));
+    );
     expression
 }
 

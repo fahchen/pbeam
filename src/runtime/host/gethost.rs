@@ -306,7 +306,7 @@ impl Pool {
     /// Start a worker thread with the given queue, as `create_worker` does.
     fn create(&mut self, domain: Option<Vec<u8>>, queue: VecDeque<Job>) -> Worker {
         let (jobs, receiver) = mpsc::channel::<Job>();
-        let (id, events, answer) = (self.next_id, self.events.clone(), self.answer.clone());
+        let (id, events, answer) = (self.next_id, self.events.clone(), Arc::clone(&self.answer));
         self.next_id += 1;
         thread::spawn(move || {
             while let Ok(job) = receiver.recv() {
@@ -555,9 +555,9 @@ fn address_info_code(value: c_int) -> Code {
 fn hosts_reply(unit: u8, addresses: &[Vec<u8>], names: &[Vec<u8>]) -> Vec<u8> {
     let mut reply = vec![unit];
     reply.extend_from_slice(&u32::try_from(addresses.len()).unwrap_or(0).to_be_bytes());
-    addresses
-        .iter()
-        .for_each(|address| reply.extend_from_slice(address));
+    for address in addresses {
+        reply.extend_from_slice(address);
+    }
     reply.extend_from_slice(&u32::try_from(names.len()).unwrap_or(0).to_be_bytes());
     for name in names {
         reply.extend_from_slice(name);
