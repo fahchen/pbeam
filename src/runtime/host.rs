@@ -124,11 +124,17 @@ fn name_bytes(name: &[libc::c_char]) -> Vec<u8> {
 pub(crate) enum FilenameEncoding {
     /// `ERL_FILENAME_LATIN1`: each character of a name is one byte. Only a
     /// host other than macOS uses it.
-    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    #[cfg_attr(
+        all(target_os = "macos", not(test)),
+        expect(dead_code, reason = "only a host other than macOS uses it")
+    )]
     Latin1,
     /// `ERL_FILENAME_UTF8`: a name is UTF-8. Only a host other than macOS
     /// uses it.
-    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    #[cfg_attr(
+        all(target_os = "macos", not(test)),
+        expect(dead_code, reason = "only a host other than macOS uses it")
+    )]
     Utf8,
     /// `ERL_FILENAME_UTF8_MAC`: a name is UTF-8, and only macOS uses it.
     /// ERTS checks and writes a name as `ERL_FILENAME_UTF8` does

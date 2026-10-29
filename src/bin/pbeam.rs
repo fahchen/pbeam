@@ -245,6 +245,10 @@ fn main() -> ExitCode {
 
 /// Return the exit status of the end of a command line, and write the
 /// message of an error to stderr.
+#[expect(
+    clippy::print_stderr,
+    reason = "the command-line binary reports to the terminal"
+)]
 fn exit_status(end: Result<(), Exit>) -> ExitCode {
     match end {
         Ok(()) => ExitCode::SUCCESS,

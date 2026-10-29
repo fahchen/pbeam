@@ -675,6 +675,7 @@ fn records_the_interpreter_dispatch_baseline() {
 
 /// Print the tables of the baseline: the rows of each probe, and the added
 /// cost of one instruction over the `floor` row of the local floor loop.
+#[expect(clippy::print_stdout, reason = "the probe prints its measurement")]
 #[expect(
     clippy::as_conversions,
     clippy::cast_precision_loss,

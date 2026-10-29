@@ -122,8 +122,8 @@ pub(super) enum Check {
     /// `check_time_offset` (`erl_time_sup.c:789-831`): the OS corrects the
     /// monotonic clock, and the check moves only the time offset.
     #[cfg_attr(
-        not(target_os = "linux"),
-        allow(dead_code, reason = "the host check of Linux; the unit tests use it")
+        all(not(target_os = "linux"), not(test)),
+        expect(dead_code, reason = "the host check of Linux; the unit tests use it")
     )]
     Offset,
     /// `check_time_correction` (`erl_time_sup.c:450-777`): the check moves

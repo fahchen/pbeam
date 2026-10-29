@@ -864,7 +864,6 @@ name = "erts_debug_size"
 path = "tests/integration/erts_debug_size.rs"
 
 # BeautifulRust lints (https://github.com/morganlinton/BeautifulRust, lints/lints.toml).
-# A lint with a hit on main is "allow" until its m23 task fixes the hits.
 # Silence a lint locally with #[expect(clippy::<lint>, reason = "...")].
 [lints.rust]
 unsafe_op_in_unsafe_fn = "warn"                      # each unsafe op needs its own unsafe block
@@ -872,8 +871,6 @@ missing_debug_implementations = "warn"               # every public type impleme
 missing_docs = "warn"                                # [lib] document every public item
 unreachable_pub = "warn"                             # pub items that aren't actually exported
 rust_2018_idioms = { level = "warn", priority = -1 } # 2018-edition idioms, e.g. Formatter<'_>
-
-# m23 allow list: lints of the groups above with a hit on main. The named task removes the line and fixes the hits.
 
 [lints.clippy]
 # Groups first, at lower priority so the individual settings below win.
@@ -888,8 +885,8 @@ missing_panics_doc = "warn" # [lib] document reachable panics under # Panics
 missing_errors_doc = "warn" # [lib] document failures under # Errors
 
 # Suppressions must explain themselves and expire when no longer needed.
-allow_attributes = "allow"                # #1352 turns on: prefer #[expect] over #[allow] (needs rust-version 1.81+)
-allow_attributes_without_reason = "allow" # #1352 turns on: every suppression says why (needs rust-version 1.81+)
+allow_attributes = "warn"                # prefer #[expect] over #[allow] (needs rust-version 1.81+)
+allow_attributes_without_reason = "warn" # every suppression says why (needs rust-version 1.81+)
 
 # Unsafe must be justified.
 undocumented_unsafe_blocks = "warn"     # // SAFETY: comment on every unsafe block
@@ -909,8 +906,8 @@ wildcard_imports = "warn" # no glob imports (use super::* in tests is allowed)
 # Output and debugging leftovers.
 dbg_macro = "warn"
 todo = "warn"
-print_stdout = "allow" # #1352 turns on: [lib] libraries log, they don't print
-print_stderr = "allow" # #1352 turns on: [lib] libraries log, they don't print
+print_stdout = "warn" # [lib] libraries log, they don't print
+print_stderr = "warn" # [lib] libraries log, they don't print
 
 # Casts that silently lose information.
 as_conversions = "warn"           # prefer From / TryFrom
@@ -922,5 +919,3 @@ module_name_repetitions = "allow"
 must_use_candidate = "allow"
 module_inception = "allow"        # a leaf module named after its main item is fine
 enum_glob_use = "allow"           # use Enum::* inside a function that matches on it
-
-# m23 allow list: lints of the groups above with a hit on main. The named task removes the line and fixes the hits.

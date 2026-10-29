@@ -177,7 +177,13 @@ fn run_in_terminal(command: &mut Command) -> Vec<u8> {
         command.pre_exec(|| {
             // `TIOCSCTTY` is a `c_uint` on macOS and has the request type
             // of `ioctl` on Linux, so the conversion does nothing there.
-            #[allow(clippy::useless_conversion)]
+            #[cfg_attr(
+                target_os = "linux",
+                expect(
+                    clippy::useless_conversion,
+                    reason = "the request has the ioctl type on Linux"
+                )
+            )]
             let request = libc::TIOCSCTTY.into();
             if libc::setsid() < 0 || libc::ioctl(0, request, 0) < 0 {
                 return Err(io::Error::last_os_error());

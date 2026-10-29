@@ -105,9 +105,6 @@ pub(crate) enum LinkMode {
 /// # Errors
 ///
 /// The `errno` of `stat` or `lstat`, for example `ENOENT` or `ENOTDIR`.
-// The `stat` field types differ between hosts, for example `st_mode` is
-// `u16` on macOS and `u32` on Linux, so a cast can have the same type.
-#[allow(clippy::unnecessary_cast)]
 pub(crate) fn read_info(path: &CStr, links: LinkMode) -> Result<FileInfo, c_int> {
     // SAFETY: all zeros is a valid `stat`. `path` is a NUL-terminated
     // string, and `stat` and `lstat` write only into the struct that the

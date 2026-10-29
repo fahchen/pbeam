@@ -44,6 +44,10 @@ const USAGE: &str =
        pbeam_bundle executable <runtime-binary> <bundle> <output>
        pbeam_bundle check-nifs <directory>";
 
+#[expect(
+    clippy::print_stderr,
+    reason = "the command-line binary reports to the terminal"
+)]
 fn main() -> ExitCode {
     let arguments: Vec<_> = env::args_os().skip(1).collect();
     let Some((command, rest)) = arguments.split_first() else {
@@ -344,6 +348,10 @@ fn check_nifs(directory: &Path) -> Result<(), String> {
 /// // NIF function has no PBeam binding; a call runs the BEAM stub body".
 /// assert!(nif_gate(root, &missing_binding_files).is_ok());
 /// ```
+#[expect(
+    clippy::print_stdout,
+    reason = "the command-line binary reports to the terminal"
+)]
 #[expect(
     clippy::case_sensitive_file_extension_comparisons,
     reason = "the OTP build writes the suffix `.beam` in lower case, and the match must stay exact"

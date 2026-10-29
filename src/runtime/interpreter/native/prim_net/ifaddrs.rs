@@ -8,7 +8,13 @@
 //! `docs/erts-differences.md`).
 
 // Each reader runs on one host; the unit tests run them on each host.
-#![allow(dead_code)]
+#![cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "each reader runs on one host; the unit tests run them on each host"
+    )
+)]
 
 use super::{
     AtomTable, BeamError, BifResult, Map, Term, c_int, encode_sockaddr, errno_id, error, failure,

@@ -154,7 +154,10 @@ pub enum Term {
 /// `Term` that is not `Send` or not `Sync` does not satisfy it, so the
 /// crate does not compile. The trait has no function, so it adds no
 /// runtime code and no coverage line.
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "a compile-time check that Term is Send and Sync; no code calls it"
+)]
 trait TermIsSendAndSync: Send + Sync {}
 impl TermIsSendAndSync for Term {}
 

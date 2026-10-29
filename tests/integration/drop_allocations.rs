@@ -282,6 +282,7 @@ fn counts(shapes: Vec<Shape>) -> Vec<(&'static str, usize)> {
 /// ```rust,ignore
 /// report(&[("an immediate", 0)]);
 /// ```
+#[expect(clippy::print_stdout, reason = "the probe prints its measurement")]
 fn report(counts: &[(&str, usize)]) {
     for (name, count) in counts {
         println!("allocations of the drop of {name}: {count}");

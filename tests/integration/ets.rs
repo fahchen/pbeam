@@ -71,6 +71,7 @@ fn inserts_objects_in_a_loop_as_pinned_erts() {
 
 /// Run `ets_probe:Function()` 9 times on PBeam, print the least of the timed
 /// runs, and return the result of the last run.
+#[expect(clippy::print_stdout, reason = "the probe prints its measurement")]
 fn timed(program: &BeamProgram, function: &str) -> Term {
     let mut best = std::time::Duration::MAX;
     let mut result = None;

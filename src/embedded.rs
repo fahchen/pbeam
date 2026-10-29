@@ -412,6 +412,10 @@ fn remove(directory: &Path) {
 }
 
 /// Return [`ExitCode::FAILURE`] after a message on stderr.
+#[expect(
+    clippy::print_stderr,
+    reason = "the one-file executable reports a failure on stderr"
+)]
 fn failure(message: &str) -> ExitCode {
     eprintln!("pbeam: {message}");
     ExitCode::FAILURE

@@ -3025,7 +3025,7 @@ fn integer_digits(
 fn big_integer_estimate(bits: u64, sign: num_bigint::Sign, base: u32) -> usize {
     /// `lg2_lookup` (`big.c:4087-4092`): the rounded `log2` of each base
     /// from 2 to 36.
-    #[allow(clippy::approx_constant, reason = "ERTS uses these rounded values")]
+    #[expect(clippy::approx_constant, reason = "ERTS uses these rounded values")]
     const LG2_LOOKUP: [f64; 35] = [
         1.0, 1.58496, 2.0, 2.32193, 2.58496, 2.80735, 3.0, 3.16993, 3.32193, 3.45943, 3.58496,
         3.70044, 3.80735, 3.90689, 4.0, 4.08746, 4.16993, 4.24793, 4.32193, 4.39232, 4.45943,
