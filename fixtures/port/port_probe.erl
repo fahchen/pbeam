@@ -621,14 +621,23 @@ busy() ->
     process_flag(trap_exit, true),
     B = <<0:8192>>,
     P = open_port({spawn, "sleep 5"}, [binary]),
-    Full = fill(P, B, 0, 2000),
+    Full = saturate(P, B),
     %% The pipe size depends on the kernel, so the probe checks that the
     %% queue reached the high limit and holds less than one more write.
     Queue = queue_between(P, 8192, 8192 + 1024),
+    %% A sender on the busy port waits; the exit of the port resumes it,
+    %% and its command finds no port (io.c:3895).
+    Parent = self(),
+    Waiter = spawn(fun() -> Parent ! {waiter, error_of(fun() -> erlang:port_command(P, B) end)} end),
+    timer_sleep(100),
+    WaiterStatus = erlang:process_info(Waiter, status),
     Force = error_of(fun() -> erlang:port_command(P, B, [force]) end),
     BadOpt = error_of(fun() -> erlang:port_command(P, B, [foo]) end),
+    %% The data is checked after force and after the busy state.
+    Checks = [error_of(fun() -> erlang:port_command(P, foo, [force]) end),
+              erlang:port_command(P, foo, [nosuspend]), erlang:port_command(P, [1 | 2], [nosuspend])],
     Low = open_port({spawn, "sleep 5"}, [binary, {busy_limits_port, {100, 200}}]),
-    LowFull = fill(Low, B, 0, 2000),
+    LowFull = saturate(Low, B),
     LowQueue = queue_between(Low, 200, 200 + 1024),
     Off = open_port({spawn, "sleep 5"}, [binary, {busy_limits_port, disabled}]),
     OffFull = fill(Off, B, 0, 100),
@@ -636,7 +645,10 @@ busy() ->
     Bad = [error_of(fun() -> open_port({spawn, "true"}, [{busy_limits_port, L}]) end)
            || L <- [{0, 10}, {10, 1 bsl 64}, foo, {1, 2, 3}]],
     BadMsgq = error_of(fun() -> open_port({spawn, "true"}, [{busy_limits_msgq, {0, 1}}]) end),
+    %% The exit of a busy port resumes its suspended sender, whose
+    %% command then finds no port (io.c:3895).
     [exit(Q, kill) || Q <- [P, Low, Off]],
+    WaiterDown = receive {waiter, WaiterResult} -> WaiterResult after 2000 -> missing end,
     Slow = open_port({spawn_executable, sh()}, [binary, {args, ["-c", "sleep 1; cat >/dev/null"]}]),
     Self = self(),
     Ticker = spawn(fun() -> tick(Self, 0) end),
@@ -652,8 +664,22 @@ busy() ->
     Gone = open_port({spawn_executable, sh()}, [binary, out, {busy_limits_port, disabled}, {args, ["-c", "sleep 0.3"]}]),
     GoneQueued = fill(Gone, B, 0, 70),
     GoneExit = receive {'EXIT', Gone, GoneReason} -> GoneReason after 3000 -> missing end,
-    [element(2, Full), Queue, Force, BadOpt, element(2, LowFull), LowQueue, OffFull, Swapped, Bad, BadMsgq, Sent, Ticked,
-     Queued, Closed, Exit, GoneQueued, GoneExit].
+    GoneInfo = erlang:port_info(Gone),
+    [Full, Queue, Force, BadOpt, LowFull, LowQueue, OffFull, Swapped, Bad, BadMsgq, Sent, Ticked,
+     Queued, Closed, Exit, GoneQueued, GoneExit, GoneInfo, WaiterStatus, WaiterDown, Checks].
+
+%% Fill the queue until the port is busy and stays busy: a macOS pipe grows
+%% while it is written, and the growth can take the queue.
+saturate(P, B) ->
+    {_, false} = fill(P, B, 0, 2000),
+    timer_sleep(100),
+    case erlang:port_command(P, B, [nosuspend]) of
+        false -> false;
+        true -> saturate(P, B)
+    end.
+
+timer_sleep(T) ->
+    receive after T -> ok end.
 
 queue_between(P, Min, Max) ->
     {queue_size, Size} = erlang:port_info(P, queue_size),

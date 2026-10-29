@@ -1036,9 +1036,9 @@ pub(super) fn port_command(
     // port lock does in `erts_port_output` (io.c:1715-2088).
     let found = found_port(scheduler, port)?;
     let mut slot = lock_found(&found);
-    let (Some(port_state), Some(bytes), Some(&(id, _))) =
-        (open(&mut slot), iolist::iodata_bytes(data), found.as_ref())
-    else {
+    // The data is checked after `force` and after the busy state
+    // (erl_bif_port.c:195-198; `erts_port_output`, io.c:1752-1756).
+    let (Some(port_state), Some(&(id, _))) = (open(&mut slot), found.as_ref()) else {
         drop(slot);
         return Ok(signals_return(scheduler, port, Term::static_atom("badarg")));
     };
@@ -1075,6 +1075,10 @@ pub(super) fn port_command(
             arguments: vec![port.clone(), data.clone(), options.clone()],
         });
     }
+    let Some(bytes) = iolist::iodata_bytes(data) else {
+        drop(slot);
+        return Ok(signals_return(scheduler, port, Term::static_atom("badarg")));
+    };
     let written = output(scheduler, id, port_state, bytes)?;
     drop(slot);
     written.finish(scheduler, id)?;

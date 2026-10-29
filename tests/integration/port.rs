@@ -392,7 +392,7 @@ fn queues_the_output_of_a_busy_port_as_pinned_erts() {
     // 1455-1493; erl_bif_port.c:175-230, 824-825, 920-975).
     assert_runs(
         "busy()",
-        "[false,true,{error,notsup},{error,badarg},false,true,{100,true},true,[{error,badarg},{error,badarg},{error,badarg},{error,badarg}],{error,badarg},true,true,{70,true},true,normal,{70,true},epipe]",
+        "[false,true,{error,notsup},{error,badarg},false,true,{100,true},true,[{error,badarg},{error,badarg},{error,badarg},{error,badarg}],{error,badarg},true,true,{70,true},true,normal,{70,true},epipe,undefined,{status,suspended},{error,badarg},[{error,notsup},false,false]]",
     );
 }
 

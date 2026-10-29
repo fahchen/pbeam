@@ -261,7 +261,9 @@ impl Scheduler {
                     self.atoms
                         .put(&crate::runtime::host::errno::errno_id(errno))?,
                 );
-                self.close_port(id, reason);
+                // `driver_failure_posix` drops the queue and ends the port
+                // at once (sys_drivers.c:1482-1490).
+                self.fail_port(id, reason);
             }
         }
         Ok(())
@@ -402,6 +404,13 @@ impl Scheduler {
             };
         let links = std::mem::take(&mut port.links);
         let monitors = std::mem::take(&mut port.monitors);
+        // The exit ends the busy state and resumes each suspended sender,
+        // whose command then finds no open port (`set_busy_port`,
+        // io.c:3895).
+        let suspended = match &mut port.driver {
+            Driver::Spawn(spawn) => spawn.queue.unbusy(),
+            Driver::Inet(_) => Vec::new(),
+        };
         // The port loses its name under its lock, before its exit signals
         // (`erts_deliver_port_exit`, io.c:3904-3905).
         self.node.remove_port_name(id);
@@ -414,6 +423,9 @@ impl Scheduler {
         drop(slot);
         if !flushes {
             self.node.ports().remove(id);
+        }
+        for process in suspended {
+            self.resume(process);
         }
         // The scheduler that serves the port waits for its fds: wake it, so
         // that it waits again without the fds of the closed port.

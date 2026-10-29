@@ -184,6 +184,13 @@ impl OutputQueue {
         self.busy
     }
 
+    /// End the busy state and return the processes that waited for the
+    /// port.
+    pub(super) fn unbusy(&mut self) -> Vec<ProcessId> {
+        self.busy = false;
+        std::mem::take(&mut self.waiters)
+    }
+
     /// Add the process `id` to the processes that wait for the port.
     pub(super) fn suspend(&mut self, id: ProcessId) {
         self.waiters.push(id);
@@ -383,8 +390,7 @@ impl Spawn {
             .write_some(self.queue.bytes.make_contiguous())?;
         self.queue.bytes.drain(..written);
         if self.queue.busy && self.queue.size() < self.queue.low {
-            self.queue.busy = false;
-            return Ok(std::mem::take(&mut self.queue.waiters));
+            return Ok(self.queue.unbusy());
         }
         Ok(Vec::new())
     }
