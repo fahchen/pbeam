@@ -387,8 +387,11 @@ impl Inet {
 
     /// End the receive that waits with `timeout`, as
     /// `tcp_inet_recv_timeout` does (inet_drv.c:11941-11949): the bytes
-    /// that it read stay in the buffer for the next receive.
+    /// that it read stay in the buffer for the next receive. A `udp_inet`
+    /// socket turns its read select off, also in active mode
+    /// (`packet_inet_timeout`, inet_drv.c:15021-15024).
     pub(in crate::runtime) fn receive_timeout(&mut self) -> Vec<Event> {
+        self.read_off = self.socket_type == SocketType::Datagram;
         self.stream.remain = 0;
         self.end_receive(Err("timeout".to_owned()))
     }
@@ -706,14 +709,17 @@ impl Inet {
         events
     }
 
-    /// Return the fd of a socket with a receive that waits
-    /// (`sock_select(desc, FD_READ, 1)`, inet_drv.c:12317, 15496) or of a
+    /// Return the fd of a socket with a receive that waits and a read
+    /// select that is on (`sock_select(desc, FD_READ, 1)`,
+    /// inet_drv.c:12317, 15496; see `Inet::read_off`) or of a
     /// connected stream socket in active mode (inet_drv.c:7966), else
     /// `None`.
     pub(in crate::runtime) fn stream_receive_fd(&self) -> Option<c_int> {
         let socket = self.socket.as_ref()?;
-        let active = self.active != 0 && self.state == State::Connected;
-        (self.stream.receiver.is_some() || active).then(|| socket.as_raw_fd())
+        let active = self.active != 0
+            && self.state == State::Connected
+            && self.socket_type == SocketType::Stream;
+        (self.stream.receiver.is_some() && !self.read_off || active).then(|| socket.as_raw_fd())
     }
 
     /// Return the fd of a socket with queued output (`sock_select(desc,

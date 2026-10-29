@@ -289,22 +289,56 @@ reconnect() ->
      prim_inet:peername(S), prim_inet:connect(S, {127, 0, 0, 1}, PB), sender(prim_inet:peername(S), PB),
      prim_inet:close(B)].
 
-%% A connected passive socket with a receive that waits becomes active
-%% once, and a datagram of the peer comes: the socket gives it to the owner,
-%% because it is active (inet_drv.c:4335-4357). The waiter does not get
-%% it; its end differs on PBeam (#1246).
+%% A passive socket with a receive of 200 ms that waits becomes active, and
+%% a datagram of a peer comes at once (0) or after the timeout (300). An
+%% active socket gives the datagram to the owner, not to the waiter
+%% (`packet_reply_binary_data`, inet_drv.c:4335-4355). A socket that
+%% becomes passive after it stops the timer and the read select: the
+%% waiter gets no reply and no next datagram until the close, which gives
+%% it `{error, closed}` (inet_drv.c:15570-15573). The timeout ends the
+%% waiter and stops the read select, also of an active socket
+%% (`packet_inet_timeout`, inet_drv.c:15021-15024). A change to passive
+%% stops the timer and the select, and a change to active starts the
+%% select (inet_drv.c:7960-7967). An integer in the options waits that
+%% many ms. Each case gives the datagrams of the
+%% owner, the end of the waiter before the close, and after it.
 active_waiter() ->
+    [waiter(connected, [{active, once}], 0),
+     waiter(open, [{active, once}], 0),
+     waiter(open, [{active, true}], 0),
+     waiter(open, [{active, once}], 300),
+     waiter(open, [{active, true}, {active, false}], 0),
+     waiter(open, [{active, once}, 300, {active, true}], 0)].
+
+waiter(Mode, Options, At) ->
     {S, PS} = bound(),
     {B, PB} = bound(),
-    ok = prim_inet:connect(S, {127, 0, 0, 1}, PB),
+    case Mode of
+        connected -> ok = prim_inet:connect(S, {127, 0, 0, 1}, PB);
+        open -> ok
+    end,
     Self = self(),
-    spawn(fun() -> Self ! {waiter, prim_inet:recvfrom(S, 0, 300)} end),
+    spawn(fun() -> Self ! {waiter, prim_inet:recvfrom(S, 0, 200)} end),
     timer:sleep(50),
-    ok = prim_inet:setopts(S, [{active, once}]),
-    ok = prim_inet:sendto(B, {127, 0, 0, 1}, PS, <<"w">>),
-    Owner = receive {udp, S, _, _, Data} -> {udp, Data} after 500 -> none end,
-    Waiter = receive {waiter, {ok, _} = W} -> W after 0 -> none end,
-    [Owner, Waiter].
+    Send = fun(Data) -> ok = prim_inet:sendto(B, {127, 0, 0, 1}, PS, Data) end,
+    [case Option of
+         Time when is_integer(Time) -> timer:sleep(Time);
+         _ -> ok = prim_inet:setopts(S, [Option])
+     end || Option <- Options],
+    timer:sleep(At),
+    Send(<<"a">>),
+    timer:sleep(50),
+    Send(<<"b">>),
+    timer:sleep(300),
+    Owner = owner(S),
+    Before = receive {waiter, W} -> W after 0 -> none end,
+    ok = prim_inet:close(S),
+    After = receive {waiter, X} -> X after 100 -> none end,
+    ok = prim_inet:close(B),
+    {Owner, Before, After}.
+
+owner(S) ->
+    receive {udp, S, _, _, Data} -> [Data | owner(S)] after 0 -> [] end.
 
 %% An IPv6 socket (INET_AF_INET6, inet_drv.c:14585-14595) on ::1: the
 %% name, a send and a receive (inet_set_address, inet_drv.c:4726-4745;

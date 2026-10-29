@@ -193,6 +193,13 @@ pub(in crate::runtime) struct Inet {
     /// that one poll event reads (`INET_PACKET_POLL`, 5, at the start,
     /// inet_drv.c:1072, 14508).
     read_packets: i32,
+    /// A `udp_inet` socket whose read select is off: it reads no datagram,
+    /// also in active mode, until a receive request or a change of the
+    /// option `active` selects it again. The timeout of a receive
+    /// (inet_drv.c:15021-15024), the last datagram of an active socket that
+    /// becomes passive (inet_drv.c:15570-15573), and a change to passive
+    /// (inet_drv.c:7960-7967) turn the select off.
+    read_off: bool,
     /// The option `send_timeout` in milliseconds, -1 for `infinity` (the
     /// start value, `INET_INFINITY`).
     send_timeout: i32,
@@ -280,6 +287,7 @@ impl Inet {
             active: 0,
             active_count: 0,
             read_packets: 5,
+            read_off: false,
             send_timeout: -1,
             send_timeout_close: 0,
             delay_send: false,
@@ -369,9 +377,9 @@ impl Inet {
         (!self.acceptors.is_empty()).then(|| socket.as_raw_fd())
     }
 
-    /// Return the fd of an active datagram socket, which the port reads for
-    /// datagrams (`sock_select(desc, FD_READ, 1)`, inet_drv.c:7960-7967,
-    /// 14619-14621), else `None`.
+    /// Return the fd of an active datagram socket whose read select is on,
+    /// which the port reads for datagrams (`sock_select(desc, FD_READ, 1)`,
+    /// inet_drv.c:7960-7967, 14619-14621), else `None`.
     ///
     /// # Examples
     ///
@@ -380,7 +388,8 @@ impl Inet {
     /// ```
     pub(in crate::runtime) fn receive_fd(&self) -> Option<c_int> {
         let socket = self.socket.as_ref()?;
-        (self.socket_type == SocketType::Datagram && self.active != 0).then(|| socket.as_raw_fd())
+        (self.socket_type == SocketType::Datagram && self.active != 0 && !self.read_off)
+            .then(|| socket.as_raw_fd())
     }
 
     /// Run the request `command` of the process `caller` with the bytes
@@ -412,6 +421,9 @@ impl Inet {
                 let old = self.active;
                 let mut count = 0;
                 let reply = self.set_options(request, &mut count)?;
+                if reply == [OK] {
+                    self.select_datagram_read(old);
+                }
                 if count > 0 {
                     return Ok(Control::Passive { reply, count });
                 }
@@ -889,6 +901,25 @@ impl Inet {
             }
         }
         Ok(vec![OK])
+    }
+
+    /// Set the read select of an open `udp_inet` socket after a valid
+    /// `SETOPTS` that changed the option `active` from `old`, as
+    /// `inet_set_opts` does (inet_drv.c:7945-7967): an active socket reads,
+    /// and a passive socket does not. A change to passive also stops the
+    /// timer of the receive that waits, which then waits until the close of
+    /// the port (inet_drv.c:7961-7964). The timer service drops the stopped
+    /// timer when it comes, as no receive holds it.
+    fn select_datagram_read(&mut self, old: i32) {
+        if self.socket_type != SocketType::Datagram || self.socket.is_none() || self.active == old {
+            return;
+        }
+        self.read_off = self.active == 0;
+        if self.read_off
+            && let Some(receiver) = &mut self.stream.receiver
+        {
+            receiver.timer = None;
+        }
     }
 
     /// Return the result of a `SETOPTS` with the reply `reply` that changed
