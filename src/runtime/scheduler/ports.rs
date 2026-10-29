@@ -328,6 +328,14 @@ impl Scheduler {
             let _ = self.send_signal(None, owner, badsig);
             return false;
         }
+        // The sends that wait behind a busy port end before the exit
+        // signals: ERTS aborts their suspended `erlang:port_command/3` (see
+        // `Inet::end_waiters`). A port in the `CLOSING` state has none.
+        if let Driver::Inet(tcp) = &mut port.driver {
+            let waiters = tcp.end_waiters();
+            self.send_events(id, port, waiters)
+                .expect("the reply of a waiting send makes no new atom");
+        }
         let open = !port.closing;
         port.send_closed |= closer.is_some();
         // `erts_deliver_port_exit` sets `CLOSING` for each queue that holds
