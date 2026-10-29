@@ -21,7 +21,7 @@ use crate::{
         process::{ProcessState, Start, tests::frame},
     },
     term::{
-        Atom, AtomTable, Binary, Lambda, ProcessId, Reference, debug_term, test_atom,
+        Atom, AtomTable, Binary, Lambda, MatchState, ProcessId, Reference, debug_term, test_atom,
         test_atom_table,
     },
 };
@@ -29,6 +29,11 @@ use crate::{
 /// Return the initial capabilities of the default policy.
 fn allow_all() -> Vec<Capability> {
     AllowAll.initial()
+}
+
+/// Return a match context, the one term that a map does not hold.
+fn match_context() -> Term {
+    Term::MatchContext(Arc::new(MatchState::new(Binary::from(b"a"))))
 }
 
 /// A delivery that waits in the inbox at an idle step lets the step return
@@ -1287,13 +1292,11 @@ fn updates_and_reads_maps_and_reports_unsupported_map_operands() {
             map: map(vec![]),
             destination: Operand::X(0),
             pairs: vec![(
-                Operand::Value(Term::tuple(vec![Term::Reference(
-                    Reference(0).pid_reference()
-                )])),
+                Operand::Value(Term::tuple(vec![match_context()])),
                 Operand::Value(Term::Integer(1))
             )],
         }])
-        .contains("unsupported map key Tuple([Reference(Reference(9223372036854775808))])")
+        .contains("unsupported map key Tuple([MatchContext(")
     );
 }
 
@@ -1469,51 +1472,33 @@ fn raises_or_jumps_when_put_map_exact_gets_no_map_or_no_key() {
     .execute("fixture", "main", &[]);
     let error = references.unwrap_err().to_string();
     assert!(error.contains("badkey,#Ref<0.0.1.1>"), "{error}");
-    // A key that a PBeam map cannot hold is a missing key of the exact
-    // change, as ERTS reports a missing key.
-    let unsupported = make_program(
-        vec![Instruction::PutMapExact {
-            fail_label: 0,
-            map: Operand::Value(Term::Map(Map::new())),
-            destination: Operand::X(0),
-            pairs: vec![(
-                Operand::Value(Term::tuple(vec![Term::Reference(
-                    Reference(0).pid_reference(),
-                )])),
-                atom("a"),
-            )],
-        }],
-        0,
-    )
-    .execute("fixture", "main", &[]);
-    let error = unsupported.unwrap_err().to_string();
-    assert!(error.contains("badkey,{#Ref<0.2147483648.1.0>}"), "{error}");
-    // An alias reference has no PBeam order, so the exact change reports
-    // that order instead of comparing the keys.
-    let alias = make_program(
-        vec![Instruction::PutMapExact {
-            fail_label: 0,
-            map: Operand::Value(Term::Map(Map::new())),
-            destination: Operand::X(0),
-            pairs: vec![
-                (
-                    Operand::Value(Term::Reference(crate::Reference(1).pid_reference())),
-                    atom("a"),
-                ),
-                (
-                    Operand::Value(Term::Reference(crate::Reference(2).pid_reference())),
-                    atom("b"),
-                ),
-            ],
-        }],
-        0,
-    )
-    .execute("fixture", "main", &[]);
-    let error = alias.unwrap_err().to_string();
-    assert!(
-        error.contains("unsupported term order of an alias reference"),
-        "{error}"
+    // An alias reference has a PBeam order, so the exact change finds two
+    // alias keys as it finds two references (`src/term/order.rs`).
+    let alias = |number| Term::Reference(crate::Reference(number).pid_reference());
+    let map = Term::Map(
+        Map::from_pairs(
+            vec![(alias(2), test_atom("b")), (alias(1), test_atom("a"))],
+            &test_atom_table(),
+        )
+        .unwrap(),
     );
+    let exact = make_program(
+        vec![
+            Instruction::PutMapExact {
+                fail_label: 0,
+                map: Operand::Value(map),
+                destination: Operand::X(0),
+                pairs: vec![
+                    (Operand::Value(alias(1)), atom("c")),
+                    (Operand::Value(alias(2)), atom("d")),
+                ],
+            },
+            Instruction::Return,
+        ],
+        0,
+    )
+    .execute("fixture", "main", &[]);
+    assert!(exact.is_ok(), "{exact:?}");
     // The assoc change adds the key, so a key that PBeam cannot hold raises
     // the runtime error of the key. The first change builds a map with one
     // owner, so the second change takes that map and puts it back on the
@@ -1530,9 +1515,7 @@ fn raises_or_jumps_when_put_map_exact_gets_no_map_or_no_key() {
                 map: Operand::X(0),
                 destination: Operand::X(0),
                 pairs: vec![(
-                    Operand::Value(Term::tuple(vec![Term::Reference(
-                        Reference(0).pid_reference(),
-                    )])),
+                    Operand::Value(Term::tuple(vec![match_context()])),
                     atom("a"),
                 )],
             },
@@ -1741,11 +1724,9 @@ fn keeps_a_key_or_value_in_the_destination_slot() {
 
 #[test]
 fn reports_a_maps_from_list_key_that_the_map_form_does_not_support() {
-    // ERTS accepts a tuple key with a port; a PBeam map does not hold one yet.
-    let pair = Term::tuple(vec![
-        Term::tuple(vec![Term::Reference(Reference(0).pid_reference())]),
-        Term::Integer(0),
-    ]);
+    // A match context reaches no map operation, so a tuple key that holds
+    // one is not a supported key.
+    let pair = Term::tuple(vec![Term::tuple(vec![match_context()]), Term::Integer(0)]);
     let from_list = make_program(
         vec![
             Instruction::Move(Operand::Value(Term::list_from(vec![pair])), Operand::X(0)),
@@ -1755,21 +1736,22 @@ fn reports_a_maps_from_list_key_that_the_map_form_does_not_support() {
         0,
     )
     .execute("fixture", "main", &[]);
-    assert_eq!(
-        from_list.unwrap_err().to_string(),
-        "unsupported map key Tuple([Reference(Reference(9223372036854775808))])"
+    assert!(
+        from_list
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported map key Tuple([MatchContext(")
     );
 }
 
 #[test]
 fn reports_a_maps_put_key_that_the_map_form_does_not_support() {
-    // ERTS accepts a tuple key with a port; a PBeam map does not hold one yet.
+    // A match context reaches no map operation, so a tuple key that holds
+    // one is not a supported key.
     let put = make_program(
         vec![
             Instruction::Move(
-                Operand::Value(Term::tuple(vec![Term::Reference(
-                    Reference(0).pid_reference(),
-                )])),
+                Operand::Value(Term::tuple(vec![match_context()])),
                 Operand::X(0),
             ),
             Instruction::Move(Operand::Value(Term::Integer(0)), Operand::X(1)),
@@ -1780,9 +1762,10 @@ fn reports_a_maps_put_key_that_the_map_form_does_not_support() {
         0,
     )
     .execute("fixture", "main", &[]);
-    assert_eq!(
-        put.unwrap_err().to_string(),
-        "unsupported map key Tuple([Reference(Reference(9223372036854775808))])"
+    assert!(
+        put.unwrap_err()
+            .to_string()
+            .contains("unsupported map key Tuple([MatchContext(")
     );
 }
 
@@ -4409,13 +4392,11 @@ fn reads_the_current_stacktrace_of_the_calling_process() {
         );
     }
     // ERTS 29.1.1: process_info(self(), {dictionary, k}) is
-    // {{dictionary, k}, undefined}, process_info(self(), [messages]) is
-    // [{messages, []}], and process_info(self(), status) is
-    // {status, running}. PBeam does not implement them yet.
+    // {{dictionary, k}, undefined}, and process_info(self(), [messages]) is
+    // [{messages, []}]. PBeam does not implement them yet.
     for (process, item) in [
         (root(), dictionary()),
         (root(), Term::list_from(vec![test_atom("messages")])),
-        (root(), test_atom("status")),
     ] {
         assert_eq!(
             process_info(process.clone(), item.clone())
@@ -4427,6 +4408,12 @@ fn reads_the_current_stacktrace_of_the_calling_process() {
             )
         );
     }
+    // ERTS 29.1.1: process_info(self(), status) is {status, running}, as
+    // for the item that `process_info/1` reports.
+    assert_eq!(
+        process_info(root(), test_atom("status")).unwrap(),
+        Term::tuple(vec![test_atom("status"), test_atom("running")])
+    );
     // ERTS 29.1.1: process_info(self(), registered_name) is [] for a
     // process without a name.
     assert_eq!(

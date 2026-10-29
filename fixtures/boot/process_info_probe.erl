@@ -1,5 +1,5 @@
 -module(process_info_probe).
--export([links/0, charges/0]).
+-export([links/0, charges/0, messages/0, items/0, wait/0]).
 
 %% Link two named children to a fresh reporter process. The reporter reads
 %% the names of its own links with `process_info(self(), links)` and prints
@@ -32,6 +32,35 @@ name(Pid) ->
         {registered_name, Name} -> Name;
         [] -> unnamed
     end.
+
+%% Send two atoms to a sleeping child and read the queue of the child and
+%% of this process: the child holds [a,b] in arrival order, the caller
+%% holds [] (`erl_bif_info.c` item `messages`).
+messages() ->
+    Child = spawn(fun() -> receive after 10000 -> ok end end),
+    Child ! a,
+    Child ! b,
+    timer:sleep(50),
+    io:format("~p~n", [process_info(Child, messages)]),
+    io:format("~p~n", [process_info(self(), messages)]).
+
+%% Read the items of a sleeping child that `process_info/1` also reports,
+%% from another process: the child waits with an empty dictionary, a false
+%% `trap_exit`, the default error handler, its current function, and its
+%% start MFA. The values come from the same item values as
+%% `process_info/1`, so a read of another process agrees with it.
+items() ->
+    Child = spawn(process_info_probe, wait, []),
+    timer:sleep(50),
+    [io:format("~p~n", [process_info(Child, Item)]) ||
+        Item <- [status, message_queue_len, dictionary, trap_exit,
+                 error_handler, current_function, initial_call, priority]],
+    exit(Child, kill).
+
+%% Wait for one message, so a reader of another process sees a waiting
+%% process in a known function.
+wait() ->
+    receive after 10000 -> ok end.
 
 %% Print `ok` when 2000 reads of a target with 4096 links cost more than
 %% 1000 reductions more than 2000 reads of a target with 0 links. The

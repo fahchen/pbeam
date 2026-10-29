@@ -9,7 +9,6 @@ use super::{
 use crate::error::{BeamError, error};
 use crate::runtime::{BifId, resolve_bif};
 use crate::term::{Atom, AtomTable, Lambda, RecordDef, Term, flatmap_order};
-use std::cmp::Ordering;
 use std::num::NonZeroU64;
 use std::sync::Arc;
 
@@ -305,21 +304,10 @@ pub(crate) fn prepare_select_value_choices(
         return SelectValueChoices::Linear(choices);
     }
     let mut ordered = choices.clone();
-    let mut failure = None;
-    ordered.sort_by(|(left, _), (right, _)| {
-        left.compare_exact(right, atoms).unwrap_or_else(|error| {
-            failure.get_or_insert(error);
-            Ordering::Equal
-        })
-    });
-    let distinct = failure.is_none()
-        && ordered.windows(2).all(|pair| {
-            pair[0].0 != pair[1].0
-                && !matches!(
-                    pair[0].0.compare_exact(&pair[1].0, atoms),
-                    Ok(Ordering::Equal)
-                )
-        });
+    ordered.sort_by(|(left, _), (right, _)| left.order_exact(right, atoms));
+    let distinct = ordered
+        .windows(2)
+        .all(|pair| pair[0].0 != pair[1].0 && pair[0].0.order_exact(&pair[1].0, atoms).is_ne());
     if distinct {
         SelectValueChoices::Ordered(ordered)
     } else {
@@ -3206,9 +3194,7 @@ fn sort_map_key_pairs(
         ));
     }
     pairs.sort_by(|(left, _), (right, _)| match (left, right) {
-        (Operand::Value(left), Operand::Value(right)) => {
-            flatmap_order(left, right, atoms).unwrap_or(Ordering::Equal)
-        }
+        (Operand::Value(left), Operand::Value(right)) => flatmap_order(left, right, atoms),
         _ => matches!(left, Operand::Value(_)).cmp(&matches!(right, Operand::Value(_))),
     });
     Ok(pairs)

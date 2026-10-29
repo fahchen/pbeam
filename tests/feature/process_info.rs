@@ -1,6 +1,6 @@
-//! Compare `erlang:process_info(Pid, links)` of the pinned ERTS with the
-//! same call on the `pbeam` binary. The probe prints the registered name of
-//! each link, or `unnamed`, so the run needs no pid of another run.
+//! Compare `erlang:process_info/2` of the pinned ERTS with the same call
+//! on the `pbeam` binary. The probes print registered names and item values
+//! that need no pid of another run.
 
 use std::process::Command;
 
@@ -17,6 +17,22 @@ use boot::{BOOT_MODULES, boot_beam, otp_root};
 use common::pinned_beam_path;
 
 const PROCESS_INFO_PROBE: &str = "fixtures/boot/process_info_probe.beam";
+
+#[test]
+fn reads_the_messages_of_a_process_as_pinned_erts() {
+    // The `messages` item gives the queue in arrival order: a sleeping
+    // child holds [a,b], the caller holds [] (`erl_bif_info.c`).
+    assert_eq!(run(&mut erts("messages")), run(&mut pbeam("messages")));
+}
+
+#[test]
+fn reads_the_items_of_another_process_as_pinned_erts() {
+    // A read of another process reports each item from the values that
+    // `process_info/1` reads: a child in `wait/0` waits with an empty
+    // dictionary, a false `trap_exit`, the default error handler, its
+    // current function, and its start MFA (`erl_bif_info.c`).
+    assert_eq!(run(&mut erts("items")), run(&mut pbeam("items")));
+}
 
 #[test]
 fn reads_the_links_of_a_process_as_pinned_erts() {

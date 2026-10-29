@@ -4546,7 +4546,7 @@ fn update_map_exact(
     mut pairs: Vec<(Term, Term)>,
     atoms: &AtomTable,
 ) -> Result<Option<Term>, BeamError> {
-    Map::sort_pairs(&mut pairs, atoms)?;
+    Map::sort_pairs(&mut pairs, atoms);
     Ok(entries
         .update(
             pairs

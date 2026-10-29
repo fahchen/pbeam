@@ -511,3 +511,32 @@ fn is_binary_rejects_a_bitstring_with_tail_bits() {
         );
     }
 }
+
+#[test]
+fn charges_an_item_with_its_queue_or_dictionary_size() {
+    // `erts_process_info` charges floor(Messages / 4) for `messages`
+    // (`erl_bif_info.c:1735`) and for `memory` (`erl_bif_info.c:2066-2067`),
+    // and floor(Entries / 4) for `dictionary` (`erl_bif_info.c:1969`). The
+    // value of a dictionary item holds one tuple for each entry.
+    let item = |name: &str| Term::static_atom(name);
+    let dictionary = Term::tuple(vec![
+        item("dictionary"),
+        Term::list_from(
+            (0..5).map(|key| Term::tuple(vec![Term::Integer(key), Term::Integer(key)])),
+        ),
+    ]);
+    // 7 messages and 5 entries each give floor(7 / 4) = 1 and
+    // floor(5 / 4) = 1; `status` has no size-dependent cost.
+    assert_eq!(
+        super::item_reductions(&item("messages"), &Term::nil(), 7, false),
+        1
+    );
+    assert_eq!(
+        super::item_reductions(&item("dictionary"), &dictionary, 0, false),
+        1
+    );
+    assert_eq!(
+        super::item_reductions(&item("status"), &Term::nil(), 7, false),
+        0
+    );
+}
