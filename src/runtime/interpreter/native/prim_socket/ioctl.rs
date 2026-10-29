@@ -108,3 +108,7 @@ pub(super) fn ioctl(
         atom(scheduler, "enotsup")?,
     ])))
 }
+
+#[cfg(test)]
+#[path = "../../../../../tests/runtime/interpreter/native/prim_socket/ioctl.rs"]
+mod tests;
