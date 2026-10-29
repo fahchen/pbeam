@@ -48,7 +48,7 @@ const FEATURES: [(&str, [bool; 2]); 5] = [
 
 /// The rows of `esock_msg_flags` (`prim_socket_nif.c:526-624`), as
 /// `(name, flag)`. A flag that the host does not define is 0.
-const MSG_FLAGS: [(&str, [i32; 2]); 12] = [
+pub(super) const MSG_FLAGS: [(&str, [i32; 2]); 12] = [
     ("cmsg_cloexec", [0, 1073741824]),
     ("confirm", [0, 2048]),
     ("ctrunc", [32, 8]),

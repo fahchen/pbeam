@@ -6002,8 +6002,12 @@ fn process_info_values(
             arity,
         } => MfaNames::Atoms(module.clone(), function.clone(), *arity),
     };
+    // A suspended process is `suspended` before `running`
+    // (`erts_process_state2status`, erl_process.c:9304-9330).
     let status = if process.exiting.is_some() {
         "exiting"
+    } else if process.suspended {
+        "suspended"
     } else if caller || process.dirty_started() {
         "running"
     } else if process.waiting {

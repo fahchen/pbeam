@@ -464,7 +464,7 @@ const AMBIENT: &[&str] = &[
 /// `effect_probe:ambient/0` also calls each entry once. `null_read/0` and
 /// `buffer/0` call the `prim_buffer` entries, and `buffer/0` calls
 /// `peek_head/1` and `copying_read/2` through `prim_buffer:read/2`.
-const LATER: [&str; 56] = [
+const LATER: [&str; 58] = [
     "prim_buffer:copying_read/2",
     "prim_buffer:find_byte_index/2",
     "prim_buffer:new/0",
@@ -512,10 +512,12 @@ const LATER: [&str; 56] = [
     "prim_socket:nif_peername/1",
     "prim_socket:nif_recv/4",
     "prim_socket:nif_recvfrom/4",
+    "prim_socket:nif_recvmsg/5",
     "prim_socket:nif_send/4",
     "prim_socket:nif_sendfile/1",
     "prim_socket:nif_sendfile/4",
     "prim_socket:nif_sendfile/5",
+    "prim_socket:nif_sendmsg/5",
     "prim_socket:nif_sendto/5",
     "prim_socket:nif_sendv/3",
     "prim_socket:nif_setopt/5",

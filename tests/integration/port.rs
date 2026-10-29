@@ -384,6 +384,20 @@ fn monitors_a_port_as_pinned_erts() {
 }
 
 #[test]
+fn queues_the_output_of_a_busy_port_as_pinned_erts() {
+    // The pipe takes what it holds and the queue keeps the rest; the port
+    // is busy between its limits, `nosuspend` gives `false`, `force` gives
+    // `notsup`, a busy port suspends the sender while another process runs,
+    // a close writes the queue first and then ends the port, and a limit
+    // that is not an integer gives `badarg` (sys_drivers.c:1058-1135,
+    // 1455-1493; erl_bif_port.c:175-230, 824-825, 920-975).
+    assert_runs(
+        "busy()",
+        "[false,true,{error,notsup},{error,badarg},false,true,{100,true},true,[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}],{error,badarg},true,true,{70,true},true,normal,<<55,49,54,56,48,10>>,{70,true},epipe,undefined,{status,suspended},{error,badarg},[{error,notsup},false,false]]",
+    );
+}
+
+#[test]
 fn registers_a_port_name_as_pinned_erts() {
     // A port name works in whereis/1, registered/0, port_info/1,2, each
     // send form, the port BIFs, and monitor/2, and the port loses it at
@@ -414,18 +428,17 @@ fn stops_the_run_for_each_port_part_that_is_not_implemented() {
             "unsupported open_port/2 option {line, L} whose low 32 bits are not positive",
         ),
         (
-            "busy_limits",
-            "unsupported open_port/2 option busy_limits_port",
-        ),
-        (
             "empty_line",
             "unsupported open_port/2 option {line, L} whose low 32 bits are not positive",
+        ),
+        (
+            "tcp_options",
+            "unsupported erlang:port_command/3 options of a tcp_inet port",
         ),
         (
             "fd_list",
             "unsupported open_port/2 without the binary option",
         ),
-        ("force", "unsupported erlang:port_command/3 options"),
     ] {
         let argument = Term::Atom(program.atom(case).unwrap());
         let error = program

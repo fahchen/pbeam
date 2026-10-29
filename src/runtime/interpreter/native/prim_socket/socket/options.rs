@@ -647,7 +647,7 @@ fn named_value(table: &[(i32, &str)], name: Option<&str>) -> Option<i32> {
 /// Return the `int` of `decode_ip_tos` (`prim_socket_nif.c:16087-16219`):
 /// an integer, a TOS atom shifted by 1, a DSCP atom shifted by 2, or the
 /// map of `decode_iptos_tos_value`.
-fn decode_tos(scheduler: &Scheduler, value: &Term) -> Option<i32> {
+pub(super) fn decode_tos(scheduler: &Scheduler, value: &Term) -> Option<i32> {
     if matches!(value, Term::Integer(_) | Term::BigInt(_) | Term::Float(_)) {
         return int(value);
     }
@@ -678,7 +678,7 @@ fn decode_tos_map(scheduler: &Scheduler, value: &Term) -> Option<i32> {
 /// `#{native => Value, tos => #{precedence => Prec, tos => Tos}, dscp =>
 /// Dscp}`, with an atom for each known value and an integer for each other
 /// value.
-fn tos_term(scheduler: &mut Scheduler, value: i32) -> Result<Term, BeamError> {
+pub(super) fn tos_term(scheduler: &mut Scheduler, value: i32) -> Result<Term, BeamError> {
     let mut name = |table: &[(i32, &str)], native: i32| -> Result<Term, BeamError> {
         match table.iter().find(|(entry, _)| *entry == native) {
             Some((_, name)) => atom(scheduler, name),
