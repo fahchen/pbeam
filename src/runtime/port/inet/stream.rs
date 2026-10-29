@@ -561,9 +561,9 @@ impl Inet {
     /// `{error, enotconn}` (12506-12521). The sends that arrived while the
     /// port was busy then run (see [`Self::unbusy`]).
     pub(in crate::runtime) fn send_timeout_expired(&mut self) -> Vec<Event> {
-        let Some(sender) = self.stream.busy.take() else {
-            return Vec::new();
-        };
+        // `Scheduler::tcp_send_timeout` runs this only for the busy send
+        // that holds the timer.
+        let sender = self.stream.busy.take().expect("a send waits for the timer");
         let mut events = vec![Event::Replied {
             sender,
             result: Err("timeout".to_owned()),
