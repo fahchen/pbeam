@@ -501,6 +501,26 @@ fn sets_msfilter_and_gets_pktoptions_as_pinned_erts() {
 }
 
 #[test]
+fn receives_with_the_otp_options_select_read_and_rcvbuf_count_as_pinned_erts() {
+    // `kernel_boot_probe:sockopt_select_read/0` runs `{otp, select_read}`
+    // `true` and `{otp, rcvbuf}` `{N, Size}` (prim_socket_nif.c:8193-8222,
+    // 11838-11844): `{more, Bin}` until N buffers came
+    // (unix_socket_syncio.c:10050-10137), `{select_read, ...}` of
+    // `nif_recv/4` and `nif_recvfrom/4` with a reference and its select
+    // message (unix_socket_syncio.c:3967-3970, 10122-10125, 10275-10310),
+    // and an accepted socket, which inherits `rNum` but not `selectRead`
+    // (unix_socket_syncio.c:2843-2850).
+    let (reference, status, node) =
+        run_kernel_boot("sockopt_select_read", false, &["{sockopt_select_read,"]);
+    assert_eq!(status, Some(0), "ERTS");
+    assert!(
+        reference.contains("[{more,<<\"0123\">>},{ok,<<\"4567\">>},{ok,<<\"89abcdef\">>}]"),
+        "{reference}"
+    );
+    assert_eq!(node, reference, "PBeam");
+}
+
+#[test]
 fn sets_and_gets_the_otp_socket_options_and_linger_as_pinned_erts() {
     // `kernel_boot_probe:sockopt_otp/0` runs the handlers of
     // `esock_setopt_otp` and `esock_getopt_otp`

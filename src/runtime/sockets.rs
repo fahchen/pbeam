@@ -243,6 +243,10 @@ pub(super) struct OtpOptions {
     pub(super) iow: bool,
     /// `rBufSz`, the buffer size of a receive with length 0.
     pub(super) recv_buffer: usize,
+    /// `rNum`, the count `N` of `{otp, rcvbuf}` `{N, Size}`: a receive with
+    /// length 0 that fills the buffer gives `{more, Bin}` until `N` buffers
+    /// came (`unix_socket_syncio.c:10050-10090`), or 0.
+    pub(super) recv_count: u32,
     /// `rCtrlSz`, the value of `{otp, rcvctrlbuf}`.
     pub(super) recv_ctrl: usize,
     /// `wCtrlSz`, the value of `{otp, sndctrlbuf}`.
@@ -257,6 +261,7 @@ impl Default for OtpOptions {
         Self {
             iow: false,
             recv_buffer: 8 * 1024,
+            recv_count: 0,
             recv_ctrl: 1024,
             send_ctrl: 1024,
         }
@@ -301,6 +306,11 @@ pub(super) struct SocketState {
     pub(super) counters: IoCounters,
     /// The `otp` level options.
     pub(super) options: OtpOptions,
+    /// `selectRead`, the value of `{otp, select_read}`, which an accepted
+    /// socket does not inherit (`unix_socket_syncio.c:2843-2850`).
+    pub(super) select_read: bool,
+    /// `rNumCnt`, the buffers of [`OtpOptions::recv_count`] that came.
+    pub(super) recv_count_done: u32,
 }
 
 impl SocketState {
