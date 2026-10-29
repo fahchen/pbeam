@@ -4980,24 +4980,23 @@ fn deliver_to(
             scheduler.send_alias_message(reference, message);
             return Ok(Ok(Sent::Local));
         }
-        Destination::Name(atom) => {
-            let name = scheduler.atoms.name_of(atom);
-            match scheduler.whereis(name) {
-                Some(target) => Some(target),
-                None => return Ok(Err(BifResult::badarg())),
-            }
-        }
-        Destination::NodeName(atom) => scheduler.whereis(scheduler.atoms.name_of(atom)),
+        // A name of a port sends to the port (`erts_whereis_name`,
+        // register.c:309-380).
+        Destination::Name(atom) => match scheduler.name_owner(scheduler.atoms.name_of(atom)) {
+            Some(Named::Process(target)) => Some(target),
+            Some(Named::Port(id)) => return port_send(scheduler, id, &message),
+            None => return Ok(Err(BifResult::badarg())),
+        },
+        Destination::NodeName(atom) => match scheduler.name_owner(scheduler.atoms.name_of(atom)) {
+            Some(Named::Process(target)) => Some(target),
+            Some(Named::Port(id)) => return port_send(scheduler, id, &message),
+            None => None,
+        },
         Destination::Remote(node) => {
             scheduler.send_to_remote_node(node);
             return Ok(Ok(Sent::NoConnect));
         }
-        Destination::Port(id) => {
-            return Ok(match erts_internal::port_bang(scheduler, id, &message)? {
-                Some(denied) => Err(denied),
-                None => Ok(Sent::Local),
-            });
-        }
+        Destination::Port(id) => return port_send(scheduler, id, &message),
     };
     if let Some(target) = target {
         if let Some(denied) = io_service::send_denial(scheduler, target, &message)? {
@@ -5007,6 +5006,19 @@ fn deliver_to(
         scheduler.send_message(caller, target, message);
     }
     Ok(Ok(Sent::Local))
+}
+
+/// Send `message` to the port `id`, as `Port ! Message` does (see
+/// [`erts_internal::port_bang`]).
+fn port_send(
+    scheduler: &mut Scheduler,
+    id: crate::term::PortId,
+    message: &Term,
+) -> Result<Result<Sent, BifResult>, BeamError> {
+    Ok(match erts_internal::port_bang(scheduler, id, message)? {
+        Some(denied) => Err(denied),
+        None => Ok(Sent::Local),
+    })
 }
 
 /// Run `erlang:unregister(Name)`: remove the registered name `Name` and
