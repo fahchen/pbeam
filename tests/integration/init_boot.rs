@@ -628,6 +628,29 @@ fn receives_with_flags_on_inet_sockets_as_pinned_erts() {
 }
 
 #[test]
+fn sends_and_receives_messages_with_control_data_as_pinned_erts() {
+    // `kernel_boot_probe:socket_msg/0` runs `socket:sendmsg/2,3,4` and
+    // `socket:recvmsg/1,2,3,4,5` on the NIFs `nif_sendmsg/5` and
+    // `nif_recvmsg/5` (prim_socket_nif.c:6619-6675, 7265-7429;
+    // unix_socket_syncio.c:3099-3355, 3987-4105, 7214-7713, 9021-9142): the
+    // control messages of the tables of prim_socket_nif.c:15645-15758 that
+    // the host sends and gives, the `{invalid, ctrl}` cases, a truncated
+    // datagram, a short control buffer, a stream socket, and the counters.
+    // On macOS it also runs `socket:sendmmsg/4` and `socket:recvmmsg/6`,
+    // whose NIFs raise `error:notsup` there
+    // (unix_socket_syncio.c:4297-4309, 4526-4537).
+    let (reference, status, node) = run_kernel_boot("socket_msg", false, &["{socket_msg,"]);
+    assert_eq!(status, Some(0), "ERTS");
+    assert!(
+        reference.starts_with(
+            "{socket_msg,[{error,timeout},ok,{ok,[{addr,true},{ctrl,[]},{flags,[]},{iov,[<<\"hello\">>]}]},"
+        ),
+        "{reference}"
+    );
+    assert_eq!(node, reference, "PBeam");
+}
+
+#[test]
 fn sends_io_vectors_as_pinned_erts() {
     // `kernel_boot_probe:socket_sendv/0` runs `socket:sendv/2,3` on the NIF
     // `nif_sendv/3` (prim_socket_nif.c:6777-6822; unix_socket_syncio.c:3361-3524):
@@ -709,6 +732,16 @@ fn stops_the_run_at_the_socket_calls_that_pbeam_does_not_support() {
         probes.push((
             "socket_recvfrom_errqueue",
             "prim_socket:nif_recvfrom/4: the flags 8192 on a socket of the domain 2 are not supported",
+        ));
+        // ERTS on Linux runs `sendmmsg(2)` and `recvmmsg(2)`
+        // (unix_socket_syncio.c:4111-4524).
+        probes.push((
+            "socket_sendmmsg",
+            "prim_socket:nif_sendmmsg/4 is not supported: see \"NIF stubs\" in docs/erts-differences.md",
+        ));
+        probes.push((
+            "socket_recvmmsg",
+            "prim_socket:nif_recvmmsg/6 is not supported: see \"NIF stubs\" in docs/erts-differences.md",
         ));
     }
     for (probe, text) in probes {

@@ -276,3 +276,201 @@ fn counts_each_read_attempt_of_a_timed_read() {
     assert_eq!(printed(&scheduler, result), "select");
     assert_eq!(counters(&mut scheduler), 2);
 }
+
+#[test]
+fn checks_the_arguments_of_sendmsg_and_recvmsg_in_the_nif_order() {
+    // `prim_socket:sendmsg/4` and `recvmsg/5` encode their arguments
+    // (prim_socket.erl:645-726, 840-851), so only a direct NIF call gives
+    // these terms: `nif_sendmsg` checks the socket, `Ref` and `Msg`, then
+    // `Flags` (prim_socket_nif.c:6636-6653), and `nif_recvmsg` checks the
+    // socket, `Ref`, `BufSz`, `CtrlSz`, and `Flags`
+    // (prim_socket_nif.c:7287-7389).
+    let mut scheduler = scheduler();
+    let (_, socket) = resource(&mut scheduler, |_| {});
+    let reference = Term::Reference(scheduler.make_ref().unwrap());
+    let message = Term::Map(crate::term::Map::new());
+    let zero = Term::Integer(0);
+    let atom = Term::static_atom("ok");
+    let big = Term::Integer(1 << 40);
+    let negative = Term::Integer(-1);
+    let above = Term::from_bigint(num_bigint::BigInt::from(1_u64 << 63));
+    let iov = Term::Nil;
+    let badarg = format!("{:?}", BifResult::badarg());
+    let send = |scheduler: &mut Scheduler,
+                socket: &Term,
+                message: &Term,
+                flags: &Term,
+                reference: &Term| {
+        format!(
+            "{:?}",
+            sendmsg(scheduler, socket, message, flags, reference, &iov).unwrap()
+        )
+    };
+    assert_eq!(
+        send(&mut scheduler, &zero, &message, &zero, &reference),
+        badarg
+    );
+    assert_eq!(
+        send(&mut scheduler, &socket, &message, &zero, &zero),
+        badarg
+    );
+    assert_eq!(
+        send(&mut scheduler, &socket, &zero, &zero, &reference),
+        badarg
+    );
+    assert_eq!(
+        send(&mut scheduler, &socket, &message, &atom, &reference),
+        badarg
+    );
+    let result = sendmsg(&mut scheduler, &socket, &message, &big, &reference, &iov);
+    assert_eq!(
+        printed(&scheduler, result),
+        "{invalid,{integer_range,1099511627776}}"
+    );
+    let receive = |scheduler: &mut Scheduler, arguments: [&Term; 5]| {
+        recvmsg(
+            scheduler,
+            arguments[0],
+            arguments[1],
+            arguments[2],
+            arguments[3],
+            arguments[4],
+        )
+    };
+    for arguments in [
+        [&zero, &zero, &zero, &zero, &reference],
+        [&socket, &zero, &zero, &zero, &atom],
+        [&socket, &atom, &zero, &zero, &reference],
+        [&socket, &zero, &atom, &zero, &reference],
+        [&socket, &zero, &zero, &atom, &reference],
+    ] {
+        let result = receive(&mut scheduler, arguments);
+        assert_eq!(format!("{:?}", result.unwrap()), badarg);
+    }
+    let result = receive(
+        &mut scheduler,
+        [&socket, &negative, &zero, &zero, &reference],
+    );
+    assert_eq!(printed(&scheduler, result), "{invalid,{integer_range,-1}}");
+    let result = receive(
+        &mut scheduler,
+        [&socket, &zero, &negative, &zero, &reference],
+    );
+    assert_eq!(printed(&scheduler, result), "{invalid,{integer_range,-1}}");
+    let result = receive(&mut scheduler, [&socket, &zero, &zero, &big, &reference]);
+    assert_eq!(
+        printed(&scheduler, result),
+        "{invalid,{integer_range,1099511627776}}"
+    );
+    let result = receive(&mut scheduler, [&socket, &above, &zero, &zero, &reference]);
+    assert!(error_text(result).contains("the length 9223372036854775808 above the ssize_t range"));
+}
+
+#[test]
+fn checks_the_state_address_and_iov_of_sendmsg_and_the_state_of_recvmsg() {
+    // `essio_sendmsg` checks the state, then `addr`, then the I/O vector
+    // (unix_socket_syncio.c:3127-3260). `prim_socket:sendmsg/4` encodes a
+    // valid address and checks the I/O vector first (prim_socket.erl:645-726),
+    // so a fixture gives none of these results.
+    let mut scheduler = scheduler();
+    let reference = Term::Reference(scheduler.make_ref().unwrap());
+    let zero = Term::Integer(0);
+    let atoms = &scheduler.atoms;
+    let entry = |name: &str, value: Term| (Term::Atom(atoms.put(name).unwrap()), value);
+    let family = entry("family", Term::Atom(atoms.put("inet").unwrap()));
+    let address = Term::Map(crate::term::Map::from_pairs(vec![family], atoms).unwrap());
+    let message =
+        Term::Map(crate::term::Map::from_pairs(vec![entry("addr", address)], atoms).unwrap());
+    let empty = Term::Map(crate::term::Map::new());
+    let (_, closed) = resource(&mut scheduler, |state| {
+        state.write = CLOSED;
+        state.read = CLOSED;
+    });
+    let result = sendmsg(
+        &mut scheduler,
+        &closed,
+        &empty,
+        &zero,
+        &reference,
+        &Term::Nil,
+    );
+    assert_eq!(printed(&scheduler, result), "{error,closed}");
+    let result = recvmsg(&mut scheduler, &closed, &zero, &zero, &zero, &reference);
+    let (_, socket) = datagram(&mut scheduler);
+    assert_eq!(printed(&scheduler, result), "{error,closed}");
+    let result = sendmsg(
+        &mut scheduler,
+        &socket,
+        &message,
+        &zero,
+        &reference,
+        &Term::Nil,
+    );
+    assert_eq!(printed(&scheduler, result), "{invalid,addr}");
+    let result = sendmsg(&mut scheduler, &socket, &empty, &zero, &reference, &zero);
+    assert_eq!(printed(&scheduler, result), "{invalid,iov}");
+    let long: Vec<Term> = (0..=IOV_MAX).map(|_| Term::binary(vec![1])).collect();
+    let result = sendmsg(
+        &mut scheduler,
+        &socket,
+        &empty,
+        &zero,
+        &reference,
+        &Term::list_from(long),
+    );
+    assert_eq!(printed(&scheduler, result), "{invalid,iov}");
+}
+
+#[test]
+fn stops_the_run_for_recvmsg_on_a_socket_whose_source_address_is_not_known() {
+    // The safe `recvmsg` of nix reads an address that it does not
+    // initialize when the kernel gives one of length 0, as on a local socket
+    // of an unbound peer (row "NIF stubs").
+    let mut scheduler = scheduler();
+    let (_, socket) = resource(&mut scheduler, |state| state.domain = libc::AF_UNIX);
+    let reference = Term::Reference(scheduler.make_ref().unwrap());
+    let zero = Term::Integer(0);
+    let result = recvmsg(&mut scheduler, &socket, &zero, &zero, &zero, &reference);
+    assert!(
+        error_text(result)
+            .contains("prim_socket:nif_recvmsg/5: the flags 0 on a socket of the domain 1")
+    );
+}
+
+#[test]
+fn encodes_each_message_flag_of_the_host_and_the_other_bits() {
+    // `esock_encode_msg_flags` names each flag of `esock_msg_flags` and
+    // gives the other bits as one integer (prim_socket_nif.c:14235-14251).
+    let mut scheduler = scheduler();
+    let trunc = MSG_FLAGS
+        .iter()
+        .find(|(name, _)| *name == "trunc")
+        .unwrap()
+        .1[HOST];
+    let ctrunc = MSG_FLAGS
+        .iter()
+        .find(|(name, _)| *name == "ctrunc")
+        .unwrap()
+        .1[HOST];
+    let term = message_flags_term(&mut scheduler, trunc | ctrunc | 1 << 29).unwrap();
+    let text = String::from_utf8(crate::term::print_term(&term, &scheduler.atoms)).unwrap();
+    assert_eq!(text, "[ctrunc,trunc,536870912]");
+    let term = message_flags_term(&mut scheduler, 0).unwrap();
+    assert_eq!(term, Term::Nil);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn stops_the_run_for_sendmmsg_and_recvmmsg_on_linux() {
+    // ERTS runs `sendmmsg(2)` and `recvmmsg(2)` on Linux
+    // (unix_socket_syncio.c:4111-4524); PBeam does not yet.
+    let mut scheduler = scheduler();
+    assert!(
+        error_text(sendmmsg(&mut scheduler))
+            .contains("prim_socket:nif_sendmmsg/4 is not supported")
+    );
+    assert!(
+        error_text(recvmmsg(&mut scheduler))
+            .contains("prim_socket:nif_recvmmsg/6 is not supported")
+    );
+}

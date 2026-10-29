@@ -17,7 +17,10 @@ use std::sync::{Arc, Mutex};
 use nix::sys::socket::{SockaddrStorage, UnixAddr};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
+mod cmsg;
 mod options;
+
+pub(super) use cmsg::{decode_cmsgs, encode_cmsgs};
 
 use super::supports::atom;
 use super::*;
@@ -530,7 +533,7 @@ pub(super) fn sockaddr(
 
 /// Return the value of the atom key `name` of the map `map`, or `None`
 /// for a map without the key or a term that is not a map.
-fn field<'a>(atoms: &AtomTable, map: &'a Term, name: &str) -> Option<&'a Term> {
+pub(super) fn field<'a>(atoms: &AtomTable, map: &'a Term, name: &str) -> Option<&'a Term> {
     let key = Term::Atom(atoms.get(name)?);
     match map {
         Term::Map(map) => map.get(&key),
