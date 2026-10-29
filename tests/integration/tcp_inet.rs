@@ -356,6 +356,14 @@ fn stops_the_run_for_each_udp_inet_part_that_is_not_implemented() {
             "short_count",
             "unsupported udp_inet option active with a count of fewer than 2 bytes",
         ),
+        (
+            "short_membership",
+            "unsupported udp_inet option membership with fewer than 12 bytes",
+        ),
+        (
+            "short_membership6",
+            "unsupported udp_inet option membership with fewer than 20 bytes",
+        ),
     ] {
         let argument = Term::Atom(program.atom(case).unwrap());
         let error = program
@@ -1123,6 +1131,27 @@ fn sets_and_gets_the_udp_inet_socket_options_as_pinned_erts() {
     let expected = "{{ok,[{broadcast,false},{dontroute,false},{multicast_ttl,1},{multicast_loop,true},{buffer,9216}]},ok,{ok,[{broadcast,true},{dontroute,true},{multicast_ttl,255},{multicast_loop,false},{buffer,9216}]},ok,255,true,[{10000,true},{65536,true},{1,true},{1,true}]}";
     assert_eq!(erts_text("udp_probe", "options"), expected, "ERTS");
     assert_eq!(pbeam_text("udp_probe", "options"), expected, "PBeam");
+}
+
+#[test]
+fn runs_the_udp_inet_multicast_options_as_pinned_erts() {
+    // `multicast_if`, `add_membership`, and `drop_membership`
+    // (inet_drv.c:7589-7802) and `GETOPTS` of `multicast_if`
+    // (inet_drv.c:9497-9528), with a send to a group that a socket joined on
+    // the loopback interface.
+    let expected = "{[ok,ok],ok,{ok,{{127,0,0,1},true,<<109>>}},ok,{error,timeout},ok,100,[ok,{error,einval},ok,ok,{ok,[{buffer,9216}]},{error,einval},[0,101,105,110,118,97,108]],true,[{error,einval},{error,einval},{error,einval}],[[101,105,110,118,97,108],65535]}";
+    assert_eq!(erts_text("udp_probe", "multicast"), expected, "ERTS");
+    assert_eq!(pbeam_text("udp_probe", "multicast"), expected, "PBeam");
+}
+
+#[test]
+fn gives_zero_for_the_bytes_of_multicast_if_that_erts_does_not_write() {
+    // ERTS gives 4 bytes of reply memory that the driver does not write
+    // (inet_drv.c:9502-9526), so only PBeam has one result.
+    assert_eq!(
+        pbeam_text("udp_probe", "multicast_if"),
+        "{{ok,[{multicast_if,{0,0,0,0}}]},{ok,[{multicast_if,0}]}}"
+    );
 }
 
 #[test]
