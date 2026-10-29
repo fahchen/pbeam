@@ -215,6 +215,8 @@ fn rejects_list_and_tuple_keys_with_unsupported_elements() {
         )
     };
     let unsupported = [
+        // A key that is not supported.
+        match_context(),
         Term::list_from(vec![Term::Integer(1), port_map()]),
         Term::list_from(vec![Term::list_from(vec![port_map()])]),
         // A tuple with an element that is not supported.
