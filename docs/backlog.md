@@ -97,6 +97,14 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a consumer that reads `os_pid` after a failed start.
 - **Source:** the review of PR #1334 (#1203) and the owner decision of 2026-10-29.
 
+### Run the ioctl requests of prim_socket with raw ioctl
+
+- **Now:** `socket:ioctl/2,3,4` gives the ERTS argument errors and `{error, enotsup}`, but each request that the pinned ERTS runs with `ioctl(2)` (`gifconf`, `gifname`, `gifindex`, the interface flag, address, netmask, hardware address, MTU and queue length requests, `nread`, `nwrite`, `nspace`, `atmark`, `tcp_info`) stops the run with a clear runtime error. Row "NIF stubs" of `docs/erts-differences.md` records it.
+- **Reason:** the safe calls do not give the ERTS results: glibc `if_indextoname` changes `ENODEV` to `ENXIO`, the `getifaddrs` flags have more than 16 bits, and macOS `SIOCGIFCONF` also gives link-layer entries. A match needs raw `libc::ioctl` calls, which are new `unsafe` and need the owner's approval.
+- **Option:** raw `ioctl(2)` calls limited to `src/runtime/interpreter/native/prim_socket/ioctl.rs`, each with a SAFETY comment and counted in AGENTS.md, as for `raw_set` and `raw_get` of #1209.
+- **Trigger:** an application that calls one of these requests, and the owner's approval of the `unsafe`.
+- **Source:** PR #1380 (#1211); #1382 closed as not planned on 2026-10-30.
+
 ### Free magic-reference resources when the last reference term is dropped
 
 - **Now:** the compiled programs of ETS select continuations, the compiled binary patterns, and the atomics and counters arrays stay until the run ends, where ERTS frees each one with the last reference term (`erl_db_util.h:617-619`). A `Reference` term is a plain `u64`, so PBeam cannot see when the last term goes.
