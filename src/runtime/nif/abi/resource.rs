@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use super::Handle;
 use super::env::Env;
+use super::layout::{DownFn, ErlNifResourceTypeInit};
 use crate::AtomTable;
 use crate::Term;
 use crate::term::Reference;
@@ -55,6 +56,8 @@ struct Entry {
 pub(crate) struct ResourceType {
     /// The destructor, or `None`.
     dtor: Option<DtorFn>,
+    /// The down callback of `enif_monitor_process`, or `None`.
+    down: Option<DownFn>,
     /// The atom table of the load, for the env of the destructor.
     atoms: Arc<AtomTable>,
     /// The library of the load.
@@ -67,6 +70,25 @@ impl ResourceType {
     pub(super) fn new(dtor: Option<DtorFn>, atoms: Arc<AtomTable>, library: Arc<Handle>) -> Self {
         Self {
             dtor,
+            down: None,
+            atoms,
+            _library: library,
+        }
+    }
+
+    /// Return a new type with the callbacks of `init`, which a library of
+    /// NIF 2.16 or newer gives: ERTS reads the fields from the last one
+    /// down, so a struct of `members` members has only its first
+    /// `members` callbacks (`erl_nif.c:2747-2756`).
+    pub(super) fn with_init(
+        init: &ErlNifResourceTypeInit,
+        atoms: Arc<AtomTable>,
+        library: Arc<Handle>,
+    ) -> Self {
+        let members = init.members.max(0);
+        Self {
+            dtor: (members >= 1).then_some(init.dtor).flatten(),
+            down: (members >= 3).then_some(init.down).flatten(),
             atoms,
             _library: library,
         }
@@ -179,6 +201,17 @@ pub(super) fn keep(data: usize) {
 pub(super) fn release(data: usize) {
     let released = lock().get_mut(&data).and_then(|entry| entry.kept.pop());
     drop(released);
+}
+
+/// Return whether the type of the object at `data` has the down callback
+/// of `enif_monitor_process`, which ERTS keeps in the monitors of the
+/// object: without it, `enif_monitor_process` gives -1
+/// (`erl_nif.c:3947-3952`).
+pub(super) fn has_down(data: usize) -> bool {
+    lock()
+        .get(&data)
+        .and_then(|entry| entry.object.upgrade())
+        .is_some_and(|object| object.kind.down.is_some())
 }
 
 /// `ERL_NIF_RT_CREATE` of `ErlNifResourceFlags` (`erl_nif.h:188-192`).
