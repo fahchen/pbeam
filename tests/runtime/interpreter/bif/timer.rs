@@ -3,6 +3,7 @@
 //! compiled fixture also drives.
 
 use super::*;
+use crate::runtime::scheduler::node::ReceiverSite;
 use crate::runtime::timer::Timers;
 
 #[test]
@@ -71,7 +72,7 @@ fn reads_and_cancels_an_active_timer_of_the_node() {
         let index = scheduler.index();
         scheduler
             .node()
-            .register_timer(reference, index, 1_000_000_000, None, false);
+            .register_timer(reference, index, 1_000_000_000, None, ReceiverSite::Local);
         let mut context = BifContext {
             scheduler: &mut scheduler,
         };

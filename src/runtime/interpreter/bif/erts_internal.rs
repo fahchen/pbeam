@@ -214,6 +214,10 @@ const UNSUPPORTED_TUPLE_OPTIONS: [&str; 2] = ["busy_limits_port", "busy_limits_m
 /// ERTS `SysDriverOpts` and the port flags that `open_port` sets
 /// (`erl_bif_port.c:812-834`).
 #[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "mirrors the independent option flags of `SysDriverOpts` and the port flags that `open_port` sets (`erl_bif_port.c:812-834`)"
+)]
 struct PortSettings {
     /// `use_stdio` (the default) or `nouse_stdio`, and `stderr_to_stdout`.
     streams: Streams,
@@ -316,7 +320,7 @@ pub(super) fn open_port(
         .as_ref()
         .filter(|directory| !directory.is_nil())
     {
-        Some(directory) => match native_name(atoms, directory, false) {
+        Some(directory) => match native_name(atoms, directory, EmptyName::Reject) {
             Some(directory) => Some(directory),
             None => return Ok(Value(Term::static_atom("badarg"))),
         },
@@ -671,7 +675,7 @@ fn port_settings(atoms: &AtomTable, settings: &Term) -> Result<Option<PortSettin
                     result.environment = changes;
                     continue;
                 } else if option.is_static("arg0") {
-                    let Some(arg0) = native_name(atoms, &pair[1], true) else {
+                    let Some(arg0) = native_name(atoms, &pair[1], EmptyName::Allow) else {
                         return Ok(None);
                     };
                     result.arg0 = Some(arg0);
@@ -819,7 +823,9 @@ fn unsupported_option(name: &str) -> BeamError {
 /// ```
 fn port_args(atoms: &AtomTable, args: &Term) -> Option<Vec<Vec<u8>>> {
     let elements = args.proper_list()?;
-    elements.map(|arg| native_name(atoms, arg, true)).collect()
+    elements
+        .map(|arg| native_name(atoms, arg, EmptyName::Allow))
+        .collect()
 }
 
 /// The name of a port of `open_port/2`.
@@ -853,13 +859,13 @@ fn port_name(atoms: &AtomTable, name: &Term) -> Option<PortName> {
     };
     match elements.as_ref() {
         [Term::Atom(kind), name] if kind.is_static("spawn_executable") => {
-            native_name(atoms, name, false).map(PortName::Executable)
+            native_name(atoms, name, EmptyName::Reject).map(PortName::Executable)
         }
         [Term::Atom(kind), name] if kind.is_static("spawn_driver") => {
-            native_name(atoms, name, false).map(PortName::Driver)
+            native_name(atoms, name, EmptyName::Reject).map(PortName::Driver)
         }
         [Term::Atom(kind), name] if kind.is_static("spawn") => {
-            native_name(atoms, name, false).map(PortName::Command)
+            native_name(atoms, name, EmptyName::Reject).map(PortName::Command)
         }
         [Term::Atom(kind), input, output] if kind.is_static("fd") => input
             .small_integer()
@@ -867,6 +873,15 @@ fn port_name(atoms: &AtomTable, name: &Term) -> Option<PortName> {
             .map(|(input, output)| PortName::Fd(input, output)),
         _ => None,
     }
+}
+
+/// Whether `[]` is a valid name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EmptyName {
+    /// `[]` is no name.
+    Reject,
+    /// `[]` is the empty name.
+    Allow,
 }
 
 /// Return the native bytes of a file name, as
@@ -888,7 +903,7 @@ fn port_name(atoms: &AtomTable, name: &Term) -> Option<PortName> {
 /// assert_eq!(native_name(&atoms, &Term::nil(), false), None);
 /// assert_eq!(native_name(&atoms, &Term::nil(), true), Some(Vec::new()));
 /// ```
-fn native_name(atoms: &AtomTable, name: &Term, allow_empty: bool) -> Option<Vec<u8>> {
+fn native_name(atoms: &AtomTable, name: &Term, empty: EmptyName) -> Option<Vec<u8>> {
     let characters;
     let name = match name {
         Term::Binary(bytes) => {
@@ -901,7 +916,7 @@ fn native_name(atoms: &AtomTable, name: &Term, allow_empty: bool) -> Option<Vec<
             characters = Term::list_from(text.map(|c| Term::Integer(u32::from(c).into())));
             &characters
         }
-        name if name.is_nil() && !allow_empty => return None,
+        name if name.is_nil() && empty == EmptyName::Reject => return None,
         name => name,
     };
     native_filename(name, filename_encoding())
@@ -1442,8 +1457,8 @@ pub(super) fn port_control(
             events = Some((0..count).map(|_| Event::Passive).collect());
             Accept::Queued(reply)
         }
-        Control::Active { read } => {
-            events = Some(tcp.activate(read));
+        Control::Active { activation } => {
+            events = Some(tcp.activate(activation));
             Accept::Queued(vec![OK])
         }
         Control::Badarg => {
@@ -2218,7 +2233,7 @@ pub(super) fn request_system_task(
         return Ok(Value(Term::static_atom("ok")));
     }
     let refers = scheduler.check_process_code(*target, module);
-    let reply = check_process_code_reply(id.clone(), refers);
+    let reply = check_process_code_reply(id.clone(), Term::from(refers));
     scheduler.send_message(caller, caller, reply);
     Ok(Value(Term::static_atom("ok")))
 }

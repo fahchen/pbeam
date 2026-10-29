@@ -4,7 +4,7 @@ use socket2::{Domain, Socket, Type};
 
 use super::{
     super::{Control, MAGIC},
-    Event, Output, Receiver, Sender,
+    Activation, Event, Output, Receiver, Sender,
 };
 use crate::{
     runtime::port::inet::{Inet, SocketType},
@@ -127,13 +127,16 @@ fn delivers_the_buffer_when_a_socket_becomes_active() {
     let (local, mut peer) = Socket::pair(Domain::UNIX, Type::STREAM, None).unwrap();
     let mut port = Inet::new(SocketType::Stream).copy(local);
     port.active = 1;
-    assert_eq!(port.activate(false), Vec::new());
+    assert_eq!(port.activate(Activation::Deliver), Vec::new());
     port.active = 0;
     peer.write_all(&[1, 2]).unwrap();
     assert_eq!(port.receive(4), Vec::new());
     assert_eq!(port.receive_timeout(), Vec::new());
     port.active = 1;
-    assert_eq!(port.activate(false), [Event::Data(vec![1, 2])]);
+    assert_eq!(
+        port.activate(Activation::Deliver),
+        [Event::Data(vec![1, 2])]
+    );
     assert_eq!(port.active, 1);
 }
 

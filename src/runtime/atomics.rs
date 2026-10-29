@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, RwLock};
 
-use crate::term::{Reference, Term};
+use crate::term::{Reference, Signedness, Term};
 
 /// The header of an array in bytes: the magic binary of ERTS
 /// (`ERTS_MAGIC_BIN_ORIG_SIZE`, `erl_binary.h:137-140`) and the fields of
@@ -29,7 +29,7 @@ pub(super) struct Array {
     /// 64-bit integer and a write accepts the signed 64-bit range
     /// (`AtomicsRef.is_signed` and `get_value`, `erl_bif_atomics.c:45`,
     /// `112-117`).
-    signed: bool,
+    signedness: Signedness,
     /// The bits of each atomic. A write wraps around at 64 bits, as the
     /// `erts_atomic64_*` operations of the C array do. Each operation is
     /// sequentially consistent, as the `_mb` (full barrier) operations of
@@ -38,17 +38,17 @@ pub(super) struct Array {
 }
 
 impl Array {
-    /// Return whether the array holds signed atomics.
+    /// Return whether the array holds signed or unsigned atomics.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let arrays = AtomicArrays::default();
-    /// arrays.create(Reference(0), true, 1);
-    /// assert!(arrays.array(&Term::Reference(Reference(0))).unwrap().signed());
+    /// arrays.create(Reference(0), Signedness::Signed, 1);
+    /// assert_eq!(arrays.array(&Term::Reference(Reference(0))).unwrap().signedness(), Signedness::Signed);
     /// ```
-    pub(super) fn signed(&self) -> bool {
-        self.signed
+    pub(super) fn signedness(&self) -> Signedness {
+        self.signedness
     }
 
     /// Return the number of atomics of the array, as `AtomicsRef.vlen`.
@@ -184,18 +184,18 @@ impl AtomicArrays {
     ///
     /// ```rust,ignore
     /// let arrays = AtomicArrays::default();
-    /// assert!(arrays.create(Reference(0), true, 2));
+    /// assert!(arrays.create(Reference(0), Signedness::Signed, 2));
     /// assert!(arrays.array(&Term::Reference(Reference(0))).is_some());
-    /// assert!(!arrays.create(Reference(1), true, usize::MAX));
+    /// assert!(!arrays.create(Reference(1), Signedness::Signed, usize::MAX));
     /// ```
-    pub(super) fn create(&self, id: Reference, signed: bool, size: usize) -> bool {
+    pub(super) fn create(&self, id: Reference, signedness: Signedness, size: usize) -> bool {
         let mut values = Vec::new();
         if values.try_reserve_exact(size).is_err() {
             return false;
         }
         values.resize_with(size, || AtomicI64::new(0));
         let array = Arc::new(Array {
-            signed,
+            signedness,
             values: values.into_boxed_slice(),
         });
         self.arrays

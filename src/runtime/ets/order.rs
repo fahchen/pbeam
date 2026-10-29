@@ -16,7 +16,7 @@ use std::ops::Bound;
 use std::sync::Arc;
 
 use crate::error::BeamError;
-use crate::term::{AtomTable, Term};
+use crate::term::{AtomTable, Direction, Term};
 
 /// The keys of an `ordered_set` table in the ERTS term order, as the tree
 /// orders them with `cmp_key_eq` (`erl_db_tree.c:758-761`). Two keys that
@@ -185,7 +185,7 @@ impl KeyOrder {
         probe.result(found)
     }
 
-    /// Return the keys above `key` up when `forward` is true, else the keys
+    /// Return the keys above `key` up for [`Direction::Forward`], else the keys
     /// below `key` down, as `find_next` and `find_prev` step
     /// (`erl_db_tree.c:3659-3762`). The key `key` does not have to be in the
     /// order.
@@ -197,11 +197,11 @@ impl KeyOrder {
         &'a self,
         atoms: &AtomTable,
         key: &Term,
-        forward: bool,
+        direction: Direction,
     ) -> Result<Box<dyn Iterator<Item = &'a Term> + 'a>, BeamError> {
         let probe = Probe::new(|stored: &Term| key.compare(stored, atoms));
         let place = &probe as &dyn Locate;
-        let keys: Box<dyn Iterator<Item = &'a Term>> = if forward {
+        let keys: Box<dyn Iterator<Item = &'a Term>> = if direction == Direction::Forward {
             let range = (Bound::Excluded(place), Bound::Unbounded);
             Box::new(self.keys.range::<dyn Locate, _>(range).map(|key| &key.term))
         } else {

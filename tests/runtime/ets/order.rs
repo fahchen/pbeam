@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 
 use super::{KeyOrder, Locate, OrderKey, Probe};
-use crate::term::{AtomTable, Reference, Term};
+use crate::term::{AtomTable, Direction, Reference, Term};
 
 fn order(keys: &[Term]) -> (Arc<AtomTable>, KeyOrder) {
     let atoms = Arc::new(AtomTable::new());
@@ -32,12 +32,12 @@ fn keeps_one_key_for_keys_that_compare_equal() {
 fn steps_and_splits_around_a_key_that_is_not_in_the_order() {
     let (atoms, order) = order(&[Term::Integer(1), Term::Integer(3), Term::Integer(5)]);
     let above: Vec<_> = order
-        .beyond(&atoms, &Term::Float(2.0), true)
+        .beyond(&atoms, &Term::Float(2.0), Direction::Forward)
         .unwrap()
         .collect();
     assert_eq!(above, [&Term::Integer(3), &Term::Integer(5)]);
     let below: Vec<_> = order
-        .beyond(&atoms, &Term::Integer(3), false)
+        .beyond(&atoms, &Term::Integer(3), Direction::Backward)
         .unwrap()
         .collect();
     assert_eq!(below, [&Term::Integer(1)]);

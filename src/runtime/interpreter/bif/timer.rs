@@ -5,7 +5,27 @@
 use super::BifResult::Value;
 use super::{BeamError, BifContext, BifResult, Scheduler, Term, boot_denial, denial};
 use crate::runtime::capability::{CapabilityKind, Operation};
+use crate::runtime::scheduler::node::ReceiverSite;
 use crate::runtime::timer::{Receiver, Timer, Timers};
+
+/// The BIF that starts a BIF timer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum TimerKind {
+    /// `erlang:send_after/3,4`: the receiver gets the message as it is.
+    SendAfter,
+    /// `erlang:start_timer/3,4`: the receiver gets `{timeout, Reference, Msg}`.
+    StartTimer,
+}
+
+/// How `erlang:read_timer/2` gives the time left.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReadReply {
+    /// The call returns the value (`{async, false}`).
+    Value,
+    /// The caller gets the message `{read_timer, TimerRef, Result}`, and the
+    /// call returns `ok` (`{async, true}`).
+    Message,
+}
 
 /// Run `erlang:start_timer(Time, Dest, Msg, Options)`, as ERTS `start_timer_4`
 /// (`erl_hl_timer.c:2622-2642`) does: parse the option list
@@ -29,7 +49,14 @@ pub(super) fn start_timer_4(
     message: &Term,
     options: &Term,
 ) -> Result<BifResult, BeamError> {
-    setup_4(context, time, receiver, message, options, true)
+    setup_4(
+        context,
+        time,
+        receiver,
+        message,
+        options,
+        TimerKind::StartTimer,
+    )
 }
 
 /// Run `erlang:send_after(Time, Dest, Msg, Options)`, as ERTS `send_after_4`
@@ -53,7 +80,14 @@ pub(super) fn send_after_4(
     message: &Term,
     options: &Term,
 ) -> Result<BifResult, BeamError> {
-    setup_4(context, time, receiver, message, options, false)
+    setup_4(
+        context,
+        time,
+        receiver,
+        message,
+        options,
+        TimerKind::SendAfter,
+    )
 }
 
 /// Start a timer of [`start_timer_4`] and [`send_after_4`]. A bad option
@@ -65,7 +99,7 @@ pub(super) fn send_after_4(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = setup_4(&mut context, &Term::Integer(100), &Term::Pid(pid), &msg, &Term::nil(), false)?;
+/// let result = setup_4(&mut context, &Term::Integer(100), &Term::Pid(pid), &msg, &Term::nil(), TimerKind::SendAfter)?;
 /// assert!(matches!(result, BifResult::Value(Term::Reference(_))));
 /// ```
 ///
@@ -78,7 +112,7 @@ fn setup_4(
     receiver: &Term,
     message: &Term,
     options: &Term,
-    wrap: bool,
+    kind: TimerKind,
 ) -> Result<BifResult, BeamError> {
     let Some(absolute) = absolute_option(options) else {
         return Ok(BifResult::badopt());
@@ -92,7 +126,7 @@ fn setup_4(
     let Some(end) = end else {
         return Ok(BifResult::badarg_with_cause("time"));
     };
-    setup(scheduler, end, receiver, message, wrap)
+    setup(scheduler, end, receiver, message, kind)
 }
 
 /// Read the options of `start_timer/4` and `send_after/4` as
@@ -154,7 +188,7 @@ pub(super) fn read_timer(
     context: &mut BifContext<'_>,
     reference: &Term,
 ) -> Result<BifResult, BeamError> {
-    Ok(read(context, reference, false))
+    Ok(read(context, reference, ReadReply::Value))
 }
 
 /// Run `erlang:read_timer(TimerRef, Options)`, as ERTS `read_timer_2`
@@ -184,10 +218,10 @@ pub(super) fn read_timer_2(
     reference: &Term,
     options: &Term,
 ) -> Result<BifResult, BeamError> {
-    let Some(asynchronous) = async_option(options) else {
+    let Some(reply) = async_option(options) else {
         return Ok(BifResult::badarg());
     };
-    Ok(read(context, reference, asynchronous))
+    Ok(read(context, reference, reply))
 }
 
 /// Read the options of `read_timer/2` as `parse_bif_timer_options`
@@ -197,11 +231,11 @@ pub(super) fn read_timer_2(
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(async_option(&Term::nil()), Some(false));
+/// assert_eq!(async_option(&Term::nil()), Some(ReadReply::Value));
 /// assert_eq!(async_option(&Term::static_atom("async")), None);
 /// ```
-fn async_option(options: &Term) -> Option<bool> {
-    let mut asynchronous = false;
+fn async_option(options: &Term) -> Option<ReadReply> {
+    let mut reply = ReadReply::Value;
     for option in options.proper_list()? {
         let Term::Tuple(fields) = option else {
             return None;
@@ -212,15 +246,15 @@ fn async_option(options: &Term) -> Option<bool> {
         if !name.is_static("async") {
             return None;
         }
-        asynchronous = if value.is_static("true") {
-            true
+        reply = if value.is_static("true") {
+            ReadReply::Message
         } else if value.is_static("false") {
-            false
+            ReadReply::Value
         } else {
             return None;
         };
     }
-    Some(asynchronous)
+    Some(reply)
 }
 
 /// Read a BIF timer as `access_bif_timer` (`erl_hl_timer.c:2237-2340`)
@@ -237,7 +271,7 @@ fn async_option(options: &Term) -> Option<bool> {
 /// sends the request to the owner scheduler and gives `ok` at once
 /// (`erl_hl_timer.c:2272-2295`); the reply comes later. A read changes no
 /// state, so the message and its value are the same.
-fn read(context: &mut BifContext<'_>, reference: &Term, asynchronous: bool) -> BifResult {
+fn read(context: &mut BifContext<'_>, reference: &Term, reply: ReadReply) -> BifResult {
     let Term::Reference(reference) = reference else {
         return BifResult::badarg();
     };
@@ -246,7 +280,7 @@ fn read(context: &mut BifContext<'_>, reference: &Term, asynchronous: bool) -> B
         Some(end) => Term::Integer(Timers::time_left(scheduler.timers.now(), end)),
         None => Term::static_atom("false"),
     };
-    if !asynchronous {
+    if reply == ReadReply::Value {
         return Value(result);
     }
     let caller = scheduler.current_process_mut().id;
@@ -263,13 +297,13 @@ fn read(context: &mut BifContext<'_>, reference: &Term, asynchronous: bool) -> B
 /// tick `end`, as `setup_bif_timer` (`erl_hl_timer.c:1804-1871`) does:
 /// `Dest` is a pid or an atom, else `badarg`; the capability check and the
 /// runtime to boot gate run before the first effect; a new reference goes
-/// into the timer tree of a live pid; and `wrap` makes the message
-/// `{timeout, Reference, Msg}`, and else the message is `Msg`.
+/// into the timer tree of a live pid; and [`TimerKind::StartTimer`] makes
+/// the message `{timeout, Reference, Msg}`, and else the message is `Msg`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = setup(&mut scheduler, 1100, &Term::Pid(pid), &msg, false)?;
+/// let result = setup(&mut scheduler, 1100, &Term::Pid(pid), &msg, TimerKind::SendAfter)?;
 /// assert!(matches!(result, BifResult::Value(Term::Reference(_))));
 /// ```
 ///
@@ -281,7 +315,7 @@ pub(super) fn setup(
     end: i64,
     receiver: &Term,
     message: &Term,
-    wrap: bool,
+    kind: TimerKind,
 ) -> Result<BifResult, BeamError> {
     let receiver = match receiver {
         Term::Pid(id) => Receiver::Process(*id),
@@ -307,16 +341,16 @@ pub(super) fn setup(
     let node = scheduler.node();
     let active = match receiver {
         Receiver::Process(id) => match scheduler.remote_owner(id) {
-            Some(_) => node.register_timer(reference, index, end, Some(id), true),
+            Some(_) => node.register_timer(reference, index, end, Some(id), ReceiverSite::Remote),
             None => {
                 scheduler.live_process(id).is_some()
-                    && node.register_timer(reference, index, end, Some(id), false)
+                    && node.register_timer(reference, index, end, Some(id), ReceiverSite::Local)
             }
         },
-        Receiver::Name(_) => node.register_timer(reference, index, end, None, false),
+        Receiver::Name(_) => node.register_timer(reference, index, end, None, ReceiverSite::Local),
     };
     if active {
-        let message = if wrap {
+        let message = if kind == TimerKind::StartTimer {
             Term::tuple(vec![
                 Term::static_atom("timeout"),
                 Term::Reference(reference),

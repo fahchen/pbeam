@@ -374,17 +374,27 @@ pub struct Capability {
     delegable: bool,
 }
 
+/// Whether the holder of a capability gives a copy to each child that it
+/// spawns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Delegation {
+    /// The holder gives a copy to each child.
+    Delegable,
+    /// The holder can only use the capability.
+    NotDelegable,
+}
+
 impl Capability {
     /// Make a capability of `kind` that permits `operations` within
-    /// `constraint`. With `delegable`, the holder gives a copy to each child
-    /// that it spawns; else the holder can only use it.
+    /// `constraint`. With [`Delegation::Delegable`], the holder gives a copy to
+    /// each child that it spawns; else the holder can only use it.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let modules = Constraint::Only(BTreeSet::from([String::from("worker")]));
-    /// assert!(Capability::new(CapabilityKind::Process, &[Operation::Spawn], modules, true).is_ok());
-    /// assert!(Capability::new(CapabilityKind::Env, &[Operation::Spawn], Constraint::Any, false).is_err());
+    /// assert!(Capability::new(CapabilityKind::Process, &[Operation::Spawn], modules, Delegation::Delegable).is_ok());
+    /// assert!(Capability::new(CapabilityKind::Env, &[Operation::Spawn], Constraint::Any, Delegation::NotDelegable).is_err());
     /// ```
     ///
     /// # Errors
@@ -396,7 +406,7 @@ impl Capability {
         kind: CapabilityKind,
         operations: &[Operation],
         constraint: Constraint,
-        delegable: bool,
+        delegation: Delegation,
     ) -> Result<Self, BeamError> {
         let spec = kind.spec();
         if let Some(operation) = operations
@@ -418,7 +428,7 @@ impl Capability {
             kind,
             operations: Operation::set(operations),
             constraint,
-            delegable,
+            delegable: delegation == Delegation::Delegable,
         })
     }
 
@@ -430,7 +440,7 @@ impl Capability {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let spawn = Capability::new(CapabilityKind::Process, &[Operation::Spawn], Constraint::Any, false)?;
+    /// let spawn = Capability::new(CapabilityKind::Process, &[Operation::Spawn], Constraint::Any, Delegation::NotDelegable)?;
     /// assert!(spawn.permits(CapabilityKind::Process, Operation::Spawn, Some(b"lists")));
     /// assert!(!spawn.permits(CapabilityKind::Process, Operation::Link, None));
     /// ```
@@ -501,7 +511,7 @@ impl Policy for AllowAll {
     /// ```rust,ignore
     /// let capabilities = AllowAll.initial();
     /// assert_eq!(capabilities.len(), 8);
-    /// let process = Capability::new(CapabilityKind::Process, CapabilityKind::Process.operations(), Constraint::Any, true)?;
+    /// let process = Capability::new(CapabilityKind::Process, CapabilityKind::Process.operations(), Constraint::Any, Delegation::Delegable)?;
     /// assert_eq!(capabilities[0], process);
     /// ```
     fn initial(&self) -> Vec<Capability> {

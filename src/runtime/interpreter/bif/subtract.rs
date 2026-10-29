@@ -10,6 +10,15 @@ use std::cmp::Ordering;
 /// `erl_bif_lists.c:367-368`).
 const NAIVE_THRESHOLD: usize = 16;
 
+/// The list that a length stage counts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Side {
+    /// The left list of `--`.
+    Left,
+    /// The right list of `--`.
+    Right,
+}
+
 /// The stage of a subtraction (`ErtsSubtractCtxStage`,
 /// `erl_bif_lists.c:370-388`). The trap state keeps it as an integer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -244,9 +253,9 @@ impl Subtract {
     ) -> Result<BifResult, BeamError> {
         loop {
             let step = match self.stage {
-                Stage::LengthLeft => self.length(process, true)?,
+                Stage::LengthLeft => self.length(process, Side::Left)?,
                 Stage::NaiveLeft => self.naive_left(process)?,
-                Stage::LengthRight => self.length(process, false)?,
+                Stage::LengthRight => self.length(process, Side::Right)?,
                 Stage::NaiveRight => self.naive_right(process)?,
                 Stage::SetBuild => self.set_build(process, atoms)?,
                 Stage::SetFinish => self.set_finish(process, atoms)?,
@@ -281,13 +290,13 @@ impl Subtract {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let step = state.length(&mut process, true)?;
+    /// let step = state.length(&mut process, Side::Left)?;
     /// ```
     #[expect(
         clippy::unnecessary_wraps,
         reason = "stage method of `subtract`; every stage returns `Result<Step, BeamError>`"
     )]
-    fn length(&mut self, process: &mut ProcessState, left: bool) -> Result<Step, BeamError> {
+    fn length(&mut self, process: &mut ProcessState, side: Side) -> Result<Step, BeamError> {
         const ELEMENTS_PER_RED: usize = 32;
         let budget = ELEMENTS_PER_RED * process.bif_reductions_or_zero();
         let mut elements = self.iterator.list_iter().expect("a stage walks a list");
@@ -298,7 +307,7 @@ impl Subtract {
         }
         process.bump_reductions((count / ELEMENTS_PER_RED) as i32);
         self.iterator = rest;
-        if left {
+        if side == Side::Left {
             self.left_remaining += count;
         } else {
             self.right_remaining += count;
@@ -306,7 +315,7 @@ impl Subtract {
         if self.iterator.is_nonempty_list() {
             return Ok(Step::Trap);
         }
-        if left {
+        if side == Side::Left {
             if (1..=NAIVE_THRESHOLD).contains(&self.left_remaining) && self.right.is_nonempty_list()
             {
                 self.stage = Stage::NaiveLeft;

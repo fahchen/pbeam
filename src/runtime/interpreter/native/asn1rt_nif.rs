@@ -199,16 +199,16 @@ impl Per<'_> {
 
     /// Add one bit, as the cases 0 and 1 of `per_complete` and of
     /// `per_insert_octets_as_bits` do. Return whether a new byte starts.
-    fn insert_bit(&mut self, bit: bool) -> bool {
+    fn insert_bit(&mut self, bit: Bit) -> bool {
         if self.unused == 1 {
-            if bit {
+            if bit == Bit::One {
                 self.or(1);
             }
             self.unused = 8;
             self.advance();
             true
         } else {
-            if bit {
+            if bit == Bit::One {
                 self.or(shl(1, self.unused - 1));
             }
             self.unused -= 1;
@@ -220,7 +220,7 @@ impl Per<'_> {
     fn pad_bits(&mut self, mut no_bits: i32) -> i32 {
         let mut ret = 0;
         while no_bits > 0 {
-            if self.insert_bit(false) {
+            if self.insert_bit(Bit::Zero) {
                 ret += 1;
             }
             no_bits -= 1;
@@ -273,8 +273,8 @@ impl Per<'_> {
         let used_bits = 8 - self.unused;
         while no_bytes > 0 {
             match self.next() {
-                0 => self.insert_bit(false),
-                1 => self.insert_bit(true),
+                0 => self.insert_bit(Bit::Zero),
+                1 => self.insert_bit(Bit::One),
                 _ => return None,
             };
             no_bytes -= 1;
@@ -372,11 +372,48 @@ fn ceil(x: i32, y: i32) -> i32 {
     (x - 1) / y + 1
 }
 
-/// Read a length of `wide` bytes, big endian, as the cases of
+/// The size of a length that `per_complete` reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LengthWidth {
+    /// One byte.
+    Narrow,
+    /// Two bytes, big endian.
+    Wide,
+}
+
+impl From<bool> for LengthWidth {
+    fn from(wide: bool) -> Self {
+        if wide { Self::Wide } else { Self::Narrow }
+    }
+}
+
+/// A bit that `per_complete` inserts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Bit {
+    /// The bit 0.
+    Zero,
+    /// The bit 1.
+    One,
+}
+
+/// The form of a BER tag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TagForm {
+    /// The value is a binary.
+    Primitive,
+    /// The value is a list of `{Tag, Value}` tuples.
+    Constructed,
+}
+
+/// Read a length of `width` bytes, big endian, as the cases of
 /// `per_complete` do.
-fn read_length(per: &mut Per<'_>, wide: bool) -> i32 {
+fn read_length(per: &mut Per<'_>, width: LengthWidth) -> i32 {
     let high = per.next();
-    if wide { (high << 8) | per.next() } else { high }
+    if width == LengthWidth::Wide {
+        (high << 8) | per.next()
+    } else {
+        high
+    }
 }
 
 /// Run `per_complete` (`asn1_erl_nif.c:119-493`) on the non-empty `input`
@@ -407,7 +444,7 @@ fn per_complete(input: &[u8], truncated: &mut bool) -> Option<Vec<u8>> {
         let opcode = input.get(per.ip).copied().unwrap_or(0);
         match opcode {
             0 | 1 => {
-                if per.insert_bit(opcode == 1) {
+                if per.insert_bit(if opcode == 1 { Bit::One } else { Bit::Zero }) {
                     buf_space -= 1;
                 }
             }
@@ -429,7 +466,7 @@ fn per_complete(input: &[u8], truncated: &mut bool) -> Option<Vec<u8>> {
                 buf_space -= i64::from(per.insert_least_sign_bits(no_bits, val));
             }
             20 | 21 => {
-                let no_bytes = read_length(&mut per, opcode == 21);
+                let no_bytes = read_length(&mut per, LengthWidth::from(opcode == 21));
                 counter -= i64::from(no_bytes) + if opcode == 21 { 2 } else { 1 };
                 if counter < 0 {
                     return None;
@@ -438,7 +475,7 @@ fn per_complete(input: &[u8], truncated: &mut bool) -> Option<Vec<u8>> {
             }
             30 | 31 => {
                 let in_unused = per.next();
-                let no_bytes = read_length(&mut per, opcode == 31);
+                let no_bytes = read_length(&mut per, LengthWidth::from(opcode == 31));
                 counter -= i64::from(no_bytes) + if opcode == 31 { 3 } else { 2 };
                 if counter < 0 {
                     return None;
@@ -448,8 +485,8 @@ fn per_complete(input: &[u8], truncated: &mut bool) -> Option<Vec<u8>> {
             40..=43 | 45..=47 => {
                 let wide_desired = matches!(opcode, 42 | 43 | 46 | 47);
                 let wide_bytes = matches!(opcode, 41 | 43 | 47);
-                let desired_len = read_length(&mut per, wide_desired);
-                let no_bytes = read_length(&mut per, wide_bytes);
+                let desired_len = read_length(&mut per, LengthWidth::from(wide_desired));
+                let no_bytes = read_length(&mut per, LengthWidth::from(wide_bytes));
                 let saved_mem = buf_space - counter;
                 let needed = if opcode == 40 {
                     let pad_bits = desired_len - no_bytes - per.unused;
@@ -528,24 +565,28 @@ impl Ber<'_> {
         if self.ib + 2 > end {
             return self.fail("invalid_value");
         }
-        let (tag, constructed) = self.decode_tag(end)?;
+        let (tag, form) = self.decode_tag(end)?;
         if self.ib >= end {
             return self.fail("invalid_tag");
         }
-        let value = self.decode_value(constructed, end, depth + 1)?;
+        let value = self.decode_value(form, end, depth + 1)?;
         Ok(Term::tuple(vec![Term::Integer(tag), value]))
     }
 
     /// `ber_decode_tag` (`asn1_erl_nif.c:895-939`): the tag number with
     /// the class in bits 16 and 17, and whether the form is constructed.
-    fn decode_tag(&mut self, end: usize) -> Result<(i64, bool), BerError> {
+    fn decode_tag(&mut self, end: usize) -> Result<(i64, TagForm), BerError> {
         let first = self.input[self.ib];
         let class = i64::from(first & 0xc0) << 10;
-        let constructed = first & 0x20 != 0;
+        let form = if first & 0x20 != 0 {
+            TagForm::Constructed
+        } else {
+            TagForm::Primitive
+        };
         let number = first & 0x1f;
         if number < 31 {
             self.ib += 1;
-            return Ok((class | i64::from(number), constructed));
+            return Ok((class | i64::from(number), form));
         }
         if self.ib + 3 > end {
             return self.fail("invalid_value");
@@ -561,17 +602,12 @@ impl Ber<'_> {
         }
         tag |= i64::from(self.input[self.ib]);
         self.ib += 1;
-        Ok((tag, constructed))
+        Ok((tag, form))
     }
 
     /// `ber_decode_value` (`asn1_erl_nif.c:946-1018`) at the call depth
     /// `depth`.
-    fn decode_value(
-        &mut self,
-        constructed: bool,
-        end: usize,
-        depth: u32,
-    ) -> Result<Term, BerError> {
+    fn decode_value(&mut self, form: TagForm, end: usize, depth: u32) -> Result<Term, BerError> {
         if depth > MAX_DECODE_DEPTH {
             return self.fail(TOO_DEEP);
         }
@@ -581,7 +617,7 @@ impl Ber<'_> {
             len = usize::from(first);
         } else if first == 0x80 {
             self.ib += 1;
-            if self.ib + 1 >= end || !constructed {
+            if self.ib + 1 >= end || form == TagForm::Primitive {
                 return self.fail("invalid_length");
             }
             let mut elements = Vec::new();
@@ -611,7 +647,7 @@ impl Ber<'_> {
         }
         self.ib += 1;
         let value_end = self.ib + len;
-        if constructed {
+        if form == TagForm::Constructed {
             let mut elements = Vec::new();
             while self.ib < value_end {
                 elements.push(self.decode(value_end, depth)?);

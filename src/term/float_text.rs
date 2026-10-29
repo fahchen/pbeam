@@ -212,8 +212,18 @@ pub(crate) fn scientific_option(value: f64, decimals: i32) -> Option<Vec<u8>> {
     (text.len() < BUFFER_SIZE).then_some(text)
 }
 
+/// Whether `float_to_list/2` removes the trailing zeros of the decimals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TrailingZeros {
+    /// Keep the zeros: the default.
+    Keep,
+    /// Remove the zeros, but keep one zero after the point: the `compact`
+    /// option.
+    Trim,
+}
+
 /// Return the text of `float_to_list/2` with `{decimals, Decimals}`, and
-/// with `compact` when `compact` is true, or `None` when ERTS fails, as
+/// with `compact` when `zeros` is [`TrailingZeros::Trim`], or `None` when ERTS fails, as
 /// `sys_double_to_chars_fast` (`erl_sys_common_misc.c:161-273`) gives it.
 /// A negative `decimals` fails. A float above 2^53 or 19 decimals or more
 /// takes the C text `%.*f`, which fails at 256 bytes or more. Else the
@@ -224,14 +234,14 @@ pub(crate) fn scientific_option(value: f64, decimals: i32) -> Option<Vec<u8>> {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(fixed(1.5, 0, false), Some(b"2".to_vec()));
-/// assert_eq!(fixed(0.125, 2, false), Some(b"0.13".to_vec()));
-/// assert_eq!(fixed(1.0, 3, true), Some(b"1.0".to_vec()));
-/// assert_eq!(fixed(-0.0, 1, false), Some(b"-0.0".to_vec()));
-/// assert_eq!(fixed(1.0, -1, false), None);
-/// assert_eq!(fixed(1.0e300, 2, false), None);
+/// assert_eq!(fixed(1.5, 0, TrailingZeros::Keep), Some(b"2".to_vec()));
+/// assert_eq!(fixed(0.125, 2, TrailingZeros::Keep), Some(b"0.13".to_vec()));
+/// assert_eq!(fixed(1.0, 3, TrailingZeros::Trim), Some(b"1.0".to_vec()));
+/// assert_eq!(fixed(-0.0, 1, TrailingZeros::Keep), Some(b"-0.0".to_vec()));
+/// assert_eq!(fixed(1.0, -1, TrailingZeros::Keep), None);
+/// assert_eq!(fixed(1.0e300, 2, TrailingZeros::Keep), None);
 /// ```
-pub(crate) fn fixed(value: f64, decimals: i32, compact: bool) -> Option<Vec<u8>> {
+pub(crate) fn fixed(value: f64, decimals: i32, zeros: TrailingZeros) -> Option<Vec<u8>> {
     let decimals = usize::try_from(decimals).ok()?;
     let magnitude = value.abs();
     if magnitude > MAX_FAST_FLOAT || decimals >= POW10.len() {
@@ -243,7 +253,7 @@ pub(crate) fn fixed(value: f64, decimals: i32, compact: bool) -> Option<Vec<u8>>
         if text.len() >= BUFFER_SIZE {
             return None;
         }
-        if compact {
+        if zeros == TrailingZeros::Trim {
             trim_trailing_zeros(&mut text);
         }
         return Some(text);
@@ -265,7 +275,7 @@ pub(crate) fn fixed(value: f64, decimals: i32, compact: bool) -> Option<Vec<u8>>
         (whole as u64, fraction as u64)
     };
     text.extend_from_slice(format!("{whole}.{fraction:0decimals$}").as_bytes());
-    if compact {
+    if zeros == TrailingZeros::Trim {
         trim_trailing_zeros(&mut text);
     }
     Some(text)

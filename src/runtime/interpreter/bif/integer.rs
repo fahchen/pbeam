@@ -20,7 +20,7 @@ use num_traits::Signed;
 use super::BifResult::Value;
 use super::{BifResult, ExceptionClass, Scheduler, Term, erlang};
 use crate::runtime::scheduler::CONTEXT_REDS;
-use crate::term::{MAX_BIG_DIGITS, fits_big_arity};
+use crate::term::{Division, MAX_BIG_DIGITS, ShiftDirection, fits_big_arity};
 
 /// A BIF result and the reductions that it uses.
 pub(super) type Charged = (BifResult, i32);
@@ -259,20 +259,20 @@ fn arith_reductions(op: Arith, left: &Term, right: &Term) -> i32 {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let (quotient, _) = div_rem(&Term::Integer(-7), &Term::Integer(2), false);
+/// let (quotient, _) = div_rem(&Term::Integer(-7), &Term::Integer(2), Division::Quotient);
 /// assert!(matches!(quotient, BifResult::Value(Term::Integer(-3))));
-/// let (remainder, _) = div_rem(&Term::Integer(-7), &Term::Integer(3), true);
+/// let (remainder, _) = div_rem(&Term::Integer(-7), &Term::Integer(3), Division::Remainder);
 /// assert!(matches!(remainder, BifResult::Value(Term::Integer(-1))));
-/// assert!(matches!(div_rem(&Term::static_atom("a"), &Term::Integer(0), false).0, BifResult::Raise { .. }));
+/// assert!(matches!(div_rem(&Term::static_atom("a"), &Term::Integer(0), Division::Quotient).0, BifResult::Raise { .. }));
 /// ```
-pub(super) fn div_rem(left: &Term, right: &Term, remainder: bool) -> Charged {
+pub(super) fn div_rem(left: &Term, right: &Term, division: Division) -> Charged {
     if *right == Term::Integer(0) {
         return (BifResult::badarith(), 0);
     }
     if let (Term::Integer(left_value), Term::Integer(right_value)) = (left, right) {
         // `i64::MIN rem -1` is 0 and `i64::MIN div -1` is the only quotient
         // outside the i64 range.
-        let value = if remainder {
+        let value = if division == Division::Remainder {
             Some(left_value.wrapping_rem(*right_value))
         } else {
             left_value.checked_div(*right_value)
@@ -294,7 +294,7 @@ pub(super) fn div_rem(left: &Term, right: &Term, remainder: bool) -> Charged {
     let (Some(left_value), Some(right_value)) = (left.bigint(), right.bigint()) else {
         return (BifResult::badarith(), 0);
     };
-    let value = if remainder {
+    let value = if division == Division::Remainder {
         left_value.as_ref() % right_value.as_ref()
     } else {
         left_value.as_ref() / right_value.as_ref()
@@ -398,8 +398,8 @@ pub(super) fn bnot(term: &Term) -> Charged {
     (big_result(!value.into_owned()), linear(digits(term) + 2))
 }
 
-/// Run `erlang:'bsl'/2` (`right_shift` false) or `erlang:'bsr'/2`
-/// (`right_shift` true), as `erts_shift` (`erl_arith.c:190-309`) does. The
+/// Run `erlang:'bsl'/2` ([`ShiftDirection::Left`]) or `erlang:'bsr'/2`
+/// ([`ShiftDirection::Right`]), as `erts_shift` (`erl_arith.c:190-309`) does. The
 /// shift is arithmetic: a right shift rounds toward negative infinity.
 ///
 /// A bignum shift amount is never small: `N bsl` a negative bignum and
@@ -415,13 +415,14 @@ pub(super) fn bnot(term: &Term) -> Charged {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(matches!(shift(&Term::Integer(1), &Term::Integer(4), false).0, BifResult::Value(Term::Integer(16))));
-/// assert!(matches!(shift(&Term::Integer(-16), &Term::Integer(2), true).0, BifResult::Value(Term::Integer(-4))));
-/// let (big, reductions) = shift(&Term::Integer(1), &Term::Integer(64), false);
+/// assert!(matches!(shift(&Term::Integer(1), &Term::Integer(4), ShiftDirection::Left).0, BifResult::Value(Term::Integer(16))));
+/// assert!(matches!(shift(&Term::Integer(-16), &Term::Integer(2), ShiftDirection::Right).0, BifResult::Value(Term::Integer(-4))));
+/// let (big, reductions) = shift(&Term::Integer(1), &Term::Integer(64), ShiftDirection::Left);
 /// assert!(matches!(big, BifResult::Value(Term::BigInt(_))));
 /// assert_eq!(reductions, 1);
 /// ```
-pub(super) fn shift(left: &Term, right: &Term, right_shift: bool) -> Charged {
+pub(super) fn shift(left: &Term, right: &Term, direction: ShiftDirection) -> Charged {
+    let right_shift = direction == ShiftDirection::Right;
     let amount = match right.small_integer() {
         Some(amount) if right_shift => -amount,
         Some(amount) => amount,

@@ -37,15 +37,24 @@ use super::{
     tuple::Tuple,
 };
 
+/// The number of owners of a term container.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Owners {
+    /// One owner only holds the container, so the walk cannot reach it twice.
+    One,
+    /// Several owners hold the container, so the walk counts it once.
+    Several,
+}
+
 /// The bytes of the term containers that the walk has visited.
 pub(crate) struct LiveBytes {
     /// The containers that the walk has already counted.
     seen: Vec<Shared>,
     /// The bytes of the containers that the walk counted.
     bytes: usize,
-    /// The terms that the walk must visit, with the flag that one owner only
-    /// holds the container of the term.
-    pending: Vec<(Term, bool)>,
+    /// The terms that the walk must visit, with the number of owners of the
+    /// container of the term.
+    pending: Vec<(Term, Owners)>,
 }
 
 /// One shared container of a term, by its `Arc`.
@@ -179,8 +188,12 @@ impl LiveBytes {
 
     /// Push `term` onto the work stack of the walk.
     fn push(&mut self, term: &Term) {
-        let unique = owned_once(term);
-        self.pending.push((term.clone(), unique));
+        let owners = if owned_once(term) {
+            Owners::One
+        } else {
+            Owners::Several
+        };
+        self.pending.push((term.clone(), owners));
     }
 
     /// Count the container of `term` and walk the terms that it holds. The
@@ -219,16 +232,16 @@ impl LiveBytes {
     /// walk the terms that they hold. The terms of a long list go through the
     /// work stack, so the loop does not recurse on the Rust stack.
     fn walk(&mut self) {
-        while let Some((term, unique)) = self.pending.pop() {
+        while let Some((term, owners)) = self.pending.pop() {
             match &term {
-                Term::Tuple(tuple) => self.tuple(tuple, unique),
-                Term::Cons(cell) => self.cons(cell, unique),
-                Term::Map(map) => self.map(map, unique),
+                Term::Tuple(tuple) => self.tuple(tuple, owners),
+                Term::Cons(cell) => self.cons(cell, owners),
+                Term::Map(map) => self.map(map, owners),
                 Term::Binary(binary) => self.binary(binary),
-                Term::Fun(fun) => self.fun(fun, unique),
-                Term::Record(record) => self.record(record, unique),
-                Term::MatchContext(state) => self.match_context(state, unique),
-                Term::BigInt(value) => self.bigint(value, unique),
+                Term::Fun(fun) => self.fun(fun, owners),
+                Term::Record(record) => self.record(record, owners),
+                Term::MatchContext(state) => self.match_context(state, owners),
+                Term::BigInt(value) => self.bigint(value, owners),
                 Term::Atom(_)
                 | Term::Integer(_)
                 | Term::Float(_)
@@ -242,8 +255,8 @@ impl LiveBytes {
     }
 
     /// Count the element array of `tuple` and walk its elements.
-    fn tuple(&mut self, tuple: &Tuple, unique: bool) {
-        if !unique && !self.fresh(Shared::Tuple(Arc::clone(tuple.arc()))) {
+    fn tuple(&mut self, tuple: &Tuple, owners: Owners) {
+        if owners == Owners::Several && !self.fresh(Shared::Tuple(Arc::clone(tuple.arc()))) {
             return;
         }
         self.bytes += tuple.allocated_bytes();
@@ -253,8 +266,8 @@ impl LiveBytes {
     }
 
     /// Count the cell of `cell` and walk its head and tail.
-    fn cons(&mut self, cell: &ConsRef, unique: bool) {
-        if !unique && !self.fresh(Shared::Cons(Arc::clone(cell.arc()))) {
+    fn cons(&mut self, cell: &ConsRef, owners: Owners) {
+        if owners == Owners::Several && !self.fresh(Shared::Cons(Arc::clone(cell.arc()))) {
             return;
         }
         self.bytes += ConsRef::allocated_bytes();
@@ -263,9 +276,9 @@ impl LiveBytes {
     }
 
     /// Count the form of `map` and walk its pairs and nodes.
-    fn map(&mut self, map: &Map, unique: bool) {
+    fn map(&mut self, map: &Map, owners: Owners) {
         let repr = map.arc();
-        if !unique && !self.fresh(Shared::Map(Arc::clone(repr))) {
+        if owners == Owners::Several && !self.fresh(Shared::Map(Arc::clone(repr))) {
             return;
         }
         self.bytes += map.allocated_bytes();
@@ -301,8 +314,12 @@ impl LiveBytes {
                     self.push(value);
                 }
                 Child::Node(node) => {
-                    let unique = Arc::strong_count(node) == 1;
-                    if !unique && !self.fresh(Shared::Node(Arc::clone(node))) {
+                    let owners = if Arc::strong_count(node) == 1 {
+                        Owners::One
+                    } else {
+                        Owners::Several
+                    };
+                    if owners == Owners::Several && !self.fresh(Shared::Node(Arc::clone(node))) {
                         continue;
                     }
                     self.bytes += node.allocated_bytes();
@@ -343,8 +360,8 @@ impl LiveBytes {
     }
 
     /// Count the thing of `fun` and walk its free variables.
-    fn fun(&mut self, fun: &Fun, unique: bool) {
-        if !unique && !self.fresh(Shared::Fun(Arc::clone(fun.arc()))) {
+    fn fun(&mut self, fun: &Fun, owners: Owners) {
+        if owners == Owners::Several && !self.fresh(Shared::Fun(Arc::clone(fun.arc()))) {
             return;
         }
         self.bytes += fun.allocated_bytes();
@@ -356,8 +373,8 @@ impl LiveBytes {
     /// Count the thing of `record` and walk its values. The walk counts a
     /// transient definition once and its tuple; module code holds each
     /// other definition, so the walk does not count it.
-    fn record(&mut self, record: &Record, unique: bool) {
-        if !unique && !self.fresh(Shared::Record(Arc::clone(record.arc()))) {
+    fn record(&mut self, record: &Record, owners: Owners) {
+        if owners == Owners::Several && !self.fresh(Shared::Record(Arc::clone(record.arc()))) {
             return;
         }
         self.bytes += size_of::<RecordThing>() + size_of_val(record.values());
@@ -375,8 +392,8 @@ impl LiveBytes {
     }
 
     /// Count the state of `state` and walk its binary.
-    fn match_context(&mut self, state: &Arc<MatchState>, unique: bool) {
-        if !unique && !self.fresh(Shared::Match(Arc::clone(state))) {
+    fn match_context(&mut self, state: &Arc<MatchState>, owners: Owners) {
+        if owners == Owners::Several && !self.fresh(Shared::Match(Arc::clone(state))) {
             return;
         }
         self.bytes += size_of::<MatchState>();
@@ -386,8 +403,8 @@ impl LiveBytes {
     /// Count the value of the bignum `value` and its digit array. Two terms
     /// that share one `Arc` count it once. A bignum holds no term, so the walk
     /// does not recurse here.
-    fn bigint(&mut self, value: &Arc<BigInt>, unique: bool) {
-        if !unique && !self.fresh(Shared::BigInt(Arc::clone(value))) {
+    fn bigint(&mut self, value: &Arc<BigInt>, owners: Owners) {
+        if owners == Owners::Several && !self.fresh(Shared::BigInt(Arc::clone(value))) {
             return;
         }
         self.bytes += size_of::<BigInt>() + value.iter_u64_digits().len() * size_of::<u64>();

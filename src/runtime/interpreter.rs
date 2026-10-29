@@ -3,11 +3,11 @@ use super::{
     capability::{Policy, Restriction},
     dirty::{Output, Work},
     process::{
-        BifCall, DirtyCall, Frame, PendingBif, PendingTrap, Priority, ProcessState, ReceiveTimer,
-        StackSlot, Start, StartFlags,
+        BifCall, CallKind, DirtyCall, Frame, PendingBif, PendingTrap, Priority, ProcessState,
+        ReceiveTimer, StackSlot, Start, StartFlags,
     },
-    scheduler::{PolicyEnd, Received, Scheduler, Turn, node::Node},
-    tty::InitialMode,
+    scheduler::{ChildLink, PolicyEnd, Received, Scheduler, Turn, node::Node},
+    tty::{InitialMode, StdinRead},
 };
 use crate::{
     beam::{
@@ -19,8 +19,8 @@ use crate::{
     },
     error::{BeamError, error},
     term::{
-        Atom, AtomTable, Binary, Fun, HostTerm, Insert, Map, MatchState, Target, Term, debug_term,
-        fits_big_arity, print_term, segment_equals, segment_integer,
+        Atom, AtomTable, Binary, Endian, Fun, HostTerm, Insert, Map, MatchState, Signedness,
+        Target, Term, debug_term, fits_big_arity, print_term, segment_equals, segment_integer,
     },
 };
 #[cfg(test)]
@@ -87,6 +87,26 @@ pub struct BeamProgram {
     atoms: Arc<AtomTable>,
 }
 
+/// How the root process of a policy module run gets its capabilities.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RootAuthority {
+    /// The root process starts with the capabilities that `initial/1` of the
+    /// policy module gives.
+    Policy,
+    /// Boot mode: the root process starts with the boot authority and enters
+    /// the runtime with `pbeam_cap:enter_runtime/2`.
+    Boot,
+}
+
+/// Whether an `erlang:apply/3` raise happens at the start of a process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ApplySite {
+    /// The raise happens in a call of `erlang:apply/3`.
+    Call,
+    /// The raise happens in the initial `erlang:apply/3` of a process.
+    ProcessStart,
+}
+
 /// The issuer of the initial capabilities of a run.
 #[derive(Clone, Copy)]
 enum Issuer<'a> {
@@ -99,10 +119,8 @@ enum Issuer<'a> {
     Module {
         /// The name of the policy module.
         policy: &'a str,
-        /// True in boot mode: the root process starts with the boot
-        /// authority and enters the runtime with
-        /// `pbeam_cap:enter_runtime/2`.
-        boot: bool,
+        /// How the root process gets its capabilities.
+        authority: RootAuthority,
     },
 }
 
@@ -286,9 +304,9 @@ fn idle_step(scheduler: &mut Scheduler, node: &Node) -> Result<(), BeamError> {
     // the mark lets a scheduler with more work give it some at its next
     // step (`Scheduler::serve_steal`), which ends the wait with a delivery.
     let index = scheduler.index();
-    node.set_hungry(index, true);
+    node.set_hungry(index);
     let waited = idle_wait(scheduler, node);
-    node.set_hungry(index, false);
+    node.clear_hungry(index);
     // Each process that a steal gave this scheduler is in the inbox now, and
     // it enters the slots before a timer, an OS signal, or a dirty
     // completion of the next loop step looks for it.
@@ -674,9 +692,9 @@ impl BeamProgram {
         function: &str,
         arguments: &[HostTerm],
         policy: &str,
-        boot: bool,
+        authority: RootAuthority,
     ) -> Result<HostTerm, BeamError> {
-        let issuer = Issuer::Module { policy, boot };
+        let issuer = Issuer::Module { policy, authority };
         self.execute_issued(module, function, arguments, issuer, &mut None)
     }
 
@@ -901,7 +919,7 @@ impl BeamProgram {
         let selected = results.iter().any(|result| match result {
             Ok(selected) | Err((_, selected)) => *selected,
         });
-        initial_mode.reset(selected);
+        initial_mode.reset(StdinRead::from(selected));
         // Each root result is a term of the shared table of the run.
         let roots = node.take_root_results();
         // A failed root aborts the run. Report its error before the wait
@@ -1089,7 +1107,7 @@ impl BeamProgram {
             }
             Err(import_error) => Err(import_error),
         };
-        initial_mode.reset(scheduler.node().ttys().input_selected());
+        initial_mode.reset(StdinRead::from(scheduler.node().ttys().input_selected()));
         run?;
         // The node holds the result of the root. The table of the run holds
         // each name that the run created, so the host result can name every
@@ -1168,11 +1186,11 @@ impl BeamProgram {
                 scheduler.start(frame, arguments.to_vec(), policy.initial());
                 None
             }
-            Issuer::Module { policy, boot } => {
+            Issuer::Module { policy, authority } => {
                 scheduler.code.entry_label(policy, "grant", 3)?;
                 let initial = scheduler.code.entry_label(policy, "initial", 1)?;
                 let initial = scheduler.code.frame(policy, initial, 1)?;
-                if boot {
+                if authority == RootAuthority::Boot {
                     scheduler.start_policy(initial, None)?;
                     scheduler.start_boot(frame, arguments.to_vec());
                     None
@@ -1283,7 +1301,7 @@ impl BeamProgram {
                     Term::Atom(function),
                     Term::list_from(arguments),
                 ];
-                Self::apply_error(scheduler, call, "system_limit", true)?
+                Self::apply_error(scheduler, call, "system_limit", ApplySite::ProcessStart)?
             } else {
                 let arity = process.registers.len() as u32;
                 // The start of a process is a tail call of the MFA from the
@@ -1293,7 +1311,7 @@ impl BeamProgram {
                 // process with no frame, so a BIF or the error handler runs
                 // as a body call of the first frame. The result of the BIF,
                 // or the `return` of the handler, then ends the process.
-                self.call_mfa(scheduler, &module, &function, arity, false)?
+                self.call_mfa(scheduler, &module, &function, arity, CallKind::Body)?
             };
             if let Some(outcome) = outcome {
                 return Ok(outcome);
@@ -1321,7 +1339,7 @@ impl BeamProgram {
                     let entry = (module.as_str(), name.as_str(), arguments, Term::nil());
                     raise_at_entry(scheduler, entry, class, reason)?
                 }
-                result => Self::finish_bif(scheduler, result, true)?,
+                result => Self::finish_bif(scheduler, result, CallKind::Tail)?,
             };
             if let Some(outcome) = outcome {
                 return Ok(outcome);
@@ -1333,7 +1351,7 @@ impl BeamProgram {
             module,
             function,
             arguments,
-            tail,
+            entry,
             origin,
         }) = scheduler.current_process_mut().pending_bif.take()
         {
@@ -1375,7 +1393,7 @@ impl BeamProgram {
                 }
                 _ => result,
             };
-            if let Some(outcome) = Self::finish_bif(scheduler, result, tail)? {
+            if let Some(outcome) = Self::finish_bif(scheduler, result, entry)? {
                 return Ok(outcome);
             }
         }
@@ -1387,9 +1405,9 @@ impl BeamProgram {
             module,
             function,
             arity,
-            tail,
+            entry,
         }) = scheduler.current_process_mut().pending_trap.take()
-            && let Some(outcome) = Self::resume_trap(scheduler, module, function, arity, tail)?
+            && let Some(outcome) = Self::resume_trap(scheduler, module, function, arity, entry)?
         {
             return Ok(outcome);
         }
@@ -1575,13 +1593,16 @@ impl BeamProgram {
                         let call = vec![module, name, Term::list_from(arguments)];
                         let raised =
                             bif_error(scheduler, "erlang", "apply", call, BifResult::badarg(), 0)?;
-                        if let Some(outcome) = Self::finish_bif(scheduler, raised, false)? {
+                        if let Some(outcome) = Self::finish_bif(scheduler, raised, CallKind::Body)?
+                        {
                             return Ok(outcome);
                         }
                         cursor.refresh(scheduler)?;
                         continue;
                     };
-                    if let Some(outcome) = self.call_mfa(scheduler, module, name, *arity, *tail)? {
+                    if let Some(outcome) =
+                        self.call_mfa(scheduler, module, name, *arity, CallKind::from(*tail))?
+                    {
                         return Ok(outcome);
                     }
                     cursor.refresh(scheduler)?;
@@ -1612,7 +1633,9 @@ impl BeamProgram {
                         release_frame(process, *deallocate)?;
                     }
                     cursor.commit(process);
-                    if let Some(outcome) = self.call_fun(scheduler, call, *arity, *tail)? {
+                    if let Some(outcome) =
+                        self.call_fun(scheduler, call, *arity, CallKind::from(*tail))?
+                    {
                         return Ok(outcome);
                     }
                     cursor.refresh(scheduler)?;
@@ -1722,7 +1745,9 @@ impl BeamProgram {
                             let (module_name, name, _) = mfa(*bif);
                             let raised =
                                 bif_error(scheduler, module_name, name, values, raised, 0)?;
-                            if let Some(outcome) = Self::finish_bif(scheduler, raised, false)? {
+                            if let Some(outcome) =
+                                Self::finish_bif(scheduler, raised, CallKind::Body)?
+                            {
                                 return Ok(outcome);
                             }
                             cursor.refresh(scheduler)?;
@@ -2315,7 +2340,7 @@ impl BeamProgram {
                     let (process, atoms) = scheduler.current_process_and_atoms();
                     let state = match_context(process, context, atoms)?;
                     let value = binary_field_size(read_ref(process, size)?, *unit)
-                        .and_then(|bits| state.get_float(bits, *little));
+                        .and_then(|bits| state.get_float(bits, Endian::from(*little)));
                     match value {
                         Some(value) => write(process, destination, Term::Float(value))?,
                         None => cursor.position = label_position(*fail_label)?,
@@ -2345,7 +2370,12 @@ impl BeamProgram {
                     let value =
                         binary_field_size(read_ref(process, size)?, *unit).and_then(|bits| {
                             let read = state.read_bits(bits)?;
-                            bounded_segment_integer(&read, bits as usize, *little, *signed)
+                            bounded_segment_integer(
+                                &read,
+                                bits as usize,
+                                Endian::from(*little),
+                                Signedness::from(*signed),
+                            )
                         });
                     match value {
                         Some(value) => write(process, destination, value)?,
@@ -2447,9 +2477,9 @@ impl BeamProgram {
                     let (process, atoms) = scheduler.current_process_and_atoms();
                     let state = match_context(process, context, atoms)?;
                     let code_point = if matches!(instruction, Instruction::BinaryGetUtf16 { .. }) {
-                        state.get_utf16(*little)
+                        state.get_utf16(Endian::from(*little))
                     } else {
-                        state.get_utf32(*little)
+                        state.get_utf32(Endian::from(*little))
                     };
                     match (code_point, destination) {
                         (Some(code_point), Some(destination)) => {
@@ -2466,7 +2496,13 @@ impl BeamProgram {
                     test_heap,
                 } => {
                     let (process, atoms) = scheduler.current_process_and_atoms();
-                    if !binary_match(process, context, commands, *test_heap, atoms)? {
+                    if !binary_match(
+                        process,
+                        context,
+                        commands,
+                        TestHeap::from(*test_heap),
+                        atoms,
+                    )? {
                         cursor.position = label_position(*fail_label)?;
                     }
                 }
@@ -2747,7 +2783,7 @@ impl BeamProgram {
                     let to = read(process, &Operand::X(0))?;
                     let message = read(process, &Operand::X(1))?;
                     let result = send(scheduler, &to, message)?;
-                    if let Some(outcome) = Self::finish_bif(scheduler, result, false)? {
+                    if let Some(outcome) = Self::finish_bif(scheduler, result, CallKind::Body)? {
                         return Ok(outcome);
                     }
                     cursor.refresh(scheduler)?;
@@ -2893,7 +2929,7 @@ impl BeamProgram {
                                 work,
                                 entry: (module.name.clone(), name.clone(), arguments),
                             })),
-                            result => Self::finish_bif(scheduler, result, true),
+                            result => Self::finish_bif(scheduler, result, CallKind::Tail),
                         };
                         if let Some(outcome) = outcome? {
                             return Ok(outcome);
@@ -3116,7 +3152,7 @@ impl BeamProgram {
             kind,
         } = &code.imports[index];
         let arity = *arity;
-        let tail = deallocate.is_some();
+        let entry = CallKind::from(deallocate.is_some());
         let process = scheduler.current_process_mut();
         match deallocate {
             Some(deallocate) if matches!(kind, ImportKind::ApplyFun | ImportKind::Apply) => {
@@ -3151,7 +3187,7 @@ impl BeamProgram {
                 let process = scheduler.current_process_mut();
                 let arguments = call_arguments(&process.registers, arity)?;
                 let result = bif_error(scheduler, module, name, arguments, result, 0)?;
-                Self::finish_bif(scheduler, result, false)
+                Self::finish_bif(scheduler, result, CallKind::Body)
             }
             ImportKind::CallOnLoadFunction => {
                 let module = read_x_register(&process.registers, 0)?.clone();
@@ -3163,13 +3199,13 @@ impl BeamProgram {
                     _ => None,
                 };
                 if let Some(frame) = frame {
-                    enter_frame(scheduler.current_process_mut(), frame, false);
+                    enter_frame(scheduler.current_process_mut(), frame, CallKind::Body);
                     Ok(None)
                 } else {
                     let arguments = vec![module];
                     let badarg = BifResult::badarg();
                     let result = bif_error(scheduler, "erlang", name, arguments, badarg, 0)?;
-                    Self::finish_bif(scheduler, result, false)
+                    Self::finish_bif(scheduler, result, CallKind::Body)
                 }
             }
             ImportKind::Bif { bif, heavy } => {
@@ -3183,10 +3219,10 @@ impl BeamProgram {
                 // (`jit/arm/ops.tab:709-714`), so the frame of the caller
                 // is in the stack trace.
                 let result = bif_error(scheduler, module, name, arguments, result, 0)?;
-                Self::finish_bif(scheduler, result, false)
+                Self::finish_bif(scheduler, result, CallKind::Body)
             }
-            ImportKind::ApplyFun => self.apply_fun(scheduler, tail),
-            ImportKind::Apply => self.apply_mfa(scheduler, tail),
+            ImportKind::ApplyFun => self.apply_fun(scheduler, entry),
+            ImportKind::Apply => self.apply_mfa(scheduler, entry),
             ImportKind::Export => {
                 // A registered native function runs at the `NifStart`
                 // instruction of its stub, so this path enters the frame and
@@ -3194,14 +3230,14 @@ impl BeamProgram {
                 // registry check stays in `native::call`.
                 let slot = &targets[index];
                 if let Some(target) = slot.get() {
-                    return enter_export(process, target.frame(), arity, tail);
+                    return enter_export(process, target.frame(), arity, entry);
                 }
                 match scheduler.synced_code().export_frame(module, name, arity)? {
                     Some(frame) => {
                         slot.set(Some(ExportTarget::of(&frame)));
-                        enter_export(scheduler.current_process_mut(), frame, arity, tail)
+                        enter_export(scheduler.current_process_mut(), frame, arity, entry)
                     }
-                    None => Self::undefined_function(scheduler, module, name, arity, tail),
+                    None => Self::undefined_function(scheduler, module, name, arity, entry),
                 }
             }
         }
@@ -3236,7 +3272,7 @@ impl BeamProgram {
         module: &Atom,
         name: &Atom,
         arity: u32,
-        tail: bool,
+        entry: CallKind,
     ) -> Result<Option<Outcome>, BeamError> {
         // A BIF that reads the code table, such as `erlang:module_loaded/1`,
         // and the export of the MFA see each code operation that returned
@@ -3283,12 +3319,12 @@ impl BeamProgram {
                         atoms.name_of(name).to_owned(),
                     )
                 };
-                let skip = usize::from(tail);
+                let skip = usize::from(entry.is_tail());
                 bif_error(scheduler, &module_name, &name, arguments, result, skip)?
             } else {
                 result
             };
-            return Self::finish_bif(scheduler, result, tail);
+            return Self::finish_bif(scheduler, result, entry);
         }
         // A name that PBeam does not resolve as a BIF reaches the export
         // lookup. The name of the atom term comes from the run table.
@@ -3299,7 +3335,7 @@ impl BeamProgram {
                 atoms.name_of(name).to_owned(),
             )
         };
-        self.call_export(scheduler, &module_name, &name, arity, tail)
+        self.call_export(scheduler, &module_name, &name, arity, entry)
     }
 
     /// Call the export of `module:name/arity` with the arguments in the X
@@ -3324,16 +3360,16 @@ impl BeamProgram {
         module: &str,
         name: &str,
         arity: u32,
-        tail: bool,
+        entry: CallKind,
     ) -> Result<Option<Outcome>, BeamError> {
         match (module, name, arity) {
-            ("erlang", "apply", 2) => return self.apply_fun(scheduler, tail),
-            ("erlang", "apply", 3) => return self.apply_mfa(scheduler, tail),
+            ("erlang", "apply", 2) => return self.apply_fun(scheduler, entry),
+            ("erlang", "apply", 3) => return self.apply_mfa(scheduler, entry),
             _ => {}
         }
         match scheduler.synced_code().export_frame(module, name, arity)? {
-            Some(frame) => enter_export(scheduler.current_process_mut(), frame, arity, tail),
-            None => Self::undefined_function(scheduler, module, name, arity, tail),
+            Some(frame) => enter_export(scheduler.current_process_mut(), frame, arity, entry),
+            None => Self::undefined_function(scheduler, module, name, arity, entry),
         }
     }
 
@@ -3388,7 +3424,7 @@ impl BeamProgram {
         module: &str,
         function: &str,
         arity: u32,
-        tail: bool,
+        entry: CallKind,
     ) -> Result<Option<Outcome>, BeamError> {
         let process = scheduler.current_process_mut();
         let default_handler = process.error_handler.is_none();
@@ -3428,7 +3464,7 @@ impl BeamProgram {
             .export_frame(&handler, "undefined_function", 3)?;
         let process = scheduler.current_process_mut();
         if let Some(frame) = lookup {
-            enter_frame(process, frame, tail);
+            enter_frame(process, frame, entry);
             write(process, &Operand::X(0), module_atom)?;
             write(process, &Operand::X(1), function_atom)?;
             write(process, &Operand::X(2), arguments)?;
@@ -3479,7 +3515,7 @@ impl BeamProgram {
         module_atom: Term,
         fun: Term,
         arity: u32,
-        tail: bool,
+        entry: CallKind,
     ) -> Result<Option<Outcome>, BeamError> {
         let process = scheduler.current_process_mut();
         let default_handler = process.error_handler.is_none();
@@ -3503,7 +3539,7 @@ impl BeamProgram {
                 Term::static_atom("undef"),
             ));
         };
-        enter_frame(process, frame, tail);
+        enter_frame(process, frame, entry);
         write(process, &Operand::X(0), module_atom)?;
         write(process, &Operand::X(1), fun)?;
         write(process, &Operand::X(2), arguments)?;
@@ -3532,21 +3568,26 @@ impl BeamProgram {
     fn apply_mfa(
         &self,
         scheduler: &mut Scheduler,
-        tail: bool,
+        entry: CallKind,
     ) -> Result<Option<Outcome>, BeamError> {
         let mut call = {
             let process = scheduler.current_process_mut();
             call_arguments(&process.registers, 3)?
         };
         let start = Self::is_start_apply(scheduler)?;
+        let site = if start {
+            ApplySite::ProcessStart
+        } else {
+            ApplySite::Call
+        };
         let (module, name, arguments, proper) = loop {
             // Each wrong form raises the same `badarg`, so one pattern checks
             // the function, the module, and the list.
             let [Term::Atom(module), Term::Atom(name), list] = &mut call[..] else {
-                return Self::apply_error(scheduler, call, "badarg", start);
+                return Self::apply_error(scheduler, call, "badarg", site);
             };
             let Some((arguments, proper)) = list.list_elements() else {
-                return Self::apply_error(scheduler, call, "badarg", start);
+                return Self::apply_error(scheduler, call, "badarg", site);
             };
             let is_apply = {
                 let atoms = &scheduler.atoms;
@@ -3558,10 +3599,10 @@ impl BeamProgram {
             call = arguments;
         };
         if arguments.len() > APPLY_MAX_ARGUMENTS {
-            return Self::apply_error(scheduler, call, "system_limit", start);
+            return Self::apply_error(scheduler, call, "system_limit", site);
         }
         if !proper {
-            return Self::apply_error(scheduler, call, "badarg", start);
+            return Self::apply_error(scheduler, call, "badarg", site);
         }
         let arity = arguments.len() as u32;
         let process = scheduler.current_process_mut();
@@ -3577,7 +3618,7 @@ impl BeamProgram {
             write(process, &Operand::X(index), argument)?;
         }
         process.start_apply = start;
-        let outcome = self.call_mfa(scheduler, &module, &name, arity, tail);
+        let outcome = self.call_mfa(scheduler, &module, &name, arity, entry);
         scheduler.current_process_mut().start_apply = false;
         outcome
     }
@@ -3595,22 +3636,22 @@ impl BeamProgram {
     /// ```rust,ignore
     /// // `erlang:apply(1, f, [])` raises badarg with the first frame
     /// // {erlang, apply, [1, f, []], [{error_info, #{module => erl_erts_errors}}]}.
-    /// let outcome = BeamProgram::apply_error(&mut scheduler, call, "badarg", false)?;
+    /// let outcome = BeamProgram::apply_error(&mut scheduler, call, "badarg", ApplySite::Call)?;
     /// ```
     fn apply_error(
         scheduler: &mut Scheduler,
         call: Vec<Term>,
         reason: &'static str,
-        start: bool,
+        site: ApplySite,
     ) -> Result<Option<Outcome>, BeamError> {
         let raised = BifResult::Raise {
             class: ExceptionClass::Error,
             reason: Term::static_atom(reason),
         };
-        scheduler.current_process_mut().start_apply = start;
+        scheduler.current_process_mut().start_apply = site == ApplySite::ProcessStart;
         let raised = bif_error(scheduler, "erlang", "apply", call, raised, 0);
         scheduler.current_process_mut().start_apply = false;
-        Self::finish_bif(scheduler, raised?, false)
+        Self::finish_bif(scheduler, raised?, CallKind::Body)
     }
 
     fn is_start_apply(scheduler: &mut Scheduler) -> Result<bool, BeamError> {
@@ -3647,7 +3688,7 @@ impl BeamProgram {
     fn apply_fun(
         &self,
         scheduler: &mut Scheduler,
-        tail: bool,
+        entry: CallKind,
     ) -> Result<Option<Outcome>, BeamError> {
         let process = scheduler.current_process_mut();
         let list = read(process, &Operand::X(1))?;
@@ -3672,7 +3713,7 @@ impl BeamProgram {
                 reason: Term::static_atom(reason),
             };
             let raised = bif_error(scheduler, "erlang", "apply", call, raised, 0)?;
-            return Self::finish_bif(scheduler, raised, false);
+            return Self::finish_bif(scheduler, raised, CallKind::Body);
         }
         let arity = arguments.len() as u32;
         // The arguments replace the fun in x0, so the call reads the fun first.
@@ -3680,7 +3721,7 @@ impl BeamProgram {
         for (index, argument) in (0..).zip(arguments) {
             write(process, &Operand::X(index), argument)?;
         }
-        self.call_fun(scheduler, call, arity, tail)
+        self.call_fun(scheduler, call, arity, entry)
     }
 
     /// Call the fun that `call` holds with the arguments in `x0` to `x(arity - 1)`, as ERTS
@@ -3712,7 +3753,7 @@ impl BeamProgram {
         scheduler: &mut Scheduler,
         call: FunCall,
         arity: u32,
-        tail: bool,
+        entry: CallKind,
     ) -> Result<Option<Outcome>, BeamError> {
         let (target, free, fun) = match call {
             FunCall::Enter { target, free, fun } => (target, free, fun),
@@ -3733,7 +3774,7 @@ impl BeamProgram {
             Target::Local(lambda) => lambda,
             Target::External {
                 module, function, ..
-            } if tail
+            } if entry.is_tail()
                 && matches!(
                     (
                         scheduler.atoms.name_of(module),
@@ -3748,7 +3789,7 @@ impl BeamProgram {
             }
             Target::External {
                 module, function, ..
-            } => return self.call_mfa(scheduler, module, function, arity, tail),
+            } => return self.call_mfa(scheduler, module, function, arity, entry),
         };
         let total_arity = arity + free.len() as u32;
         scheduler.sync_code();
@@ -3761,7 +3802,7 @@ impl BeamProgram {
             // has no such export (`beam_common.c:1708-1728`).
             if scheduler.code.waiting_or_loaded(&module).is_err() {
                 let module_atom = Term::Atom(lambda.module().clone());
-                return Self::undefined_lambda(scheduler, &module, module_atom, fun, arity, tail);
+                return Self::undefined_lambda(scheduler, &module, module_atom, fun, arity, entry);
             }
             let process = scheduler.current_process_mut();
             let reason = Term::tuple(vec![Term::static_atom("badfun"), fun]);
@@ -3771,7 +3812,7 @@ impl BeamProgram {
         for (register, value) in (arity..).zip(free) {
             write(process, &Operand::X(register), value)?;
         }
-        enter_frame(scheduler.current_process_mut(), frame, tail);
+        enter_frame(scheduler.current_process_mut(), frame, entry);
         Ok(None)
     }
 
@@ -3818,7 +3859,7 @@ impl BeamProgram {
         process.frames.pop();
         if !process.frames.is_empty() {
             let module = Atom::from_static("erlang").expect("erlang is a static atom");
-            return self.call_mfa(scheduler, &module, function, arity, false);
+            return self.call_mfa(scheduler, &module, function, arity, CallKind::Body);
         }
         let reason = read(process, &Operand::X(0))?;
         let location = if arity == 3 {
@@ -3869,13 +3910,13 @@ impl BeamProgram {
     fn finish_bif(
         scheduler: &mut Scheduler,
         result: BifResult,
-        tail: bool,
+        entry: CallKind,
     ) -> Result<Option<Outcome>, BeamError> {
         let process = scheduler.current_process_mut();
         match result {
             BifResult::Value(value) => {
                 write(process, &Operand::X(0), value)?;
-                if tail {
+                if entry.is_tail() {
                     return_from_frame(process)
                 } else {
                     Ok(None)
@@ -3883,7 +3924,7 @@ impl BeamProgram {
             }
             BifResult::YieldReturn(value) => {
                 write(process, &Operand::X(0), value)?;
-                if tail {
+                if entry.is_tail() {
                     // The process exits at its next run when it returned
                     // from its last frame.
                     return_from_frame(process)?;
@@ -3924,7 +3965,7 @@ impl BeamProgram {
                     .export_frame(module, function, arity)?;
                 if let Some(frame) = frame {
                     let process = scheduler.current_process_mut();
-                    enter_frame(process, frame, tail);
+                    enter_frame(process, frame, entry);
                     // A BIF trap always switches out the process
                     // (`context_switch_simplified` in
                     // `jit/arm/instr_bif.cpp:525-536`, `676-701`). The
@@ -3942,7 +3983,7 @@ impl BeamProgram {
                         module,
                         function,
                         arity,
-                        tail,
+                        entry,
                     });
                     Ok(Some(Outcome::Yield))
                 }
@@ -3957,7 +3998,7 @@ impl BeamProgram {
                     module,
                     function,
                     arguments,
-                    tail,
+                    entry,
                     origin,
                 });
                 Ok(Some(Outcome::Yield))
@@ -3972,7 +4013,7 @@ impl BeamProgram {
                     module,
                     function,
                     arguments,
-                    tail,
+                    entry,
                     origin: None,
                 });
                 Ok(Some(Outcome::Wait))
@@ -3982,7 +4023,7 @@ impl BeamProgram {
                     module: "pbeam_cap",
                     function: "await_grant",
                     arguments: Vec::new(),
-                    tail,
+                    entry,
                     origin: None,
                 });
                 Ok(Some(Outcome::Wait))
@@ -4039,17 +4080,17 @@ impl BeamProgram {
         module: &str,
         function: &str,
         arity: u32,
-        tail: bool,
+        entry: CallKind,
     ) -> Result<Option<Outcome>, BeamError> {
         match scheduler
             .synced_code()
             .export_frame(module, function, arity)?
         {
             Some(frame) => {
-                enter_frame(scheduler.current_process_mut(), frame, tail);
+                enter_frame(scheduler.current_process_mut(), frame, entry);
                 Ok(None)
             }
-            None => Self::undefined_function(scheduler, module, function, arity, tail),
+            None => Self::undefined_function(scheduler, module, function, arity, entry),
         }
     }
 }
@@ -4120,8 +4161,8 @@ fn loads_modules(scheduler: &Scheduler) -> bool {
 /// enter_frame(&mut process, scheduler.code.mfa_frame("external", "effect", 1)?, false);
 /// assert_eq!(process.frames.len(), 2);
 /// ```
-fn enter_frame(process: &mut ProcessState, frame: Frame, tail: bool) {
-    if tail {
+fn enter_frame(process: &mut ProcessState, frame: Frame, entry: CallKind) {
+    if entry.is_tail() {
         *current_frame(process) = frame;
     } else {
         process.frames.push(frame);
@@ -4147,10 +4188,10 @@ fn enter_export(
     process: &mut ProcessState,
     frame: Frame,
     arity: u32,
-    tail: bool,
+    entry: CallKind,
 ) -> Result<Option<Outcome>, BeamError> {
     check_remote_call_arguments(&process.registers, arity)?;
-    enter_frame(process, frame, tail);
+    enter_frame(process, frame, entry);
     Ok(None)
 }
 
@@ -4221,7 +4262,7 @@ fn create_process(
         start,
         arguments,
         monitor,
-        link,
+        ChildLink::from(link),
         flags,
         capabilities.as_deref(),
     );
@@ -5609,10 +5650,10 @@ fn match_context_escape(operand: &Operand) -> BeamError {
 /// ```rust,ignore
 /// let equal = BinaryMatchCommand::Equal { size: 8, value: 1 };
 /// let skip = BinaryMatchCommand::Skip { size: 8 };
-/// assert_eq!(equal_read_end(&[skip.clone(), equal, skip], 1, false), 24);
+/// assert_eq!(equal_read_end(&[skip.clone(), equal, skip], 1, TestHeap::Absent), 24);
 /// ```
-fn equal_read_end(commands: &[BinaryMatchCommand], failed: usize, test_heap: bool) -> u64 {
-    let mut heap_need = test_heap
+fn equal_read_end(commands: &[BinaryMatchCommand], failed: usize, test_heap: TestHeap) -> u64 {
+    let mut heap_need = test_heap == TestHeap::Fused
         || commands.iter().any(|command| match command {
             BinaryMatchCommand::Integer { size, .. } => *size >= 60,
             BinaryMatchCommand::Binary { .. } | BinaryMatchCommand::GetTail { .. } => true,
@@ -5678,6 +5719,41 @@ fn equal_read_end(commands: &[BinaryMatchCommand], failed: usize, test_heap: boo
     failed_read.0 + failed_read.1
 }
 
+/// Whether a `bs_match` instruction has a fused `test_heap` instruction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TestHeap {
+    /// No `test_heap` instruction is fused into the match.
+    Absent,
+    /// A `test_heap` instruction follows the match and is fused into it.
+    Fused,
+}
+
+impl From<bool> for TestHeap {
+    fn from(fused: bool) -> Self {
+        if fused { Self::Fused } else { Self::Absent }
+    }
+}
+
+/// The form of the size operand of a `bs_create_bin` segment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SizeForm {
+    /// A literal from 0 to 2^56 - 1, which ERTS computes at load time with
+    /// no check (jit/arm/instr_bs.cpp:1493-1505).
+    Fixed,
+    /// Any other operand, which ERTS checks at run time.
+    Variable,
+}
+
+impl SizeForm {
+    /// Return the form of the size operand `size`.
+    fn of(size: &Operand) -> Self {
+        match size {
+            Operand::Value(Term::Integer(literal)) if (0..1 << 56).contains(literal) => Self::Fixed,
+            _ => Self::Variable,
+        }
+    }
+}
+
 /// Return the value of an integer segment as `segment_integer` gives it,
 /// or `None` for a bignum of more than `BIG_ARITY_MAX` digits: ERTS
 /// `bytes_to_big` then gives `THE_NON_VALUE` (erl_bits.c:343-353), and the
@@ -5686,10 +5762,15 @@ fn equal_read_end(commands: &[BinaryMatchCommand], failed: usize, test_heap: boo
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(bounded_segment_integer(&[0xFF], 8, false, true), Some(Term::Integer(-1)));
+/// assert_eq!(bounded_segment_integer(&[0xFF], 8, Endian::Big, Signedness::Signed), Some(Term::Integer(-1)));
 /// ```
-fn bounded_segment_integer(bits: &[u8], size: usize, little: bool, signed: bool) -> Option<Term> {
-    let value = segment_integer(bits, size, little, signed);
+fn bounded_segment_integer(
+    bits: &[u8],
+    size: usize,
+    endian: Endian,
+    signedness: Signedness,
+) -> Option<Term> {
+    let value = segment_integer(bits, size, endian, signedness);
     match &value {
         Term::BigInt(big) if !fits_big_arity(big) => None,
         _ => Some(value),
@@ -5727,15 +5808,15 @@ fn bounded_segment_integer(bits: &[u8], size: usize, little: bool, signed: bool)
 /// write(&mut process, &Operand::X(0), Term::MatchContext(context))?;
 /// let unit = NonZeroU64::new(8).unwrap();
 /// let byte = BinaryMatchCommand::Integer { size: 8, little: false, signed: false, destination: Operand::X(1) };
-/// assert!(binary_match(&mut process, &Operand::X(0), &[BinaryMatchCommand::EnsureAtLeast { size: 8, unit }, byte], false, &atoms)?);
+/// assert!(binary_match(&mut process, &Operand::X(0), &[BinaryMatchCommand::EnsureAtLeast { size: 8, unit }, byte], TestHeap::Absent, &atoms)?);
 /// assert_eq!(read(&process, &Operand::X(1))?, Term::Integer(7));
-/// assert!(!binary_match(&mut process, &Operand::X(0), &[BinaryMatchCommand::EnsureExactly { size: 0 }], false, &atoms)?);
+/// assert!(!binary_match(&mut process, &Operand::X(0), &[BinaryMatchCommand::EnsureExactly { size: 0 }], TestHeap::Absent, &atoms)?);
 /// ```
 fn binary_match(
     process: &mut ProcessState,
     context: &Operand,
     commands: &[BinaryMatchCommand],
-    test_heap: bool,
+    test_heap: TestHeap,
     atoms: &AtomTable,
 ) -> Result<bool, BeamError> {
     let context = match_context(process, context, atoms)?;
@@ -5770,13 +5851,18 @@ fn binary_match(
                 // `BIG_ARITY_MAX` digits to the register with no check
                 // (`GET_INTEGER`, jit/arm/instr_bs.cpp:3110-3134), and the
                 // pinned ERTS then fails the `tag_val_def` assertion.
-                let value = bounded_segment_integer(&bits, *size as usize, *little, *signed)
-                    .ok_or_else(|| {
-                        error(format!(
-                            "bs_match integer segment of {size} bits is a bignum above \
+                let value = bounded_segment_integer(
+                    &bits,
+                    *size as usize,
+                    Endian::from(*little),
+                    Signedness::from(*signed),
+                )
+                .ok_or_else(|| {
+                    error(format!(
+                        "bs_match integer segment of {size} bits is a bignum above \
                              BIG_ARITY_MAX digits"
-                        ))
-                    })?;
+                    ))
+                })?;
                 write(process, destination, value)?;
             }
             BinaryMatchCommand::Binary { size, destination } => {
@@ -6069,15 +6155,17 @@ fn f64_to_f16(value: f64) -> u16 {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(integer_segment_bits(false, &Term::Integer(3), 8), Ok(24));
-/// assert_eq!(integer_segment_bits(false, &Term::Integer(-1), 1), Err("badarg"));
-/// assert_eq!(integer_segment_bits(false, &Term::Integer(1 << 52), 8), Err("system_limit"));
+/// assert_eq!(integer_segment_bits(SizeForm::Variable, &Term::Integer(3), 8), Ok(24));
+/// assert_eq!(integer_segment_bits(SizeForm::Variable, &Term::Integer(-1), 1), Err("badarg"));
+/// assert_eq!(integer_segment_bits(SizeForm::Variable, &Term::Integer(1 << 52), 8), Err("system_limit"));
 /// let size = Term::from_bigint(BigInt::from(1u128 << 64));
-/// assert_eq!(integer_segment_bits(false, &size, 1), Err("system_limit"));
+/// assert_eq!(integer_segment_bits(SizeForm::Variable, &size, 1), Err("system_limit"));
 /// ```
-fn integer_segment_bits(fixed: bool, size: &Term, unit: u64) -> Result<u64, &'static str> {
+fn integer_segment_bits(form: SizeForm, size: &Term, unit: u64) -> Result<u64, &'static str> {
     match (size.small_integer(), size) {
-        (Some(bits), _) if bits >= 0 && (fixed || unit == 1 || bits >> 52 == 0) => {
+        (Some(bits), _)
+            if bits >= 0 && (form == SizeForm::Fixed || unit == 1 || bits >> 52 == 0) =>
+        {
             Ok((bits as u64).saturating_mul(unit))
         }
         (Some(bits), _) if bits >= 0 => Err("system_limit"),
@@ -6338,9 +6426,9 @@ fn create_binary(
                 // The size pass checks the size of a `float` segment as the
                 // size of an `integer` segment (jit/arm/instr_bs.cpp:
                 // 1493-1505, 1639-1689).
-                let fixed = matches!(size, Operand::Value(Term::Integer(literal)) if (0..1 << 56).contains(literal));
+                let form = SizeForm::of(size);
                 let size = read(process, size)?;
-                let bits = match integer_segment_bits(fixed, &size, *unit) {
+                let bits = match integer_segment_bits(form, &size, *unit) {
                     Ok(bits) => bits,
                     Err(reason) => {
                         return Ok(Err(BinarySegmentFailure {
@@ -6365,9 +6453,9 @@ fn create_binary(
             } => {
                 // ERTS computes the size of a literal from 0 to 2^56 - 1 at
                 // load time with no check (jit/arm/instr_bs.cpp:1493-1505).
-                let fixed = matches!(size, Operand::Value(Term::Integer(literal)) if (0..1 << 56).contains(literal));
+                let form = SizeForm::of(size);
                 let size = read(process, size)?;
-                let bits = match integer_segment_bits(fixed, &size, *unit) {
+                let bits = match integer_segment_bits(form, &size, *unit) {
                     Ok(bits) => bits,
                     Err(reason) => {
                         return Ok(Err(BinarySegmentFailure {
@@ -6381,7 +6469,7 @@ fn create_binary(
                     value: read(process, source)?,
                     bits,
                     little: *little,
-                    fixed,
+                    fixed: form == SizeForm::Fixed,
                 });
             }
             BinarySegment::Utf8 { segment, source } => {
@@ -6587,7 +6675,7 @@ fn write_binary_parts(
                 bits,
                 little,
                 ..
-            } => writer.push_integer(*value, *bits, *little),
+            } => writer.push_integer(*value, *bits, Endian::from(*little)),
             // A segment keeps the low bits of the two's complement value
             // and repeats the sign bit above the value (`fmt_big_be` and
             // `fmt_big_le`, erl_bits.c:989-1015 and 1119-1145).
@@ -6596,7 +6684,7 @@ fn write_binary_parts(
                 bits,
                 little,
                 ..
-            } => writer.push_bigint(value, *bits, *little),
+            } => writer.push_bigint(value, *bits, Endian::from(*little)),
             BinaryPart::Integer { .. } => return Err(integer_type_failure(parts, index)),
             BinaryPart::Utf8(code_point) => {
                 writer.push_bytes(code_point.encode_utf8(&mut [0; 4]).as_bytes());
@@ -6607,12 +6695,20 @@ fn write_binary_parts(
                 little,
             } => match utf_segment_code_point(value) {
                 Some(code_point) if code_point < 0x1_0000 => {
-                    writer.push_integer(i64::from(code_point), 16, *little);
+                    writer.push_integer(i64::from(code_point), 16, Endian::from(*little));
                 }
                 Some(code_point) => {
                     let value = code_point - 0x1_0000;
-                    writer.push_integer(i64::from(0xD800 | (value >> 10)), 16, *little);
-                    writer.push_integer(i64::from(0xDC00 | (value & 0x3FF)), 16, *little);
+                    writer.push_integer(
+                        i64::from(0xD800 | (value >> 10)),
+                        16,
+                        Endian::from(*little),
+                    );
+                    writer.push_integer(
+                        i64::from(0xDC00 | (value & 0x3FF)),
+                        16,
+                        Endian::from(*little),
+                    );
                 }
                 None => {
                     return Err(BinarySegmentFailure::badarg(
@@ -6624,14 +6720,18 @@ fn write_binary_parts(
                 }
             },
             BinaryPart::Utf32 { code_point, little } => {
-                writer.push_integer(i64::from(*code_point), 32, *little);
+                writer.push_integer(i64::from(*code_point), 32, Endian::from(*little));
             }
             BinaryPart::Float {
                 segment,
                 value,
                 bits,
                 little,
-            } => writer.push_integer(float_segment_bits(*segment, value, *bits)?, *bits, *little),
+            } => writer.push_integer(
+                float_segment_bits(*segment, value, *bits)?,
+                *bits,
+                Endian::from(*little),
+            ),
         }
     }
     Ok(writer.into_bytes())
@@ -6658,10 +6758,9 @@ fn sized_binary_part(
     source: &Operand,
     size: &Operand,
 ) -> Result<Result<BinaryPart<'static>, BinarySegmentFailure>, BeamError> {
-    let fixed =
-        matches!(size, Operand::Value(Term::Integer(literal)) if (0..1 << 56).contains(literal));
+    let form = SizeForm::of(size);
     let size = read(process, size)?;
-    Ok(match integer_segment_bits(fixed, &size, unit) {
+    Ok(match integer_segment_bits(form, &size, unit) {
         Ok(bits) => Ok(BinaryPart::Sized {
             segment,
             value: read(process, source)?,

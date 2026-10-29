@@ -740,23 +740,38 @@ fn decompress_stream_nif(
     data: &Term,
     flush: &Term,
 ) -> Result<BifResult, BeamError> {
-    let flush_true = matches!(flush, Term::Atom(atom) if scheduler.atoms.name_of(atom) == "true");
+    let flush_kind = if matches!(flush, Term::Atom(atom) if scheduler.atoms.name_of(atom) == "true")
+    {
+        FlushArgument::TrueAtom
+    } else {
+        FlushArgument::Other
+    };
     let (kind, current) = contexts(scheduler);
     let mut contexts = lock(&kind);
     let native = match open(&mut contexts.decompress, context, current) {
         Err(reason) => Native::Raise(reason),
-        Ok(decompressor) => decompress(decompressor, data, flush, flush_true),
+        Ok(decompressor) => decompress(decompressor, data, flush, flush_kind),
     };
     result(scheduler, native)
 }
 
+/// The flush argument of a `decompress_stream_nif/3` call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FlushArgument {
+    /// The atom `true`.
+    TrueAtom,
+    /// An integer flush, or another term.
+    Other,
+}
+
 /// Run the stream call of `decompress_stream_nif/3` on an open context.
-/// `flush_true` is true when the flush is the atom `true`.
+/// `flush_kind` is [`FlushArgument::TrueAtom`] when the flush is the atom
+/// `true`.
 fn decompress(
     decompressor: &mut Decompressor,
     data: &Term,
     flush: &Term,
-    flush_true: bool,
+    flush_kind: FlushArgument,
 ) -> Native {
     let mut chunk_size = DCtx::out_size();
     if !decompressor.in_use {
@@ -766,7 +781,7 @@ fn decompress(
         // An empty binary with the flush atom `true` gives `done` and does
         // not start the context (`zstd_nif.c:747-753`). `zstd.erl` passes
         // only an integer flush, so no `zstd` call reaches this result.
-        if binary.is_empty() && flush_true {
+        if binary.is_empty() && flush_kind == FlushArgument::TrueAtom {
             return Native::Codec {
                 tag: "done",
                 remainder: None,

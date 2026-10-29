@@ -26,13 +26,14 @@ pub(crate) use flat_size::flat_size;
 pub(crate) use fun::Fun;
 pub(crate) use fun::{Lambda, Target, debug_target};
 pub(crate) use hash::{atom_hash, internal_hash, make_hash, make_hash2};
-pub(crate) use integer::{MAX_BIG_DIGITS, fits_big_arity};
+pub(crate) use integer::{Division, MAX_BIG_DIGITS, ShiftDirection, fits_big_arity};
 use list::{Cons, ConsRef};
 pub(crate) use live_bytes::LiveBytes;
 pub use map::Map;
 pub(crate) use map::{Direction, Drain as MapDrain, Insert, flatmap_order, from_list_units};
 pub(crate) use match_context::MatchState;
-pub(crate) use match_context::{segment_equals, segment_integer};
+pub(crate) use match_context::{Endian, Signedness, segment_equals, segment_integer};
+use order::Comparison;
 pub(crate) use print::{print_term, print_term_limited};
 pub(crate) use record::Record;
 pub(crate) use record::RecordDef;
@@ -156,6 +157,13 @@ pub enum Term {
 #[allow(dead_code)]
 trait TermIsSendAndSync: Send + Sync {}
 impl TermIsSendAndSync for Term {}
+
+impl From<bool> for Term {
+    /// Return the atom `true` or `false`.
+    fn from(value: bool) -> Self {
+        Term::static_atom(if value { "true" } else { "false" })
+    }
+}
 
 /// Check at compile time that a term stays 16 bytes: a bignum is one
 /// pointer to its shared value, as each other boxed term is.
@@ -789,7 +797,7 @@ impl PartialEq for Term {
     /// assert_ne!(Term::Integer(1), Term::Float(1.0));
     /// ```
     fn eq(&self, other: &Self) -> bool {
-        self.equal(other, false)
+        self.equal(other, Comparison::Exact)
     }
 }
 
@@ -811,7 +819,7 @@ impl Term {
     /// assert!(!Term::Integer(1).arith_eq(&Term::Float(1.5)));
     /// ```
     pub(crate) fn arith_eq(&self, other: &Term) -> bool {
-        self.equal(other, true)
+        self.equal(other, Comparison::Arithmetic)
     }
 
     /// Return the native record of a record term, or `None` for each other
@@ -845,15 +853,15 @@ impl Term {
     }
 
     /// Compare two terms for exact equality, or for arithmetic equality when
-    /// `arith` is true. See [`PartialEq::eq`] and [`Term::arith_eq`].
+    /// `mode` is [`Comparison::Arithmetic`]. See [`PartialEq::eq`] and [`Term::arith_eq`].
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert!(Term::Integer(2).equal(&Term::Float(2.0), true));
-    /// assert!(!Term::Integer(2).equal(&Term::Float(2.0), false));
+    /// assert!(Term::Integer(2).equal(&Term::Float(2.0), Comparison::Arithmetic));
+    /// assert!(!Term::Integer(2).equal(&Term::Float(2.0), Comparison::Exact));
     /// ```
-    fn equal(&self, other: &Term, arith: bool) -> bool {
+    fn equal(&self, other: &Term, mode: Comparison) -> bool {
         let mut pairs = EqStack::new();
         let mut left = self;
         let mut right = other;
@@ -890,7 +898,7 @@ impl Term {
                         true
                     } else {
                         pairs.extend(left.free().iter().zip(right.free()));
-                        let same_target = if arith {
+                        let same_target = if mode == Comparison::Arithmetic {
                             left.target().compare_equal(right.target())
                         } else {
                             left.target() == right.target()
@@ -915,7 +923,7 @@ impl Term {
                     for ((left_key, left_value), (right_key, right_value)) in
                         left.iter().zip(right.iter())
                     {
-                        if arith {
+                        if mode == Comparison::Arithmetic {
                             // Map keys compare exactly also in arithmetic
                             // comparison, so `#{1 => a} == #{1.0 => a}` is
                             // false.
@@ -933,7 +941,7 @@ impl Term {
                 (Term::BigInt(left), Term::BigInt(right)) => left == right,
                 (Term::BigInt(big), Term::Float(float))
                 | (Term::Float(float), Term::BigInt(big))
-                    if arith =>
+                    if mode == Comparison::Arithmetic =>
                 {
                     order::compare_big_float(big, *float).is_eq()
                 }
@@ -944,11 +952,13 @@ impl Term {
                     clippy::float_cmp,
                     reason = "arithmetic equality (`==`) compares floats exactly, so `0.0 == -0.0` holds"
                 )]
-                (Term::Float(left), Term::Float(right)) if arith => left == right,
+                (Term::Float(left), Term::Float(right)) if mode == Comparison::Arithmetic => {
+                    left == right
+                }
                 (Term::Float(left), Term::Float(right)) => left.to_bits() == right.to_bits(),
                 (Term::Integer(integer), Term::Float(float))
                 | (Term::Float(float), Term::Integer(integer))
-                    if arith =>
+                    if mode == Comparison::Arithmetic =>
                 {
                     order::compare_integer_float(*integer, *float).is_eq()
                 }

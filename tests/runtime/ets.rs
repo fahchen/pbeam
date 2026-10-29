@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use super::{
-    Access, Busy, EMPTY, EtsTables, FIRST_SEGMENT_SLOTS, Freeing, KeyIndex, Lacking, Retained,
-    Table, TableType, key_hash, object_hash, segment, stored_hash,
+    Access, Busy, EMPTY, EtsTables, FIRST_SEGMENT_SLOTS, Freeing, InsertKind, KeyIndex, Lacking,
+    Retained, Table, TableType, key_hash, object_hash, segment, stored_hash,
 };
 use crate::term::atom_hash;
 use crate::term::{Atom, AtomTable, Map, ProcessId, Reference, Term, test_atom_table};
@@ -20,7 +20,7 @@ fn bounds_the_work_of_one_turn_of_a_busy_list_insert() {
     let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
     assert_eq!(table.step_busy(&atoms, 7), (0, None));
     let objects = (0..10).map(|value| vec![Term::Integer(value)]).collect();
-    table.busy = Some(Busy::new(ProcessId(0), objects, false));
+    table.busy = Some(Busy::new(ProcessId(0), objects, InsertKind::Insert));
     // The counter yields after the loop unit of a step (`erl_db.c:1936-1940`),
     // so 7 units put three objects in and charge the loop unit of the
     // fourth.
@@ -42,7 +42,7 @@ fn bounds_the_work_of_one_turn_of_a_busy_list_insert() {
     let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Bag);
     let mut tables = EtsTables::default();
     let objects = vec![vec![Term::Integer(1)], vec![Term::Integer(2)]];
-    table.busy = Some(Busy::new(ProcessId(0), objects, false));
+    table.busy = Some(Busy::new(ProcessId(0), objects, InsertKind::Insert));
     // The budget ends the insert with the last object, so the state with
     // the walk of each key stays for this turn.
     table.step_busy(&atoms, 4);
@@ -66,7 +66,11 @@ fn bounds_the_work_of_one_turn_of_a_busy_list_insert() {
     // turn gives the result `false` (`erl_db.c:1863-1873`, `1909-1925`).
     let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
     table.insert_all(&atoms, vec![vec![Term::Integer(1)]]);
-    table.busy = Some(Busy::new(ProcessId(0), vec![vec![Term::Integer(1)]], true));
+    table.busy = Some(Busy::new(
+        ProcessId(0),
+        vec![vec![Term::Integer(1)]],
+        InsertKind::InsertNew,
+    ));
     assert_eq!(table.step_busy(&atoms, 2), (2, None));
     assert_eq!(
         table.step_busy(&atoms, 2),
@@ -1665,7 +1669,7 @@ fn a_read_or_a_write_helps_the_list_insert_of_another_process() {
     for id in 0..2 {
         let mut table = Table::new(ProcessId(1), Access::Public, 1, TableType::Set);
         let objects = vec![vec![Term::Integer(id)], vec![Term::Integer(id + 10)]];
-        table.busy = Some(Busy::new(ProcessId(1), objects, false));
+        table.busy = Some(Busy::new(ProcessId(1), objects, InsertKind::Insert));
         tables.create(Reference(id as u64), None, table);
     }
     tables.reserve_result(ProcessId(1));
@@ -1687,7 +1691,11 @@ fn a_read_or_a_write_helps_the_list_insert_of_another_process() {
     assert!(write.is_ok_and(|table| table.busy.is_none() && table.len() == 2));
     // The starter itself takes its busy table with no completion.
     let mut table = Table::new(ProcessId(1), Access::Public, 1, TableType::Set);
-    table.busy = Some(Busy::new(ProcessId(1), vec![vec![Term::Integer(5)]], false));
+    table.busy = Some(Busy::new(
+        ProcessId(1),
+        vec![vec![Term::Integer(5)]],
+        InsertKind::Insert,
+    ));
     tables.create(Reference(2), None, table);
     let own = tables.write(&atoms, &id(2), ProcessId(1), 4000);
     assert!(own.is_ok_and(|table| table.busy.is_some()));

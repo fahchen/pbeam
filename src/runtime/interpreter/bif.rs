@@ -1235,7 +1235,11 @@ impl BeamProgram {
                 *index as usize,
                 *smallest as u64,
                 *position as u64,
-                function == "binary_longest_suffix_trap",
+                if function == "binary_longest_suffix_trap" {
+                    binary::CommonEnd::Suffix
+                } else {
+                    binary::CommonEnd::Prefix
+                },
             ));
         }
         if module == "persistent_term"
@@ -1286,7 +1290,11 @@ impl BeamProgram {
                 bytes.clone().to_bytes(),
                 *characters as usize,
                 rest,
-                encoding.is_static("latin1"),
+                if encoding.is_static("latin1") {
+                    crate::runtime::unicode::CharEncoding::Latin1
+                } else {
+                    crate::runtime::unicode::CharEncoding::Unicode
+                },
             ),
             ("erlang", "characters_to_list_trap_2", [result, Term::Integer(remaining)]) => {
                 unicode::finish_trap(
@@ -1545,6 +1553,25 @@ pub(crate) fn import_kind(module: &str, name: &str, arity: u32) -> ImportKind {
 #[path = "../../../tests/runtime/interpreter/bif.rs"]
 mod tests;
 
+/// Where a process keeps the messages of its queue (`message_queue_data`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MessageQueue {
+    /// The `on_heap` setting: the messages are in the heap of the process.
+    OnHeap,
+    /// The `off_heap` setting: the messages are outside the heap.
+    OffHeap,
+}
+
+impl From<bool> for MessageQueue {
+    fn from(off_heap: bool) -> Self {
+        if off_heap {
+            Self::OffHeap
+        } else {
+            Self::OnHeap
+        }
+    }
+}
+
 /// Return the extra reductions of a `process_info` item: `floor(Links / 4)`
 /// for `links` (`erl_bif_info.c:1777`), `floor(Messages / 4)` for `messages`
 /// (`erl_bif_info.c:1735`), for `memory` (`erl_bif_info.c:2066-2067`), and
@@ -1555,7 +1582,7 @@ pub(crate) fn item_reductions(
     item: &Term,
     value: &Term,
     messages: usize,
-    off_heap_message_queue: bool,
+    queue: MessageQueue,
 ) -> i32 {
     let count = match item {
         Term::Atom(_) if item == &Term::static_atom("links") => value
@@ -1571,7 +1598,7 @@ pub(crate) fn item_reductions(
             .map_or(0, std::iter::Iterator::count),
         Term::Atom(_) if item == &Term::static_atom("memory") => messages,
         Term::Atom(_)
-            if item == &Term::static_atom("total_heap_size") && !off_heap_message_queue =>
+            if item == &Term::static_atom("total_heap_size") && queue == MessageQueue::OnHeap =>
         {
             messages
         }

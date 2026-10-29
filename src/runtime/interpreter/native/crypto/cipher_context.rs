@@ -5,8 +5,8 @@
 //! safe `openssl` crate makes each OpenSSL call.
 
 use super::cipher::{
-    CipherFailure, FIRST_AEAD, Padding, cipher_index, cipher_init, cipher_options, fetch_cipher,
-    final_output, init_context,
+    CipherDirection, CipherFailure, FIRST_AEAD, Padding, cipher_index, cipher_init, cipher_options,
+    fetch_cipher, final_output, init_context,
 };
 use super::{
     BeamError, BifResult, CIPHERS, HashMap, Map, Reference, Scheduler, Term, atom_name, c_error,
@@ -136,8 +136,14 @@ pub(super) fn ng_crypto_init_nif(
     let outcome = with_cipher(scheduler, &arguments[0], |state| {
         let encrypt = encrypt.ok_or(("badarg", 695, 3, "Expected true or false"))?;
         state.encrypt = i8::from(encrypt);
-        cipher_init(&mut state.context, encrypt, None, None, None)
-            .map_err(|_| ("error", 701, -1, "Can't initialize encflag"))?;
+        cipher_init(
+            &mut state.context,
+            CipherDirection::from(encrypt),
+            None,
+            None,
+            None,
+        )
+        .map_err(|_| ("error", 701, -1, "Can't initialize encflag"))?;
         Ok(())
     });
     match outcome {
@@ -214,7 +220,11 @@ pub(super) fn ng_crypto_final_nif(
 ) -> Result<BifResult, BeamError> {
     let output = with_cipher(scheduler, context, |state| {
         let mut output = Vec::new();
-        let (encrypt, padding, size) = (state.encrypt != 0, state.padding, state.size);
+        let (encrypt, padding, size) = (
+            CipherDirection::from(state.encrypt != 0),
+            state.padding,
+            state.size,
+        );
         let padded_size = &mut state.padded_size;
         final_output(
             &mut state.context,
@@ -331,8 +341,14 @@ fn aead_init(scheduler: &Scheduler, arguments: &[Term]) -> Result<AeadContext, C
     let message = "The cipher is not supported in this libcrypto version";
     let cipher = fetch_cipher(index).ok_or(("notsup", 131, 0, message))?;
     let mut context = CipherCtx::new().expect("OpenSSL allocates each cipher context");
-    cipher_init(&mut context, encrypt, Some(&cipher), None, None)
-        .map_err(|_| ("error", 136, -1, "CipherInit failed"))?;
+    cipher_init(
+        &mut context,
+        CipherDirection::from(encrypt),
+        Some(&cipher),
+        None,
+        None,
+    )
+    .map_err(|_| ("error", 136, -1, "CipherInit failed"))?;
     context
         .set_key_length(key.len())
         .map_err(|_| ("badarg", 138, 1, "Bad Key length"))?;
@@ -407,8 +423,14 @@ fn aead_run(state: &mut AeadContext, arguments: &[Term]) -> Result<Option<Vec<u8
     } else {
         (296, "Can't set key and iv")
     };
-    cipher_init(context, state.encrypt, None, Some(&state.key), Some(&iv))
-        .map_err(|_| ("error", line, -1, message))?;
+    cipher_init(
+        context,
+        CipherDirection::from(state.encrypt),
+        None,
+        Some(&state.key),
+        Some(&iv),
+    )
+    .map_err(|_| ("error", line, -1, message))?;
     if state.ccm {
         context
             .set_data_len(text.len())

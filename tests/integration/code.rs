@@ -4,7 +4,8 @@
 use std::process::Command;
 
 use pbeam_runtime::{
-    AtomTable, BeamProgram, Capability, CapabilityKind, Constraint, Operation, Policy, Term,
+    AtomTable, BeamProgram, Capability, CapabilityKind, Constraint, Delegation, Operation, Policy,
+    Term,
 };
 
 #[path = "../common/mod.rs"]
@@ -29,7 +30,7 @@ fn code_capability(operations: &[Operation], modules: &[&str]) -> Grants {
             CapabilityKind::Code,
             operations,
             Constraint::Only(modules.iter().map(|&module| module.to_owned()).collect()),
-            false,
+            Delegation::NotDelegable,
         )
         .unwrap(),
     ])

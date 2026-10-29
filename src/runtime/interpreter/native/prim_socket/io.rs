@@ -181,7 +181,14 @@ fn write(
         None => host.send_with_flags(bytes, flags),
     };
     let request = (key, caller, reference);
-    send_result(scheduler, state, sent, bytes.len(), false, request)
+    send_result(
+        scheduler,
+        state,
+        sent,
+        bytes.len(),
+        IovTail::Absent,
+        request,
+    )
 }
 
 /// Check the socket state before a write, as `essio_send` does
@@ -261,7 +268,14 @@ pub(super) fn sendv(
         .expect("an open socket has a host socket");
     let sent = nix::sys::uio::writev(host, &slices).map_err(io::Error::from);
     let request = (key, caller, reference);
-    send_result(scheduler, state, sent, size, data_in_tail, request)
+    send_result(
+        scheduler,
+        state,
+        sent,
+        size,
+        IovTail::from(data_in_tail),
+        request,
+    )
 }
 
 /// Return the bytes of the binaries that are not empty in the first
@@ -290,6 +304,36 @@ fn iovec(iov: &Term) -> Option<(Vec<&[u8]>, bool)> {
     }
 }
 
+/// Whether the iovec of a send has data after its first `iov_max` elements.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IovTail {
+    /// The iovec ends within `iov_max` elements.
+    Absent,
+    /// A tail follows: the send reports the written bytes as `{iov, Written}`.
+    Present,
+}
+
+impl From<bool> for IovTail {
+    fn from(present: bool) -> Self {
+        if present { Self::Present } else { Self::Absent }
+    }
+}
+
+/// The `Ref` argument of a receive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecvRef {
+    /// The atom `zero`: the receive does not select.
+    Zero,
+    /// A reference: the receive selects after `EAGAIN`.
+    Reference,
+}
+
+impl From<bool> for RecvRef {
+    fn from(zero: bool) -> Self {
+        if zero { Self::Zero } else { Self::Reference }
+    }
+}
+
 /// Handle the result `sent` of a send of `size` bytes, as
 /// `send_check_result` does (`unix_socket_syncio.c:6868-6945`): a partial
 /// write or `EAGAIN` makes the write select; each byte written with
@@ -300,7 +344,7 @@ fn send_result(
     mut state: MutexGuard<'_, SocketState>,
     sent: io::Result<usize>,
     size: usize,
-    data_in_tail: bool,
+    tail: IovTail,
     (key, caller, reference): (Reference, ProcessId, &Term),
 ) -> Result<BifResult, BeamError> {
     match sent {
@@ -312,7 +356,7 @@ fn send_result(
             caller,
             reference,
         )),
-        Ok(written) if data_in_tail => {
+        Ok(written) if tail == IovTail::Present => {
             // `send_check_retry` with the `sendRef` `iov`
             // (`unix_socket_syncio.c:7091-7155`).
             state.counters.write_pkg_max_count += written as u64;
@@ -548,7 +592,17 @@ pub(super) fn recv(
     let read = match received.map_err(io::Error::from) {
         Ok(0) if stream => return Ok(end_of_stream(state)),
         Ok(read) => read,
-        Err(failure) => return recv_fail(scheduler, state, &failure, zero, key, caller, reference),
+        Err(failure) => {
+            return recv_fail(
+                scheduler,
+                state,
+                &failure,
+                RecvRef::from(zero),
+                key,
+                caller,
+                reference,
+            );
+        }
     };
     buffer.truncate(read);
     let length = read as u64;
@@ -648,7 +702,17 @@ pub(super) fn recvfrom(
     let (read, from) = match received.map_err(io::Error::from) {
         Ok((0, _)) if stream => return Ok(end_of_stream(state)),
         Ok(received) => received,
-        Err(failure) => return recv_fail(scheduler, state, &failure, zero, key, caller, reference),
+        Err(failure) => {
+            return recv_fail(
+                scheduler,
+                state,
+                &failure,
+                RecvRef::from(zero),
+                key,
+                caller,
+                reference,
+            );
+        }
     };
     buffer.truncate(read);
     let length = read as u64;
@@ -732,7 +796,7 @@ fn recv_fail(
     scheduler: &mut Scheduler,
     mut state: MutexGuard<'_, SocketState>,
     failure: &io::Error,
-    zero: bool,
+    recv_ref: RecvRef,
     key: Reference,
     caller: ProcessId,
     reference: &Term,
@@ -743,7 +807,7 @@ fn recv_fail(
         drop(state);
         return errno_error(scheduler, failure);
     }
-    if zero {
+    if recv_ref == RecvRef::Zero {
         state.reader = None;
         return Ok(BifResult::Value(Term::static_atom("timeout")));
     }

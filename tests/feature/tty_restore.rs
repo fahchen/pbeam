@@ -67,7 +67,7 @@ fn sets_fd_0_to_its_first_mode_at_the_run_end_as_pinned_erts() {
     // `clears_pendin_after_the_reset_turns_icanon_on`).
     for (function, status) in [("main", 0), ("halt", 0), ("crash", 1)] {
         for (name, command) in [("ERTS", erts(function)), ("PBeam", pbeam(function))] {
-            let modes = run_in_terminal(command, RAW_CANONICAL, true);
+            let modes = run_in_terminal(command, RAW_CANONICAL, StdoutTarget::Terminal);
             assert_ne!(modes.raw, modes.first, "{name} {function}: {modes:?}");
             assert_eq!(
                 (modes.last.as_str(), modes.status),
@@ -93,7 +93,7 @@ fn clears_pendin_after_the_reset_turns_icanon_on() {
     // "Terminal mode at exit" in docs/erts-differences.md). Linux does not
     // use `PENDIN`.
     for (function, status) in [("main", 0), ("halt", 0), ("crash", 1)] {
-        let modes = run_in_terminal(pbeam(function), RAW, true);
+        let modes = run_in_terminal(pbeam(function), RAW, StdoutTarget::Terminal);
         assert_ne!(modes.raw, modes.first, "{function}: {modes:?}");
         assert_eq!(
             (modes.last.as_str(), modes.status),
@@ -110,7 +110,7 @@ fn keeps_the_mode_of_fd_0_when_stdout_is_not_a_terminal() {
     // sets fd 0 to its first mode only when fds 0 and 1 are terminals
     // (sys.c:187, erl_child_setup.c:565, 574), so the raw mode stays.
     for (name, command) in [("ERTS", erts("main")), ("PBeam", pbeam("main"))] {
-        let modes = run_in_terminal(command, RAW, false);
+        let modes = run_in_terminal(command, RAW, StdoutTarget::Pipe);
         assert_ne!(modes.raw, modes.first, "{name}: {modes:?}");
         assert_eq!(
             (modes.last.as_str(), modes.status),
@@ -170,9 +170,18 @@ fn pbeam(function: &str) -> Command {
     command
 }
 
+/// Where the stdout and stderr of a command go.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StdoutTarget {
+    /// The pseudo-terminal of the command.
+    Terminal,
+    /// One pipe.
+    Pipe,
+}
+
 /// Run `command` with `TERM=dumb` and `LC_ALL=C.UTF-8`, and with a new
 /// pseudo-terminal as its stdin. Its stdout and stderr are the terminal
-/// when `terminal_output` is `true`, or else one pipe. When the output has
+/// when `output` is [`StdoutTarget::Terminal`], or else one pipe. When the output has
 /// the prompt "ready> ", set the terminal mode with `stty` and
 /// `raw_mode`, and type "go\n".
 /// Return the modes before the run, after the change to raw mode, and after
@@ -182,13 +191,13 @@ fn pbeam(function: &str) -> Command {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let modes = run_in_terminal(erts("main"), RAW, true);
+/// let modes = run_in_terminal(erts("main"), RAW, StdoutTarget::Terminal);
 /// assert_eq!(modes.last, modes.first);
 /// ```
-fn run_in_terminal(mut command: Command, raw_mode: &[&str], terminal_output: bool) -> Modes {
+fn run_in_terminal(mut command: Command, raw_mode: &[&str], output: StdoutTarget) -> Modes {
     let (master, slave) = open_terminal();
     let first = stty(&slave, &["-g"]);
-    let (output_reader, output_writer) = if terminal_output {
+    let (output_reader, output_writer) = if output == StdoutTarget::Terminal {
         (master.try_clone().unwrap(), slave.try_clone().unwrap())
     } else {
         let (reader, writer) = std::io::pipe().unwrap();

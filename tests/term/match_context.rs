@@ -1,6 +1,8 @@
 use num_bigint::BigInt;
 
-use super::{Binary, MatchState, Term, segment_bits, segment_equals, segment_integer};
+use super::{
+    Binary, Endian, MatchState, Signedness, Term, segment_bits, segment_equals, segment_integer,
+};
 
 #[test]
 fn reads_skips_and_gives_the_tail_at_each_bit_position() {
@@ -90,32 +92,41 @@ fn takes_bits_at_aligned_and_unaligned_offsets() {
 
 #[test]
 fn gives_the_integer_of_each_endianness_and_sign() {
-    assert_eq!(segment_integer(&[], 0, false, true), Term::Integer(0));
-    assert_eq!(segment_integer(&[0xA0], 3, false, false), Term::Integer(5));
-    assert_eq!(segment_integer(&[0xA0], 3, false, true), Term::Integer(-3));
     assert_eq!(
-        segment_integer(&[0x01, 0x20], 12, false, false),
+        segment_integer(&[], 0, Endian::Big, Signedness::Signed),
+        Term::Integer(0)
+    );
+    assert_eq!(
+        segment_integer(&[0xA0], 3, Endian::Big, Signedness::Unsigned),
+        Term::Integer(5)
+    );
+    assert_eq!(
+        segment_integer(&[0xA0], 3, Endian::Big, Signedness::Signed),
+        Term::Integer(-3)
+    );
+    assert_eq!(
+        segment_integer(&[0x01, 0x20], 12, Endian::Big, Signedness::Unsigned),
         Term::Integer(0x012)
     );
     // Little-endian: the last 4 bits are the most significant part.
     assert_eq!(
-        segment_integer(&[0x23, 0x10], 12, true, false),
+        segment_integer(&[0x23, 0x10], 12, Endian::Little, Signedness::Unsigned),
         Term::Integer(0x123)
     );
     assert_eq!(
-        segment_integer(&[0x23, 0x80], 12, true, true),
+        segment_integer(&[0x23, 0x80], 12, Endian::Little, Signedness::Signed),
         Term::Integer(0x823 - 0x1000)
     );
     assert_eq!(
-        segment_integer(&[0x01, 0x02], 16, true, false),
+        segment_integer(&[0x01, 0x02], 16, Endian::Little, Signedness::Unsigned),
         Term::Integer(0x0201)
     );
     assert_eq!(
-        segment_integer(&[0xFF, 0xFE], 16, false, true),
+        segment_integer(&[0xFF, 0xFE], 16, Endian::Big, Signedness::Signed),
         Term::Integer(-2)
     );
     assert_eq!(
-        segment_integer(&[0xFE, 0xFF], 16, true, true),
+        segment_integer(&[0xFE, 0xFF], 16, Endian::Little, Signedness::Signed),
         Term::Integer(-2)
     );
 }
@@ -125,35 +136,38 @@ fn gives_a_bignum_for_an_integer_outside_the_64_bit_range() {
     let mut max = vec![0x7F];
     max.extend([0xFF; 7]);
     assert_eq!(
-        segment_integer(&max, 64, false, false),
+        segment_integer(&max, 64, Endian::Big, Signedness::Unsigned),
         Term::Integer(i64::MAX)
     );
     let mut above = vec![0x80];
     above.extend([0; 7]);
     assert_eq!(
-        segment_integer(&above, 64, false, false),
+        segment_integer(&above, 64, Endian::Big, Signedness::Unsigned),
         Term::from_bigint(BigInt::from(1u64 << 63))
     );
     assert_eq!(
-        segment_integer(&above, 64, false, true),
+        segment_integer(&above, 64, Endian::Big, Signedness::Signed),
         Term::Integer(i64::MIN)
     );
     // 72 bits with 8 leading sign bits fit; one bit more does not.
     let mut wide = vec![0xFF, 0x80];
     wide.extend([0; 7]);
     assert_eq!(
-        segment_integer(&wide, 72, false, true),
+        segment_integer(&wide, 72, Endian::Big, Signedness::Signed),
         Term::Integer(i64::MIN)
     );
     let mut below = vec![0xFF, 0x7F];
     below.extend([0xFF; 7]);
     assert_eq!(
-        segment_integer(&below, 72, false, true),
+        segment_integer(&below, 72, Endian::Big, Signedness::Signed),
         Term::from_bigint(BigInt::from(i64::MIN) - 1)
     );
     let mut zero = vec![0; 9];
     zero[8] = 5;
-    assert_eq!(segment_integer(&zero, 72, false, false), Term::Integer(5));
+    assert_eq!(
+        segment_integer(&zero, 72, Endian::Big, Signedness::Unsigned),
+        Term::Integer(5)
+    );
 }
 
 #[test]

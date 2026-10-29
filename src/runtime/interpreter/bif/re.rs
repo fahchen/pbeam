@@ -6,6 +6,7 @@ use super::BifResult::{Trap, Value};
 use super::{AtomTable, BeamError, BifContext, BifResult, ExceptionClass, Term, iolist};
 use crate::runtime::pcre2;
 use crate::runtime::scheduler::CONTEXT_REDS;
+use crate::runtime::unicode::CharEncoding;
 
 /// The atom options of `re:compile/2` that set one `PCRE2_*` compile bit
 /// (`parse_options`, `erl_bif_re.c:442-537`).
@@ -311,7 +312,12 @@ pub(super) fn compile(
         Err(failure) => return Ok(Value(compile_error(&failure, None))),
     };
     if parsed.flags & FLAG_EXPORT != 0 {
-        return Ok(Value(export(&code, unicode, bytes, options)));
+        let charset = if unicode {
+            CharEncoding::Unicode
+        } else {
+            CharEncoding::Latin1
+        };
+        return Ok(Value(export(&code, charset, bytes, options)));
     }
     let result = compile_result(context, code, unicode.into())?;
     Ok(Value(Term::tuple(vec![Term::static_atom("ok"), result])))
@@ -968,6 +974,15 @@ fn ovec_pairs(count: i64) -> u32 {
     (count as u64).wrapping_add(1) as u32
 }
 
+/// Whether a match run is the first run of a `re:run/3` call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RunStage {
+    /// The first run, which checks that the subject is valid UTF.
+    First,
+    /// A later run of a trapped call, which has checked the subject.
+    Later,
+}
+
 /// Run `re:run(Subject, RE, Options)`, or
 /// `re:internal_run(Subject, RE, Options, First)` with `first` false, as
 /// `re_run` (`erl_bif_re.c:1485-1828`) does:
@@ -1015,12 +1030,12 @@ fn ovec_pairs(count: i64) -> u32 {
 ///
 /// ```rust,ignore
 /// // {match, [{1, 1}]}
-/// let value = run(&mut context, &Term::binary(b"abc".to_vec()), &Term::binary(b"b".to_vec()), &Term::nil(), true)?;
+/// let value = run(&mut context, &Term::binary(b"abc".to_vec()), &Term::binary(b"b".to_vec()), &Term::nil(), RunStage::First)?;
 /// // {match, [[{1, 1}], [{4, 1}]]}
 /// let global = Term::list_from(vec![Term::static_atom("global")]);
-/// let value = run(&mut context, &Term::binary(b"abcabc".to_vec()), &Term::binary(b"b".to_vec()), &global, true)?;
+/// let value = run(&mut context, &Term::binary(b"abcabc".to_vec()), &Term::binary(b"b".to_vec()), &global, RunStage::First)?;
 /// // badarg
-/// let value = run(&mut context, &Term::binary(b"a".to_vec()), &Term::binary(b"a".to_vec()), &Term::list_from(vec![Term::static_atom("export")]), true)?;
+/// let value = run(&mut context, &Term::binary(b"a".to_vec()), &Term::binary(b"a".to_vec()), &Term::list_from(vec![Term::static_atom("export")]), RunStage::First)?;
 /// ```
 ///
 /// # Errors
@@ -1033,7 +1048,7 @@ pub(super) fn run(
     subject: &Term,
     pattern: &Term,
     options: &Term,
-    first: bool,
+    stage: RunStage,
 ) -> Result<BifResult, BeamError> {
     let Some(mut parsed) = parse_options(&context.scheduler.atoms, options) else {
         return Ok(BifResult::badopt());
@@ -1041,7 +1056,7 @@ pub(super) fn run(
     if parsed.flags & FLAG_EXPORT != 0 {
         return Ok(BifResult::badopt());
     }
-    if !first {
+    if stage == RunStage::Later {
         parsed.match_bits |= pcre2::NO_UTF_CHECK;
     }
     let unicode = parsed.flags & FLAG_UNICODE != 0;
@@ -1302,9 +1317,9 @@ pub(super) fn internal_run(
     first: &Term,
 ) -> Result<BifResult, BeamError> {
     if is_atom(first, "true") {
-        run(context, subject, pattern, options, true)
+        run(context, subject, pattern, options, RunStage::First)
     } else if is_atom(first, "false") {
-        run(context, subject, pattern, options, false)
+        run(context, subject, pattern, options, RunStage::Later)
     } else {
         Ok(BifResult::badarg())
     }
@@ -1366,14 +1381,14 @@ const EXPORT_UNICODE_OFFSET: usize = 13;
 /// let options = Term::list_from(vec![Term::static_atom("export")]);
 /// // {ok, {re_exported_pattern, <<"re-PCRE2",163,240,192,168,1,0>>,
 /// //       <<"a">>, [export], Encoded}} on aarch64 macOS, as ERTS
-/// let result = export(&code, false, b"a".to_vec(), &options);
+/// let result = export(&code, CharEncoding::Latin1, b"a".to_vec(), &options);
 /// ```
-fn export(code: &pcre2::Code, unicode: bool, source: Vec<u8>, options: &Term) -> Term {
+fn export(code: &pcre2::Code, charset: CharEncoding, source: Vec<u8>, options: &Term) -> Term {
     let encoded = code.serialize();
     let mut header = EXPORT_TITLE.to_vec();
     header.extend_from_slice(&crc32(&encoded).to_be_bytes());
     header.push(EXPORT_VERSION);
-    header.push(unicode.into());
+    header.push((charset == CharEncoding::Unicode).into());
     Term::tuple(vec![
         Term::static_atom("ok"),
         Term::tuple(vec![

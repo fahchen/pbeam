@@ -73,7 +73,7 @@ use crate::{
     term::{ProcessId, Reference},
 };
 use stream::Stream;
-pub(in crate::runtime) use stream::{Event, Output, Receiver};
+pub(in crate::runtime) use stream::{Activation, Event, Output, Receiver};
 
 /// The number that `prim_inet` adds to each request code
 /// (`ERTS_INET_DRV_CONTROL_MAGIC_NUMBER`, `prim_inet.erl:2969`).
@@ -250,13 +250,13 @@ pub(in crate::runtime) enum Control {
     Connect(u32),
     /// A valid `SETOPTS` that made a connected socket active, as
     /// `inet_set_opts` returns 1 or 2 (inet_drv.c:7949-7981): the reply is
-    /// `[1]` after the scheduler delivers the data. With `read`, the change
-    /// to `once` reads the socket (`tcp_recv`), else the change to `true`
+    /// `[1]` after the scheduler delivers the data. With
+    /// [`Activation::Read`], the change to `once` reads the socket (`tcp_recv`), else the change to `true`
     /// delivers the bytes of the input buffer (`tcp_deliver`)
     /// (inet_drv.c:11131-11148).
     Active {
-        /// The port reads the socket.
-        read: bool,
+        /// What the port does first.
+        activation: Activation,
     },
     /// A `SETOPTS` that ended `{active, N}` this many times
     /// (inet_drv.c:6993-6998): the port sends `{udp_passive, S}` to the
@@ -276,6 +276,24 @@ pub(in crate::runtime) enum Control {
         /// The length, 0 for the bytes of one read.
         length: usize,
     },
+}
+
+/// Whether a failed set of a socket option fails the request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SetErrors {
+    /// A failed set does not fail the request.
+    Ignore,
+    /// A failed set fails the request (`propagate` of `inet_set_opts`).
+    Propagate,
+}
+
+/// Whether a membership option joins or leaves a multicast group.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GroupAction {
+    /// `ip_add_membership` and `ipv6_add_membership`.
+    Join,
+    /// `ip_drop_membership` and `ipv6_drop_membership`.
+    Leave,
 }
 
 impl Inet {
@@ -829,13 +847,13 @@ impl Inet {
                     self.buffer_set = true;
                     true
                 }
-                2 => self.set_socket(libc::SO_DONTROUTE, false, |socket| {
+                2 => self.set_socket(libc::SO_DONTROUTE, SetErrors::Ignore, |socket| {
                     setsockopt(socket, sockopt::DontRoute, &(value != 0)).map_err(io::Error::from)
                 }),
-                4 => self.set_socket(libc::SO_BROADCAST, false, |socket| {
+                4 => self.set_socket(libc::SO_BROADCAST, SetErrors::Ignore, |socket| {
                     socket.set_broadcast(value != 0)
                 }),
-                6 => self.set_socket(libc::SO_SNDBUF, false, |socket| {
+                6 => self.set_socket(libc::SO_SNDBUF, SetErrors::Ignore, |socket| {
                     socket.set_send_buffer_size(value as usize)
                 }),
                 7 => {
@@ -846,29 +864,37 @@ impl Inet {
                             self.stream.buffer = value as usize;
                         }
                     }
-                    self.set_socket(libc::SO_RCVBUF, false, |socket| {
+                    self.set_socket(libc::SO_RCVBUF, SetErrors::Ignore, |socket| {
                         socket.set_recv_buffer_size(value as usize)
                     })
                 }
-                12 => self.set_socket(libc::IP_MULTICAST_TTL, false, |socket| {
+                12 => self.set_socket(libc::IP_MULTICAST_TTL, SetErrors::Ignore, |socket| {
                     socket.set_multicast_ttl_v4(value as u32)
                 }),
-                13 => self.set_socket(libc::IP_MULTICAST_LOOP, false, |socket| {
+                13 => self.set_socket(libc::IP_MULTICAST_LOOP, SetErrors::Ignore, |socket| {
                     socket.set_multicast_loop_v4(value != 0)
                 }),
                 11 => match self.family {
-                    AF_INET => self.set_socket(libc::IP_MULTICAST_IF, false, |socket| {
-                        socket.set_multicast_if_v4(&Ipv4Addr::from(value as u32))
-                    }),
+                    AF_INET => {
+                        self.set_socket(libc::IP_MULTICAST_IF, SetErrors::Ignore, |socket| {
+                            socket.set_multicast_if_v4(&Ipv4Addr::from(value as u32))
+                        })
+                    }
                     // ERTS gives the index in network byte order
                     // (`sock_htonl`, inet_drv.c:7608).
-                    AF_INET6 => self.set_socket(libc::IPV6_MULTICAST_IF, false, |socket| {
-                        socket.set_multicast_if_v6((value as u32).to_be())
-                    }),
+                    AF_INET6 => {
+                        self.set_socket(libc::IPV6_MULTICAST_IF, SetErrors::Ignore, |socket| {
+                            socket.set_multicast_if_v6((value as u32).to_be())
+                        })
+                    }
                     _ => false,
                 },
                 14 | 15 => {
-                    let add = *option == 14;
+                    let action = if *option == 14 {
+                        GroupAction::Join
+                    } else {
+                        GroupAction::Leave
+                    };
                     match (value, self.family) {
                         (1, AF_INET) => {
                             let Some((head, rest)) = request.split_first_chunk::<12>() else {
@@ -880,13 +906,13 @@ impl Inet {
                             let index = u32::from_be_bytes([i3, i2, i1, i0]);
                             let group = Ipv4Addr::new(g3, g2, g1, g0);
                             let interface = Ipv4Addr::new(a3, a2, a1, a0);
-                            let kind = if add {
+                            let kind = if action == GroupAction::Join {
                                 libc::IP_ADD_MEMBERSHIP
                             } else {
                                 libc::IP_DROP_MEMBERSHIP
                             };
-                            self.set_socket(kind, false, |socket| {
-                                membership_v4(socket, add, group, index, interface)
+                            self.set_socket(kind, SetErrors::Ignore, |socket| {
+                                membership_v4(socket, action, group, index, interface)
                             })
                         }
                         (2, AF_INET6) => {
@@ -900,24 +926,28 @@ impl Inet {
                             let [i3, i2, i1, i0, ref group @ ..] = *head;
                             let index = u32::from_be_bytes([i3, i2, i1, i0]);
                             let group = Ipv6Addr::from(*group);
-                            self.set_socket(IPV6_MEMBERSHIP[usize::from(add)], false, |socket| {
-                                if add {
-                                    socket.join_multicast_v6(&group, index)
-                                } else {
-                                    socket.leave_multicast_v6(&group, index)
-                                }
-                            })
+                            self.set_socket(
+                                IPV6_MEMBERSHIP[usize::from(action == GroupAction::Join)],
+                                SetErrors::Ignore,
+                                |socket| {
+                                    if action == GroupAction::Join {
+                                        socket.join_multicast_v6(&group, index)
+                                    } else {
+                                        socket.leave_multicast_v6(&group, index)
+                                    }
+                                },
+                            )
                         }
                         _ => false,
                     }
                 }
-                0 => self.set_socket(libc::SO_REUSEADDR, false, |socket| {
+                0 => self.set_socket(libc::SO_REUSEADDR, SetErrors::Ignore, |socket| {
                     socket.set_reuse_address(value != 0)
                 }),
-                1 => self.set_socket(libc::SO_KEEPALIVE, false, |socket| {
+                1 => self.set_socket(libc::SO_KEEPALIVE, SetErrors::Ignore, |socket| {
                     socket.set_keepalive(value != 0)
                 }),
-                10 => self.set_socket(libc::TCP_NODELAY, false, |socket| {
+                10 => self.set_socket(libc::TCP_NODELAY, SetErrors::Ignore, |socket| {
                     socket.set_tcp_nodelay(value != 0)
                 }),
                 3 => {
@@ -926,26 +956,32 @@ impl Inet {
                     };
                     request = rest;
                     let linger = linger_time(value, u32::from_be_bytes([*s3, *s2, *s1, *s0]))?;
-                    self.set_socket(libc::SO_LINGER, false, |socket| socket.set_linger(linger))
+                    self.set_socket(libc::SO_LINGER, SetErrors::Ignore, |socket| {
+                        socket.set_linger(linger)
+                    })
                 }
                 8 => self.set_priority(value),
-                9 => self.set_socket(libc::IP_TOS, true, |socket| socket.set_tos_v4(value as u32)),
-                46 => self.set_socket(libc::IP_TTL, true, |socket| socket.set_ttl_v4(value as u32)),
+                9 => self.set_socket(libc::IP_TOS, SetErrors::Propagate, |socket| {
+                    socket.set_tos_v4(value as u32)
+                }),
+                46 => self.set_socket(libc::IP_TTL, SetErrors::Propagate, |socket| {
+                    socket.set_ttl_v4(value as u32)
+                }),
                 // A datagram receive reads no ancillary data, so it cannot
                 // give `{tos, TOS}` (inet_drv.c:15452-15466).
                 43 if value != 0 && self.socket_type == SocketType::Datagram => {
                     return Err(error(UDP_RECVTOS_ON));
                 }
-                43 => self.set_socket(libc::IP_RECVTOS, true, |socket| {
+                43 => self.set_socket(libc::IP_RECVTOS, SetErrors::Propagate, |socket| {
                     socket.set_recv_tos_v4(value != 0)
                 }),
-                16 => self.set_socket(libc::IPV6_V6ONLY, true, |socket| {
+                16 => self.set_socket(libc::IPV6_V6ONLY, SetErrors::Propagate, |socket| {
                     socket.set_only_v6(value != 0)
                 }),
-                41 => self.set_socket(libc::IPV6_TCLASS, true, |socket| {
+                41 => self.set_socket(libc::IPV6_TCLASS, SetErrors::Propagate, |socket| {
                     socket.set_tclass_v6(value as u32)
                 }),
-                44 => self.set_socket(libc::IPV6_RECVTCLASS, true, |socket| {
+                44 => self.set_socket(libc::IPV6_RECVTCLASS, SetErrors::Propagate, |socket| {
                     socket.set_recv_tclass_v6(value != 0)
                 }),
                 47 if value != 0 => return Err(error(RECVTTL_ON)),
@@ -955,7 +991,7 @@ impl Inet {
                 // option on macOS, which has no `TCP_NOPUSH` for ERTS
                 // (inet_drv.c:1101-1105, 7506-7521).
                 #[cfg(target_os = "linux")]
-                48 => self.set_socket(libc::TCP_CORK, false, |socket| {
+                48 => self.set_socket(libc::TCP_CORK, SetErrors::Ignore, |socket| {
                     socket.set_tcp_cork(value != 0)
                 }),
                 #[cfg(not(target_os = "linux"))]
@@ -1020,7 +1056,11 @@ impl Inet {
             return Control::Reply(reply);
         }
         Control::Active {
-            read: self.active == 2,
+            activation: if self.active == 2 {
+                Activation::Read
+            } else {
+                Activation::Deliver
+            },
         }
     }
 
@@ -1032,19 +1072,19 @@ impl Inet {
     }
 
     /// Run `set` on the socket of the option with the socket constant
-    /// `kind`, such as `IP_TOS` (see [`set_option`]). Return `false` when `propagate` is true and the
+    /// `kind`, such as `IP_TOS` (see [`set_option`]). Return `false` when `errors` is [`SetErrors::Propagate`] and the
     /// socket is missing or `set` fails, else `true`.
     fn set_socket(
         &self,
         kind: c_int,
-        propagate: bool,
+        errors: SetErrors,
         set: impl FnOnce(&Socket) -> io::Result<()>,
     ) -> bool {
         let result = self
             .socket
             .as_ref()
-            .map(|socket| set_option(socket, kind, propagate, set));
-        !propagate || matches!(result, Some(Ok(())))
+            .map(|socket| set_option(socket, kind, errors, set));
+        errors == SetErrors::Ignore || matches!(result, Some(Ok(())))
     }
 
     /// Run `INET_REQ_GETOPTS` (`inet_fill_opts`, inet_drv.c:9071-9754): give
@@ -1064,7 +1104,7 @@ impl Inet {
             let flag = |get: fn(&Socket) -> io::Result<bool>, bit: i32| {
                 socket
                     .and_then(|socket| get(socket).ok())
-                    .map(|on| getsockopt_value(on, bit))
+                    .map(|on| i32::from(on) * getsockopt_scale(bit))
             };
             let integer = |get: fn(&Socket) -> io::Result<u32>| {
                 socket
@@ -1093,7 +1133,7 @@ impl Inet {
                 20 => Some(self.stream.buffer as i32),
                 2 => socket
                     .and_then(|socket| getsockopt(socket, sockopt::DontRoute).ok())
-                    .map(|on| getsockopt_value(on, libc::SO_DONTROUTE)),
+                    .map(|on| i32::from(on) * getsockopt_scale(libc::SO_DONTROUTE)),
                 4 => flag(Socket::broadcast, libc::SO_BROADCAST),
                 6 => size(Socket::send_buffer_size),
                 7 => size(Socket::recv_buffer_size),
@@ -1250,14 +1290,14 @@ const IPV6_MEMBERSHIP: [c_int; 2] = [libc::IPV6_DROP_MEMBERSHIP, libc::IPV6_ADD_
 #[cfg(not(target_os = "linux"))]
 const IPV6_MEMBERSHIP: [c_int; 2] = [libc::IPV6_LEAVE_GROUP, libc::IPV6_JOIN_GROUP];
 
-/// Join (`add`) or leave the IPv4 group `group` with `ip_mreqn`, as
+/// Join or leave the IPv4 group `group` with `ip_mreqn`, as
 /// `inet_set_opts` does on Linux (inet_drv.c:7696-7711). The kernel finds
 /// the device by the index `index` when it is not 0, else by the address
 /// `interface` (`ip_mc_find_dev`), so the call gives only one of them.
 #[cfg(target_os = "linux")]
 fn membership_v4(
     socket: &Socket,
-    add: bool,
+    action: GroupAction,
     group: Ipv4Addr,
     index: u32,
     interface: Ipv4Addr,
@@ -1268,25 +1308,25 @@ fn membership_v4(
     } else {
         InterfaceIndexOrAddress::Index(index)
     };
-    if add {
+    if action == GroupAction::Join {
         socket.join_multicast_v4_n(&group, &interface)
     } else {
         socket.leave_multicast_v4_n(&group, &interface)
     }
 }
 
-/// Join (`add`) or leave the IPv4 group `group` with `ip_mreq`, which has
+/// Join or leave the IPv4 group `group` with `ip_mreq`, which has
 /// no index, as `inet_set_opts` does without `ip_mreqn`
 /// (inet_drv.c:7728-7742).
 #[cfg(not(target_os = "linux"))]
 fn membership_v4(
     socket: &Socket,
-    add: bool,
+    action: GroupAction,
     group: Ipv4Addr,
     _index: u32,
     interface: Ipv4Addr,
 ) -> io::Result<()> {
-    if add {
+    if action == GroupAction::Join {
         socket.join_multicast_v4(&group, &interface)
     } else {
         socket.leave_multicast_v4(&group, &interface)
@@ -1299,7 +1339,7 @@ fn membership_v4(
 /// # Examples
 ///
 /// ```rust,ignore
-/// set_option(&socket, libc::SO_KEEPALIVE, false, |socket| socket.set_keepalive(true))?;
+/// set_option(&socket, libc::SO_KEEPALIVE, SetErrors::Ignore, |socket| socket.set_keepalive(true))?;
 /// ```
 ///
 /// # Errors
@@ -1309,7 +1349,7 @@ fn membership_v4(
 fn set_option(
     socket: &Socket,
     _kind: c_int,
-    _propagate: bool,
+    _errors: SetErrors,
     set: impl FnOnce(&Socket) -> io::Result<()>,
 ) -> io::Result<()> {
     set(socket)
@@ -1321,22 +1361,23 @@ fn set_option(
 /// # Examples
 ///
 /// ```rust,ignore
-/// set_option(&socket, libc::IP_TOS, true, |socket| socket.set_tos_v4(16))?;
+/// set_option(&socket, libc::IP_TOS, SetErrors::Propagate, |socket| socket.set_tos_v4(16))?;
 /// ```
 ///
 /// # Errors
 ///
-/// The error of `set`, and with `propagate` the error of a set again.
+/// The error of `set`, and with [`SetErrors::Propagate`] the error of a set
+/// again.
 #[cfg(target_os = "linux")]
 fn set_option(
     socket: &Socket,
     kind: c_int,
-    propagate: bool,
+    errors: SetErrors,
     set: impl FnOnce(&Socket) -> io::Result<()>,
 ) -> io::Result<()> {
     prio_tos_trick(
         kind,
-        propagate,
+        errors,
         (socket.priority(), socket.tos_v4()),
         || set(socket),
         |tos| socket.set_tos_v4(tos),
@@ -1352,23 +1393,24 @@ fn set_option(
 /// (inet_drv.c:6798-6799): an option with the constant of `IP_TOS`, such
 /// as `TCP_NODELAY`, does not set `tos` again, and an option with the
 /// constant of `SO_PRIORITY` sets nothing again. A saved value whose
-/// `getsockopt` failed is not set again. With `propagate`, a failed set of
+/// `getsockopt` failed is not set again. With [`SetErrors::Propagate`], a failed set of
 /// `tos` again is the result and stops the set of `priority`, and a failed
 /// set of `priority` again is the result unless it fails with `EPERM`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// prio_tos_trick(libc::IP_TTL, true, (Ok(0), Ok(16)), set, set_tos, set_priority)?;
+/// prio_tos_trick(libc::IP_TTL, SetErrors::Propagate, (Ok(0), Ok(16)), set, set_tos, set_priority)?;
 /// ```
 ///
 /// # Errors
 ///
-/// The error of `set`, and with `propagate` the error of a set again.
+/// The error of `set`, and with [`SetErrors::Propagate`] the error of a set
+/// again.
 #[cfg(target_os = "linux")]
 fn prio_tos_trick(
     kind: c_int,
-    propagate: bool,
+    errors: SetErrors,
     saved: (io::Result<u32>, io::Result<u32>),
     set: impl FnOnce() -> io::Result<()>,
     set_tos: impl FnOnce(u32) -> io::Result<()>,
@@ -1381,7 +1423,7 @@ fn prio_tos_trick(
     }
     if let (true, Ok(tos)) = (kind != libc::IP_TOS, tos) {
         let restored = set_tos(tos);
-        if propagate {
+        if errors == SetErrors::Propagate {
             restored?;
         }
     }
@@ -1389,7 +1431,11 @@ fn prio_tos_trick(
         return Ok(());
     };
     match set_priority(priority) {
-        Err(failure) if propagate && failure.raw_os_error() != Some(libc::EPERM) => Err(failure),
+        Err(failure)
+            if errors == SetErrors::Propagate && failure.raw_os_error() != Some(libc::EPERM) =>
+        {
+            Err(failure)
+        }
         _ => Ok(()),
     }
 }
@@ -1476,7 +1522,7 @@ impl Inet {
     /// 1, inet_drv.c:7389-7398).
     #[cfg(target_os = "linux")]
     fn set_priority(&self, value: i32) -> bool {
-        self.set_socket(libc::SO_PRIORITY, true, |socket| {
+        self.set_socket(libc::SO_PRIORITY, SetErrors::Propagate, |socket| {
             socket.set_priority(value as u32)
         })
     }
@@ -1607,23 +1653,22 @@ fn get_host_name(request: &[u8]) -> Vec<u8> {
     [&[OK][..], &host_name()].concat()
 }
 
-/// Give the value that `getsockopt` returns for a flag option, which
-/// `GETOPTS` puts in its reply as is (inet_drv.c:9727-9750). macOS gives
+/// Give the value that `getsockopt` returns for a flag option that is on,
+/// which `GETOPTS` puts in its reply as is (inet_drv.c:9727-9750). macOS gives
 /// the flag bit `bit` of an option that is on: `so_options & SO_REUSEADDR`
 /// (4), `so_options & SO_KEEPALIVE` (8), and `t_flags & TF_NODELAY` (4) in
 /// xnu `sogetoptlock` and `tcp_ctloutput`, and 1 for `IP_RECVTOS`
 /// (`OPTBIT`). Linux gives 1 (`sk_reuse`, `sock_flag(sk, SOCK_KEEPOPEN)`,
 /// and `!!(nonagle & TCP_NAGLE_OFF)`). `socket2` gives only a boolean, so
-/// this function maps it back.
+/// the caller multiplies this value by it.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(getsockopt_value(false, 8), 0);
-/// assert_eq!(getsockopt_value(true, 8), if cfg!(target_vendor = "apple") { 8 } else { 1 });
+/// assert_eq!(getsockopt_scale(8), if cfg!(target_vendor = "apple") { 8 } else { 1 });
 /// ```
-fn getsockopt_value(on: bool, bit: i32) -> i32 {
-    i32::from(on) * if APPLE { bit } else { 1 }
+fn getsockopt_scale(bit: i32) -> i32 {
+    if APPLE { bit } else { 1 }
 }
 
 /// True on macOS and the other Apple hosts.

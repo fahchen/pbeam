@@ -117,19 +117,19 @@ fn reports_the_exiting_status_of_another_process() {
     let frame = code.mfa_frame("fixture", "main", 0).unwrap();
     let mut process = ProcessState::new(ProcessId(1), Start::Entry(frame), vec![]);
     process.exiting = Some(Term::static_atom("normal"));
-    let values = process_info_values(&code, &process, 0, 0, false, None).unwrap();
+    let values = process_info_values(&code, &process, 0, 0, InfoReader::Other, None).unwrap();
     assert_eq!(values.status, "exiting");
     process.exiting = None;
     process.waiting = true;
     assert_eq!(
-        process_info_values(&code, &process, 0, 0, false, None)
+        process_info_values(&code, &process, 0, 0, InfoReader::Other, None)
             .unwrap()
             .status,
         "waiting"
     );
     process.waiting = false;
     assert_eq!(
-        process_info_values(&code, &process, 0, 0, false, None)
+        process_info_values(&code, &process, 0, 0, InfoReader::Other, None)
             .unwrap()
             .status,
         "runnable"
@@ -147,13 +147,13 @@ fn reads_the_current_function_of_a_process_that_did_not_run() {
         function: Atom::from_static("apply").unwrap(),
     };
     let mut process = ProcessState::new(ProcessId(1), start, vec![Term::Integer(1)]);
-    let values = process_info_values(&code, &process, 0, 0, false, None).unwrap();
+    let values = process_info_values(&code, &process, 0, 0, InfoReader::Other, None).unwrap();
     assert!(matches!(
         values.current_function,
         Some(MfaNames::Atoms(_, _, 1))
     ));
     process.undefined_start = None;
-    let values = process_info_values(&code, &process, 0, 0, false, None).unwrap();
+    let values = process_info_values(&code, &process, 0, 0, InfoReader::Other, None).unwrap();
     assert!(values.current_function.is_none());
 }
 
@@ -167,14 +167,23 @@ fn returns_the_erlang_unique_integer_sequences() {
     assert_eq!(scheduler.unique_integer_positive().unwrap(), 2);
     assert_eq!(scheduler.unique_integer_positive().unwrap(), 4);
     assert_eq!(
-        scheduler.unique_monotonic_integer(false).unwrap(),
+        scheduler
+            .unique_monotonic_integer(UniqueRange::Signed)
+            .unwrap(),
         SMALL_INTEGER_MIN
     );
     assert_eq!(
-        scheduler.unique_monotonic_integer(false).unwrap(),
+        scheduler
+            .unique_monotonic_integer(UniqueRange::Signed)
+            .unwrap(),
         SMALL_INTEGER_MIN + 1
     );
-    assert_eq!(scheduler.unique_monotonic_integer(true).unwrap(), 3);
+    assert_eq!(
+        scheduler
+            .unique_monotonic_integer(UniqueRange::Positive)
+            .unwrap(),
+        3
+    );
 }
 
 #[test]
@@ -509,7 +518,7 @@ fn charges_a_quarter_reduction_for_each_group_of_four_links() {
                 &item,
                 &Term::tuple(vec![item.clone(), links(count)]),
                 0,
-                false
+                MessageQueue::OnHeap
             ),
             reductions,
             "{count}"
@@ -521,7 +530,7 @@ fn charges_a_quarter_reduction_for_each_group_of_four_links() {
             &status,
             &Term::tuple(vec![status.clone(), Term::static_atom("running")]),
             8,
-            false
+            MessageQueue::OnHeap
         ),
         0
     );

@@ -81,12 +81,15 @@ fn flatmap_holds(pairs: &[(Term, Term)], key: &Term, atoms: &AtomTable) -> bool 
         .is_ok()
 }
 
-/// The direction of an `erts_internal:map_next/3` walk over a map.
-#[derive(Clone, Copy, PartialEq)]
+/// The direction of an ordered walk: an `erts_internal:map_next/3` walk over a
+/// map, and a walk over the keys of an `ordered_set` table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Direction {
-    /// The `iterator` mode: from the first pair of the map order onwards.
+    /// From the first element of the order onwards: the `iterator` mode of a
+    /// map walk, and `ets:first/1` and `ets:next/2`.
     Forward,
-    /// The list mode: from the last pair of the map order backwards.
+    /// From the last element of the order backwards: the list mode of a map
+    /// walk, and `ets:last/1` and `ets:prev/2`.
     Backward,
 }
 

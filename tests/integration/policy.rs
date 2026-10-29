@@ -11,7 +11,7 @@ mod common;
 use std::process::Command;
 
 use common::pinned_beam;
-use pbeam_runtime::{AllowAll, AtomTable, BeamProgram, Term};
+use pbeam_runtime::{AllowAll, AtomTable, BeamProgram, RootAuthority, Term};
 
 const POLICY_PROBE: &[u8] = include_bytes!("../../fixtures/policy/policy_probe.beam");
 const ERL_POLICY: &[u8] = include_bytes!("../../fixtures/policy/erl_policy.beam");
@@ -76,7 +76,7 @@ fn program() -> BeamProgram {
 /// ```
 fn pbeam(function: &str, policy: &str) -> Result<String, String> {
     program()
-        .execute_with_policy_module("policy_probe", function, &[], policy, false)
+        .execute_with_policy_module("policy_probe", function, &[], policy, RootAuthority::Policy)
         .map(|result| text(&result.term, result.atoms()))
         .map_err(|error| error.to_string())
 }

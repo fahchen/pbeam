@@ -14,6 +14,24 @@ use super::Term;
 /// load (`bytes_to_big`, `big.c`).
 pub(crate) const MAX_BIG_DIGITS: u64 = (1 << 16) - 1;
 
+/// The operation of `div` and `rem` on two integers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Division {
+    /// `div`: the quotient, truncated toward zero.
+    Quotient,
+    /// `rem`: the remainder, with the sign of the dividend.
+    Remainder,
+}
+
+/// The operation of `bsl` and `bsr` on an integer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ShiftDirection {
+    /// `bsl`.
+    Left,
+    /// `bsr`.
+    Right,
+}
+
 /// Return whether `value` fits an ERTS bignum: at most [`MAX_BIG_DIGITS`]
 /// digits of 64 bits.
 ///

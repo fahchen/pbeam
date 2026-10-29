@@ -173,6 +173,16 @@ impl Default for Mailbox {
     }
 }
 
+/// Which markers a pass leaves in the queue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MarkerScan {
+    /// The markers at the start of the queue, which all leave it.
+    Leading,
+    /// The markers after a message, which leave it after `MARKER_PASS_MAX`
+    /// passes.
+    Later,
+}
+
 impl Mailbox {
     /// Add a message to the end of the outer part.
     ///
@@ -380,7 +390,7 @@ impl Mailbox {
         let Some(node) = self.current_node() else {
             return false;
         };
-        self.save = self.pass_markers(Link::After(node), false);
+        self.save = self.pass_markers(Link::After(node), MarkerScan::Later);
         true
     }
 
@@ -414,7 +424,7 @@ impl Mailbox {
     /// mailbox.set_save_first();
     /// ```
     pub(super) fn set_save_first(&mut self) {
-        self.save = self.pass_markers(Link::First, true);
+        self.save = self.pass_markers(Link::First, MarkerScan::Leading);
     }
 
     /// Move the save pointer to the end of the inner part after a fetch, as
@@ -576,7 +586,7 @@ impl Mailbox {
         self.clear_pending_set_save();
         let node = self.markers[index].node;
         if self.in_inner(node) {
-            self.save = self.pass_markers(Link::After(node), false);
+            self.save = self.pass_markers(Link::After(node), MarkerScan::Later);
         } else {
             self.markers[index].set_save = true;
             self.save = self.fetched;
@@ -803,7 +813,7 @@ impl Mailbox {
             link = Link::After(node);
         }
         self.fetched = link;
-        self.save = self.pass_markers(self.save, false);
+        self.save = self.pass_markers(self.save, MarkerScan::Later);
     }
 
     /// Return the node that a `next` field points to.
@@ -892,9 +902,9 @@ impl Mailbox {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let save = mailbox.pass_markers(Link::First, true);
+    /// let save = mailbox.pass_markers(Link::First, MarkerScan::Leading);
     /// ```
-    fn pass_markers(&mut self, mut link: Link, leading: bool) -> Link {
+    fn pass_markers(&mut self, mut link: Link, scan: MarkerScan) -> Link {
         while link != self.fetched
             && let Some(node) = self.target(link)
             && matches!(self.nodes[node].entry, Entry::Marker)
@@ -906,7 +916,7 @@ impl Mailbox {
                 .expect("receive marker node has a slot");
             let marker = &mut self.markers[index];
             marker.pass += 1;
-            if leading || marker.pass > MARKER_PASS_MAX {
+            if scan == MarkerScan::Leading || marker.pass > MARKER_PASS_MAX {
                 self.markers.remove(index);
                 self.unlink(node);
             } else {

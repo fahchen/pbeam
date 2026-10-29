@@ -896,11 +896,11 @@ undocumented_unsafe_blocks = "warn"     # // SAFETY: comment on every unsafe blo
 multiple_unsafe_ops_per_block = "allow" # a split adds unsafe blocks, which CLAUDE.md forbids
 
 # API shape.
-fn_params_excessive_bools = "allow" # #1349 turns on: bool parameters: use an enum or two methods
-struct_excessive_bools = "allow"    # #1349 turns on: many bool fields: use an enum or bitflags
-clone_on_ref_ptr = "warn"           # write Rc::clone(&x) so cheap clones are visible
-redundant_clone = "warn"            # a clone whose original is never used again
-rc_buffer = "warn"                  # Rc<String> / Rc<Vec<T>>: use Rc<str> / Rc<[T]>
+fn_params_excessive_bools = "warn" # bool parameters: use an enum or two methods
+struct_excessive_bools = "warn"    # many bool fields: use an enum or bitflags
+clone_on_ref_ptr = "warn"          # write Rc::clone(&x) so cheap clones are visible
+redundant_clone = "warn"           # a clone whose original is never used again
+rc_buffer = "warn"                 # Rc<String> / Rc<Vec<T>>: use Rc<str> / Rc<[T]>
 
 # Idioms.
 string_add = "warn"       # build strings with format! or push_str, not +

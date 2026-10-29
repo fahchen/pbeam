@@ -12,7 +12,8 @@ use super::BifResult::{Trap, TrapBif, Value};
 use super::{BeamError, BifResult, ProcessState, Term, error};
 use crate::runtime::scheduler::CONTEXT_REDS;
 use crate::runtime::unicode::{
-    Utf8Output, Utf8State, analyze_utf8, build_utf8, code_points, is_incomplete, utf8_need,
+    CharEncoding, Utf8Output, Utf8State, analyze_utf8, build_utf8, code_points, is_incomplete,
+    utf8_need,
 };
 use crate::term::{AtomTable, debug_term};
 
@@ -105,9 +106,9 @@ pub(super) fn characters_to_binary(
     encoding: &Term,
     atoms: &AtomTable,
 ) -> Result<BifResult, BeamError> {
-    let latin1 = match encoding {
-        Term::Atom(encoding) if encoding.is_static("latin1") => true,
-        Term::Atom(encoding) if encoding.is_one_of(&["unicode", "utf8"]) => false,
+    let charset = match encoding {
+        Term::Atom(encoding) if encoding.is_static("latin1") => CharEncoding::Latin1,
+        Term::Atom(encoding) if encoding.is_one_of(&["unicode", "utf8"]) => CharEncoding::Unicode,
         // ponytail: ERTS traps each other encoding to `unicode:characters_to_binary_int/2`; see "Chardata conversion" in docs/erts-differences.md.
         _ => {
             return Err(error(format!(
@@ -120,13 +121,13 @@ pub(super) fn characters_to_binary(
         Some((binary @ Term::Binary(_), tail)) if tail.is_nil() => binary,
         _ => chardata,
     };
-    let Some(cost) = utf8_need(subject, latin1) else {
+    let Some(cost) = utf8_need(subject, charset) else {
         return Ok(BifResult::badarg());
     };
     let simple = (cost / SIMPLE_FACTOR) as i64;
     cost_to_proc(process, simple);
     if let Some(bytes) = subject.binary_bytes()
-        && !latin1
+        && charset == CharEncoding::Unicode
         && std::str::from_utf8(bytes).is_ok()
     {
         return Ok(Value(subject.clone()));
@@ -168,9 +169,13 @@ fn utf8_turn(
     mut left: i64,
     encoding: &Term,
 ) -> Result<BifResult, BeamError> {
-    let latin1 = matches!(encoding, Term::Atom(name) if name.is_static("latin1"));
+    let charset = if matches!(encoding, Term::Atom(name) if name.is_static("latin1")) {
+        CharEncoding::Latin1
+    } else {
+        CharEncoding::Unicode
+    };
     let start = left;
-    let (rest, failed) = build_utf8(chardata, &mut left, latin1, &mut output);
+    let (rest, failed) = build_utf8(chardata, &mut left, charset, &mut output);
     cost_to_proc(process, start - left);
     let done = rest == Term::nil();
     if failed || (done && !output.leftover.is_empty()) {
@@ -272,9 +277,9 @@ pub(super) fn characters_to_list(
     chardata: &Term,
     encoding: &Term,
 ) -> Result<BifResult, BeamError> {
-    let latin1 = match encoding {
-        Term::Atom(encoding) if encoding.is_static("latin1") => true,
-        Term::Atom(encoding) if encoding.is_one_of(&["unicode", "utf8"]) => false,
+    let charset = match encoding {
+        Term::Atom(encoding) if encoding.is_static("latin1") => CharEncoding::Latin1,
+        Term::Atom(encoding) if encoding.is_one_of(&["unicode", "utf8"]) => CharEncoding::Unicode,
         _ => {
             return Ok(Trap {
                 module: "unicode",
@@ -284,11 +289,11 @@ pub(super) fn characters_to_list(
         }
     };
     if let Some(bytes) = chardata.binary_bytes()
-        && !latin1
+        && charset == CharEncoding::Unicode
     {
         return analyze_turn(process, bytes, 0, 0);
     }
-    let Some(cost) = utf8_need(chardata, latin1) else {
+    let Some(cost) = utf8_need(chardata, charset) else {
         return Ok(BifResult::badarg());
     };
     let simple = (cost / SIMPLE_FACTOR) as i64;
@@ -299,7 +304,7 @@ pub(super) fn characters_to_list(
         Utf8Output::default(),
         chardata,
         left,
-        latin1,
+        charset,
     ))
 }
 
@@ -324,10 +329,10 @@ fn list_turn(
     mut output: Utf8Output,
     chardata: &Term,
     mut left: i64,
-    latin1: bool,
+    charset: CharEncoding,
 ) -> BifResult {
     let start = left;
-    let (rest, failed) = build_utf8(chardata, &mut left, latin1, &mut output);
+    let (rest, failed) = build_utf8(chardata, &mut left, charset, &mut output);
     cost_to_proc(process, start - left);
     let leftover = std::mem::take(&mut output.leftover);
     let nil = Term::nil();
@@ -354,7 +359,10 @@ fn list_turn(
                 Term::binary(output.bytes),
                 Term::Integer(output.characters as i64),
                 leftover_before(leftover, rest),
-                Term::static_atom(if latin1 { "latin1" } else { "unicode" }),
+                Term::static_atom(match charset {
+                    CharEncoding::Latin1 => "latin1",
+                    CharEncoding::Unicode => "unicode",
+                }),
             ],
         };
     } else {
@@ -398,7 +406,7 @@ pub(super) fn list_trap(
     bytes: Vec<u8>,
     characters: usize,
     rest: &Term,
-    latin1: bool,
+    charset: CharEncoding,
 ) -> Result<BifResult, BeamError> {
     let left = allowed_iterations(process);
     let output = Utf8Output {
@@ -406,7 +414,7 @@ pub(super) fn list_trap(
         characters,
         ..Utf8Output::default()
     };
-    Ok(list_turn(process, output, rest, left, latin1))
+    Ok(list_turn(process, output, rest, left, charset))
 }
 
 /// Run the `analyze_utf8` path of `unicode:characters_to_list/2` for a

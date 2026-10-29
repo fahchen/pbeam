@@ -911,11 +911,11 @@ pub(crate) fn make_hash(atoms: &AtomTable, term: &Term) -> u32 {
                 }
                 Term::Integer(value) => match term.small_integer() {
                     Some(small) => hash = small_hash(hash, small),
-                    None => hash = bignum_hash(hash, *value < 0, &[value.unsigned_abs()]),
+                    None => hash = bignum_hash(hash, small_sign(*value), &[value.unsigned_abs()]),
                 },
                 Term::BigInt(value) => {
                     let digits = value.magnitude().to_u64_digits();
-                    hash = bignum_hash(hash, value.sign() == Sign::Minus, &digits);
+                    hash = bignum_hash(hash, value.sign(), &digits);
                 }
                 Term::Float(value) => {
                     // `GET_DOUBLE` reads the two 32-bit words of the double,
@@ -1041,6 +1041,11 @@ fn small_hash(hash: u32, small: i64) -> u32 {
     value.wrapping_mul(if small < 0 { FUNNY_4 } else { FUNNY_3 })
 }
 
+/// Return the sign of an integer that is not a small integer.
+fn small_sign(value: i64) -> Sign {
+    if value < 0 { Sign::Minus } else { Sign::Plus }
+}
+
 /// Mix the digits of a bignum as `BIG_DEF` (`erl_term_hashing.c:340-380`)
 /// does: every byte of every digit below the top digit, then the bytes of
 /// the top digit, of which ERTS skips the four high zero bytes, then the
@@ -1049,9 +1054,9 @@ fn small_hash(hash: u32, small: i64) -> u32 {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(bignum_hash(0, false, &[1]), 1_688_579_892 >> 0);
+/// assert_eq!(bignum_hash(0, Sign::Plus, &[1]), 1_688_579_892 >> 0);
 /// ```
-fn bignum_hash(hash: u32, negative: bool, digits: &[u64]) -> u32 {
+fn bignum_hash(hash: u32, sign: Sign, digits: &[u64]) -> u32 {
     let (top, below) = digits.split_last().expect("a bignum has a digit");
     let mut hash = hash;
     for digit in below {
@@ -1067,7 +1072,11 @@ fn bignum_hash(hash: u32, negative: bool, digits: &[u64]) -> u32 {
             .wrapping_add((digit & 0xFF) as u32);
         digit >>= 8;
     }
-    hash.wrapping_mul(if negative { FUNNY_4 } else { FUNNY_3 })
+    hash.wrapping_mul(if sign == Sign::Minus {
+        FUNNY_4
+    } else {
+        FUNNY_3
+    })
 }
 
 /// Mix the bytes of a binary as the list path of `BITSTRING_DEF`
@@ -1407,10 +1416,14 @@ fn small_hash2(hash: u32, small: i64) -> u32 {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(bignum_hash2(0, false, &[1]), (hash2_with(0, 1, 0, HCONST_11), 1));
+/// assert_eq!(bignum_hash2(0, Sign::Plus, &[1]), (hash2_with(0, 1, 0, HCONST_11), 1));
 /// ```
-fn bignum_hash2(hash: u32, negative: bool, digits: &[u64]) -> (u32, u64) {
-    let constant = if negative { HCONST_10 } else { HCONST_11 };
+fn bignum_hash2(hash: u32, sign: Sign, digits: &[u64]) -> (u32, u64) {
+    let constant = if sign == Sign::Minus {
+        HCONST_10
+    } else {
+        HCONST_11
+    };
     let mut hash = hash;
     for digit in digits {
         hash = hash2_with(hash, *digit as u32, (*digit >> 32) as u32, constant);
@@ -1545,14 +1558,15 @@ pub(crate) fn make_hash2(atoms: &AtomTable, term: &Term) -> (u32, u64) {
                 if let Some(small) = term.small_integer() {
                     hash = small_hash2(hash, small);
                 } else {
-                    let (value, count) = bignum_hash2(hash, *value < 0, &[value.unsigned_abs()]);
+                    let (value, count) =
+                        bignum_hash2(hash, small_sign(*value), &[value.unsigned_abs()]);
                     hash = value;
                     iterations += count;
                 }
             }
             Term::BigInt(value) => {
                 let digits = value.magnitude().to_u64_digits();
-                let (value, count) = bignum_hash2(hash, value.sign() == Sign::Minus, &digits);
+                let (value, count) = bignum_hash2(hash, value.sign(), &digits);
                 hash = value;
                 iterations += count;
             }

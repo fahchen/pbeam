@@ -69,6 +69,15 @@ pub(crate) struct FileInfo {
     pub(crate) gid: u32,
 }
 
+/// Whether `stat` follows a symbolic link.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinkMode {
+    /// `stat`: read the file that the link names.
+    Follow,
+    /// `lstat`: read the link itself.
+    NoFollow,
+}
+
 /// Return the information of the file at `path`, as `efile_read_info`
 /// (`unix_prim_file.c:739-769`) gives it on a host without `NO_ACCESS`. With
 /// `follow_links`, `stat` reads the file that a symbolic link names, else
@@ -80,9 +89,9 @@ pub(crate) struct FileInfo {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let info = read_info(c"/bin/sh", true)?;
+/// let info = read_info(c"/bin/sh", LinkMode::Follow)?;
 /// assert_eq!(info.file_type, FileType::Regular);
-/// assert_eq!(read_info(c"/pbeam-missing", true), Err(libc::ENOENT));
+/// assert_eq!(read_info(c"/pbeam-missing", LinkMode::Follow), Err(libc::ENOENT));
 /// ```
 ///
 /// # Errors
@@ -91,13 +100,13 @@ pub(crate) struct FileInfo {
 // The `stat` field types differ between hosts, for example `st_mode` is
 // `u16` on macOS and `u32` on Linux, so a cast can have the same type.
 #[allow(clippy::unnecessary_cast)]
-pub(crate) fn read_info(path: &CStr, follow_links: bool) -> Result<FileInfo, c_int> {
+pub(crate) fn read_info(path: &CStr, links: LinkMode) -> Result<FileInfo, c_int> {
     // SAFETY: all zeros is a valid `stat`. `path` is a NUL-terminated
     // string, and `stat` and `lstat` write only into the struct that the
     // second pointer gives.
     let (result, data) = unsafe {
         let mut data: libc::stat = std::mem::zeroed();
-        let result = if follow_links {
+        let result = if links == LinkMode::Follow {
             libc::stat(path.as_ptr(), &raw mut data)
         } else {
             libc::lstat(path.as_ptr(), &raw mut data)
@@ -267,6 +276,10 @@ pub(crate) fn get_cwd() -> Result<Vec<u8>, c_int> {
 /// `efile_translate_modelist` (`prim_file_nif.c:500-539`). An open has
 /// `read`, `write`, or both.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "mirrors the `EFILE_MODE_*` flags of `efile_modes_t` (`prim_file_nif.c:500-539`), which an open sets one by one"
+)]
 pub(crate) struct OpenModes {
     /// `EFILE_MODE_READ`.
     pub(crate) read: bool,

@@ -280,6 +280,25 @@ pub(super) fn cipher_options(
     Ok((encrypt.unwrap_or(1), padding.unwrap_or(Padding::Undefined)))
 }
 
+/// Whether a cipher context encrypts or decrypts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CipherDirection {
+    /// `EVP_CipherInit_ex` with the flag 0.
+    Decrypt,
+    /// `EVP_CipherInit_ex` with the flag 1.
+    Encrypt,
+}
+
+impl From<bool> for CipherDirection {
+    fn from(encrypt: bool) -> Self {
+        if encrypt {
+            Self::Encrypt
+        } else {
+            Self::Decrypt
+        }
+    }
+}
+
 /// Initialize `context` with the cipher, the key, or the IV, in the
 /// direction `encrypt`. ERTS calls `EVP_CipherInit_ex` with its encrypt
 /// flag first, then with -1, which keeps the direction; the flag -1 on a
@@ -288,16 +307,16 @@ pub(super) fn cipher_options(
 /// # Examples
 ///
 /// ```rust,ignore
-/// cipher_init(&mut context, true, Some(&cipher), None, None)?;
+/// cipher_init(&mut context, CipherDirection::Encrypt, Some(&cipher), None, None)?;
 /// ```
 pub(super) fn cipher_init(
     context: &mut CipherCtxRef,
-    encrypt: bool,
+    direction: CipherDirection,
     cipher: Option<&CipherRef>,
     key: Option<&[u8]>,
     iv: Option<&[u8]>,
 ) -> Result<(), openssl::error::ErrorStack> {
-    if encrypt {
+    if direction == CipherDirection::Encrypt {
         context.encrypt_init(cipher, key, iv)
     } else {
         context.decrypt_init(cipher, key, iv)
@@ -372,7 +391,7 @@ fn one_time(
     let mut padded_size = -1;
     final_output(
         &mut context,
-        encrypt != 0,
+        CipherDirection::from(encrypt != 0),
         padding,
         size,
         &mut padded_size,
@@ -424,7 +443,7 @@ pub(super) fn init_context(
         return Err(("badarg", 309, 2, "Bad iv size"));
     }
     let mut context = CipherCtx::new().expect("OpenSSL allocates each cipher context");
-    let direction = encrypt == 1;
+    let direction = CipherDirection::from(encrypt == 1);
     cipher_init(&mut context, direction, Some(&cipher), None, None)
         .map_err(|_| ("error", 356, -1, "Can't initialize context, step 1"))?;
     context
@@ -454,12 +473,13 @@ pub(super) fn init_context(
 /// The failure of the padding or of `EVP_CipherFinal_ex`.
 pub(super) fn final_output(
     context: &mut CipherCtxRef,
-    encrypt: bool,
+    direction: CipherDirection,
     padding: Padding,
     size: u32,
     padded_size: &mut i32,
     output: &mut Vec<u8>,
 ) -> Result<(), CipherFailure> {
+    let encrypt = direction == CipherDirection::Encrypt;
     let block_size = context.block_size();
     let pad_size = (block_size - size as usize % block_size) % block_size;
     if encrypt {
@@ -565,7 +585,7 @@ fn aead(scheduler: &Scheduler, arguments: &[Term]) -> Result<Option<Term>, Ciphe
     let cipher = fetch_cipher(index).ok_or(("notsup", 232, 0, message))?;
     let ccm = CIPHERS[index].0.ends_with("_ccm");
     let mut context = CipherCtx::new().expect("OpenSSL allocates each cipher context");
-    let direction = encrypt == 1;
+    let direction = CipherDirection::from(encrypt == 1);
     cipher_init(&mut context, direction, Some(&cipher), None, None)
         .map_err(|_| ("error", 237, -1, "CipherInit failed"))?;
     context

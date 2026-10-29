@@ -16,8 +16,8 @@
 //! changes it.
 
 use super::{
-    BifContext, BifId, BifResult, dispatch_leaf, import_kind, is_heavy_bif, is_leaf, is_pbeam_bif,
-    mfa, resolve,
+    BifContext, BifId, BifResult, MessageQueue, dispatch_leaf, import_kind, is_heavy_bif, is_leaf,
+    is_pbeam_bif, mfa, resolve,
 };
 use crate::{
     beam::ImportKind,
@@ -528,15 +528,15 @@ fn charges_an_item_with_its_queue_or_dictionary_size() {
     // 7 messages and 5 entries each give floor(7 / 4) = 1 and
     // floor(5 / 4) = 1; `status` has no size-dependent cost.
     assert_eq!(
-        super::item_reductions(&item("messages"), &Term::nil(), 7, false),
+        super::item_reductions(&item("messages"), &Term::nil(), 7, MessageQueue::OnHeap),
         1
     );
     assert_eq!(
-        super::item_reductions(&item("dictionary"), &dictionary, 0, false),
+        super::item_reductions(&item("dictionary"), &dictionary, 0, MessageQueue::OnHeap),
         1
     );
     assert_eq!(
-        super::item_reductions(&item("status"), &Term::nil(), 7, false),
+        super::item_reductions(&item("status"), &Term::nil(), 7, MessageQueue::OnHeap),
         0
     );
 }

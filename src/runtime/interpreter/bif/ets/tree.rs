@@ -6,11 +6,44 @@ use super::{
     AtomTable, BeamError, BifContext, BifResult, MatchSpec, Reference, Table, Term, Value,
 };
 use crate::runtime::ets::range::{KeyRange, cmp_partly_bound, key_range};
+use crate::term::Direction;
 use std::cmp::Ordering;
 
 /// The most objects that one turn of a walk reads (`sc.max = 1000`,
 /// `erl_db_tree.c:1309`, `1471`, `1841`, `2132`).
 const TREE_ITERATIONS: i64 = 1000;
+
+/// The BIF family of a select on an `ordered_set` table: whether the call is a
+/// `select_reverse` call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::runtime::interpreter::bif) enum SelectOrder {
+    /// `ets:select/2,3`, `ets:match/2,3`, and `ets:match_object/2,3`.
+    Select,
+    /// `ets:select_reverse/2,3`.
+    SelectReverse,
+}
+
+impl SelectOrder {
+    /// Return the direction of a walk of a call with the limit `chunk`: a
+    /// call without a limit walks down and puts each match before the earlier
+    /// ones, a call with a limit walks up, and `select_reverse` swaps both.
+    fn direction(self, chunk: i64) -> Direction {
+        if (chunk == 0) == (self == Self::SelectReverse) {
+            Direction::Forward
+        } else {
+            Direction::Backward
+        }
+    }
+}
+
+/// Whether a range turn counts the matches or replaces them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RangeKind {
+    /// `ets:select_count/2`.
+    Count,
+    /// `ets:select_replace/2`.
+    Replace,
+}
 
 /// The state of one turn of a select (`struct select_context`,
 /// `erl_db_tree.c:247-262`).
@@ -43,12 +76,14 @@ impl Walk<'_> {
     /// do (`erl_db_tree.c:4134-4161`, `4188-4217`): stop at a key past the
     /// end key, else match the object, and stop when the turn has read its
     /// objects or found the limit of matches. Return `false` to stop.
-    fn visit(&mut self, object: &[Term], forward: bool) -> Result<bool, BeamError> {
+    fn visit(&mut self, object: &[Term], direction: Direction) -> Result<bool, BeamError> {
         let key = &object[self.key];
         self.last = Some(key.clone());
         if let Some(end) = &self.end {
             let order = cmp_partly_bound(self.atoms, end, key)?;
-            if (forward && order.is_lt()) || (!forward && order.is_gt()) {
+            if (direction == Direction::Forward && order.is_lt())
+                || (direction == Direction::Backward && order.is_gt())
+            {
                 return Ok(false);
             }
         }
@@ -66,11 +101,16 @@ impl Walk<'_> {
         Ok(self.max > 0 && (self.chunk == 0 || self.got != self.chunk))
     }
 
-    /// Read the objects of `table` from the key next to `after`, up when
-    /// `forward` is true, until [`Walk::visit`] stops.
-    fn run(&mut self, table: &Table, after: Option<&Term>, forward: bool) -> Result<(), BeamError> {
-        for object in table.ordered_walk(self.atoms, after, forward)? {
-            if !self.visit(object, forward)? {
+    /// Read the objects of `table` from the key next to `after`, up for
+    /// [`Direction::Forward`], until [`Walk::visit`] stops.
+    fn run(
+        &mut self,
+        table: &Table,
+        after: Option<&Term>,
+        direction: Direction,
+    ) -> Result<(), BeamError> {
+        for object in table.ordered_walk(self.atoms, after, direction)? {
+            if !self.visit(object, direction)? {
                 break;
             }
         }
@@ -92,12 +132,12 @@ fn bounds(
     atoms: &AtomTable,
     table: &Table,
     range: &KeyRange,
-    forward: bool,
+    direction: Direction,
 ) -> Result<(Option<Term>, Option<Term>), BeamError> {
     let KeyRange::Partial { least, most } = range else {
         return Ok((None, None));
     };
-    if forward {
+    if direction == Direction::Forward {
         let (before, _) =
             table.ordered_split(|key| Ok(cmp_partly_bound(atoms, least, key)?.is_gt()))?;
         Ok((before.cloned(), Some(most.clone())))
@@ -140,7 +180,7 @@ pub(super) fn first_turn(
     table: &Table,
     spec: &MatchSpec,
     chunk: i64,
-    reverse: bool,
+    order: SelectOrder,
 ) -> Result<(Turn, i64), BeamError> {
     let keypos = usize::try_from(table.keypos())
         .ok()
@@ -170,7 +210,7 @@ pub(super) fn first_turn(
         }
         KeyRange::Bound(key) => {
             if let Some(object) = table.ordered_get(atoms, key)? {
-                walk.visit(object, false)?;
+                walk.visit(object, Direction::Backward)?;
             }
             let value = match (chunk, walk.accum) {
                 (0, accum) => accum,
@@ -181,10 +221,10 @@ pub(super) fn first_turn(
         }
         KeyRange::Partial { .. } | KeyRange::Unbound => {}
     }
-    let forward = (chunk == 0) == reverse;
-    let (after, end) = bounds(atoms, table, &range, forward)?;
+    let direction = order.direction(chunk);
+    let (after, end) = bounds(atoms, table, &range, direction)?;
     walk.end = end;
-    walk.run(table, after.as_ref(), forward)?;
+    walk.run(table, after.as_ref(), direction)?;
     let end = walk.end.unwrap_or(Term::Nil);
     let reductions = TREE_ITERATIONS - walk.max;
     let turn = chunk_end(chunk, walk.max, walk.got, walk.last, walk.accum, end, None);
@@ -232,7 +272,7 @@ pub(super) fn finish(
     table: &Term,
     spec: &MatchSpec,
     chunk: i64,
-    reverse: bool,
+    order: SelectOrder,
     (turn, reductions): (Turn, i64),
 ) -> Result<BifResult, BeamError> {
     context
@@ -255,7 +295,7 @@ pub(super) fn finish(
             Term::Integer(chunk),
             Term::Reference(program),
             accum,
-            Term::Integer(i64::from(reverse)),
+            Term::Integer(i64::from(order == SelectOrder::SelectReverse)),
             Term::Integer(got),
         ])
     };
@@ -350,7 +390,7 @@ pub(super) struct Continuation {
     /// The matches so far.
     pub(super) accum: Term,
     /// Whether the walk is reversed.
-    pub(super) reverse: bool,
+    pub(super) order: SelectOrder,
     /// The number of matches so far.
     pub(super) got: i64,
 }
@@ -381,7 +421,11 @@ impl Continuation {
             chunk,
             program: *program,
             accum: accum.clone(),
-            reverse: reverse != 0,
+            order: if reverse == 0 {
+                SelectOrder::Select
+            } else {
+                SelectOrder::SelectReverse
+            },
             got,
         })
     }
@@ -413,8 +457,8 @@ pub(super) fn next_turn(
         last: None,
         counting: false,
     };
-    let forward = (state.chunk == 0) == state.reverse;
-    walk.run(table, Some(&state.last), forward)?;
+    let direction = state.order.direction(state.chunk);
+    walk.run(table, Some(&state.last), direction)?;
     let reductions = TREE_ITERATIONS - walk.max;
     let (max, got, last, accum) = (walk.max, walk.got, walk.last, walk.accum);
     let turn = chunk_end(
@@ -431,7 +475,7 @@ pub(super) fn next_turn(
     };
     // The walk down of a call without a limit ends below the end key, and
     // each other walk ends above it.
-    let above = (state.chunk != 0) != state.reverse;
+    let above = (state.chunk != 0) != (state.order == SelectOrder::SelectReverse);
     let past = !end.is_nil()
         && cmp_partly_bound(atoms, &end, &last)?
             == if above {
@@ -472,7 +516,8 @@ pub(super) fn count(
     resume: Option<(&Term, &Term)>,
     got: i64,
 ) -> Result<CountTurn, BeamError> {
-    let (count, (_, reductions, trap)) = range_turn(atoms, table, spec, resume, got, true)?;
+    let (count, (_, reductions, trap)) =
+        range_turn(atoms, table, spec, resume, got, RangeKind::Count)?;
     Ok((count, reductions.unwrap_or(0), trap))
 }
 
@@ -498,7 +543,7 @@ pub(super) fn replace(
     spec: &MatchSpec,
     resume: Option<(&Term, &Term)>,
 ) -> Result<ReplaceTurn, BeamError> {
-    let (_, turn) = range_turn(atoms, table, spec, resume, 0, false)?;
+    let (_, turn) = range_turn(atoms, table, spec, resume, 0, RangeKind::Replace)?;
     Ok(turn)
 }
 
@@ -510,7 +555,7 @@ fn range_turn(
     spec: &MatchSpec,
     resume: Option<(&Term, &Term)>,
     got: i64,
-    counting: bool,
+    kind: RangeKind,
 ) -> Result<(i64, ReplaceTurn), BeamError> {
     let mut walk = Walk {
         atoms,
@@ -522,7 +567,7 @@ fn range_turn(
         accum: Term::nil(),
         max: TREE_ITERATIONS,
         last: None,
-        counting,
+        counting: kind == RangeKind::Count,
     };
     let after = if let Some((last, end)) = resume {
         walk.end = (!end.is_nil()).then(|| end.clone());
@@ -537,18 +582,18 @@ fn range_turn(
             KeyRange::Impossible => return Ok((0, (Term::nil(), None, None))),
             KeyRange::Bound(key) => {
                 if let Some(object) = table.ordered_get(atoms, key)? {
-                    walk.visit(object, false)?;
+                    walk.visit(object, Direction::Backward)?;
                 }
                 return Ok((walk.got, (walk.accum, None, None)));
             }
             KeyRange::Partial { .. } | KeyRange::Unbound => {
-                let (after, end) = bounds(atoms, table, &range, false)?;
+                let (after, end) = bounds(atoms, table, &range, Direction::Backward)?;
                 walk.end = end;
                 after
             }
         }
     };
-    walk.run(table, after.as_ref(), false)?;
+    walk.run(table, after.as_ref(), Direction::Backward)?;
     let reductions = TREE_ITERATIONS - walk.max;
     let trap = (walk.max == 0).then(|| {
         (
@@ -603,7 +648,7 @@ pub(super) fn select_delete(
             Ok((DeleteTurn::Done(count), 0))
         }
         KeyRange::Partial { .. } | KeyRange::Unbound => {
-            let (after, end) = bounds(atoms, table, &range, false)?;
+            let (after, end) = bounds(atoms, table, &range, Direction::Backward)?;
             delete_turn(
                 atoms,
                 table,
@@ -703,7 +748,7 @@ fn delete_turn(
     let mut max = TREE_ITERATIONS;
     let mut last = None;
     let mut doomed = Vec::new();
-    for object in table.ordered_walk(atoms, after, false)? {
+    for object in table.ordered_walk(atoms, after, Direction::Backward)? {
         last = Some(object[key].clone());
         if let Some(end) = end
             && cmp_partly_bound(atoms, end, &object[key])?.is_gt()

@@ -211,6 +211,16 @@ impl ExportTarget {
     }
 }
 
+/// What [`CodeTable::finish_after_on_load`] does with the code of a module
+/// that waited for its `-on_load` function.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::runtime) enum AfterOnLoad {
+    /// The code becomes the loaded code of the module.
+    Keep,
+    /// The code stays until a purge, and the module stays not loaded.
+    Drop,
+}
+
 /// The result of [`CodeTable::finish`].
 #[derive(Debug, PartialEq, Eq)]
 pub(in crate::runtime) enum Finish {
@@ -1036,22 +1046,22 @@ impl CodeTable {
     /// Keep or drop the code of the module `name` after its `-on_load`
     /// function, as `finish_after_on_load_2` (`beam_bif_load.c:819-941`)
     /// does. Return `false`, and change nothing, when no code of `name`
-    /// waits for its function. With `keep`, the code becomes the loaded
-    /// code of the module, and its exports become visible. Without `keep`,
-    /// the exports no longer wait for the code, and the code stays until a
+    /// waits for its function. With [`AfterOnLoad::Keep`], the code becomes the
+    /// loaded code of the module, and its exports become visible. With
+    /// [`AfterOnLoad::Drop`], the exports no longer wait for the code, and the code stays until a
     /// purge, as in ERTS. Else return `true`.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert!(code.finish_after_on_load("on_load_ok", true)?);
+    /// assert!(code.finish_after_on_load("on_load_ok", AfterOnLoad::Keep)?);
     /// assert!(code.get("on_load_ok").is_some());
-    /// assert!(!code.finish_after_on_load("on_load_ok", true)?);
+    /// assert!(!code.finish_after_on_load("on_load_ok", AfterOnLoad::Keep)?);
     /// ```
     ///
     /// # Errors
     ///
-    /// `keep` after an earlier call without `keep` gives the runtime error
+    /// [`AfterOnLoad::Keep`] after an earlier [`AfterOnLoad::Drop`] gives the runtime error
     /// `erlang:finish_after_on_load/2 cannot keep the code of M after its
     /// exports were dropped`. ERTS then makes the code current with exports
     /// that call the error handler (`beam_bif_load.c:887-897`), and PBeam has
@@ -1059,12 +1069,12 @@ impl CodeTable {
     pub(in crate::runtime) fn finish_after_on_load(
         &mut self,
         name: &str,
-        keep: bool,
+        code: AfterOnLoad,
     ) -> Result<bool, BeamError> {
         let Some(waiting) = self.on_load.get_mut(name) else {
             return Ok(false);
         };
-        if !keep {
+        if code == AfterOnLoad::Drop {
             waiting.deferred = false;
             return Ok(true);
         }

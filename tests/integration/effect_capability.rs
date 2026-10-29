@@ -12,8 +12,8 @@ use std::{
 };
 
 use pbeam_runtime::{
-    AllowAll, AtomTable, BeamError, BeamProgram, Capability, CapabilityKind, Constraint, Operation,
-    Policy, Term,
+    AllowAll, AtomTable, BeamError, BeamProgram, Capability, CapabilityKind, Constraint,
+    Delegation, Operation, Policy, Term,
 };
 
 #[path = "../common/mod.rs"]
@@ -276,9 +276,14 @@ fn grants(kind: CapabilityKind, operations: &[Operation], constraint: &Constrain
             .into_iter()
             .map(|other| {
                 if other == kind {
-                    Capability::new(kind, operations, constraint.clone(), true)
+                    Capability::new(kind, operations, constraint.clone(), Delegation::Delegable)
                 } else {
-                    Capability::new(other, other.operations(), Constraint::Any, true)
+                    Capability::new(
+                        other,
+                        other.operations(),
+                        Constraint::Any,
+                        Delegation::Delegable,
+                    )
                 }
                 .unwrap()
             })

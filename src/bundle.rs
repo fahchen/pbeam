@@ -160,15 +160,13 @@ impl<'a> Bundle<'a> {
             &mut cursor,
             MAX_MODULES,
             MAX_ATOM_NAME_BYTES,
-            "module",
-            true,
+            TableKind::Module,
         )?;
         let resources = read_table(
             &mut cursor,
             MAX_RESOURCES,
             MAX_RESOURCE_NAME_BYTES,
-            "resource",
-            false,
+            TableKind::Resource,
         )?;
         if !cursor.is_empty() {
             return Err(error(format!(
@@ -504,6 +502,25 @@ fn check_atom_name(name: &str, what: &str) -> Result<(), BeamError> {
     Ok(())
 }
 
+/// A table of a bundle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TableKind {
+    /// The module table: each name is an atom name, which may be empty.
+    Module,
+    /// The resource table: each name is not empty.
+    Resource,
+}
+
+impl TableKind {
+    /// Return the name of the table in an error message.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Module => "module",
+            Self::Resource => "resource",
+        }
+    }
+}
+
 /// Read one table: a count, then one name, one length, and one payload for
 /// each entry. The name set rejects a duplicate, and each length is checked
 /// against the remaining bytes before the payload is borrowed, so a declared
@@ -514,9 +531,9 @@ fn read_table<'a>(
     cursor: &mut Cursor<'a>,
     max_count: u32,
     max_name: usize,
-    kind: &str,
-    atom: bool,
+    table: TableKind,
 ) -> Result<Vec<Blob<'a>>, BeamError> {
+    let kind = table.label();
     let count = cursor.u32(&format!("{kind} count"))?;
     if count > max_count {
         return Err(error(format!(
@@ -526,7 +543,7 @@ fn read_table<'a>(
     let mut blobs = Vec::new();
     let mut names = HashSet::new();
     for index in 0..count {
-        let name = if atom {
+        let name = if table == TableKind::Module {
             cursor.atom_name(&format!("{kind} {index} name"))?
         } else {
             cursor.name(max_name, &format!("{kind} {index} name"))?

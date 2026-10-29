@@ -52,6 +52,10 @@ impl RecordDef {
     /// let def = RecordDef::new(module, name, false, vec![(x, Some(Term::Integer(0))), (y, None)], &atoms);
     /// assert_eq!(def.keys.len(), 2);
     /// ```
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "`is_exported` is the Erlang boolean of a record definition (`beam_file.c:1223-1299`), stored and compared as data"
+    )]
     pub(crate) fn new(
         module: Atom,
         name: Atom,
@@ -59,7 +63,7 @@ impl RecordDef {
         fields: Vec<(Atom, Option<Term>)>,
         atoms: &AtomTable,
     ) -> Self {
-        let exported = Term::static_atom(if is_exported { "true" } else { "false" });
+        let exported = Term::from(is_exported);
         let mut hashed = vec![
             Term::Atom(module.clone()),
             Term::Atom(name.clone()),

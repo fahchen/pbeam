@@ -773,7 +773,11 @@ impl Scheduler {
             } => {
                 self.handled(id, node);
                 let refers = self.check_process_code(id, &module);
-                self.send_message(id, requester, check_process_code_reply(tag, refers));
+                self.send_message(
+                    id,
+                    requester,
+                    check_process_code_reply(tag, Term::from(refers)),
+                );
                 0
             }
             Signal::ProcessInfo {
@@ -798,7 +802,7 @@ impl Scheduler {
                     atoms: &self.atoms,
                     current,
                     messages,
-                    caller: false,
+                    reader: bif::erlang::InfoReader::Other,
                     registered_name: registered,
                 };
                 let info = request
@@ -1087,7 +1091,11 @@ impl Scheduler {
                     reference,
                 } => self.send_message(id, requester, reply(reference, Term::static_atom("false"))),
                 Signal::CheckProcessCode { requester, tag, .. } => {
-                    self.send_message(id, requester, check_process_code_reply(tag, false));
+                    self.send_message(
+                        id,
+                        requester,
+                        check_process_code_reply(tag, Term::from(false)),
+                    );
                 }
                 Signal::ProcessInfo {
                     requester,

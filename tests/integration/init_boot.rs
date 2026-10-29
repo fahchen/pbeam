@@ -214,16 +214,25 @@ fn kernel_boot_flags(arguments: &str) -> Vec<String> {
     flags
 }
 
+/// Whether the kernel boot gets `ERL_INETRC`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Inetrc {
+    /// The boot has no `ERL_INETRC`.
+    Unset,
+    /// The boot gets `ERL_INETRC`.
+    Set,
+}
+
 /// Run the kernel boot of `kernel_boot_probe` with the `-s` arguments
 /// `arguments` (see [`kernel_boot_flags`]), the environment of the kernel
-/// boot, and `ERL_INETRC` only when `inetrc` is true, on the pinned ERTS
+/// boot, and `ERL_INETRC` only when `inetrc` is [`Inetrc::Set`], on the pinned ERTS
 /// and on PBeam in a child process. Check that ERTS writes nothing to
 /// stderr and that the child passes. Return the stdout and the exit code of
 /// ERTS, and the lines of the child that start with one of `prefixes`: the
 /// test harness writes its own lines around the output of the node.
 fn run_kernel_boot(
     arguments: &str,
-    inetrc: bool,
+    inetrc: Inetrc,
     prefixes: &[&str],
 ) -> (String, Option<i32>, String) {
     let environment = |command: &mut Command| {
@@ -231,7 +240,7 @@ fn run_kernel_boot(
             .envs(KERNEL_BOOT_ENVIRONMENT)
             .env_remove(KERNEL_BOOT_INETRC.0)
             .stdin(Stdio::null());
-        if inetrc {
+        if inetrc == Inetrc::Set {
             command.env(KERNEL_BOOT_INETRC.0, KERNEL_BOOT_INETRC.1);
         }
     };
@@ -316,7 +325,7 @@ fn starts_kernel_and_stops_at_init_stop_as_pinned_erts() {
         {stop,kernel_boot_app,[],undefined,{stopping,started}}\r\n";
     for (arguments, code) in [("main", 0), ("main 3", 3)] {
         let (reference, status, node) =
-            run_kernel_boot(arguments, true, &["{controller", "{stop,"]);
+            run_kernel_boot(arguments, Inetrc::Set, &["{controller", "{stop,"]);
         assert_eq!(
             (reference.as_str(), status),
             (expected, Some(code)),
@@ -337,7 +346,7 @@ fn looks_up_the_host_name_at_the_kernel_boot_as_pinned_erts() {
     // 412-428). `kernel_boot_probe:lookup/0` then displays the domain and
     // the native lookup of the host name and of `localhost`, on each host
     // OS, and calls `init:stop/0`.
-    let (reference, status, node) = run_kernel_boot("lookup", false, &["{lookup,"]);
+    let (reference, status, node) = run_kernel_boot("lookup", Inetrc::Unset, &["{lookup,"]);
     assert_eq!(status, Some(0), "ERTS");
     assert!(reference.starts_with("{lookup,[native],"), "{reference}");
     assert_eq!(node, reference, "PBeam");
@@ -353,7 +362,7 @@ fn serves_the_inet_gethost_port_program_as_pinned_erts() {
     // for localhost, 127.0.0.1, ::1, and an unknown name. The replies
     // depend on the resolver of the host, so the test compares the two
     // runs on the host.
-    let (reference, status, node) = run_kernel_boot("gethost", false, &["{gethost,"]);
+    let (reference, status, node) = run_kernel_boot("gethost", Inetrc::Unset, &["{gethost,"]);
     assert_eq!(status, Some(0), "ERTS");
     assert!(
         reference.starts_with("{gethost,[none,none,none,none,none,none],[{data,"),
@@ -377,7 +386,7 @@ fn reports_the_socket_support_of_the_host_at_the_kernel_boot_as_pinned_erts() {
     // sorted lists, and the results of other keys, and calls
     // `init:stop/0`. The values depend on the host OS and on the host file
     // `/etc/protocols`, so the test compares the two runs on the host.
-    let (reference, status, node) = run_kernel_boot("supports", true, &["{supports,"]);
+    let (reference, status, node) = run_kernel_boot("supports", Inetrc::Set, &["{supports,"]);
     assert_eq!(status, Some(0), "ERTS");
     assert!(
         reference.starts_with("{supports,[{sctp,false},{ipv6,true},{local,true},"),
@@ -398,7 +407,7 @@ fn opens_binds_and_closes_sockets_at_the_kernel_boot_as_pinned_erts() {
     // global counters (prim_socket_nif.c:17127-17218), and the error
     // returns. The probe displays only the results that are the same on
     // Linux and macOS.
-    let (reference, status, node) = run_kernel_boot("socket", false, &["{socket,"]);
+    let (reference, status, node) = run_kernel_boot("socket", Inetrc::Unset, &["{socket,"]);
     assert_eq!(status, Some(0), "ERTS");
     assert!(
         reference.starts_with("{socket,[[#{num_cnt_bits=>64,"),
@@ -418,7 +427,7 @@ fn sets_and_gets_socket_options_at_the_kernel_boot_as_pinned_erts() {
     // `socket:bind/2` with the atoms `any`, `loopback`, and `broadcast`,
     // which read `{otp, domain}` (socket.erl:3477). Some errors depend on
     // the host OS, so the test compares the two runs on the host.
-    let (reference, status, node) = run_kernel_boot("sockopt", false, &["{sockopt,"]);
+    let (reference, status, node) = run_kernel_boot("sockopt", Inetrc::Unset, &["{sockopt,"]);
     assert_eq!(status, Some(0), "ERTS");
     assert!(
         reference.starts_with("{sockopt,[[ok,{ok,true},ok,{ok,false},"),
@@ -444,7 +453,8 @@ fn sets_and_gets_the_host_socket_options_as_pinned_erts() {
     // support. The host options differ
     // between Linux and macOS, so the test compares the two runs on the
     // host.
-    let (reference, status, node) = run_kernel_boot("sockopt_host", false, &["{sockopt_host,"]);
+    let (reference, status, node) =
+        run_kernel_boot("sockopt_host", Inetrc::Unset, &["{sockopt_host,"]);
     assert_eq!(status, Some(0), "ERTS");
     assert!(
         reference.starts_with("{sockopt_host,[[ok,{ok,true},ok,{ok,false},"),
@@ -469,7 +479,8 @@ fn sets_and_gets_the_raw_and_native_socket_options_as_pinned_erts() {
     // 13009-13048, 13126-13216, 16364-16570). The host options differ
     // between Linux and macOS, so the test compares the two runs on the
     // host.
-    let (reference, status, node) = run_kernel_boot("sockopt_raw", false, &["{sockopt_raw,"]);
+    let (reference, status, node) =
+        run_kernel_boot("sockopt_raw", Inetrc::Unset, &["{sockopt_raw,"]);
     assert_eq!(status, Some(0), "ERTS");
     assert!(
         reference.starts_with("{sockopt_raw,[[ok,{ok,true},"),
@@ -489,7 +500,8 @@ fn sets_msfilter_and_gets_pktoptions_as_pinned_erts() {
     // `cmsgLevelIP` (prim_socket_nif.c:8602-8695, 13255-13405, 14176-14215,
     // 14335-14387, 14453-14490). Only Linux has the two options, so the test
     // compares the two runs on the host.
-    let (reference, status, node) = run_kernel_boot("sockopt_pkt", false, &["{sockopt_pkt,"]);
+    let (reference, status, node) =
+        run_kernel_boot("sockopt_pkt", Inetrc::Unset, &["{sockopt_pkt,"]);
     assert_eq!(status, Some(0), "ERTS");
     assert!(
         reference.starts_with("{sockopt_pkt,[{error,"),
@@ -510,7 +522,8 @@ fn sets_and_gets_the_otp_socket_options_and_linger_as_pinned_erts() {
     // the buffer size of a receive with length 0
     // (unix_socket_syncio.c:3900), and `esock_setopt_linger` and
     // `esock_getopt_linger` (prim_socket_nif.c:8551-8597, 12482-12530).
-    let (reference, status, node) = run_kernel_boot("sockopt_otp", false, &["{sockopt_otp,"]);
+    let (reference, status, node) =
+        run_kernel_boot("sockopt_otp", Inetrc::Unset, &["{sockopt_otp,"]);
     assert_eq!(status, Some(0), "ERTS");
     // ERTS writes a warning with a time stamp for a controlling process
     // that is not a local pid (prim_socket_nif.c:8082-8086). PBeam does not
@@ -539,7 +552,8 @@ fn connects_listens_accepts_and_cancels_sockets_with_select_messages_as_pinned_e
     // the abort messages of a second accept, a close, and an owner exit
     // (unix_socket_syncio.c:2643-2737, 4600-4730), and the exit of an
     // acceptor (unix_socket_syncio.c:10583-10608).
-    let (reference, status, node) = run_kernel_boot("socket_select", false, &["{socket_select,"]);
+    let (reference, status, node) =
+        run_kernel_boot("socket_select", Inetrc::Unset, &["{socket_select,"]);
     assert_eq!(status, Some(0), "ERTS");
     assert!(
         reference.starts_with("{socket_select,[ok,[bound,listening],{error,timeout}],"),
@@ -559,7 +573,7 @@ fn sends_and_receives_on_stream_sockets_as_pinned_erts() {
     // the end of a stream, the abort of a waiting reader at a close
     // (unix_socket_syncio.c:4637-4722), the counters of `socket:info/1`, and
     // the argument errors.
-    let (reference, status, node) = run_kernel_boot("socket_io", false, &["{socket_io,"]);
+    let (reference, status, node) = run_kernel_boot("socket_io", Inetrc::Unset, &["{socket_io,"]);
     assert_eq!(status, Some(0), "ERTS");
     assert!(
         reference.starts_with("{socket_io,[ok,{ok,<<\"hello\">>},"),
@@ -579,7 +593,8 @@ fn sends_and_receives_on_datagram_and_stream_sockets_with_addresses_as_pinned_er
     // 13955-14078; unix_socket_syncio.c:3042-3091, 3888-3977): the source
     // addresses, a truncated datagram, the read select, a partial send, the
     // counters of `socket:info/1`, and the argument errors.
-    let (reference, status, node) = run_kernel_boot("socket_dgram", false, &["{socket_dgram,"]);
+    let (reference, status, node) =
+        run_kernel_boot("socket_dgram", Inetrc::Unset, &["{socket_dgram,"]);
     assert_eq!(status, Some(0), "ERTS");
     assert!(
         reference.starts_with("{socket_dgram,[{error,enotconn},ok,{ok,{true,<<\"ping\">>}},"),
@@ -595,8 +610,11 @@ fn receives_with_flags_on_inet_sockets_as_pinned_erts() {
     // stream socket. `essio_recvfrom` passes the flags to `recvfrom(2)`
     // (unix_socket_syncio.c:3925-3927); a stream socket gives the address
     // of length 0, `#{family => unspec, addr => <<>>}`.
-    let (reference, status, node) =
-        run_kernel_boot("socket_recvfrom_flags", false, &["{socket_recvfrom_flags,"]);
+    let (reference, status, node) = run_kernel_boot(
+        "socket_recvfrom_flags",
+        Inetrc::Unset,
+        &["{socket_recvfrom_flags,"],
+    );
     assert_eq!(status, Some(0), "ERTS");
     assert!(
         reference.starts_with(
@@ -615,7 +633,8 @@ fn sends_io_vectors_as_pinned_erts() {
     // `{iov, Written}` on a stream socket and `{invalid, iov}` on a datagram
     // socket, a partial send, the counters, and the argument errors. The
     // `writev(2)` of no entry gives `EINVAL` on macOS and 0 on Linux.
-    let (reference, status, node) = run_kernel_boot("socket_sendv", false, &["{socket_sendv,"]);
+    let (reference, status, node) =
+        run_kernel_boot("socket_sendv", Inetrc::Unset, &["{socket_sendv,"]);
     assert_eq!(status, Some(0), "ERTS");
     assert!(
         reference.starts_with("{socket_sendv,[ok,{ok,<<\"abcd\">>},"),
@@ -630,7 +649,7 @@ fn receives_with_the_flag_errqueue_as_pinned_erts() {
     // macOS has no `MSG_ERRQUEUE`, so the flag errqueue gives the flags 0.
     let (reference, status, node) = run_kernel_boot(
         "socket_recvfrom_errqueue",
-        false,
+        Inetrc::Unset,
         &["{socket_recvfrom_errqueue,"],
     );
     assert_eq!(status, Some(0), "ERTS");
@@ -655,7 +674,7 @@ fn sends_and_receives_with_gen_tcp_and_gen_udp_on_the_socket_backend_as_pinned_e
         ),
     ] {
         let prefix = format!("{{{probe},");
-        let (reference, status, node) = run_kernel_boot(probe, false, &[&prefix]);
+        let (reference, status, node) = run_kernel_boot(probe, Inetrc::Unset, &[&prefix]);
         assert_eq!(status, Some(0), "ERTS {probe}");
         assert_eq!(reference, expected);
         assert_eq!(node, reference, "PBeam {probe}");

@@ -13,7 +13,7 @@ use order::KeyOrder;
 
 use crate::error::BeamError;
 use crate::term::atom_hash;
-use crate::term::{AtomTable, LiveBytes, ProcessId, Reference, Term, internal_hash};
+use crate::term::{AtomTable, Direction, LiveBytes, ProcessId, Reference, Term, internal_hash};
 
 /// The number of slots of the first segment of a hash table, which a new
 /// table has (`FIRST_SEGSZ`, `erl_db_hash.c:164-165`).
@@ -391,14 +391,14 @@ impl Busy {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let busy = Busy::new(ProcessId(0), vec![vec![test_atom("k")]], false);
+    /// let busy = Busy::new(ProcessId(0), vec![vec![test_atom("k")]], InsertKind::Insert);
     /// assert_eq!(busy.walked, 0);
     /// ```
-    pub(super) fn new(owner: ProcessId, objects: Vec<Vec<Term>>, walk: bool) -> Busy {
+    pub(super) fn new(owner: ProcessId, objects: Vec<Vec<Term>>, kind: InsertKind) -> Busy {
         Busy {
             owner,
             objects,
-            walk,
+            walk: kind == InsertKind::InsertNew,
             walked: 0,
             found: false,
             inserted: 0,
@@ -436,6 +436,27 @@ fn stored_bucket(hash: u64, buckets: usize) -> usize {
     } else {
         bucket
     }
+}
+
+/// The options that `ets:info/2` gives for a table.
+pub(super) struct TableOptions {
+    /// The `write_concurrency` option (`table_info`, `erl_db.c:5487-5501`).
+    pub(super) write_concurrency: Term,
+    /// The `read_concurrency` option (`erl_db.c:5502-5503`).
+    pub(super) read_concurrency: bool,
+    /// The `decentralized_counters` option (`erl_db.c:5516-5517`).
+    pub(super) decentralized_counters: bool,
+    /// The `compressed` option (`erl_db.c:5512-5513`).
+    pub(super) compressed: bool,
+}
+
+/// The BIF that an ETS insert serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum InsertKind {
+    /// `ets:insert/2`.
+    Insert,
+    /// `ets:insert_new/2`.
+    InsertNew,
 }
 
 /// The type of a hash table: the part of `tb->common.status` that
@@ -1639,13 +1660,13 @@ impl Table {
     /// Set the options that `ets:info/2` gives. `ets:new/2` keeps no other
     /// effect of them, as it does not compress objects, except that a hash
     /// table with decentralized counters gets its lock counters.
-    pub(super) fn set_options(
-        &mut self,
-        write_concurrency: Term,
-        read_concurrency: bool,
-        decentralized_counters: bool,
-        compressed: bool,
-    ) {
+    pub(super) fn set_options(&mut self, options: TableOptions) {
+        let TableOptions {
+            write_concurrency,
+            read_concurrency,
+            decentralized_counters,
+            compressed,
+        } = options;
         self.write_concurrency = write_concurrency;
         self.read_concurrency = read_concurrency;
         self.decentralized_counters = decentralized_counters;
@@ -1903,7 +1924,7 @@ impl Table {
     }
 
     /// Return the key of an `ordered_set` table next to the key `key` in the
-    /// term order: the least key above it when `forward` is true, as
+    /// term order: the least key above it for [`Direction::Forward`], as
     /// `db_next_tree` does with `find_next` (`erl_db_tree.c:665-711`,
     /// `erl_db_tree.c:3167-3224`), else the greatest key below it, as
     /// `db_prev_tree` does with `find_prev` (`erl_db_tree.c:740-757`,
@@ -1916,8 +1937,8 @@ impl Table {
     /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::OrderedSet);
     /// table.insert(&atoms, vec![Term::Integer(1)]);
     /// table.insert(&atoms, vec![Term::Integer(3)]);
-    /// assert_eq!(table.ordered_step(&atoms, &Term::Float(2.0), true), Some(Term::Integer(3)));
-    /// assert_eq!(table.ordered_step(&atoms, &Term::Integer(1), false), None);
+    /// assert_eq!(table.ordered_step(&atoms, &Term::Float(2.0), Direction::Forward), Some(Term::Integer(3)));
+    /// assert_eq!(table.ordered_step(&atoms, &Term::Integer(1), Direction::Backward), None);
     /// ```
     ///
     /// # Errors
@@ -1927,16 +1948,16 @@ impl Table {
         &self,
         atoms: &AtomTable,
         key: &Term,
-        forward: bool,
+        direction: Direction,
     ) -> Result<Option<Term>, BeamError> {
         Ok(self
             .key_order()
-            .beyond(atoms, key, forward)?
+            .beyond(atoms, key, direction)?
             .next()
             .cloned())
     }
 
-    /// Return the least key of an `ordered_set` table when `first` is true,
+    /// Return the least key of an `ordered_set` table for [`Direction::Forward`],
     /// as `db_first_tree` does (`erl_db_tree.c:635-663`), else the
     /// greatest key, as `db_last_tree` does (`erl_db_tree.c:712-738`).
     /// Return `None` for an empty table.
@@ -1945,12 +1966,16 @@ impl Table {
     ///
     /// ```rust,ignore
     /// let table = Table::ordered(ProcessId(0), Access::Public, 1, atoms);
-    /// assert_eq!(table.ordered_end(true), None);
+    /// assert_eq!(table.ordered_end(Direction::Forward), None);
     /// ```
-    pub(super) fn ordered_end(&self, first: bool) -> Option<Term> {
+    pub(super) fn ordered_end(&self, direction: Direction) -> Option<Term> {
         let order = self.key_order();
         let mut keys = order.iter();
-        if first { keys.next() } else { keys.next_back() }.cloned()
+        match direction {
+            Direction::Forward => keys.next(),
+            Direction::Backward => keys.next_back(),
+        }
+        .cloned()
     }
 
     /// Return the object of an `ordered_set` table whose key is equal to
@@ -1978,7 +2003,7 @@ impl Table {
     }
 
     /// Return the objects of an `ordered_set` table in key order, up when
-    /// `forward` is true and else down, from the key next to `after`, or
+    /// [`Direction::Forward`] and else down, from the key next to `after`, or
     /// from the first or the last key when `after` is `None`, as
     /// `traverse_forward` and `traverse_backwards` step with `find_next` and
     /// `find_prev` (`erl_db_tree.c:3659-3762`). The key `after` does not have
@@ -1987,7 +2012,7 @@ impl Table {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let objects: Vec<_> = table.ordered_walk(&atoms, None, true)?.collect();
+    /// let objects: Vec<_> = table.ordered_walk(&atoms, None, Direction::Forward)?.collect();
     /// ```
     ///
     /// # Errors
@@ -1997,13 +2022,13 @@ impl Table {
         &'a self,
         atoms: &'a AtomTable,
         after: Option<&Term>,
-        forward: bool,
+        direction: Direction,
     ) -> Result<impl Iterator<Item = &'a [Term]> + 'a, BeamError> {
         let order = self.key_order();
         let keys: Box<dyn Iterator<Item = &'a Term> + 'a> = match after {
-            None if forward => Box::new(order.iter()),
+            None if direction == Direction::Forward => Box::new(order.iter()),
             None => Box::new(order.iter().rev()),
-            Some(key) => order.beyond(atoms, key, forward)?,
+            Some(key) => order.beyond(atoms, key, direction)?,
         };
         Ok(keys.map(move |key| self.ordered_object(atoms, key)))
     }
@@ -2980,7 +3005,7 @@ impl Table {
     /// ```rust,ignore
     /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
     /// let atoms = AtomTable::new();
-    /// table.busy = Some(Busy::new(ProcessId(0), vec![vec![test_atom("k")]], false));
+    /// table.busy = Some(Busy::new(ProcessId(0), vec![vec![test_atom("k")]], InsertKind::Insert));
     /// let (units, result) = table.step_busy(&atoms, 8);
     /// assert_eq!((units, result), (2, Some(Term::static_atom("true"))));
     /// ```
@@ -3069,7 +3094,7 @@ impl Table {
                 // work stays that of one list insert.
                 let object = std::mem::take(&mut busy.objects[busy.inserted]);
                 let compared = if self.kind == TableType::Bag {
-                    self.insert_bag(atoms, object, &mut busy.walks, false)
+                    self.insert_bag(atoms, object, &mut busy.walks, InsertKind::Insert)
                 } else {
                     self.insert(atoms, object);
                     0
@@ -3118,7 +3143,7 @@ impl Table {
     /// assert_eq!(table.insert_all(&atoms, vec![object(2), object(1), object(3)]), vec![1, 1, 2]);
     /// ```
     pub(super) fn insert_all(&mut self, atoms: &AtomTable, objects: Vec<Vec<Term>>) -> Vec<usize> {
-        self.insert_all_with(atoms, objects, false)
+        self.insert_all_with(atoms, objects, InsertKind::Insert)
     }
 
     /// Insert the objects of `ets:insert_new/2`: for a bag key that the
@@ -3130,14 +3155,14 @@ impl Table {
         atoms: &AtomTable,
         objects: Vec<Vec<Term>>,
     ) -> Vec<usize> {
-        self.insert_all_with(atoms, objects, true)
+        self.insert_all_with(atoms, objects, InsertKind::InsertNew)
     }
 
     fn insert_all_with(
         &mut self,
         atoms: &AtomTable,
         objects: Vec<Vec<Term>>,
-        new: bool,
+        kind: InsertKind,
     ) -> Vec<usize> {
         if self.kind != TableType::Bag {
             let count = objects.len();
@@ -3149,7 +3174,7 @@ impl Table {
         let mut walks: HashMap<u64, Vec<BagWalk>> = HashMap::new();
         objects
             .into_iter()
-            .map(|object| self.insert_bag(atoms, object, &mut walks, new))
+            .map(|object| self.insert_bag(atoms, object, &mut walks, kind))
             .collect()
     }
 
@@ -3174,7 +3199,7 @@ impl Table {
         atoms: &AtomTable,
         object: Vec<Term>,
         walks: &mut HashMap<u64, Vec<BagWalk>>,
-        new: bool,
+        kind: InsertKind,
     ) -> usize {
         let hash = stored_hash(atoms, self.key(&object));
         if self.is_fixed() && self.position(hash, self.key(&object)).is_none() {
@@ -3182,7 +3207,7 @@ impl Table {
             if let Some(records) = self.retained.get(&hash)
                 && let Some(index) = records.iter().rposition(|retained| retained.key == key)
             {
-                if new {
+                if kind == InsertKind::InsertNew {
                     // The key-clash walk of `ets:insert_new/2` adds a new
                     // object at the head of the key's list
                     // (`erl_db_hash.c:1412-1422`, `1447-1452`).
@@ -3232,7 +3257,7 @@ impl Table {
                     .iter()
                     .find(|(_, slot)| self.object_of(*slot).as_slice() == object)
                     .map(|(_, slot)| *slot)
-            }) && !new
+            }) && kind != InsertKind::InsertNew
                 && self.is_deleted(slot)
             {
                 self.restore_object(slot, hash, &walk.key);

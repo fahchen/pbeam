@@ -1656,6 +1656,16 @@ fn list_error(count: usize, tail: &Term) -> Option<BifResult> {
     (!tail.is_nil() || count == 0).then(BifResult::badarg)
 }
 
+/// The end of the binaries that `binary:longest_common_prefix/1` and
+/// `binary:longest_common_suffix/1` compare.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CommonEnd {
+    /// The first bytes: `binary:longest_common_prefix/1`.
+    Prefix,
+    /// The last bytes: `binary:longest_common_suffix/1`.
+    Suffix,
+}
+
 /// Start `binary:longest_common_prefix/1` (`suffix` false) or
 /// `binary:longest_common_suffix/1` (`suffix` true) as
 /// `start_longest_common` does (`erl_bif_binary.c:2182-2239`). Each element
@@ -1671,7 +1681,7 @@ fn list_error(count: usize, tail: &Term) -> Option<BifResult> {
 /// let list = Term::list_from([Term::binary(b"ab".to_vec()), Term::binary(b"ac".to_vec())]);
 /// assert!(matches!(longest_common(&mut process, &list, false), BifResult::Value(Term::Integer(1))));
 /// ```
-pub(super) fn longest_common(process: &mut ProcessState, list: &Term, suffix: bool) -> BifResult {
+pub(super) fn longest_common(process: &mut ProcessState, list: &Term, end: CommonEnd) -> BifResult {
     let mut binaries = Vec::new();
     let mut smallest = u64::MAX;
     let mut tail = list;
@@ -1689,7 +1699,7 @@ pub(super) fn longest_common(process: &mut ProcessState, list: &Term, suffix: bo
     if smallest == 0 || binaries.len() == 1 {
         return Value(Term::Integer((smallest / 8) as i64));
     }
-    longest_common_turn(process, &binaries, 1, smallest, 0, suffix)
+    longest_common_turn(process, &binaries, 1, smallest, 0, end)
 }
 
 /// Run one turn of `binary:longest_common_prefix/1` or
@@ -1707,7 +1717,7 @@ pub(super) fn longest_common(process: &mut ProcessState, list: &Term, suffix: bo
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = longest_common_turn(&mut process, &binaries, 1, 16, 0, false);
+/// let result = longest_common_turn(&mut process, &binaries, 1, 16, 0, CommonEnd::Prefix);
 /// ```
 pub(super) fn longest_common_turn(
     process: &mut ProcessState,
@@ -1715,7 +1725,7 @@ pub(super) fn longest_common_turn(
     mut index: usize,
     mut smallest: u64,
     mut position: u64,
-    suffix: bool,
+    end: CommonEnd,
 ) -> BifResult {
     let bytes = |index: usize| {
         binaries[index]
@@ -1734,7 +1744,7 @@ pub(super) fn longest_common_turn(
             process.bump_all_reductions();
             return BifResult::TrapBif {
                 module: "erlang",
-                function: if suffix {
+                function: if end == CommonEnd::Suffix {
                     "binary_longest_suffix_trap"
                 } else {
                     "binary_longest_prefix_trap"
@@ -1753,7 +1763,7 @@ pub(super) fn longest_common_turn(
             // from the end for a suffix.
             let (start, len) = ((position / 8) as usize, (stride / 8) as usize);
             let (first, other) = (bytes(0), bytes(index));
-            let (first, other) = if suffix {
+            let (first, other) = if end == CommonEnd::Suffix {
                 (
                     &first[first.len() - start - len..first.len() - start],
                     &other[other.len() - start - len..other.len() - start],
@@ -1762,7 +1772,7 @@ pub(super) fn longest_common_turn(
                 (&first[start..start + len], &other[start..start + len])
             };
             let pairs = first.iter().zip(other);
-            let mismatch = if suffix {
+            let mismatch = if end == CommonEnd::Suffix {
                 pairs.rev().position(|(a, b)| a != b)
             } else {
                 pairs.into_iter().position(|(a, b)| a != b)

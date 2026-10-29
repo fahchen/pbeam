@@ -19,7 +19,7 @@ use crate::runtime::{
     files::Files,
     host::{
         errno::errno_id,
-        file::{self, FileInfo, FileType, OpenModes},
+        file::{self, FileInfo, FileType, LinkMode, OpenModes},
     },
     signal::Signal,
 };
@@ -785,7 +785,17 @@ fn read_info_nif(path: &Term, follow_links: &Term) -> Result<BifResult, BeamErro
         return einval();
     };
     let path = path.to_owned();
-    dirty_value(move || file::read_info(&path, follow_links != 0).map(|info| file_info(&info)))
+    dirty_value(move || {
+        file::read_info(
+            &path,
+            if follow_links != 0 {
+                LinkMode::Follow
+            } else {
+                LinkMode::NoFollow
+            },
+        )
+        .map(|info| file_info(&info))
+    })
 }
 
 /// Run `prim_file:read_file_nif(Path)`, as the ERTS NIF `read_file_nif`

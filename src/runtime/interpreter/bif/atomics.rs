@@ -10,7 +10,7 @@ use num_traits::ToPrimitive;
 use super::BifResult::Value;
 use super::{BeamError, BifResult, ExceptionClass, Scheduler, Term};
 use crate::runtime::atomics::{ATOMIC_BYTES, Array};
-use crate::term::Map;
+use crate::term::{Map, Signedness};
 use std::sync::Arc;
 
 /// The bit of the encoded options of `atomics:new/2` that selects signed
@@ -70,11 +70,15 @@ pub(super) fn new(
     // PBeam runs on 64-bit hosts, and the check above keeps the size of the
     // array in `usize`.
     let id = scheduler.make_magic_ref()?;
-    if !scheduler
-        .node()
-        .atomics
-        .create(id, options & OPT_SIGNED == OPT_SIGNED, size as usize)
-    {
+    if !scheduler.node().atomics.create(
+        id,
+        if options & OPT_SIGNED == OPT_SIGNED {
+            Signedness::Signed
+        } else {
+            Signedness::Unsigned
+        },
+        size as usize,
+    ) {
         return Ok(system_limit());
     }
     Ok(Value(Term::Reference(id)))
@@ -112,7 +116,7 @@ pub(super) fn get(
     let Some(position) = position(&array, index) else {
         return Ok(BifResult::badarg());
     };
-    Ok(Value(value(array.signed(), array.get(position))))
+    Ok(Value(value(array.signedness(), array.get(position))))
 }
 
 /// Run `atomics:put(Ref, Ix, Value)`: write `Value` to the atomic at the
@@ -147,7 +151,7 @@ pub(super) fn put(
     let Some(position) = position(&array, index) else {
         return Ok(BifResult::badarg());
     };
-    let Some(bits) = value_bits(array.signed(), value) else {
+    let Some(bits) = value_bits(array.signedness(), value) else {
         return Ok(BifResult::badarg());
     };
     array.set(position, bits);
@@ -217,7 +221,10 @@ pub(super) fn add_get(
     let Some(bits) = increment_bits(increment) else {
         return Ok(BifResult::badarg());
     };
-    Ok(Value(value(array.signed(), array.add_get(position, bits))))
+    Ok(Value(value(
+        array.signedness(),
+        array.add_get(position, bits),
+    )))
 }
 
 /// Run `atomics:exchange(Ref, Ix, Desired)`: write `Desired` to the atomic
@@ -240,10 +247,13 @@ pub(super) fn exchange(
     let Some(position) = position(&array, index) else {
         return Ok(BifResult::badarg());
     };
-    let Some(bits) = value_bits(array.signed(), desired) else {
+    let Some(bits) = value_bits(array.signedness(), desired) else {
         return Ok(BifResult::badarg());
     };
-    Ok(Value(value(array.signed(), array.exchange(position, bits))))
+    Ok(Value(value(
+        array.signedness(),
+        array.exchange(position, bits),
+    )))
 }
 
 /// Run `atomics:compare_exchange(Ref, Ix, Expected, Desired)`: write
@@ -270,8 +280,8 @@ pub(super) fn compare_exchange(
         return Ok(BifResult::badarg());
     };
     let (Some(expected), Some(desired)) = (
-        value_bits(array.signed(), expected),
-        value_bits(array.signed(), desired),
+        value_bits(array.signedness(), expected),
+        value_bits(array.signedness(), desired),
     ) else {
         return Ok(BifResult::badarg());
     };
@@ -279,7 +289,7 @@ pub(super) fn compare_exchange(
     if was == expected {
         return Ok(Value(Term::static_atom("ok")));
     }
-    Ok(Value(value(array.signed(), was)))
+    Ok(Value(value(array.signedness(), was)))
 }
 
 /// Run `atomics:info(Ref)`: return the information map of the array, as
@@ -303,7 +313,7 @@ pub(super) fn info(scheduler: &mut Scheduler, reference: &Term) -> Result<BifRes
     let Some(array) = scheduler.node().atomics.array(reference) else {
         return Ok(BifResult::badarg());
     };
-    let (min, max) = if array.signed() {
+    let (min, max) = if array.signedness() == Signedness::Signed {
         (Term::Integer(i64::MIN), Term::Integer(i64::MAX))
     } else {
         (Term::Integer(0), Term::from_bigint(BigInt::from(u64::MAX)))
@@ -373,7 +383,11 @@ pub(super) fn counters_new(scheduler: &mut Scheduler, size: &Term) -> Result<Bif
         return Ok(system_limit());
     }
     let id = scheduler.make_ref()?;
-    if !scheduler.node().counters.create(id, true, size as usize) {
+    if !scheduler
+        .node()
+        .counters
+        .create(id, Signedness::Signed, size as usize)
+    {
         return Ok(system_limit());
     }
     Ok(Value(Term::Reference(id)))
@@ -593,11 +607,11 @@ fn position(array: &Array, index: &Term) -> Option<usize> {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(value_bits(true, &Term::Integer(-1)), Some(-1));
-/// assert_eq!(value_bits(false, &Term::Integer(-1)), None);
+/// assert_eq!(value_bits(Signedness::Signed, &Term::Integer(-1)), Some(-1));
+/// assert_eq!(value_bits(Signedness::Unsigned, &Term::Integer(-1)), None);
 /// ```
-fn value_bits(signed: bool, term: &Term) -> Option<i64> {
-    if signed {
+fn value_bits(signedness: Signedness, term: &Term) -> Option<i64> {
+    if signedness == Signedness::Signed {
         signed_bits(term)
     } else {
         unsigned_bits(term)
@@ -661,11 +675,11 @@ fn unsigned_bits(term: &Term) -> Option<i64> {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(value(true, -1), Term::Integer(-1));
-/// assert_eq!(value(false, -1), Term::from_bigint(BigInt::from(u64::MAX)));
+/// assert_eq!(value(Signedness::Signed, -1), Term::Integer(-1));
+/// assert_eq!(value(Signedness::Unsigned, -1), Term::from_bigint(BigInt::from(u64::MAX)));
 /// ```
-fn value(signed: bool, bits: i64) -> Term {
-    if signed {
+fn value(signedness: Signedness, bits: i64) -> Term {
+    if signedness == Signedness::Signed {
         Term::Integer(bits)
     } else {
         Term::from_bigint(BigInt::from(bits as u64))

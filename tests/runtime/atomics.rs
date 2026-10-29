@@ -12,21 +12,21 @@ fn at(arrays: &AtomicArrays, id: u64) -> Arc<Array> {
 #[test]
 fn creates_an_array_of_zeroed_atomics() {
     let arrays = AtomicArrays::default();
-    assert!(arrays.create(Reference(0), true, 3));
+    assert!(arrays.create(Reference(0), Signedness::Signed, 3));
     let array = at(&arrays, 0);
-    assert!(array.signed());
+    assert_eq!(array.signedness(), Signedness::Signed);
     assert_eq!(array.len(), 3);
     assert_eq!(array.get(0), 0);
     assert_eq!(array.get(2), 0);
     // An unsigned array of one atomic.
-    assert!(arrays.create(Reference(1), false, 1));
-    assert!(!at(&arrays, 1).signed());
+    assert!(arrays.create(Reference(1), Signedness::Unsigned, 1));
+    assert_eq!(at(&arrays, 1).signedness(), Signedness::Unsigned);
 }
 
 #[test]
 fn reads_only_the_reference_of_an_array() {
     let arrays = AtomicArrays::default();
-    arrays.create(Reference(0), true, 1);
+    arrays.create(Reference(0), Signedness::Signed, 1);
     // A term that is not a reference names no array, and neither does the
     // reference of an array that no call made.
     assert!(arrays.array(&Term::Integer(0)).is_none());
@@ -39,7 +39,7 @@ fn reads_only_the_reference_of_an_array() {
 #[test]
 fn writes_and_adds_with_a_wrap_around_at_64_bits() {
     let arrays = AtomicArrays::default();
-    arrays.create(Reference(0), true, 1);
+    arrays.create(Reference(0), Signedness::Signed, 1);
     let array = arrays.array(&Term::Reference(Reference(0))).unwrap();
     array.set(0, i64::MAX);
     assert_eq!(array.get(0), i64::MAX);
@@ -51,7 +51,7 @@ fn writes_and_adds_with_a_wrap_around_at_64_bits() {
     assert_eq!(array.get(0), i64::MAX);
     // An unsigned array holds the same bits: `atomics:get/2` reads them as a
     // non-negative integer.
-    arrays.create(Reference(1), false, 1);
+    arrays.create(Reference(1), Signedness::Unsigned, 1);
     let array = arrays.array(&Term::Reference(Reference(1))).unwrap();
     array.set(0, -1);
     assert_eq!(array.get(0), -1);
@@ -63,7 +63,7 @@ fn reports_the_memory_of_an_array() {
     // 1, 2, and 3 of an array (`atom_counter_info` of `counters_SUITE`).
     let arrays = AtomicArrays::default();
     for (id, size, memory) in [(0, 1, 48), (1, 2, 56), (2, 3, 64)] {
-        arrays.create(Reference(id), true, size);
+        arrays.create(Reference(id), Signedness::Signed, size);
         assert_eq!(at(&arrays, id).memory(), memory);
         // Each atomic takes 8 bytes after the header of the array.
         assert_eq!(MEMORY_HEADER + ATOMIC_BYTES as i64 * size as i64, memory);
@@ -75,6 +75,6 @@ fn refuses_an_array_that_does_not_fit() {
     let arrays = AtomicArrays::default();
     // An array of `usize::MAX` atomics is above the address space, and ERTS
     // reports the failure of the allocation as `system_limit`.
-    assert!(!arrays.create(Reference(0), true, usize::MAX));
+    assert!(!arrays.create(Reference(0), Signedness::Signed, usize::MAX));
     assert!(arrays.array(&Term::Reference(Reference(0))).is_none());
 }

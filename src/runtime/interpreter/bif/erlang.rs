@@ -3,6 +3,8 @@
 mod snifs;
 
 use super::BifResult::{Raise, Trap, Value};
+use super::MessageQueue;
+use super::timer::TimerKind;
 use super::{
     Arc, BeamError, BifContext, BifResult, Binary, CapabilityKind, ExceptionClass, Operation,
     Scheduler, SpawnOptions, Target, Term, boot_denial, create_process, current_frame,
@@ -17,13 +19,15 @@ use crate::runtime::heap_flags::{
 };
 use crate::runtime::host;
 use crate::runtime::interpreter::DEFAULT_ERROR_HANDLER;
-use crate::runtime::interpreter::code_table::{CodeTable, Finish};
+use crate::runtime::interpreter::code_table::{AfterOnLoad, CodeTable, Finish};
 use crate::runtime::local_node;
 use crate::runtime::process::{Flush, Origin, Priority};
 use crate::runtime::process::{InitialCall, OTHER_PROCESS_INFO_ITEMS};
 use crate::runtime::process::{LinkId, ProcessState};
 use crate::runtime::scheduler::PTAB_SIZE;
-use crate::runtime::scheduler::{AliasMode, CONTEXT_REDS, Flushed, MonitorOptions, MonitorTarget};
+use crate::runtime::scheduler::{
+    AliasMode, CONTEXT_REDS, Flushed, MonitorOptions, MonitorTarget, UniqueRange,
+};
 #[cfg(target_os = "linux")]
 use crate::runtime::schedulers::cpu_topology;
 use crate::runtime::schedulers::{Schedulers, logical_processors_available};
@@ -2904,9 +2908,7 @@ fn integer_digits(
     }
     if term.small_integer().is_none() {
         let value = term.bigint().expect("the term is an integer");
-        let cost =
-            big_integer_estimate(value.bits(), value.sign() == num_bigint::Sign::Minus, base)
-                / DIGITS_PER_RED;
+        let cost = big_integer_estimate(value.bits(), value.sign(), base) / DIGITS_PER_RED;
         if cost as u64 > process.bif_reductions_unsigned() {
             // ponytail: no dirty scheduler; see "Scheduling" in docs/erts-differences.md.
             return Err(error(format!(
@@ -2950,12 +2952,12 @@ fn integer_digits(
 ///
 /// ```rust,ignore
 /// // 2^59 has 60 bits: lg 59, 60 / 3.32193 + 1 = 19.06, then the null byte.
-/// assert_eq!(big_integer_estimate(60, false, 10), 20);
-/// assert_eq!(big_integer_estimate(64, true, 10), 22);
+/// assert_eq!(big_integer_estimate(60, Sign::Plus, 10), 20);
+/// assert_eq!(big_integer_estimate(64, Sign::Minus, 10), 22);
 /// // 2^63 - 1 in base 2: lg 62, 63 / 1.0 + 1 = 64, then the null byte.
-/// assert_eq!(big_integer_estimate(63, false, 2), 65);
+/// assert_eq!(big_integer_estimate(63, Sign::Plus, 2), 65);
 /// ```
-fn big_integer_estimate(bits: u64, negative: bool, base: u32) -> usize {
+fn big_integer_estimate(bits: u64, sign: num_bigint::Sign, base: u32) -> usize {
     /// `lg2_lookup` (`big.c:4087-4092`): the rounded `log2` of each base
     /// from 2 to 36.
     #[allow(clippy::approx_constant, reason = "ERTS uses these rounded values")]
@@ -2967,7 +2969,7 @@ fn big_integer_estimate(bits: u64, negative: bool, base: u32) -> usize {
     ];
     // `lg + 1` is the number of bits of the magnitude.
     let digits = (bits as f64 / LG2_LOOKUP[base as usize - 2] + 1.0) as usize;
-    digits + usize::from(negative) + 1
+    digits + usize::from(sign == num_bigint::Sign::Minus) + 1
 }
 
 /// Run `erlang:atom_to_list/1`: return the Unicode code points of the atom
@@ -5303,7 +5305,7 @@ pub(super) fn process_info(
                     atoms,
                     current,
                     messages,
-                    caller: true,
+                    reader: InfoReader::Caller,
                     registered_name: registered,
                 };
                 let info = match stacktrace {
@@ -5313,7 +5315,9 @@ pub(super) fn process_info(
                         .ok_or_else(|| unsupported(atoms))?,
                 };
                 let off_heap = caller.off_heap_message_queue;
-                caller.bump_reductions(1 + super::item_reductions(item, &info, messages, off_heap));
+                caller.bump_reductions(
+                    1 + super::item_reductions(item, &info, messages, MessageQueue::from(off_heap)),
+                );
                 Ok(Value(info))
             },
         );
@@ -5364,7 +5368,7 @@ pub(super) fn process_info(
         atoms: &scheduler.atoms,
         current: 0,
         messages,
-        caller: false,
+        reader: InfoReader::Other,
         registered_name: registered,
     };
     let info = request
@@ -5399,7 +5403,7 @@ pub(super) fn process_info(
     }
     // Only `links` charges extra here: the items with a queue charge
     // went as a request above.
-    let extra = super::item_reductions(item, &info, 0, true);
+    let extra = super::item_reductions(item, &info, 0, MessageQueue::OffHeap);
     scheduler.current_process_mut().bump_reductions(1 + extra);
     Ok(signals_return(scheduler, process, info))
 }
@@ -5441,7 +5445,14 @@ fn caller_info_list(
     let messages = caller.mailbox.message_count();
     let off_heap = caller.off_heap_message_queue;
     let registered = scheduler.registered_name_of(caller.id);
-    let values = process_info_values(&scheduler.code, caller, current, messages, true, registered)?;
+    let values = process_info_values(
+        &scheduler.code,
+        caller,
+        current,
+        messages,
+        InfoReader::Caller,
+        registered,
+    )?;
     let all = process_info_term(&scheduler.atoms, values)?;
     let all: Vec<Term> = all.proper_list().expect("a proper list").cloned().collect();
     let mut reductions = 0;
@@ -5457,7 +5468,8 @@ fn caller_info_list(
         // ERTS reads a repeated item once and copies its result
         // (`part_res`, `erl_bif_info.c:1134-1145`), so only its first read costs.
         if !items[..index].contains(item) {
-            reductions += 1 + super::item_reductions(item, &pair, messages, off_heap);
+            reductions +=
+                1 + super::item_reductions(item, &pair, messages, MessageQueue::from(off_heap));
         }
         info.push(pair);
     }
@@ -5748,18 +5760,18 @@ pub(super) fn finish_after_on_load(
     module: &Term,
     keep: &Term,
 ) -> Result<BifResult, BeamError> {
-    let keep = match keep {
-        Term::Atom(atom) if atom.is_static("true") => true,
-        Term::Atom(atom) if atom.is_static("false") => false,
+    let code = match keep {
+        Term::Atom(atom) if atom.is_static("true") => AfterOnLoad::Keep,
+        Term::Atom(atom) if atom.is_static("false") => AfterOnLoad::Drop,
         _ => return Ok(BifResult::badarg()),
     };
     let Term::Atom(module) = module else {
         return Ok(BifResult::badarg());
     };
     let name = scheduler.atoms.name_of(module).to_owned();
-    if !scheduler.code.finish_after_on_load(&name, keep)? {
+    if !scheduler.code.finish_after_on_load(&name, code)? {
         Ok(BifResult::badarg())
-    } else if keep {
+    } else if code == AfterOnLoad::Keep {
         // ERTS suspends the caller until the code is committed
         // (`beam_bif_load.c:912-916`, `555-566`).
         Ok(BifResult::YieldReturn(Term::static_atom("true")))
@@ -5920,7 +5932,14 @@ pub(super) fn process_info_1(
             let registered = scheduler.registered_name_of(*id);
             let values = {
                 let caller = scheduler.current_process();
-                process_info_values(&scheduler.code, caller, current, messages, true, registered)?
+                process_info_values(
+                    &scheduler.code,
+                    caller,
+                    current,
+                    messages,
+                    InfoReader::Caller,
+                    registered,
+                )?
             };
             let info = process_info_term(&scheduler.atoms, values)?;
             scheduler
@@ -5946,7 +5965,14 @@ pub(super) fn process_info_1(
     };
     let messages = target.mailbox.message_count();
     let registered = scheduler.registered_name_of(*id);
-    let values = process_info_values(&scheduler.code, target, 0, messages, false, registered)?;
+    let values = process_info_values(
+        &scheduler.code,
+        target,
+        0,
+        messages,
+        InfoReader::Other,
+        registered,
+    )?;
     let info = process_info_term(&scheduler.atoms, values)?;
     scheduler
         .current_process_mut()
@@ -5961,7 +5987,7 @@ fn process_info_values(
     process: &ProcessState,
     current: u64,
     messages: usize,
-    caller: bool,
+    reader: InfoReader,
     registered_name: Option<Atom>,
 ) -> Result<ProcessInfoValues, BeamError> {
     let current_function = if let Some(frame) = process.frames.last() {
@@ -6010,7 +6036,7 @@ fn process_info_values(
     };
     let status = if process.exiting.is_some() {
         "exiting"
-    } else if caller || process.dirty_started() {
+    } else if reader == InfoReader::Caller || process.dirty_started() {
         "running"
     } else if process.waiting {
         "waiting"
@@ -6060,10 +6086,19 @@ fn process_info_values(
     })
 }
 
+/// Who reads a process for `erlang:process_info`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::runtime) enum InfoReader {
+    /// The caller reads its own process.
+    Caller,
+    /// A process reads another process, on the signal path of its scheduler.
+    Other,
+}
+
 /// One `erlang:process_info/2` read: the tables of the scheduler that
 /// reads, the counts of the process, whether the caller reads itself, and
 /// its registered name. The signal path of another scheduler builds the
-/// request with `caller` false.
+/// request with [`InfoReader::Other`].
 pub(in crate::runtime) struct ProcessInfoRequest<'a> {
     /// The code table of the scheduler, for the frames of the process.
     pub(in crate::runtime) code: &'a CodeTable,
@@ -6073,8 +6108,8 @@ pub(in crate::runtime) struct ProcessInfoRequest<'a> {
     pub(in crate::runtime) current: u64,
     /// The number of messages in the queue of the process.
     pub(in crate::runtime) messages: usize,
-    /// True when the caller reads its own process.
-    pub(in crate::runtime) caller: bool,
+    /// Who reads the process.
+    pub(in crate::runtime) reader: InfoReader,
     /// The registered name of the process.
     pub(in crate::runtime) registered_name: Option<Atom>,
 }
@@ -6093,7 +6128,7 @@ impl ProcessInfoRequest<'_> {
             process,
             self.current,
             self.messages,
-            self.caller,
+            self.reader,
             self.registered_name.clone(),
         )?;
         let Term::Atom(name) = item else {
@@ -6502,7 +6537,11 @@ pub(super) fn unique_integer_1(
         return Ok(BifResult::badarg());
     }
     let value = if monotonic {
-        scheduler.unique_monotonic_integer(positive)?
+        scheduler.unique_monotonic_integer(if positive {
+            UniqueRange::Positive
+        } else {
+            UniqueRange::Signed
+        })?
     } else if positive {
         scheduler.unique_integer_positive()?
     } else {
@@ -7062,7 +7101,7 @@ pub(super) fn start_timer(
     receiver: &Term,
     message: &Term,
 ) -> Result<BifResult, BeamError> {
-    bif_timer(context, time, receiver, message, true)
+    bif_timer(context, time, receiver, message, TimerKind::StartTimer)
 }
 
 /// Run `erlang:send_after(Time, Dest, Msg)`, as ERTS `send_after_3`
@@ -7089,19 +7128,19 @@ pub(super) fn send_after(
     receiver: &Term,
     message: &Term,
 ) -> Result<BifResult, BeamError> {
-    bif_timer(context, time, receiver, message, false)
+    bif_timer(context, time, receiver, message, TimerKind::SendAfter)
 }
 
 /// Start the BIF timer of [`start_timer`] and [`send_after`], as
 /// `setup_bif_timer` (`erl_hl_timer.c:1804-1871`) does. A bad time gives
 /// `badarg` with the `error_info` cause `time`, as `BIF_P->fvalue` does
-/// (`erl_hl_timer.c:2573-2576`, `2612-2615`). `wrap` makes the
+/// (`erl_hl_timer.c:2573-2576`, `2612-2615`). [`TimerKind::StartTimer`] makes the
 /// message `{timeout, Reference, Msg}`, and else the message is `Msg`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = bif_timer(&mut context, &Term::Integer(100), &Term::Pid(pid), &msg, false)?;
+/// let result = bif_timer(&mut context, &Term::Integer(100), &Term::Pid(pid), &msg, TimerKind::SendAfter)?;
 /// assert!(matches!(result, BifResult::Value(Term::Reference(_))));
 /// ```
 ///
@@ -7113,7 +7152,7 @@ fn bif_timer(
     time: &Term,
     receiver: &Term,
     message: &Term,
-    wrap: bool,
+    kind: TimerKind,
 ) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
     let end = match *time {
@@ -7123,7 +7162,7 @@ fn bif_timer(
     let Some(end) = end else {
         return Ok(BifResult::badarg_with_cause("time"));
     };
-    super::timer::setup(scheduler, end, receiver, message, wrap)
+    super::timer::setup(scheduler, end, receiver, message, kind)
 }
 
 /// Run `erlang:cancel_timer(TimerRef, Options)`, as ERTS `cancel_timer_2`

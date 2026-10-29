@@ -17,9 +17,9 @@ use std::ptr;
 
 use super::{
     Arc, BeamError, BifResult, CLOSED, CLOSING, ExceptionClass, Ipv4Addr, Mutex, OtpOptions,
-    Reference, Scheduler, Signal, Socket, SocketState, Sockets, Term, atom, atom_name, boolean,
-    closed, decode_domain, domain_term, errno_error, error, field, in_addr, int, invalid, io, lock,
-    map, named, pairs, send_registry, socket_argument, type_term, uint,
+    Reference, Scheduler, Signal, Socket, SocketState, Sockets, Term, atom, atom_name, closed,
+    decode_domain, domain_term, errno_error, error, field, in_addr, int, invalid, io, lock, map,
+    named, pairs, send_registry, socket_argument, type_term, uint,
 };
 use crate::runtime::interpreter::native::prim_socket::supports::option_name;
 
@@ -1089,7 +1089,7 @@ fn getopt(
         Ok(Got::Type(kind)) => type_term(scheduler, kind).map(Some).map(Ok)?,
         Ok(Got::Linger(linger)) => {
             let entries = [
-                ("onoff", boolean(linger.l_onoff != 0)),
+                ("onoff", Term::from(linger.l_onoff != 0)),
                 ("linger", Term::Integer(linger.l_linger.into())),
             ];
             let pairs = pairs(scheduler, &entries)?;
@@ -1141,7 +1141,7 @@ fn getopt_native(
             raw_int(host, level, opt).map(|value| Some(Term::Integer(value.into())))
         }
         (None, Some("boolean"), _) => {
-            raw_int(host, level, opt).map(|value| Some(boolean(value != 0)))
+            raw_int(host, level, opt).map(|value| Some(Term::from(value != 0)))
         }
         // `esock_getopt_bin_opt` gives `{error, {invalid, data_size}}` for
         // a size that a `socklen_t` cannot hold
@@ -1489,10 +1489,10 @@ fn getopt_otp(
     }
     let options = socket.options;
     let value = match opt {
-        OTP_USE_REGISTRY => boolean(socket.registered),
+        OTP_USE_REGISTRY => Term::from(socket.registered),
         // PBeam sets neither `dbg` nor `selectRead` (see `setopt_otp`).
         OTP_DEBUG | OTP_SELECT_READ => Term::static_atom("false"),
-        OTP_IOW => boolean(options.iow),
+        OTP_IOW => Term::from(options.iow),
         OTP_CTRL_PROC => Term::Pid(socket.owner.expect("an open socket has an owner")),
         OTP_RCVBUF => size_term(options.recv_buffer),
         OTP_RCVCTRLBUF => size_term(options.recv_ctrl),

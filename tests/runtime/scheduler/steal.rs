@@ -75,7 +75,7 @@ fn gives_half_of_the_queue_to_a_hungry_scheduler() {
     let (node, mut victim, mut thief) = two_schedulers();
     insert(&mut victim, &[1, 2, 3, 4]);
     victim.mark_system(ProcessId(1));
-    node.set_hungry(1, true);
+    node.set_hungry(1);
     victim.serve_steal();
     assert_eq!(node.owner(ProcessId(2)), Some(1));
     assert_eq!(node.owner(ProcessId(3)), Some(1));
@@ -95,7 +95,7 @@ fn gives_half_of_the_queue_to_a_hungry_scheduler() {
 fn keeps_the_only_runnable_process() {
     let (node, mut victim, _thief) = two_schedulers();
     insert(&mut victim, &[1]);
-    node.set_hungry(1, true);
+    node.set_hungry(1);
     victim.serve_steal();
     assert_eq!(node.owner(ProcessId(1)), Some(0));
     assert!(node.has_hungry(0));
@@ -135,7 +135,7 @@ fn keeps_each_process_that_cannot_move() {
         output: None,
         claim: Claim::default(),
     });
-    node.set_hungry(1, true);
+    node.set_hungry(1);
     victim.serve_steal();
     assert_eq!(inbox(&node, 1), [] as [(char, u64); 0]);
     assert_eq!(victim.runnable.len(), 7);
@@ -201,8 +201,8 @@ fn a_delivery_for_a_dead_process_goes_to_the_scheduler_of_the_sender() {
 fn gives_work_to_the_next_hungry_scheduler_in_cyclic_order() {
     let (node, _readers) = Node::new(3).unwrap();
     node.register(ProcessId(1), 2);
-    node.set_hungry(0, true);
-    node.set_hungry(1, true);
+    node.set_hungry(0);
+    node.set_hungry(1);
     let process = ProcessState::new(ProcessId(1), Start::Entry(frame()), vec![]);
     assert_eq!(node.give_work(2, || vec![(process, None)]), 1);
     assert_eq!(node.owner(ProcessId(1)), Some(0));
@@ -210,7 +210,7 @@ fn gives_work_to_the_next_hungry_scheduler_in_cyclic_order() {
     assert!(node.has_hungry(2), "scheduler 1 waits");
     assert_eq!(node.give_work(2, Vec::new), 0);
     assert!(node.has_hungry(2), "a give with no process keeps the mark");
-    node.set_hungry(1, false);
+    node.clear_hungry(1);
     assert!(!node.has_hungry(2));
     assert_eq!(
         node.give_work(2, || unreachable!("no scheduler is hungry")),
@@ -270,7 +270,7 @@ fn the_first_stolen_process_gives_no_count() {
         state.priority = Priority::Low;
         victim.insert(state);
     }
-    node.set_hungry(1, true);
+    node.set_hungry(1);
     victim.serve_steal();
     let mut deliveries = Vec::new();
     node.take(1, &mut deliveries);
@@ -296,7 +296,7 @@ fn a_queue_that_gives_nothing_lets_the_steal_take_a_lower_queue() {
     victim.insert(high);
     victim.mark_system(ProcessId(1));
     insert(&mut victim, &[2, 3]);
-    node.set_hungry(1, true);
+    node.set_hungry(1);
     victim.serve_steal();
     assert_eq!(node.owner(ProcessId(2)), Some(1));
     assert_eq!(victim.runnable.ids(), vec![ProcessId(1), ProcessId(3)]);
@@ -313,7 +313,7 @@ fn the_fd_0_message_follows_a_stolen_reader() {
     use crate::term::Reference;
     let (node, mut victim, mut thief) = two_schedulers();
     insert(&mut victim, &[1, 2]);
-    node.set_hungry(1, true);
+    node.set_hungry(1);
     victim.serve_steal();
     assert!(thief.drain_inbox());
     assert_eq!(node.owner(ProcessId(1)), Some(1));

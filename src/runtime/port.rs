@@ -110,6 +110,10 @@ pub(super) enum Driver {
 /// The data of the spawn driver (`ErtsSysDriverData`,
 /// `sys_drivers.c:108-121`).
 #[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "mirrors the independent port flags of ERTS (`ERTS_PORT_SFLG_SOFT_EOF`, `ERTS_PORT_SFLG_BINARY_IO`, `ERTS_PORT_SFLG_PARALLELISM`) and `exit_status` of `SysDriverOpts`, which `open_port` sets one by one"
+)]
 pub(super) struct Spawn {
     /// True with the `exit_status` option: the port sends
     /// `{Port, {exit_status, Status}}` before it closes at the end of file.

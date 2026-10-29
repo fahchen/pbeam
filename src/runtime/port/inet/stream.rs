@@ -210,8 +210,21 @@ impl Statistics {
     }
 }
 
+/// What a socket that became active does first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::runtime) enum Activation {
+    /// Deliver the bytes of the input buffer (`tcp_deliver`).
+    Deliver,
+    /// Read the socket (`tcp_recv`).
+    Read,
+}
+
 /// The receive and send state of a connected socket.
 #[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "mirrors the independent `TCP_ADDF_*` flags and the closed state of the `tcp_descriptor` of `inet_drv.c`, which the port sets one by one"
+)]
 pub(in crate::runtime) struct Stream {
     /// The size of the buffer of a receive of length 0 (`bufsz`).
     pub(super) buffer: usize,
@@ -409,8 +422,8 @@ impl Inet {
 
     /// Deliver the bytes of the input buffer to the owner of a socket that
     /// became active, as `tcp_recv` (`read`, for `once`) and `tcp_deliver`
-    /// do after `SETOPTS` (inet_drv.c:11131-11148, 13042-13060). Without
-    /// `read`, an empty buffer and a buffer that waits for more bytes give
+    /// do after `SETOPTS` (inet_drv.c:11131-11148, 13042-13060). With
+    /// [`Activation::Deliver`], an empty buffer and a buffer that waits for more bytes give
     /// no message. A socket whose connection ended gives `{tcp_closed, S}`
     /// once, and the port ends with the reason `normal`
     /// (inet_drv.c:7001-7011).
@@ -418,14 +431,14 @@ impl Inet {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(port.activate(false), vec![Event::Data(vec![1, 2])]);
+    /// assert_eq!(port.activate(Activation::Deliver), vec![Event::Data(vec![1, 2])]);
     /// ```
-    pub(in crate::runtime) fn activate(&mut self, read: bool) -> Vec<Event> {
+    pub(in crate::runtime) fn activate(&mut self, activation: Activation) -> Vec<Event> {
         let stream = &self.stream;
         if stream.ended {
             return self.active_end(Vec::new(), None, "normal".to_owned());
         }
-        if read {
+        if activation == Activation::Read {
             self.receive(0)
         } else if stream.input_size == 0 || stream.remain > 0 || stream.filled == 0 {
             Vec::new()

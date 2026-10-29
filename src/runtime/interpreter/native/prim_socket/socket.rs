@@ -79,11 +79,6 @@ fn pairs(
         .collect()
 }
 
-/// Return the atom `true` or `false`.
-fn boolean(value: bool) -> Term {
-    Term::static_atom(if value { "true" } else { "false" })
-}
-
 /// Return the unsigned integer term of a counter.
 fn count(value: u64) -> Term {
     Term::Integer(i64::try_from(value).unwrap_or(i64::MAX))
@@ -122,11 +117,11 @@ pub(super) fn info_0(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> 
     let backend = pairs(scheduler, &backend)?;
     let backend = map(scheduler, backend);
     let info = [
-        ("debug", boolean(false)),
-        ("socket_debug", boolean(false)),
-        ("eei", boolean(true)),
-        ("use_registry", boolean(true)),
-        ("iow", boolean(false)),
+        ("debug", Term::from(false)),
+        ("socket_debug", Term::from(false)),
+        ("eei", Term::from(true)),
+        ("use_registry", Term::from(true)),
+        ("iow", Term::from(false)),
         ("counters", counters),
         ("iov_max", Term::Integer(1024)),
         ("io_backend", backend),

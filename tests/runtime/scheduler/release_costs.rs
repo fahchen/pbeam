@@ -37,7 +37,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::{LinkId, RELEASE_BATCH, Release, Scheduler, StartFlags, Turn};
+use super::{ChildLink, LinkId, RELEASE_BATCH, Release, Scheduler, StartFlags, Turn};
 use crate::{
     runtime::signal::Signal,
     runtime::{
@@ -689,7 +689,7 @@ fn shared_last_release_measurement(shape: &Shape) -> Measurement {
             Start::Entry(frame()),
             vec![graph],
             None,
-            false,
+            ChildLink::Unlinked,
             StartFlags::default(),
             None,
         )

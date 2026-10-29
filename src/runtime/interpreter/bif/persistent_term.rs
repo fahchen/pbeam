@@ -55,7 +55,12 @@ pub(super) fn resume(
             chunk_trap(scheduler, "info_trap", info.clone(), *entries as usize)
         }
         ("put_wait", [key, value, Term::Atom(new)]) => {
-            put_start(scheduler, key, value, new.is_static("true"))
+            let mode = if new.is_static("true") {
+                PutMode::PutNew
+            } else {
+                PutMode::Put
+            };
+            put_start(scheduler, key, value, mode)
         }
         ("put_common_trap", [key, value, Term::Integer(copied)]) => {
             put_trap(scheduler, key, value, *copied as usize)
@@ -444,6 +449,16 @@ fn thread_progress(value: Term) -> BifResult {
     Value(value)
 }
 
+/// The BIF that a `persistent_term` put serves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PutMode {
+    /// `persistent_term:put/2`.
+    Put,
+    /// `persistent_term:put_new/2`, which raises `badarg` for a key that the
+    /// table holds.
+    PutNew,
+}
+
 /// Run `persistent_term:put/2`, or `persistent_term:put_new/2` when `new`
 /// is true: store `value` for `key`, as ERTS `put_common` does
 /// (`erl_bif_persistent.c:314-322`, `642-784`). The call first
@@ -461,7 +476,7 @@ fn thread_progress(value: Term) -> BifResult {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = put(&mut context, &Term::static_atom("key"), &Term::Integer(1), false)?;
+/// let result = put(&mut context, &Term::static_atom("key"), &Term::Integer(1), PutMode::Put)?;
 /// assert!(matches!(result, BifResult::TrapBif { function: "thread_progress", .. }));
 /// ```
 ///
@@ -473,7 +488,7 @@ pub(super) fn put(
     context: &mut BifContext<'_>,
     key: &Term,
     value: &Term,
-    new: bool,
+    mode: PutMode,
 ) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
     let check = denial(
@@ -485,12 +500,12 @@ pub(super) fn put(
     if let Some(denied) = check? {
         return Ok(denied);
     }
-    Ok(put_start(scheduler, key, value, new))
+    Ok(put_start(scheduler, key, value, mode))
 }
 
 /// Seize the update permission and start `put/2` of `key` and `value`.
-fn put_start(scheduler: &mut Scheduler, key: &Term, value: &Term, new: bool) -> BifResult {
-    let new_atom = Term::static_atom(if new { "true" } else { "false" });
+fn put_start(scheduler: &mut Scheduler, key: &Term, value: &Term, mode: PutMode) -> BifResult {
+    let new_atom = Term::from(mode == PutMode::PutNew);
     let wait = vec![key.clone(), value.clone(), new_atom];
     if let Some(wait) = seize(scheduler, "put_wait", wait) {
         return wait;
@@ -507,7 +522,7 @@ fn put_start(scheduler: &mut Scheduler, key: &Term, value: &Term, new: bool) -> 
             release(scheduler);
             Value(Term::static_atom("ok"))
         }
-        Some(_) if new && stored => {
+        Some(_) if mode == PutMode::PutNew && stored => {
             release(scheduler);
             BifResult::badarg()
         }

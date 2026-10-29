@@ -11,7 +11,7 @@ use std::{
 
 use clap::Parser;
 use pbeam_runtime::{
-    BeamError, BeamProgram, HostTerm, Schedulers, Term, add_erlexec_path,
+    BeamError, BeamProgram, HostTerm, RootAuthority, Schedulers, Term, add_erlexec_path,
     install_start_dispositions,
 };
 
@@ -350,7 +350,12 @@ fn run(arguments: Cli) -> Result<(), Exit> {
     let (module, function) = (&arguments.module, &arguments.function);
     let result = match &arguments.policy {
         Some(policy) => {
-            program.execute_with_policy_module(module, function, &atoms, policy, arguments.boot)
+            let authority = if arguments.boot {
+                RootAuthority::Boot
+            } else {
+                RootAuthority::Policy
+            };
+            program.execute_with_policy_module(module, function, &atoms, policy, authority)
         }
         None => program.execute(module, function, &atoms),
     };

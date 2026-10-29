@@ -1,6 +1,9 @@
 use super::{
-    CONTEXT_REDS, ExitPhase, LinkId, MonitorOptions, MonitorTarget, RELEASE_BATCH, RELEASE_CHUNK,
-    Release, Scheduler, StartFlags, Turn, node::Node, poll,
+    CONTEXT_REDS, ChildLink, ExitPhase, LinkId, MonitorOptions, MonitorTarget, RELEASE_BATCH,
+    RELEASE_CHUNK, Release, Scheduler, StartFlags, Turn,
+    node::{Node, ReceiverSite},
+    poll,
+    ports::EndOfFile,
 };
 use crate::runtime::capability::{AllowAll, Capability, CapabilityKind, Denied, Policy};
 use crate::runtime::host::input::{Readiness, wait_readable};
@@ -13,8 +16,8 @@ use crate::term::{AtomTable, test_atom};
 use crate::{
     runtime::ets::{Access, Table, TableType},
     runtime::process::{
-        BifCall, Monitor, Origin, OriginMonitor, PendingBif, ProcessState, ReceiveTimer, StackSlot,
-        Start, TimerReference,
+        BifCall, CallKind, Monitor, Origin, OriginMonitor, PendingBif, ProcessState, ReceiveTimer,
+        StackSlot, Start, TimerReference,
         tests::{frame, test_scheduler, test_scheduler_without_checks},
     },
     runtime::signal::Signal,
@@ -84,7 +87,7 @@ fn keeps_the_current_process_in_the_table_and_out_of_the_run_queue() {
             Start::Entry(frame()),
             vec![],
             None,
-            false,
+            ChildLink::Unlinked,
             StartFlags::default(),
             None,
         )
@@ -132,7 +135,7 @@ fn makes_no_capability_copies_in_a_run_that_skips_the_checks() {
         Start::Entry(frame()),
         vec![],
         Some(Term::static_atom("DOWN")),
-        true,
+        ChildLink::Linked,
         StartFlags::default(),
         None,
     );
@@ -152,7 +155,7 @@ fn makes_no_capability_copies_in_a_run_that_skips_the_checks() {
             Start::Entry(frame()),
             vec![],
             Some(Term::static_atom("DOWN")),
-            true,
+            ChildLink::Linked,
             StartFlags::default(),
             None,
         )
@@ -177,7 +180,7 @@ fn switches_out_to_the_end_of_the_run_queue_with_a_new_budget() {
             Start::Entry(frame()),
             vec![],
             None,
-            false,
+            ChildLink::Unlinked,
             StartFlags::default(),
             None,
         )
@@ -210,7 +213,7 @@ fn sends_down_and_exit_signals_and_records_the_root_result() {
             Start::Entry(frame()),
             vec![],
             Some(Term::static_atom("DOWN")),
-            false,
+            ChildLink::Unlinked,
             StartFlags::default(),
             None,
         )
@@ -221,7 +224,7 @@ fn sends_down_and_exit_signals_and_records_the_root_result() {
             Start::Entry(frame()),
             vec![],
             None,
-            true,
+            ChildLink::Linked,
             StartFlags::default(),
             None,
         )
@@ -275,7 +278,7 @@ fn ends_the_run_only_after_the_exit_of_the_root_process_completes() {
                 Start::Entry(frame()),
                 vec![],
                 None,
-                true,
+                ChildLink::Linked,
                 StartFlags::default(),
                 None,
             )
@@ -311,7 +314,7 @@ fn links_and_unlinks_processes_and_ignores_normal_exit_without_trap_exit() {
             Start::Entry(frame()),
             vec![],
             None,
-            false,
+            ChildLink::Unlinked,
             StartFlags::default(),
             None,
         )
@@ -371,7 +374,7 @@ fn ends_a_linked_process_and_rejects_counter_overflow() {
             Start::Entry(frame()),
             vec![],
             None,
-            true,
+            ChildLink::Linked,
             StartFlags::default(),
             None,
         )
@@ -405,7 +408,7 @@ fn ends_a_linked_process_and_rejects_counter_overflow() {
         Start::Entry(frame()),
         vec![],
         None,
-        false,
+        ChildLink::Unlinked,
         StartFlags::default(),
         None,
     );
@@ -425,7 +428,7 @@ fn sends_the_pending_monitor_signal_before_a_demonitor_signal() {
             Start::Entry(frame()),
             vec![],
             None,
-            false,
+            ChildLink::Unlinked,
             StartFlags::default(),
             None,
         )
@@ -503,7 +506,7 @@ fn frees_the_name_of_a_process_when_it_exits() {
             Start::Entry(frame()),
             vec![],
             None,
-            false,
+            ChildLink::Unlinked,
             StartFlags::default(),
             None,
         )
@@ -543,7 +546,7 @@ fn deletes_the_tables_of_a_process_when_it_exits() {
             Start::Entry(frame()),
             vec![],
             Some(Term::static_atom("DOWN")),
-            false,
+            ChildLink::Unlinked,
             StartFlags::default(),
             None,
         )
@@ -650,7 +653,7 @@ fn continues_the_exit_timer_walk_at_its_next_timer() {
         );
         scheduler
             .node
-            .register_timer(reference, 0, 1100, Some(ProcessId(0)), false);
+            .register_timer(reference, 0, 1100, Some(ProcessId(0)), ReceiverSite::Local);
         mirror.insert(TimerReference(reference), ());
     }
     // The tree of the node has the shape of the mirror, which has the same
@@ -818,7 +821,7 @@ fn runs_other_processes_while_a_dirty_write_waits_and_resumes_it_after() {
             Start::Entry(frame()),
             vec![],
             None,
-            false,
+            ChildLink::Unlinked,
             StartFlags::default(),
             None,
         )
@@ -915,7 +918,7 @@ fn start_dirty_writers(
                     Start::Entry(frame()),
                     vec![],
                     Some(Term::static_atom("DOWN")),
-                    false,
+                    ChildLink::Unlinked,
                     StartFlags::default(),
                     None,
                 )
@@ -1154,7 +1157,7 @@ fn moves_the_containers_of_an_exiting_process_to_the_release_work_list() {
             module: "erlang",
             function: "length",
             arguments: vec![marker(6)],
-            tail: false,
+            entry: CallKind::Body,
             origin: Some(BifCall {
                 module: "erlang".to_owned(),
                 name: "length".to_owned(),
@@ -1224,7 +1227,7 @@ fn releases_the_terms_of_every_container_of_an_exiting_process() {
             module: "erlang",
             function: "length",
             arguments: vec![pending.clone()],
-            tail: false,
+            entry: CallKind::Body,
             origin: None,
         });
         process.length_trap = Some(vec![length_trap.clone()]);
@@ -1673,7 +1676,7 @@ fn counts_the_bytes_of_the_release_work_list() {
             module: "erlang",
             function: "length",
             arguments: vec![marker(8)],
-            tail: false,
+            entry: CallKind::Body,
             origin: None,
         });
         process.length_trap = Some(vec![marker(9)]);
@@ -1865,7 +1868,7 @@ fn removes_the_accept_of_a_process_that_exits_with_its_port_monitor_signal_pendi
             Start::Entry(frame()),
             vec![],
             None,
-            false,
+            ChildLink::Unlinked,
             StartFlags::default(),
             None,
         )
@@ -1992,7 +1995,7 @@ fn unlinks_the_new_owner_after_its_queued_link_signal_at_a_driver_exit() {
             Start::Entry(frame()),
             vec![],
             None,
-            false,
+            ChildLink::Unlinked,
             StartFlags::default(),
             None,
         )
@@ -2033,7 +2036,7 @@ fn drops_the_link_exit_signal_of_a_process_that_the_port_does_not_link() {
             Start::Entry(frame()),
             vec![],
             None,
-            false,
+            ChildLink::Unlinked,
             StartFlags::default(),
             None,
         )
@@ -2363,7 +2366,7 @@ fn changes_nothing_on_a_port_that_closed() {
     // scheduler in between, changes nothing and does not panic.
     assert!(!scheduler.close_port(port, atom("normal")));
     scheduler.driver_exit(port, atom("normal"));
-    scheduler.port_end_of_file(port, false);
+    scheduler.port_end_of_file(port, EndOfFile::Close);
     assert!(!scheduler.connect_port(port, owner));
     scheduler.tcp_flushed(port);
     assert!(node.ports().get(port).is_none());

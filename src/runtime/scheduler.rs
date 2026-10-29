@@ -483,6 +483,30 @@ pub(super) struct Scheduler {
     wake: Option<UnixStream>,
 }
 
+/// Whether a spawn links the child to its parent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ChildLink {
+    /// The spawn does not link the child.
+    Unlinked,
+    /// The spawn links the child to its parent: `spawn_link`.
+    Linked,
+}
+
+impl From<bool> for ChildLink {
+    fn from(link: bool) -> Self {
+        if link { Self::Linked } else { Self::Unlinked }
+    }
+}
+
+/// The range of the values of `erlang:unique_integer([monotonic])`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum UniqueRange {
+    /// The values start at the smallest small integer.
+    Signed,
+    /// The `positive` option: the values start at 1.
+    Positive,
+}
+
 impl Scheduler {
     /// Return a scheduler with no processes and the atom table of the run.
     /// The table is a copy of the table of the loaded program, so each atom
@@ -2652,24 +2676,27 @@ impl Scheduler {
     /// `make_unique_monotonic_integer_value` (`erl_bif_unique.c:693-734`)
     /// do. The counter starts at -1, so the first call has the raw value 0.
     /// The value of a call without `positive` is the raw value plus
-    /// `MIN_SMALL`; the value of a call with `positive` is the raw value
-    /// plus 1.
+    /// `MIN_SMALL`; the value of a call with [`UniqueRange::Positive`] is the
+    /// raw value plus 1.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(scheduler.unique_monotonic_integer(false)?, -(1 << 59));
-    /// assert_eq!(scheduler.unique_monotonic_integer(false)?, -(1 << 59) + 1);
-    /// assert_eq!(scheduler.unique_monotonic_integer(true)?, 3);
+    /// assert_eq!(scheduler.unique_monotonic_integer(UniqueRange::Signed)?, -(1 << 59));
+    /// assert_eq!(scheduler.unique_monotonic_integer(UniqueRange::Signed)?, -(1 << 59) + 1);
+    /// assert_eq!(scheduler.unique_monotonic_integer(UniqueRange::Positive)?, 3);
     /// ```
     ///
     /// # Errors
     ///
     /// A value above the small integer range is a runtime error: ERTS then
     /// gives a bignum, which PBeam does not have.
-    pub(super) fn unique_monotonic_integer(&mut self, positive: bool) -> Result<i64, BeamError> {
+    pub(super) fn unique_monotonic_integer(
+        &mut self,
+        range: UniqueRange,
+    ) -> Result<i64, BeamError> {
         let raw = self.node.next_unique_monotonic();
-        let value = if positive {
+        let value = if range == UniqueRange::Positive {
             raw.checked_add(1)
         } else {
             raw.checked_add(SMALL_INTEGER_MIN)
@@ -3039,7 +3066,11 @@ impl Scheduler {
                         let _ = self.send_signal_local(Some(requester), target, signal);
                     } else {
                         let refers = self.check_process_code(target, &module);
-                        self.send_message(target, requester, check_process_code_reply(tag, refers));
+                        self.send_message(
+                            target,
+                            requester,
+                            check_process_code_reply(tag, Term::from(refers)),
+                        );
                     }
                 }
                 Delivery::Signal {
@@ -3089,7 +3120,7 @@ impl Scheduler {
     ///
     /// ```rust,ignore
     /// let down = Some(Term::static_atom("DOWN"));
-    /// let (pid, monitor) = scheduler.spawn(Start::Entry(frame), vec![], down, false, StartFlags::default(), None)?.unwrap();
+    /// let (pid, monitor) = scheduler.spawn(Start::Entry(frame), vec![], down, ChildLink::Unlinked, StartFlags::default(), None)?.unwrap();
     /// assert!(monitor.is_some());
     /// ```
     pub(super) fn spawn(
@@ -3097,7 +3128,7 @@ impl Scheduler {
         start: Start,
         arguments: Vec<Term>,
         monitor: Option<Term>,
-        link: bool,
+        link: ChildLink,
         flags: StartFlags,
         restrictions: Option<&[Restriction]>,
     ) -> Result<Result<(ProcessId, Option<Reference>), Denied>, BeamError> {
@@ -3118,7 +3149,7 @@ impl Scheduler {
             Ok(Vec::new())
         } else {
             check(true, Operation::Spawn, Some(module.as_bytes()))
-                .and_then(|()| check(link, Operation::Link, None))
+                .and_then(|()| check(link == ChildLink::Linked, Operation::Link, None))
                 .and_then(|()| check(monitor.is_some(), Operation::Monitor, None))
                 .and_then(|()| parent.delegate(restrictions))
         };
@@ -3161,7 +3192,7 @@ impl Scheduler {
         } else {
             None
         };
-        if link {
+        if link == ChildLink::Linked {
             self.current_process_mut()
                 .links
                 .insert(LinkId::Process(child.id), 0);

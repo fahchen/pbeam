@@ -43,6 +43,16 @@ const SHORT_LINE_LIMIT: u64 = 0xFFFF;
 /// (`beam_file.c:217-220`, `522`).
 const MAX_SMALL: u64 = (1 << 59) - 1;
 
+/// Whether a line entry may repeat the item of the previous entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Duplicates {
+    /// Skip an entry that has the item of the previous entry: a `line`
+    /// instruction.
+    Skip,
+    /// Record the entry: the entry of a function.
+    Keep,
+}
+
 /// The line table of one module. The loader builds it once, and a stack
 /// trace reads the location of an instruction from it.
 ///
@@ -189,7 +199,7 @@ impl LineTable {
     ///
     /// See [`LineTable::add`].
     pub(super) fn line(&mut self, instruction: usize, item: u64) -> Result<(), BeamError> {
-        self.add(instruction, item, false)
+        self.add(instruction, item, Duplicates::Skip)
     }
 
     /// Start the entries of the function whose `func_info` is at index
@@ -217,7 +227,7 @@ impl LineTable {
         item: Option<u64>,
     ) -> Result<(), BeamError> {
         match item {
-            Some(item) => self.add(instruction, item, true),
+            Some(item) => self.add(instruction, item, Duplicates::Keep),
             None if self.items.is_empty() => Ok(()),
             None => {
                 self.entries.push((instruction, 0));
@@ -233,7 +243,12 @@ impl LineTable {
     ///
     /// An item after the last item of the chunk, or more entries than the
     /// chunk declares, is an error.
-    fn add(&mut self, instruction: usize, item: u64, duplicates: bool) -> Result<(), BeamError> {
+    fn add(
+        &mut self,
+        instruction: usize,
+        item: u64,
+        duplicates: Duplicates,
+    ) -> Result<(), BeamError> {
         if self.items.is_empty() {
             return Ok(());
         }
@@ -247,7 +262,7 @@ impl LineTable {
                 self.recorded, self.declared_entries
             )));
         }
-        if duplicates || self.last_item != Some(item) {
+        if duplicates == Duplicates::Keep || self.last_item != Some(item) {
             self.entries.push((instruction, item));
             self.last_item = Some(item);
             self.recorded += 1;

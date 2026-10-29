@@ -180,6 +180,25 @@ impl Ttys {
     }
 }
 
+/// Whether fd 0 has a read select.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum StdinRead {
+    /// No process selects fd 0 for read.
+    Unselected,
+    /// The reader of the node selects fd 0 for read.
+    Selected,
+}
+
+impl From<bool> for StdinRead {
+    fn from(selected: bool) -> Self {
+        if selected {
+            Self::Selected
+        } else {
+            Self::Unselected
+        }
+    }
+}
+
 /// The mode of fd 0 at the start of a run, as the `erl_sys_initial_tty_mode`
 /// that `erl_sys_init` reads when fd 0 is a terminal (`sys.c:428-432`).
 /// `None` when fd 0 is not a terminal.
@@ -219,7 +238,7 @@ impl InitialMode {
     /// closes its socket, also after `SIGKILL` (`sys_drivers.c:1670-1690`,
     /// `erl_child_setup.c:563-576`).
     ///
-    /// `input_selected` tells whether fd 0 has a read select. A change that
+    /// `input` tells whether fd 0 has a read select. A change that
     /// turns `ICANON` on sets `PENDIN` in the macOS kernel and wakes each
     /// `select` of the terminal. A `select` reads the input count with
     /// `ttnread`, which clears `PENDIN` again (XNU `bsd/kern/tty.c`:
@@ -237,10 +256,10 @@ impl InitialMode {
     /// ```rust,ignore
     /// let initial_mode = InitialMode::read();
     /// // A process sets fd 0 to raw mode, and the reader selects fd 0.
-    /// initial_mode.reset(true);
+    /// initial_mode.reset(StdinRead::Selected);
     /// // fd 0 has its first mode again, without `PENDIN`.
     /// ```
-    pub(super) fn reset(&self, input_selected: bool) {
+    pub(super) fn reset(&self, input: StdinRead) {
         let Some(mode) = &self.0 else {
             return;
         };
@@ -251,7 +270,7 @@ impl InitialMode {
         }
         // ERTS ignores the result (sys.c:188, erl_child_setup.c:566, 575).
         let _ = terminal::set_mode(libc::STDIN_FILENO, mode);
-        if input_selected {
+        if input == StdinRead::Selected {
             input::wait_readable(&[libc::STDIN_FILENO], Some(Duration::ZERO));
         }
     }

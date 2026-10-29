@@ -14,7 +14,7 @@ use std::{
     time::Duration,
 };
 
-use pbeam_runtime::{AllowAll, AtomTable, BeamProgram, Term};
+use pbeam_runtime::{AllowAll, AtomTable, BeamProgram, RootAuthority, Term};
 
 #[path = "../common/mod.rs"]
 mod common;
@@ -1052,7 +1052,7 @@ fn stops_the_open_of_an_inet_port_in_a_runtime_process_of_a_boot_run() {
             "unsupported",
             &[program.host_term(argument)],
             "processes_policy",
-            true,
+            RootAuthority::Boot,
         )
         .unwrap_err()
         .to_string();

@@ -4,7 +4,7 @@
 //! head. PBeam compiles only such a head: a pattern with no guard and the
 //! body `['$$']`.
 
-use crate::term::{AtomTable, Term};
+use crate::term::{AtomTable, Division, ShiftDirection, Term};
 use num_bigint::BigInt;
 use num_traits::{Signed, ToPrimitive};
 
@@ -503,7 +503,8 @@ impl MatchSpec {
             let values = &bindings;
             let whole = Term::tuple(object.to_vec());
             if !clause.guards.iter().all(|guard| {
-                evaluate(atoms, guard, values, &whole, true) == Some(Term::static_atom("true"))
+                evaluate(atoms, guard, values, &whole, Site::Guard)
+                    == Some(Term::static_atom("true"))
             }) {
                 continue;
             }
@@ -511,7 +512,7 @@ impl MatchSpec {
             for body in &clause.body {
                 // A body BIF that fails gives `'EXIT'`, as `matchCatch`
                 // catches the failure of a BIF (`erl_db_util.c:3098-3105`).
-                result = evaluate(atoms, body, values, &whole, false)
+                result = evaluate(atoms, body, values, &whole, Site::Body)
                     .unwrap_or_else(|| Term::static_atom("EXIT"));
             }
             return Some(result);
@@ -741,6 +742,24 @@ fn known_guard(name: &str, arity: usize) -> bool {
     )
 }
 
+/// Where an expression of a match specification runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Site {
+    /// The guard of a clause: a failure fails the guard.
+    Guard,
+    /// The body of a clause: a failure of a part gives `EXIT` for the part.
+    Body,
+}
+
+/// Which term `min/2` or `max/2` returns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pick {
+    /// `min/2`.
+    Smaller,
+    /// `max/2`.
+    Larger,
+}
+
 /// Evaluate one guard or body expression, as `db_prog_match`
 /// (`erl_db_util.c:2247-3110`) runs the compiled program. Return `None`
 /// when a BIF of the expression fails; a guard then fails and a body gives
@@ -750,7 +769,7 @@ fn evaluate(
     expression: &Expr,
     bindings: &[Term],
     whole: &Term,
-    guard: bool,
+    site: Site,
 ) -> Option<Term> {
     match expression {
         Expr::Constant(term) => Some(term.clone()),
@@ -760,15 +779,15 @@ fn evaluate(
         Expr::Tuple(elements) => Some(Term::tuple(
             elements
                 .iter()
-                .map(|element| part(atoms, element, bindings, whole, guard))
+                .map(|element| part(atoms, element, bindings, whole, site))
                 .collect::<Option<Vec<_>>>()?,
         )),
         Expr::List(elements, tail) => {
             let elements: Vec<Term> = elements
                 .iter()
-                .map(|element| part(atoms, element, bindings, whole, guard))
+                .map(|element| part(atoms, element, bindings, whole, site))
                 .collect::<Option<Vec<_>>>()?;
-            let mut tail = part(atoms, tail, bindings, whole, guard)?;
+            let mut tail = part(atoms, tail, bindings, whole, site)?;
             for element in elements.into_iter().rev() {
                 tail = Term::cons(element, tail);
             }
@@ -777,26 +796,26 @@ fn evaluate(
         Expr::Call(function, arguments) => {
             let arguments: Vec<Term> = arguments
                 .iter()
-                .map(|argument| part(atoms, argument, bindings, whole, guard))
+                .map(|argument| part(atoms, argument, bindings, whole, site))
                 .collect::<Option<Vec<_>>>()?;
             call(atoms, *function, &arguments)
         }
-        Expr::AndAlso(left, right) => match &evaluate(atoms, left, bindings, whole, guard)? {
+        Expr::AndAlso(left, right) => match &evaluate(atoms, left, bindings, whole, site)? {
             Term::Atom(atom) if atom.is_static("false") => Some(Term::static_atom("false")),
             Term::Atom(atom) if atom.is_static("true") => {
-                evaluate(atoms, right, bindings, whole, guard)
+                evaluate(atoms, right, bindings, whole, site)
             }
             _ => None,
         },
-        Expr::OrElse(left, right) => match &evaluate(atoms, left, bindings, whole, guard)? {
+        Expr::OrElse(left, right) => match &evaluate(atoms, left, bindings, whole, site)? {
             Term::Atom(atom) if atom.is_static("true") => Some(Term::static_atom("true")),
             Term::Atom(atom) if atom.is_static("false") => {
-                evaluate(atoms, right, bindings, whole, guard)
+                evaluate(atoms, right, bindings, whole, site)
             }
             _ => None,
         },
         Expr::BooleanOne(expression, checked) => {
-            let value = evaluate(atoms, expression, bindings, whole, guard)?;
+            let value = evaluate(atoms, expression, bindings, whole, site)?;
             if *checked {
                 match &value {
                     Term::Atom(atom) if atom.is_one_of(&["true", "false"]) => Some(value),
@@ -816,10 +835,10 @@ fn part(
     expression: &Expr,
     bindings: &[Term],
     whole: &Term,
-    guard: bool,
+    site: Site,
 ) -> Option<Term> {
-    let value = evaluate(atoms, expression, bindings, whole, guard);
-    if guard {
+    let value = evaluate(atoms, expression, bindings, whole, site);
+    if site == Site::Guard {
         value
     } else {
         Some(value.unwrap_or_else(|| Term::static_atom("EXIT")))
@@ -921,14 +940,14 @@ fn call(atoms: &AtomTable, function: Guard, arguments: &[Term]) -> Option<Term> 
         Guard::Minus2 => arithmetic(Arithmetic::Subtract, &arguments[0], &arguments[1]),
         Guard::Times => arithmetic(Arithmetic::Multiply, &arguments[0], &arguments[1]),
         Guard::Div => divide(&arguments[0], &arguments[1]),
-        Guard::IntDiv => integer_division(&arguments[0], &arguments[1], false),
-        Guard::Rem => integer_division(&arguments[0], &arguments[1], true),
+        Guard::IntDiv => integer_division(&arguments[0], &arguments[1], Division::Quotient),
+        Guard::Rem => integer_division(&arguments[0], &arguments[1], Division::Remainder),
         Guard::Band => bitwise(Bitwise::And, &arguments[0], &arguments[1]),
         Guard::Bor => bitwise(Bitwise::Or, &arguments[0], &arguments[1]),
         Guard::Bxor => bitwise(Bitwise::Xor, &arguments[0], &arguments[1]),
         Guard::Bnot => bitwise_not(&arguments[0]),
-        Guard::Bsl => shift(&arguments[0], &arguments[1], false),
-        Guard::Bsr => shift(&arguments[0], &arguments[1], true),
+        Guard::Bsl => shift(&arguments[0], &arguments[1], ShiftDirection::Left),
+        Guard::Bsr => shift(&arguments[0], &arguments[1], ShiftDirection::Right),
         Guard::Gt => compare(
             atoms,
             &arguments[0],
@@ -985,8 +1004,8 @@ fn call(atoms: &AtomTable, function: Guard, arguments: &[Term]) -> Option<Term> 
         Guard::Xor => boolean(&arguments[0], &arguments[1], |left, right| left != right),
         Guard::And => boolean(&arguments[0], &arguments[1], |left, right| left && right),
         Guard::Or => boolean(&arguments[0], &arguments[1], |left, right| left || right),
-        Guard::Min => Some(choose(atoms, &arguments[0], &arguments[1], false)?),
-        Guard::Max => Some(choose(atoms, &arguments[0], &arguments[1], true)?),
+        Guard::Min => Some(choose(atoms, &arguments[0], &arguments[1], Pick::Smaller)?),
+        Guard::Max => Some(choose(atoms, &arguments[0], &arguments[1], Pick::Larger)?),
     }
 }
 
@@ -1025,7 +1044,8 @@ fn compare_exact(
 
 /// Return the smaller or the larger of two terms, as `min/2` and `max/2`
 /// do.
-fn choose(atoms: &AtomTable, left: &Term, right: &Term, larger: bool) -> Option<Term> {
+fn choose(atoms: &AtomTable, left: &Term, right: &Term, pick: Pick) -> Option<Term> {
+    let larger = pick == Pick::Larger;
     let order = left.compare(right, atoms).ok()?;
     Some(match order {
         std::cmp::Ordering::Less => {
@@ -1099,12 +1119,12 @@ fn divide(left: &Term, right: &Term) -> Option<Term> {
 }
 
 /// Return the value of `div` or `rem` of two integers.
-fn integer_division(left: &Term, right: &Term, remainder: bool) -> Option<Term> {
+fn integer_division(left: &Term, right: &Term, division: Division) -> Option<Term> {
     let (left, right) = (integer(left)?, integer(right)?);
     if right == BigInt::from(0) {
         return None;
     }
-    Some(integer_term(if remainder {
+    Some(integer_term(if division == Division::Remainder {
         left % right
     } else {
         left / right
@@ -1135,13 +1155,13 @@ fn bitwise_not(term: &Term) -> Option<Term> {
 }
 
 /// Return the value of `bsl` or `bsr` of two integers.
-fn shift(left: &Term, right: &Term, right_shift: bool) -> Option<Term> {
+fn shift(left: &Term, right: &Term, direction: ShiftDirection) -> Option<Term> {
     /// The largest bignum arity on a 64-bit system (`BIG_ARITY_MAX`,
     /// `erl_term.h:465-466`).
     const BIG_ARITY_MAX: u128 = (1 << 16) - 1;
     let left = integer(left)?;
     let count = integer(right)?;
-    let mut left_shift = !right_shift;
+    let mut left_shift = direction == ShiftDirection::Left;
     let mut huge = false;
     let count = match count.to_i64() {
         // A negative count reverses the direction

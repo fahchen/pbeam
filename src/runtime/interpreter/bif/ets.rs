@@ -4,14 +4,17 @@ use super::BifResult::Value;
 use super::{AtomTable, BeamError, BifContext, BifResult, ProcessId, Term, error};
 use crate::runtime::ets::pattern::{MatchSpec, SpecError};
 use crate::runtime::ets::{
-    Access, Busy, EtsTables, ITERATIONS_PER_RED, Lacking, Table, TableType, Transfer,
+    Access, Busy, EtsTables, ITERATIONS_PER_RED, InsertKind, Lacking, Table, TableOptions,
+    TableType, Transfer,
 };
-use crate::term::Reference;
+use crate::term::{Direction, Reference};
 use num_bigint::BigInt;
 use std::cmp::Ordering;
 use std::sync::Arc;
 
 mod tree;
+
+pub(super) use tree::SelectOrder;
 
 /// The fewest and the most locks that the hidden option
 /// `{write_concurrency, {debug_hash_fixed_number_of_locks, N}}` accepts
@@ -296,16 +299,16 @@ pub(super) fn new(
             _ => 64,
         });
     }
-    made.set_options(
-        if fine {
+    made.set_options(TableOptions {
+        write_concurrency: if fine {
             concurrency
         } else {
             Term::static_atom("false")
         },
         read_concurrency,
-        decentralized,
+        decentralized_counters: decentralized,
         compressed,
-    );
+    });
     let name_text = name.map(|name| context.scheduler.atoms.name_of(name));
     let mut ets = context.scheduler.ets.exclusive();
     // The name check and the create take one lock, so no other scheduler
@@ -360,7 +363,7 @@ pub(super) fn insert(
     table: &Term,
     objects: &Term,
 ) -> Result<BifResult, BeamError> {
-    insert_objects(context, table, objects, false)
+    insert_objects(context, table, objects, InsertKind::Insert)
 }
 
 /// Run `ets:insert_new(Table, Objects)`, as ERTS `ets_insert_new_2`
@@ -392,15 +395,15 @@ pub(super) fn insert_new(
     table: &Term,
     objects: &Term,
 ) -> Result<BifResult, BeamError> {
-    insert_objects(context, table, objects, true)
+    insert_objects(context, table, objects, InsertKind::InsertNew)
 }
 
-/// Run [`insert`], or [`insert_new`] when `new` is true.
+/// Run [`insert`], or [`insert_new`] when `kind` is [`InsertKind::InsertNew`].
 fn insert_objects(
     context: &mut BifContext<'_>,
     table: &Term,
     objects: &Term,
-    new: bool,
+    kind: InsertKind,
 ) -> Result<BifResult, BeamError> {
     // A cons cell with a tail that is not `[]`: at least two objects, or an
     // improper list.
@@ -417,7 +420,10 @@ fn insert_objects(
             done: 0,
             bag: bag.then(Term::nil),
             check: Check::Rest(objects.clone()),
-            new: if new { New::Unlocked } else { New::No },
+            new: match kind {
+                InsertKind::Insert => New::No,
+                InsertKind::InsertNew => New::Unlocked,
+            },
             refused: None,
         };
         return insert_list(context, id, objects, keypos, state);
@@ -435,7 +441,10 @@ fn insert_objects(
             return Ok(retry(
                 context,
                 lacking,
-                if new { "insert_new" } else { "insert" },
+                match kind {
+                    InsertKind::Insert => "insert",
+                    InsertKind::InsertNew => "insert_new",
+                },
                 vec![table.clone(), objects.clone()],
             ));
         }
@@ -448,10 +457,12 @@ fn insert_objects(
     let Some(tuples) = valid_objects(objects, keypos) else {
         return Ok(BifResult::badarg());
     };
-    if new && first_held(&context.scheduler.atoms, &table, &tuples, keypos)?.is_some() {
+    if kind == InsertKind::InsertNew
+        && first_held(&context.scheduler.atoms, &table, &tuples, keypos)?.is_some()
+    {
         return Ok(Value(Term::static_atom("false")));
     }
-    let compared = put_objects(&context.scheduler.atoms, &mut table, &tuples, keypos, new)?;
+    let compared = put_objects(&context.scheduler.atoms, &mut table, &tuples, keypos, kind)?;
     drop(table);
     drop(ets);
     let compared: usize = compared.iter().sum();
@@ -680,7 +691,13 @@ pub(super) fn insert_list(
             }
             // The list call does its own membership walk and passes `false`
             // to `db_put` (`erl_db.c:1858`, `1943`).
-            put_objects(&context.scheduler.atoms, &mut table, &tuples, keypos, false)?;
+            put_objects(
+                &context.scheduler.atoms,
+                &mut table,
+                &tuples,
+                keypos,
+                InsertKind::Insert,
+            )?;
             units.left -= 2 * count as i64;
             break 'work Some(Value(Term::static_atom("true")));
         }
@@ -712,14 +729,21 @@ pub(super) fn insert_list(
                 }
                 Ok(mut taken_table) => {
                     let tuples = tuples();
-                    let walk = matches!(new, New::Unlocked);
-                    let bif = if walk { "insert_new/2" } else { "insert/2" };
+                    let kind = if matches!(new, New::Unlocked) {
+                        InsertKind::InsertNew
+                    } else {
+                        InsertKind::Insert
+                    };
+                    let bif = match kind {
+                        InsertKind::InsertNew => "insert_new/2",
+                        InsertKind::Insert => "insert/2",
+                    };
                     check_keypos(&tuples, keypos, bif)?;
                     ets.reserve_result(caller);
                     taken_table.busy = Some(Busy::new(
                         caller,
                         tuples.iter().map(|object| object.to_vec()).collect(),
-                        walk,
+                        kind,
                     ));
                     // The call keeps its own BIF: `ets:insert_new/2` marks
                     // the steps of the walk and the insert with
@@ -1003,7 +1027,7 @@ impl Units {
 ///
 /// ```rust,ignore
 /// let object = vec![test_atom("k")];
-/// assert_eq!(put_objects(&atoms, &mut table, &[&object], 1)?, vec![0]);
+/// assert_eq!(put_objects(&atoms, &mut table, &[&object], 1, InsertKind::Insert)?, vec![0]);
 /// assert!(table.object(&atoms, &test_atom("k")).is_some());
 /// ```
 ///
@@ -1016,14 +1040,13 @@ fn put_objects(
     table: &mut Table,
     tuples: &[&[Term]],
     keypos: i32,
-    new: bool,
+    kind: InsertKind,
 ) -> Result<Vec<usize>, BeamError> {
     check_keypos(tuples, keypos, "insert/2")?;
     let objects = tuples.iter().map(|elements| elements.to_vec()).collect();
-    Ok(if new {
-        table.insert_all_new(atoms, objects)
-    } else {
-        table.insert_all(atoms, objects)
+    Ok(match kind {
+        InsertKind::InsertNew => table.insert_all_new(atoms, objects),
+        InsertKind::Insert => table.insert_all(atoms, objects),
     })
 }
 
@@ -1036,7 +1059,7 @@ fn put_objects(
 ///
 /// ```rust,ignore
 /// let object = vec![test_atom("k")];
-/// put_objects(&atoms, &mut table, &[&object], 1)?;
+/// put_objects(&atoms, &mut table, &[&object], 1, InsertKind::Insert)?;
 /// assert_eq!(first_held(&atoms, &table, &[&[test_atom("j")], &object], 1)?, Some(2));
 /// ```
 ///
@@ -1822,7 +1845,7 @@ pub(super) fn info(
             found.write_concurrency().clone()
         }
         Term::Atom(atom) if atom.is_static("read_concurrency") => {
-            boolean_term(found.read_concurrency())
+            Term::from(found.read_concurrency())
         }
         Term::Atom(atom) if atom.is_static("name") => Term::Atom(
             atoms
@@ -1831,13 +1854,13 @@ pub(super) fn info(
         ),
         Term::Atom(atom) if atom.is_static("keypos") => Term::Integer(i64::from(found.keypos())),
         Term::Atom(atom) if atom.is_static("node") => Term::static_atom("nonode@nohost"),
-        Term::Atom(atom) if atom.is_static("named_table") => boolean_term(ets.named(id)),
-        Term::Atom(atom) if atom.is_static("compressed") => boolean_term(found.compressed()),
+        Term::Atom(atom) if atom.is_static("named_table") => Term::from(ets.named(id)),
+        Term::Atom(atom) if atom.is_static("compressed") => Term::from(found.compressed()),
         Term::Atom(atom) if atom.is_static("id") => Term::Reference(id),
         Term::Atom(atom) if atom.is_static("decentralized_counters") => {
-            boolean_term(found.decentralized_counters())
+            Term::from(found.decentralized_counters())
         }
-        Term::Atom(atom) if atoms.name_of(atom) == "fixed" => boolean_term(found.is_fixed()),
+        Term::Atom(atom) if atoms.name_of(atom) == "fixed" => Term::from(found.is_fixed()),
         Term::Atom(atom)
             if matches!(
                 atoms.name_of(atom),
@@ -1940,7 +1963,13 @@ pub(super) fn match_objects(
     pattern: &Term,
     limit: Option<&Term>,
 ) -> Result<BifResult, BeamError> {
-    select_objects(context, table, &match_specification(pattern), limit, false)
+    select_objects(
+        context,
+        table,
+        &match_specification(pattern),
+        limit,
+        SelectOrder::Select,
+    )
 }
 
 /// Run `ets:match_object(Table, Pattern)` or, with `Some(Limit)`,
@@ -1969,7 +1998,7 @@ pub(super) fn match_object(
         table,
         &match_object_specification(pattern),
         limit,
-        false,
+        SelectOrder::Select,
     )
 }
 
@@ -1995,9 +2024,9 @@ pub(super) fn select(
     table: &Term,
     spec: &Term,
     limit: Option<&Term>,
-    reverse: bool,
+    order: SelectOrder,
 ) -> Result<BifResult, BeamError> {
-    select_objects(context, table, spec, limit, reverse)
+    select_objects(context, table, spec, limit, order)
 }
 
 /// Run [`select`] over the match specification `spec`.
@@ -2006,7 +2035,7 @@ fn select_objects(
     table: &Term,
     spec: &Term,
     limit: Option<&Term>,
-    reverse: bool,
+    order: SelectOrder,
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
     let chunk = match limit.map(Term::small_integer) {
@@ -2038,10 +2067,10 @@ fn select_objects(
     };
     if table.table_type() == TableType::OrderedSet {
         let chunk = chunk as i64;
-        let turn = tree::first_turn(atoms, &table, &compiled, chunk, reverse)?;
+        let turn = tree::first_turn(atoms, &table, &compiled, chunk, order)?;
         drop(table);
         drop(ets);
-        return tree::finish(context, name, &compiled, chunk, reverse, turn);
+        return tree::finish(context, name, &compiled, chunk, order, turn);
     }
     // A key position below 1 compares as a large unsigned number with the
     // arity of the pattern (`db_getkey`, `erl_db_util.c:3940-3960`).
@@ -2264,11 +2293,11 @@ pub(super) fn select_continue(
             return Ok(BifResult::badarg());
         };
         let compiled = compiled.clone();
-        let (chunk, reverse) = (state.chunk, state.reverse);
+        let (chunk, order) = (state.chunk, state.order);
         let turn = tree::next_turn(atoms, &found, &compiled, state)?;
         drop(found);
         drop(ets);
-        return tree::finish(context, table, &compiled, chunk, reverse, turn);
+        return tree::finish(context, table, &compiled, chunk, order, turn);
     }
     let [_, next, chunk, program, rest, size] = elements.as_ref() else {
         return Ok(BifResult::badarg());
@@ -2682,12 +2711,21 @@ pub(super) fn safe_fixtable(
     Ok(Value(Term::static_atom("true")))
 }
 
+/// What a walk BIF of a table returns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum WalkResult {
+    /// The key: `ets:first/1`, `ets:last/1`, `ets:next/2`, and `ets:prev/2`.
+    Key,
+    /// `{Key, Objects}`: the `_lookup` forms.
+    KeyWithObjects,
+}
+
 /// Run one of the eight walk BIFs of a table: `ets:first/1`,
 /// `ets:last/1`, `ets:next/2`, `ets:prev/2`, and their `_lookup` forms, as
 /// `ets_first_1`, `ets_last_1`, `ets_next_2`, `ets_prev_2`, and the lookup
 /// BIFs do (`erl_db.c:1170-1350`). `args` holds the table and, for a step,
-/// the key. `backward` selects `last` or `prev`, and `lookup` the form that
-/// returns `{Key, Objects}`.
+/// the key. `direction` selects `last` or `prev` with [`Direction::Backward`],
+/// and `result` the form that returns `{Key, Objects}`.
 ///
 /// - A table that does not exist or that the caller cannot read raises
 ///   `badarg` (`erl_db.c:769-912`).
@@ -2704,15 +2742,15 @@ pub(super) fn safe_fixtable(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = walk(&mut context, "last", vec![table], true, false)?;
+/// let result = walk(&mut context, "last", vec![table], Direction::Backward, WalkResult::Key)?;
 /// assert!(matches!(result, BifResult::Value(value) if value == Term::static_atom("$end_of_table")));
 /// ```
 pub(super) fn walk(
     context: &mut BifContext<'_>,
     name: &'static str,
     args: Vec<Term>,
-    backward: bool,
-    lookup: bool,
+    direction: Direction,
+    result: WalkResult,
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
     let reds = context
@@ -2727,13 +2765,13 @@ pub(super) fn walk(
         Err(lacking) => return Ok(retry(context, lacking, name, args)),
     };
     let found = match (table.table_type(), args.get(1)) {
-        (TableType::OrderedSet, None) => table.ordered_end(!backward),
+        (TableType::OrderedSet, None) => table.ordered_end(direction),
         // A tree table rejects the end marker as a key
         // (`erl_db_tree.c:654-655`, `729-730`).
         (TableType::OrderedSet, Some(key)) if *key == Term::static_atom("$end_of_table") => {
             return Ok(BifResult::badarg());
         }
-        (TableType::OrderedSet, Some(key)) => table.ordered_step(atoms, key, !backward)?,
+        (TableType::OrderedSet, Some(key)) => table.ordered_step(atoms, key, direction)?,
         (_, None) => table.first_key(),
         (_, Some(key)) => match table.next_key(atoms, key) {
             Some(next) => next,
@@ -2743,7 +2781,7 @@ pub(super) fn walk(
     let Some(key) = found else {
         return Ok(Value(Term::static_atom("$end_of_table")));
     };
-    if !lookup {
+    if result == WalkResult::Key {
         return Ok(Value(key));
     }
     let objects = table
@@ -3124,11 +3162,11 @@ pub(super) fn info_all(context: &mut BifContext<'_>, table: &Term) -> Result<Bif
         ("id", Term::Reference(id)),
         (
             "decentralized_counters",
-            boolean_term(found.decentralized_counters()),
+            Term::from(found.decentralized_counters()),
         ),
-        ("read_concurrency", boolean_term(found.read_concurrency())),
+        ("read_concurrency", Term::from(found.read_concurrency())),
         ("write_concurrency", found.write_concurrency().clone()),
-        ("compressed", boolean_term(found.compressed())),
+        ("compressed", Term::from(found.compressed())),
         ("memory", Term::Integer(found.memory_words() as i64)),
         ("owner", Term::Pid(found.owner())),
         (
@@ -3145,7 +3183,7 @@ pub(super) fn info_all(context: &mut BifContext<'_>, table: &Term) -> Result<Bif
         ),
         ("size", Term::from_bigint(BigInt::from(found.size()))),
         ("node", Term::static_atom("nonode@nohost")),
-        ("named_table", boolean_term(named)),
+        ("named_table", Term::from(named)),
         ("type", Term::static_atom(found.table_type().name())),
         ("keypos", Term::Integer(i64::from(found.keypos()))),
         ("protection", Term::static_atom(access_name(found.access()))),
@@ -3155,11 +3193,6 @@ pub(super) fn info_all(context: &mut BifContext<'_>, table: &Term) -> Result<Bif
         .map(|(item, value)| Term::tuple(vec![Term::static_atom(item), value]))
         .collect();
     Ok(Value(Term::list_from(pairs)))
-}
-
-/// Return the atom `true` or `false` for `value`.
-fn boolean_term(value: bool) -> Term {
-    Term::static_atom(if value { "true" } else { "false" })
 }
 
 /// Return the atom of the access mode, as `ets:info/2` gives it.
@@ -3709,8 +3742,8 @@ fn keeps_key(atoms: &AtomTable, keypos: usize, pattern: &Term, body: &Term) -> b
         return false;
     };
     let (object, const_mode) = match &construction[..] {
-        [tag, object] if atom(tag, "const") => (object, true),
-        [object] => (object, false),
+        [tag, object] if atom(tag, "const") => (object, ConstMode::Inside),
+        [object] => (object, ConstMode::Outside),
         _ => return false,
     };
     let Some(body_key) = tuple_key(keypos, object) else {
@@ -3719,7 +3752,7 @@ fn keeps_key(atoms: &AtomTable, keypos: usize, pattern: &Term, body: &Term) -> b
     if match_eq_body(atoms, key, body_key, const_mode) {
         return true;
     }
-    if const_mode {
+    if const_mode == ConstMode::Inside {
         return false;
     }
     matches!(body_key, Term::Tuple(call) if matches!(&call[..],
@@ -3736,12 +3769,21 @@ fn tuple_key(keypos: usize, term: &Term) -> Option<&Term> {
     }
 }
 
+/// Whether a body term is inside a `{const, _}` part.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConstMode {
+    /// The term is outside a `{const, _}` part, so a tuple is `{{...}}`.
+    Outside,
+    /// The term is inside a `{const, _}` part, so a tuple is a literal.
+    Inside,
+}
+
 /// Return whether the body term `body` always builds the term that the
 /// pattern term `pattern` matched, as `db_match_eq_body`
 /// (`erl_db_util.c:1333-1419`) does. Outside a `{const, _}` part, a tuple
 /// of the body is `{{...}}`; a variable, `'_'`, `'$$'`, `'$_'`, or a map
 /// never gives a match.
-fn match_eq_body(atoms: &AtomTable, pattern: &Term, body: &Term, const_mode: bool) -> bool {
+fn match_eq_body(atoms: &AtomTable, pattern: &Term, body: &Term, const_mode: ConstMode) -> bool {
     let mut stack = vec![(pattern, body, const_mode)];
     while let Some((a, b, const_mode)) = stack.pop() {
         match b {
@@ -3755,13 +3797,13 @@ fn match_eq_body(atoms: &AtomTable, pattern: &Term, body: &Term, const_mode: boo
                 stack.push((a_head, b_head, const_mode));
             }
             Term::Tuple(b_elements) => {
-                let b_elements = if const_mode {
+                let b_elements = if const_mode == ConstMode::Inside {
                     b_elements
                 } else {
                     match &b_elements[..] {
                         [Term::Tuple(inner)] => inner,
                         [Term::Atom(tag), object] if atoms.name_of(tag) == "const" => {
-                            stack.push((a, object, true));
+                            stack.push((a, object, ConstMode::Inside));
                             continue;
                         }
                         _ => return false,
@@ -3782,7 +3824,7 @@ fn match_eq_body(atoms: &AtomTable, pattern: &Term, body: &Term, const_mode: boo
                 let name = atoms.name_of(atom);
                 if a != b
                     || matches!(name, "_" | "$$" | "$_")
-                    || (const_mode && is_match_variable(name))
+                    || (const_mode == ConstMode::Inside && is_match_variable(name))
                 {
                     return false;
                 }
@@ -3842,8 +3884,10 @@ pub(super) fn slot(
         return Ok(BifResult::badarg());
     };
     let (objects, end): (Vec<Vec<Term>>, usize) = if found.table_type() == TableType::OrderedSet {
-        let object = found.ordered_walk(atoms, None, true)?.nth(slot);
-        let end = found.ordered_walk(atoms, None, true)?.count();
+        let object = found
+            .ordered_walk(atoms, None, Direction::Forward)?
+            .nth(slot);
+        let end = found.ordered_walk(atoms, None, Direction::Forward)?.count();
         (object.into_iter().map(<[Term]>::to_vec).collect(), end)
     } else if slot < found.bucket_count() {
         let mut objects: Vec<Vec<Term>> = found.chain(slot).map(<[Term]>::to_vec).collect();

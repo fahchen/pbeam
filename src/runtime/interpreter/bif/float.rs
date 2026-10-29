@@ -5,7 +5,7 @@
 
 use super::BifResult::Value;
 use super::{BifResult, Term};
-use crate::term::float_text;
+use crate::term::float_text::{self, TrailingZeros};
 
 /// The default number of digits after the point of `float_to_list/1`,
 /// `SYS_DEFAULT_FLOAT_DECIMALS` (`sys.h:890`).
@@ -207,11 +207,11 @@ fn float_text_of(float: &Term, options: &Term) -> Option<Vec<u8>> {
         return None;
     };
     let mut decimals = DEFAULT_DECIMALS;
-    let mut compact = false;
+    let mut zeros = TrailingZeros::Keep;
     let mut format = Format::Legacy;
     for option in options.proper_list()? {
         match option {
-            Term::Atom(atom) if atom.is_static("compact") => compact = true,
+            Term::Atom(atom) if atom.is_static("compact") => zeros = TrailingZeros::Trim,
             Term::Atom(atom) if atom.is_static("short") => format = Format::Short,
             Term::Tuple(elements) if elements.len() == 2 => {
                 let count = elements[1].small_integer()?;
@@ -228,7 +228,7 @@ fn float_text_of(float: &Term, options: &Term) -> Option<Vec<u8>> {
     }
     match format {
         Format::Short => Some(float_text::shortest(*value)),
-        Format::Fixed => float_text::fixed(*value, decimals, compact),
+        Format::Fixed => float_text::fixed(*value, decimals, zeros),
         Format::Legacy | Format::Scientific => float_text::scientific_option(*value, decimals),
     }
 }

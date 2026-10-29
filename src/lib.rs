@@ -12,8 +12,9 @@ pub use bundle::{Blob, Bundle, BundleWriter, Entry};
 pub mod embedded;
 pub use error::BeamError;
 pub use runtime::{
-    AllowAll, BeamProgram, Binding, Capability, CapabilityKind, Constraint, Job, Library, LoadFn,
-    NativeFn, NativeResult, NifContext, NifGap, Operation, Policy, RegistrationError, Schedulers,
-    add_erlexec_path, install_start_dispositions, nif_manifest_gaps, register_library,
+    AllowAll, BeamProgram, Binding, Capability, CapabilityKind, Constraint, Delegation, Job,
+    Library, LoadFn, NativeFn, NativeResult, NifContext, NifGap, Operation, Policy,
+    RegistrationError, RootAuthority, Schedulers, add_erlexec_path, install_start_dispositions,
+    nif_manifest_gaps, register_library,
 };
 pub use term::{Atom, AtomTable, HostTerm, Map, PortId, ProcessId, Reference, Term, debug_term};

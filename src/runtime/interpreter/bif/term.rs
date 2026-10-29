@@ -23,6 +23,7 @@ use num_traits::ToPrimitive;
 use super::BifResult::Value;
 use super::{BeamError, BifContext, BifResult, Binary, Term, error, integer, records};
 use crate::runtime::interpreter::code_table::CodeTable;
+use crate::runtime::unicode::CharEncoding;
 use crate::term::{
     AtomTable, Fun, Lambda, MAX_ATOM_CHARACTERS, MAX_TUPLE_SIZE, ProcessId, Record, RecordDef,
     Reference, Target, external, float_text,
@@ -983,7 +984,7 @@ enum CheckKind {
     Local {
         hash: u32,
         start: usize,
-        prior: bool,
+        prior: NodeScope,
     },
 }
 
@@ -1033,11 +1034,20 @@ fn check_tiny_creation(input: &[u8], index: &mut usize) -> Result<(), DecodeErro
         .ok_or(DecodeError::Badarg)
 }
 
+/// Whether the term that a size check reads is inside a `LOCAL_EXT` term.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NodeScope {
+    /// The term is not in a `LOCAL_EXT` term: `LOCAL_EXT` cannot name its node.
+    Remote,
+    /// The term is in a `LOCAL_EXT` term, which only the local node decodes.
+    Local,
+}
+
 /// Take the node atom of a pid, port, or reference at `index`.
-fn check_sysname(input: &[u8], index: &mut usize, local: bool) -> Result<(), DecodeError> {
+fn check_sysname(input: &[u8], index: &mut usize, scope: NodeScope) -> Result<(), DecodeError> {
     match *input.get(*index).ok_or(DecodeError::Badarg)? {
         106 => {
-            if !local {
+            if scope == NodeScope::Remote {
                 return Err(DecodeError::Badarg);
             }
             *index += 1;
@@ -1065,7 +1075,7 @@ fn check_sysname(input: &[u8], index: &mut usize, local: bool) -> Result<(), Dec
 /// check, because its structure is valid.
 fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
     let mut index = 0usize;
-    let mut local = false;
+    let mut scope = NodeScope::Remote;
     let mut frames: Vec<CheckFrame> = Vec::new();
     'parse: loop {
         let tag = *input.get(index).ok_or(DecodeError::Badarg)?;
@@ -1160,20 +1170,20 @@ fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
                 check_skip(input, &mut index, 1 + length)?;
             }
             88 | 120 => {
-                check_sysname(input, &mut index, local)?;
+                check_sysname(input, &mut index, scope)?;
                 check_skip(input, &mut index, 12)?;
             }
             103 => {
-                check_sysname(input, &mut index, local)?;
+                check_sysname(input, &mut index, scope)?;
                 check_skip(input, &mut index, 8)?;
                 check_tiny_creation(input, &mut index)?;
             }
             89 => {
-                check_sysname(input, &mut index, local)?;
+                check_sysname(input, &mut index, scope)?;
                 check_skip(input, &mut index, 8)?;
             }
             102 | 101 => {
-                check_sysname(input, &mut index, local)?;
+                check_sysname(input, &mut index, scope)?;
                 check_skip(input, &mut index, 4)?;
                 check_tiny_creation(input, &mut index)?;
             }
@@ -1182,7 +1192,7 @@ fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
                 if count > MAX_REFERENCE_NUMBERS {
                     return Err(DecodeError::Badarg);
                 }
-                check_sysname(input, &mut index, local)?;
+                check_sysname(input, &mut index, scope)?;
                 check_skip(input, &mut index, 4 + 4 * count)?;
             }
             114 => {
@@ -1190,7 +1200,7 @@ fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
                 if count > MAX_REFERENCE_NUMBERS {
                     return Err(DecodeError::Badarg);
                 }
-                check_sysname(input, &mut index, local)?;
+                check_sysname(input, &mut index, scope)?;
                 check_tiny_creation(input, &mut index)?;
                 check_skip(input, &mut index, 4 * count)?;
             }
@@ -1236,8 +1246,8 @@ fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
             }
             121 => {
                 let hash = check_number(input, &mut index, 4)?;
-                let prior = local;
-                local = true;
+                let prior = scope;
+                scope = NodeScope::Local;
                 frames.push(CheckFrame {
                     kind: CheckKind::Local {
                         hash,
@@ -1278,7 +1288,7 @@ fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
                 }
                 CheckKind::Local { hash, start, prior } => {
                     frames.pop();
-                    local = prior;
+                    scope = prior;
                     if external::block_hash(&input[start..index], seed) != hash {
                         return Err(DecodeError::Badarg);
                     }
@@ -1461,19 +1471,19 @@ impl Decoder<'_> {
                     }
                     100 => {
                         let length = usize::from(self.u16()?);
-                        Term::Atom(self.atom(length, true)?)
+                        Term::Atom(self.atom(length, CharEncoding::Latin1)?)
                     }
                     115 => {
                         let length = usize::from(self.u8()?);
-                        Term::Atom(self.atom(length, true)?)
+                        Term::Atom(self.atom(length, CharEncoding::Latin1)?)
                     }
                     118 => {
                         let length = usize::from(self.u16()?);
-                        Term::Atom(self.atom(length, false)?)
+                        Term::Atom(self.atom(length, CharEncoding::Unicode)?)
                     }
                     119 => {
                         let length = usize::from(self.u8()?);
-                        Term::Atom(self.atom(length, false)?)
+                        Term::Atom(self.atom(length, CharEncoding::Unicode)?)
                     }
                     106 => Term::Nil,
                     107 => {
@@ -1737,6 +1747,10 @@ impl Decoder<'_> {
     /// occurs twice is `badarg` before any value is decoded. The definition
     /// is the loaded one when it has the same export flag and fields
     /// (`dec_term`, `external.c:5300-5367`).
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "`exported` is the `is_exported` boolean of the `RECORD_EXT` header (`external.c:5300-5367`), passed to `RecordDef::new` as data"
+    )]
     fn record_def(
         &self,
         exported: bool,
@@ -1809,11 +1823,21 @@ impl Decoder<'_> {
         match tag {
             100 | 118 => {
                 let length = usize::from(self.u16()?);
-                self.atom(length, tag == 100)
+                let charset = if tag == 100 {
+                    CharEncoding::Latin1
+                } else {
+                    CharEncoding::Unicode
+                };
+                self.atom(length, charset)
             }
             115 | 119 => {
                 let length = usize::from(self.u8()?);
-                self.atom(length, tag == 115)
+                let charset = if tag == 115 {
+                    CharEncoding::Latin1
+                } else {
+                    CharEncoding::Unicode
+                };
+                self.atom(length, charset)
             }
             _ => Err(DecodeError::Badarg),
         }
@@ -1822,9 +1846,13 @@ impl Decoder<'_> {
     /// Decode an atom of `length` bytes in Latin-1 or UTF-8, as
     /// `dec_term_atom_common` (`external.c:4525-4548`) does. The `safe`
     /// option takes only an atom that the run has.
-    fn atom(&mut self, length: usize, latin1: bool) -> Result<crate::term::Atom, DecodeError> {
+    fn atom(
+        &mut self,
+        length: usize,
+        charset: CharEncoding,
+    ) -> Result<crate::term::Atom, DecodeError> {
         let bytes = self.take(length)?;
-        let name = if latin1 {
+        let name = if charset == CharEncoding::Latin1 {
             bytes.iter().map(|&byte| char::from(byte)).collect()
         } else {
             std::str::from_utf8(bytes)
@@ -1899,19 +1927,19 @@ impl Decoder<'_> {
         let atom = match self.u8()? {
             100 => {
                 let length = usize::from(self.u16()?);
-                self.atom(length, true)?
+                self.atom(length, CharEncoding::Latin1)?
             }
             115 => {
                 let length = usize::from(self.u8()?);
-                self.atom(length, true)?
+                self.atom(length, CharEncoding::Latin1)?
             }
             118 => {
                 let length = usize::from(self.u16()?);
-                self.atom(length, false)?
+                self.atom(length, CharEncoding::Unicode)?
             }
             119 => {
                 let length = usize::from(self.u8()?);
-                self.atom(length, false)?
+                self.atom(length, CharEncoding::Unicode)?
             }
             _ => return Err(DecodeError::Badarg),
         };
