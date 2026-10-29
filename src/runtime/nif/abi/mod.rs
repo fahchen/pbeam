@@ -216,11 +216,13 @@ impl Library {
             // PBeam has no `enif_priv_data` yet, so no call reads the
             // private data of the callback.
             let mut private: *mut c_void = std::ptr::null_mut();
+            // The handle of `info`: 1, or the atom handle of an atom.
+            let info = env.handles()[0];
             // SAFETY: `load` is the callback of a library that `open`
             // loaded and that `self` keeps open. The env is alive and
-            // unique for the call, its handle 1 is `info`, and `private`
-            // is a writable `void*`, as the C API gives them.
-            unsafe { load(&raw mut env, &raw mut private, 1) }
+            // unique for the call, `info` is the handle of the load info,
+            // and `private` is a writable `void*`, as the C API gives them.
+            unsafe { load(&raw mut env, &raw mut private, info) }
         })
     }
 }
