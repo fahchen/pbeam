@@ -575,3 +575,44 @@ fn checks_the_state_and_the_messages_of_sendmmsg_and_the_state_of_recvmmsg() {
             .contains("prim_socket:nif_recvmmsg/6: the flags 0 on a socket of the domain 1")
     );
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn stops_the_run_of_recvmmsg_when_a_message_needs_an_atom_of_a_full_table() {
+    // The map of each message that `recvmmsg` returns has the key `iov`,
+    // which is not a static atom. A new atom in a full table stops the run,
+    // as ERTS exits the emulator (`index_put_entry`), and no fixture can
+    // fill the table before a read.
+    let mut scheduler = scheduler();
+    let reference = Term::Reference(scheduler.make_ref().unwrap());
+    let (key, socket) = datagram(&mut scheduler);
+    let state = lock(&scheduler.node().resources.kind::<Sockets>())
+        .get(key)
+        .unwrap();
+    let address = lock(&state)
+        .socket
+        .as_ref()
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .as_socket()
+        .unwrap();
+    std::net::UdpSocket::bind("127.0.0.1:0")
+        .unwrap()
+        .send_to(b"x", address)
+        .unwrap();
+    let mut index = 0;
+    while scheduler.atoms.put(&format!("pbeam_fill_{index}")).is_ok() {
+        index += 1;
+    }
+    let (one, zero) = (Term::Integer(1), Term::Integer(0));
+    let result = recvmmsg(
+        &mut scheduler,
+        &socket,
+        [&one, &zero, &zero, &zero, &reference],
+    );
+    assert_eq!(
+        error_text(result),
+        "no more index entries in atom_tab (max=1048576)"
+    );
+}
