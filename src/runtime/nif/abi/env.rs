@@ -1532,9 +1532,7 @@ pub unsafe extern "C" fn enif_get_map_value(
     let Some(Term::Map(map)) = &found else {
         return 0;
     };
-    let Some(key) = env.get(key) else {
-        return 0;
-    };
+    let key = env.term(key);
     let Some(found) = map.get(&key).cloned() else {
         return 0;
     };
@@ -1580,20 +1578,15 @@ pub unsafe extern "C" fn enif_make_map_from_arrays(
     if duplicate {
         return 0;
     }
-    let map = match Map::from_pairs(pairs, &env.atoms) {
-        Ok(map) => map,
-        Err(key) => {
-            env.unsupported.get_or_insert_with(|| {
-                format!("the NIF made a map with the key {key:?}, which PBeam does not support yet")
-            });
-            return 0;
-        }
-    };
-    let handle = env.make(Term::Map(map));
-    // SAFETY: the C API requires that `map_out` points to a writable
-    // `ERL_NIF_TERM`.
-    unsafe { map_out.write(handle) };
-    1
+    // Each term of an env has a map hash, so the map form takes each key
+    // (`Map::from_pairs`), and the error result gives 0 as a duplicate key
+    // does.
+    Map::from_pairs(pairs, &env.atoms).map_or(0, |map| {
+        let handle = env.make(Term::Map(map));
+        // SAFETY: the C API gives a writable `ERL_NIF_TERM`.
+        unsafe { map_out.write(handle) };
+        1
+    })
 }
 
 /// `ErlNifResourceType* enif_init_resource_type(ErlNifEnv*, const char*,

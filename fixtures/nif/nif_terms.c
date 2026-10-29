@@ -39,6 +39,8 @@
  *   24  enif_thread_type
  *   25  enif_clear_env of a new env that holds a term, then a new term in
  *       it: cleared
+ *   26  enif_make_new_atom_len of the first Len bytes of C3 A9 FF with the
+ *       encoding Encoding of Arg [Encoding | Len], or none
  */
 #include <stdint.h>
 #include <string.h>
@@ -248,6 +250,18 @@ static ERL_NIF_TERM probe(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
         memset(name, 'a', sizeof name);
         return enif_make_new_atom_len(env, name, (size_t)value, &atom, ERL_NIF_LATIN1) ? atom
                                                                                      : enif_make_atom(env, "none");
+    }
+    case 26: {
+        static const char name[] = "\xc3\xa9\xff";
+        ERL_NIF_TERM head, tail, atom;
+        int encoding;
+        if (!enif_get_list_cell(env, argv[1], &head, &tail) || !enif_get_int(env, head, &encoding) ||
+            !enif_get_long(env, tail, &value) || value < 0 || value > 3) {
+            return enif_make_badarg(env);
+        }
+        return enif_make_new_atom_len(env, name, (size_t)value, &atom, (ErlNifCharEncoding)encoding)
+                   ? atom
+                   : enif_make_atom(env, "none");
     }
     case 24:
         return enif_make_int(env, enif_thread_type());

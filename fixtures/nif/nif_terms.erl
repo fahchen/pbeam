@@ -58,7 +58,8 @@ cases() ->
      {22, x},
      {23, 2}, {23, 255}, {23, 256}, {23, 0},
      {24, 0},
-     {25, 0}].
+     {25, 0},
+     {26, [1 | 2]}, {26, [2 | 2]}, {26, [2 | 3]}, {26, [0 | 2]}].
 
 %% The results of probes/1 on the pinned ERTS (OTP 29.1.1), in the order of
 %% cases/0.
@@ -97,7 +98,8 @@ expected() ->
      {x, x, x},
      aa, list_to_atom(duplicate(255, $a)), none, '',
      1,
-     cleared].
+     cleared,
+     'Ã©', 'é', none, none].
 
 duplicate(0, _) -> [];
 duplicate(N, Element) -> [Element | duplicate(N - 1, Element)].
