@@ -293,9 +293,14 @@ impl Env {
         self.process
     }
 
-    /// Return the handles of the arguments, the `argv` of the call.
+    /// Return the handles of the arguments, the `argv` of the call. The
+    /// handle of an atom argument is its atom handle.
     pub(super) fn handles(&self) -> Vec<NifTerm> {
-        (1..=self.slots.len()).collect()
+        let handle = |(index, slot): (usize, &Slot)| match slot {
+            Slot::Term(Term::Atom(atom)) => atom_handle(atom),
+            _ => index + 1,
+        };
+        self.slots.iter().enumerate().map(handle).collect()
     }
 
     /// Add `slot` and return its handle.
@@ -316,9 +321,8 @@ impl Env {
     /// `enif_make_new_binary` has the bytes that the NIF wrote so far.
     pub(super) fn get(&self, handle: NifTerm) -> Option<Term> {
         if handle & ATOM_HANDLE != 0 {
-            return Some(Term::Atom(Atom::from_index(
-                u32::try_from(handle & !ATOM_HANDLE).expect("the atom index fits u32"),
-            )));
+            let index = u32::try_from(handle ^ ATOM_HANDLE).ok();
+            return index.and_then(|index| self.atoms.atom_at(index).map(Term::Atom));
         }
         self.slot(handle).map(|slot| match slot {
             Slot::Term(term) => term.clone(),
@@ -353,7 +357,6 @@ impl Env {
         }
     }
 
-    /// Add the term `term` and return its handle.
     /// Return the handle of `term` in the env. A term of an atom takes no
     /// slot: its handle is the atom-table index with [`ATOM_HANDLE`], which
     /// every env reads, as ERTS makes an atom an immediate term that no
@@ -363,7 +366,7 @@ impl Env {
     /// environment").
     fn make(&mut self, term: Term) -> NifTerm {
         if let Term::Atom(atom) = &term {
-            return ATOM_HANDLE | atom.index() as usize;
+            return atom_handle(atom);
         }
         self.put(Slot::Term(term))
     }
@@ -435,6 +438,11 @@ impl Env {
             ))
         })
     }
+}
+
+/// Return the atom handle of `atom`, the same in each env of the node.
+fn atom_handle(atom: &Atom) -> NifTerm {
+    ATOM_HANDLE | atom.index() as NifTerm
 }
 
 /// Return the bytes that `enif_get_string` writes for `list` with the
