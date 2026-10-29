@@ -14,11 +14,11 @@
 //! env, because the C code keeps it after the call (`erl_nif.h:201-203`).
 
 use std::cell::RefCell;
-use std::ffi::c_int;
+use std::ffi::{c_int, c_void};
 use std::sync::Arc;
 
 use super::env::Env;
-use super::layout::{ErlNifPid, NifTerm};
+use super::layout::{ErlNifMonitor, ErlNifPid, NifTerm};
 use crate::AtomTable;
 use crate::Term;
 use crate::runtime::scheduler::node::Node;
@@ -246,6 +246,47 @@ pub unsafe extern "C" fn enif_send(
         1
     })
     .unwrap_or(0)
+}
+
+/// `int enif_monitor_process(ErlNifEnv*, void*, const ErlNifPid*,
+/// ErlNifMonitor*)`: watch the process `to_pid` for the resource object
+/// `obj` and return 0, or return -1 when the type of the object has no
+/// down callback, and 1 when the process does not exist, as ERTS gives for
+/// a monitor signal that it cannot send (`erl_nif.c:3933-3990`).
+///
+/// PBeam does not run the down callback of the type yet: it writes a
+/// monitor of zero words, which `enif_demonitor_process` and
+/// `enif_compare_monitors` do not use.
+///
+/// # Safety
+///
+/// `obj` is the data of a live resource object, `to_pid` points to a valid
+/// `ErlNifPid`, and `monitor` is NULL or points to a writable
+/// `ErlNifMonitor`, as the C API requires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn enif_monitor_process(
+    _env: *mut Env,
+    obj: *mut c_void,
+    to_pid: *const ErlNifPid,
+    monitor: *mut ErlNifMonitor,
+) -> c_int {
+    // SAFETY: the C API gives a valid `ErlNifPid`.
+    let target = unsafe { to_pid.read() }.process();
+    with_context(|context| {
+        if !super::resource::has_down(obj.expose_provenance()) {
+            return -1;
+        }
+        if context.node.live_owner(target).is_none() {
+            return 1;
+        }
+        if !monitor.is_null() {
+            // SAFETY: the C API requires that a `monitor` that is not NULL
+            // points to a writable `ErlNifMonitor`.
+            unsafe { monitor.write(ErlNifMonitor { words: [0; 4] }) };
+        }
+        0
+    })
+    .unwrap_or(1)
 }
 
 #[cfg(test)]
