@@ -37,6 +37,8 @@ fn resource(scheduler: &mut Scheduler, change: impl FnOnce(&mut SocketState)) ->
         writer: None,
         counters: IoCounters::default(),
         options: OtpOptions::default(),
+        select_read: false,
+        recv_count_done: 0,
     };
     change(&mut state);
     let reference = scheduler.make_magic_ref().unwrap();
@@ -69,6 +71,8 @@ fn datagram(scheduler: &mut Scheduler) -> (Reference, Term) {
         writer: None,
         counters: IoCounters::default(),
         options: OtpOptions::default(),
+        select_read: false,
+        recv_count_done: 0,
     };
     let reference = scheduler.make_magic_ref().unwrap();
     lock(&scheduler.node().resources.kind::<Sockets>()).insert(reference, state);

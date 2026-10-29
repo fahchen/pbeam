@@ -407,6 +407,8 @@ pub(super) fn open_4(
                 writer: None,
                 counters: IoCounters::default(),
                 options: OtpOptions::default(),
+                select_read: false,
+                recv_count_done: 0,
             },
         );
         sockets.registry
