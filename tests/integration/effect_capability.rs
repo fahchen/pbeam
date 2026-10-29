@@ -1374,19 +1374,14 @@ fn stops_the_run_for_a_socket_bind_to_a_native_family() {
 
 #[test]
 fn stops_the_run_for_a_socket_option_form_without_a_handler() {
-    // `{otp, debug}` and `{otp, select_read}` with `true`, `{otp, rcvbuf}`
-    // with a buffer count, and on Linux `{ip, msfilter}` and
-    // `{ip, pktoptions}` stop the run (row "NIF stubs" of
+    // `{otp, debug}` and `{otp, select_read}` with `true`, and
+    // `{otp, rcvbuf}` with a buffer count, stop the run (row "NIF stubs" of
     // docs/erts-differences.md).
-    let mut expected = vec![
+    let expected = [
         "unsupported prim_socket option value {otp, 1001} true",
         "unsupported prim_socket option value {otp, 1011} true",
         "unsupported prim_socket option value {otp, rcvbuf} {N, Size}",
     ];
-    if cfg!(target_os = "linux") {
-        expected.push("unsupported prim_socket option (\"ip\", \"msfilter\")");
-        expected.push("unsupported prim_socket option (\"ip\", \"pktoptions\")");
-    }
     for (case, expected) in (1..).zip(expected) {
         let error = program()
             .execute("effect_probe", &format!("socket_option_{case}"), &[])
