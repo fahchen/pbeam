@@ -1264,6 +1264,9 @@ impl Scheduler {
                 Timer::SocketReceive { port, key } => {
                     self.tcp_receive_timeout(port, (self.index, key));
                 }
+                Timer::SocketSend { port, key } => {
+                    self.tcp_send_timeout(port, (self.index, key));
+                }
             }
         }
     }
@@ -2712,6 +2715,13 @@ impl Scheduler {
         self.node.name_of(id).and_then(|name| self.atoms.get(&name))
     }
 
+    /// Return the registered name of the port `id`, or `None`.
+    pub(super) fn registered_port_name(&self, id: PortId) -> Option<Atom> {
+        self.node
+            .port_name_of(id)
+            .and_then(|name| self.atoms.get(&name))
+    }
+
     /// Return the atom table of the run. The table holds each name that the
     /// run created, for example each name of `erlang:list_to_atom/1`, so a
     /// host result that carries the table can name every atom of a root
@@ -3377,8 +3387,14 @@ impl Scheduler {
             reference = reference.pid_reference();
             self.node.register_alias(reference, watcher);
         }
-        let target_port = match target {
-            MonitorTarget::Port(port) => Some(port),
+        // A name of a port monitors the port (`erts_whereis_name_to_id`,
+        // bif.c:898-922).
+        let target_port = match &target {
+            MonitorTarget::Port(port) => Some(*port),
+            MonitorTarget::PortName(name) => match self.name_owner(self.atoms.name_of(name)) {
+                Some(Named::Port(port)) => Some(port),
+                _ => None,
+            },
             _ => None,
         };
         let (kind, id, item) = match target {
@@ -3565,12 +3581,14 @@ impl Scheduler {
         self.node.alias_owner(reference)
     }
 
-    /// Give the name `name` to the live process `id`, as `erlang:register/2`
-    /// does. Return the `error_info` cause and change nothing when ERTS
-    /// `erts_register_name` fails (`register.c:183-253`): `none` when `name`
-    /// is not an atom or is `undefined`, when `id` is not a pid, or when
-    /// another process has the name; `notalive` when the process is not
-    /// alive; and `registered_name` when the process has a name.
+    /// Give the name `name` to the live process or the open port `id`, as
+    /// `erlang:register/2` does. Return the `error_info` cause and change
+    /// nothing when ERTS `erts_register_name` fails (`register.c:183-253`):
+    /// `none` when `name` is not an atom or is `undefined`, when `id` is not
+    /// a pid or a port, when the port is not open (`erts_id2port`), or when
+    /// another process or port has the name; `notalive` when the process is
+    /// not alive; and `registered_name` when the process or the port has a
+    /// name.
     ///
     /// # Examples
     ///
@@ -3580,12 +3598,17 @@ impl Scheduler {
     /// assert_eq!(scheduler.register(&name, &Term::Pid(ProcessId(0))), Err("registered_name"));
     /// ```
     pub(super) fn register(&mut self, name: &Term, id: &Term) -> Result<(), &'static str> {
-        let (Term::Atom(name), Term::Pid(id)) = (name, id) else {
+        let Term::Atom(name) = name else {
             return Err("none");
         };
         if name.is_static("undefined") {
             return Err("none");
         }
+        let id = match id {
+            Term::Pid(id) => id,
+            Term::Port(port) => return self.register_port(name, *port),
+            _ => return Err("none"),
+        };
         if self.processes.get(id).is_none() && self.remote_owner(*id).is_none() {
             return Err("notalive");
         }
@@ -3602,14 +3625,35 @@ impl Scheduler {
         Ok(())
     }
 
+    /// Give the name `name` to the open port `port`, under the port lock, as
+    /// `erts_register_name` does (`register.c:193-197`, `222-253`).
+    fn register_port(&mut self, name: &Atom, port: PortId) -> Result<(), &'static str> {
+        let cell = self.node.port(port);
+        let slot = cell.as_ref().map(crate::runtime::port::lock);
+        if slot
+            .as_ref()
+            .is_none_or(|slot| slot.as_ref().is_none_or(|port| port.closing))
+        {
+            return Err("none");
+        }
+        if self.node.port_name_of(port).is_some() {
+            return Err("registered_name");
+        }
+        if !self.node.port_name_register(self.atoms.name_of(name), port) {
+            return Err("none");
+        }
+        Ok(())
+    }
+
     /// Register `name` for `id` unless another process has it. Return false
     /// and change nothing when another process has the name.
     fn name_insert(&mut self, name: &str, id: ProcessId) -> bool {
         self.node.name_register(name, id)
     }
 
-    /// Remove the process of `name`. Return the process that had it.
-    fn name_take(&mut self, name: &str) -> Option<ProcessId> {
+    /// Remove the owner of `name`. Return the process or the port that had
+    /// it.
+    fn name_take(&mut self, name: &str) -> Option<Named> {
         self.node.name_remove(name)
     }
 
@@ -3631,10 +3675,12 @@ impl Scheduler {
             return false;
         };
         let name_text = self.atoms.name_of(name).to_owned();
-        let Some(id) = self.name_take(&name_text) else {
+        let Some(owner) = self.name_take(&name_text) else {
             return false;
         };
-        if let Some(process) = self.processes.get_mut(&id) {
+        if let Named::Process(id) = owner
+            && let Some(process) = self.processes.get_mut(&id)
+        {
             process.registered_name = None;
         }
         true
@@ -3642,8 +3688,8 @@ impl Scheduler {
 
     /// Return the process that has the registered name `name`, as ERTS
     /// `erts_whereis_name_to_id` (`register.c:276-300`) finds it in the
-    /// `process_reg` table. Return `None` when no live process has the name.
-    /// PBeam registers no port, so a name never gives a port.
+    /// `process_reg` table. Return `None` when no live process has the name,
+    /// also when a port has it (see [`Scheduler::name_owner`]).
     ///
     /// # Examples
     ///
@@ -3655,6 +3701,12 @@ impl Scheduler {
     /// ```
     pub(super) fn whereis(&self, name: &str) -> Option<ProcessId> {
         self.node.name_get(name)
+    }
+
+    /// Return the process or the port that has the registered name `name`,
+    /// as `erts_whereis_name_to_id` finds it (`register.c:276-306`).
+    pub(super) fn name_owner(&self, name: &str) -> Option<Named> {
+        self.node.name_owner(name)
     }
 
     /// Send the error report of the uncaught exception that ends the
@@ -4092,7 +4144,7 @@ impl Scheduler {
                                 lock(&self.node().resources.kind::<Files>()).monitor_down(file);
                             }
                             TargetMonitor::Nif(monitor) => {
-                                crate::runtime::nif::abi::monitor_down(monitor, id);
+                                crate::runtime::nif::abi::monitor_down(monitor, id, self.node());
                             }
                             TargetMonitor::Socket(socket) => {
                                 self.socket_owner_down(id, socket);
@@ -4159,7 +4211,7 @@ mod tcp_stream;
 
 pub(super) use code::check_process_code_reply;
 use known_nodes::KnownNodes;
-use node::{Delivery, Node};
+use node::{Delivery, Named, Node};
 pub(super) use policy::PolicyEnd;
 use policy::PolicyProcess;
 use process_slots::ProcessSlots;

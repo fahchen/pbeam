@@ -26,6 +26,8 @@
  *       in an env of enif_alloc_env and the atom bare with no message env
  *       to the pid Arg, and then sends {sent, Result1, Result2,
  *       enif_thread_type()} to the caller: ok, or not_pid
+ *   12  start a thread of the library, which waits 20 ms and then returns
+ *       into the code of the library: ok
  *
  * dirty_probe:
  *    0  enif_send of {dirty, Arg} in an env of enif_alloc_env with a NULL
@@ -86,6 +88,13 @@ static void *send_from_thread(void *arg)
     enif_free_env(msg_env);
     free(to);
     return NULL;
+}
+
+/* The thread of probe 12: it runs code of the library after the call. */
+static void *wait_in_library(void *arg)
+{
+    usleep(20000);
+    return arg;
 }
 
 static ERL_NIF_TERM probe(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
@@ -157,6 +166,12 @@ static ERL_NIF_TERM probe(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
         }
         enif_self(env, &to->caller);
         pthread_create(&thread, NULL, send_from_thread, to);
+        pthread_detach(thread);
+        return enif_make_atom(env, "ok");
+    }
+    case 12: {
+        pthread_t thread;
+        pthread_create(&thread, NULL, wait_in_library, NULL);
         pthread_detach(thread);
         return enif_make_atom(env, "ok");
     }
