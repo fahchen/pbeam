@@ -742,13 +742,20 @@ null_write() ->
     {ok, Fd} = prim_file:open("/dev/null", [write]),
     [prim_file:write(Fd, <<>>), prim_file:position(Fd, 0), prim_file:close(Fd)].
 
-%% Open /dev/null in read mode, read its end, and close it with prim_file.
-%% A file with a read mode keeps a read buffer of prim_buffer, and
-%% prim_file:read/2 runs prim_file:read_nif/2 (prim_file.erl:162-204,
-%% 516-517).
+%% Open /dev/null in read mode, read its end, ask for an advice, read the
+%% host handle, and close it with prim_file. A file with a read mode keeps a
+%% read buffer of prim_buffer, and prim_file:read/2 runs
+%% prim_file:read_nif/2 (prim_file.erl:162-204, 516-517).
+%% prim_file:get_handle/1 gives the host descriptor in the native-endian
+%% bytes of a C int (unix_prim_file.c:103-113), so the probe prints its
+%% size only.
 null_read() ->
     {ok, Fd} = prim_file:open("/dev/null", [read]),
-    [prim_file:read(Fd, 1), prim_file:close(Fd)].
+    [prim_file:read(Fd, 1),
+     byte_size(prim_file:get_handle(Fd)),
+     prim_file:advise(Fd, 0, 0, sequential),
+     prim_file:advise(Fd, 0, 0, never),
+     prim_file:close(Fd)].
 
 %% Each NIF of prim_buffer, the read buffer of a file with a read mode
 %% (prim_file.erl:516-517): new/0, size/1, write/2, find_byte_index/2,
