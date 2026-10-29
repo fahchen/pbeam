@@ -4,7 +4,7 @@
 -behaviour(supervisor).
 -export([main/0, main/1, lookup/0, gethost/0, supports/0, socket/0, sockopt/0, socket_select/0, socket_io/0,
          socket_dgram/0,         socket_acceptors/0, socket_connect_invalid/0, socket_recvfrom_flags/0, socket_recvfrom_local_flags/0,
-         socket_recvfrom_errqueue/0, socket_sendv/0, socket_msg/0, socket_mmsg/0, socket_backend_tcp/0, socket_backend_udp/0, sockopt_otp/0, sockopt_select_read/0, sockopt_host/0, sockopt_raw/0, sockopt_pkt/0, start/2, stop/1, init/1]).
+         socket_recvfrom_errqueue/0, socket_sendv/0, socket_msg/0, socket_mmsg/0, socket_sctp/0, socket_sendfile/0, socket_ioctl/0, socket_ioctl_raw/0, socket_backend_tcp/0, socket_backend_udp/0, sockopt_otp/0, sockopt_select_read/0, sockopt_host/0, sockopt_raw/0, sockopt_pkt/0, start/2, stop/1, init/1]).
 
 %% `erl -noshell -boot start_clean -pa fixtures/boot -s kernel_boot_probe
 %% main -kernel logger_level warning` runs main/0 in the boot process of init after the boot script
@@ -437,6 +437,161 @@ socket_recvfrom_flags() ->
     erlang:display({socket_recvfrom_flags, Udp, Inet6, Stream, Counters}),
     init:stop().
 
+%% `-s kernel_boot_probe socket_sendfile` runs socket:sendfile/2,3,4,5 and
+%% prim_socket:sendfile/4,5 and sendfile_deferred_close/1 on an inet
+%% stream socket: a whole file, a part, an offset after the end, an
+%% offset that the host rejects, the argument errors, a file that is
+%% closed, a send that waits for the write select, and a send with a
+%% timeout. The bytes of a send that waits depend on the host buffers, so
+%% the probe shows only whether they are a positive integer.
+socket_sendfile() ->
+    Base = "/tmp/kernel_boot_probe_sendfile_" ++ os:getpid(),
+    Small = Base ++ ".small",
+    Big = Base ++ ".big",
+    Data = list_to_binary([X rem 251 || X <- lists:seq(1, 100000)]),
+    ok = file:write_file(Small, Data),
+    ok = file:write_file(Big, binary:copy(Data, 80)),
+    {ok, F} = file:open(Small, [raw, read, binary]),
+    {ok, G} = file:open(Big, [raw, read, binary]),
+    Pair = fun(Shrink) ->
+                   {ok, L} = socket:open(inet, stream, tcp),
+                   ok = socket:bind(L, #{family => inet, addr => {127, 0, 0, 1}, port => 0}),
+                   ok = socket:listen(L),
+                   {ok, Addr} = socket:sockname(L),
+                   {ok, C} = socket:open(inet, stream, tcp),
+                   [ok = socket:setopt(C, socket, sndbuf, 4096) || Shrink],
+                   ok = socket:connect(C, Addr),
+                   {ok, A} = socket:accept(L),
+                   [ok = socket:setopt(A, socket, rcvbuf, 4096) || Shrink],
+                   ok = socket:close(L),
+                   {C, A}
+           end,
+    Parent = self(),
+    {C, A} = Pair(false),
+    {'$socket', Ref} = C,
+    %% A second process reads while the sendfile runs.
+    Sent = fun(Send, N) ->
+                   spawn(fun() -> Parent ! {got, socket:recv(A, N, 5000)} end),
+                   Result = Send(),
+                   receive {got, Got} -> {Result, Got} after 6000 -> {Result, missing} end
+           end,
+    Plain = [Sent(fun() -> socket:sendfile(C, F) end, 100000) =:= {{ok, 100000}, {ok, Data}},
+             Sent(fun() -> socket:sendfile(C, F, 10, 20) end, 20) =:= {{ok, 20}, {ok, binary:part(Data, 10, 20)}},
+             Sent(fun() -> socket:sendfile(C, F, 99990, 100, infinity) end, 10)
+                 =:= {{ok, 10}, {ok, binary:part(Data, 99990, 10)}},
+             socket:sendfile(C, F, 200000, 0), socket:sendfile(C, F, -1, 0)],
+    Raised = fun(Fun) -> try Fun() catch Class:Reason -> {Class, Reason} end end,
+    FRef = prim_file:internal_get_nif_resource(F),
+    Args = [Raised(fun() -> socket:sendfile(C, not_a_file) end), Raised(fun() -> socket:sendfile(C, F, -1, -1) end),
+            Raised(fun() -> prim_socket:sendfile(Ref, 0, 0, not_a_ref) end),
+            Raised(fun() -> prim_socket:sendfile(Ref, foo, 0, make_ref()) end),
+            Raised(fun() -> prim_socket:sendfile(Ref, 0, foo, make_ref()) end),
+            Raised(fun() -> prim_socket:sendfile(Ref, 1 bsl 63, foo, make_ref()) end),
+            Raised(fun() -> prim_socket:sendfile(Ref, 1 bsl 63, 0, make_ref()) end),
+            Raised(fun() -> prim_socket:sendfile(Ref, 0, -1, make_ref()) end),
+            Raised(fun() -> prim_socket:sendfile(Ref, 0, 1 bsl 64, make_ref()) end),
+            Raised(fun() -> prim_socket:sendfile(Ref, FRef, 0, 0, not_a_ref) end),
+            Raised(fun() -> prim_socket:sendfile(Ref, not_a_ref, 0, 0, make_ref()) end),
+            Raised(fun() -> prim_socket:sendfile(make_ref(), FRef, 0, 0, make_ref()) end),
+            Raised(fun() -> prim_socket:sendfile(Ref, make_ref(), 0, 0, make_ref()) end),
+            Raised(fun() -> prim_socket:sendfile(Ref, Ref, 0, 0, make_ref()) end),
+            Raised(fun() -> prim_socket:sendfile(Ref, 0, 0, make_ref()) end),
+            Raised(fun() -> prim_socket:sendfile(Ref, 0, (1 bsl 64) - 1, make_ref()) end),
+            Raised(fun() -> prim_socket:sendfile_deferred_close(Ref) end),
+            Raised(fun() -> prim_socket:sendfile_deferred_close(make_ref()) end)],
+    {ok, Closed} = file:open(Small, [raw, read, binary]),
+    ok = file:close(Closed),
+    Gone = socket:sendfile(C, Closed),
+    %% The calls, the chunks, and the waits depend on the host buffers.
+    Keys = [sendfile_byte, sendfile_fails, sendfile_max, sendfile_tries, write_byte, write_pkg],
+    Counters = maps:with(Keys, maps:get(counters, socket:info(C))),
+    {C2, A2} = Pair(true),
+    {'$socket', Ref2} = C2,
+    Size = byte_size(Data) * 80,
+    Positive = fun(N) -> is_integer(N) andalso N > 0 end,
+    Waits = case socket:sendfile(C2, G, 0, 0, nowait) of
+                {select, {{select_info, sendfile, Handle} = Info, Bytes2}} ->
+                    [Positive(Bytes2), socket:sendfile(C2, F, 0, 1, nowait),
+                     case Raised(fun() -> prim_socket:sendfile(Ref2, Bytes2, 0, make_ref()) end) of
+                         {select, N2} when is_integer(N2) -> select;
+                         Cont -> Cont
+                     end,
+                     prim_socket:sendfile_deferred_close(Ref2),
+                     Raised(fun() -> prim_socket:sendfile(Ref2, Bytes2, 0, Handle) end),
+                     case socket:cancel(C2, Info) of
+                         {error, {invalid, {select_info, Tag, _}}} -> {invalid, Tag};
+                         Cancel -> Cancel
+                     end, prim_socket:sendfile_deferred_close(Ref2)];
+                Other -> Other
+            end,
+    _ = socket:close(C2),
+    _ = socket:close(A2),
+    {C3, A3} = Pair(true),
+    Reader = spawn(fun() -> Parent ! {read, read_all(A3, 0, Size)} end),
+    Whole = socket:sendfile(C3, G),
+    Read = receive {read, N} -> N after 10000 -> missing end,
+    Info3 = maps:get(counters, socket:info(C3)),
+    Whole3 = [Whole, Read, Positive(maps:get(sendfile_waits, Info3)), maps:get(sendfile_tries, Info3),
+              maps:get(sendfile_byte, Info3), maps:get(sendfile_max, Info3), maps:get(sendfile_fails, Info3)],
+    exit(Reader, kill),
+    {C4, A4} = Pair(true),
+    Timeout = case socket:sendfile(C4, G, 0, 0, 200) of
+                  {error, {timeout, Bytes}} -> [Positive(Bytes), socket:sendfile(C4, F, 0, 1, 0)];
+                  Other4 -> Other4
+              end,
+    [_ = socket:close(S) || S <- [C, A, C3, A3, C4, A4]],
+    Shut = [socket:sendfile(C, F), prim_socket:sendfile(Ref, 0, 0, make_ref())],
+    ok = file:close(F),
+    ok = file:close(G),
+    ok = file:delete(Small),
+    ok = file:delete(Big),
+    erlang:display({socket_sendfile, Plain, Args, Gone, lists:sort(maps:to_list(Counters)), Waits, Whole3, Timeout, Shut}),
+    init:stop().
+
+read_all(S, Got, Size) when Got < Size ->
+    case socket:recv(S, 0, 5000) of
+        {ok, B} -> read_all(S, Got + byte_size(B), Size);
+        Other -> {Got, Other}
+    end;
+read_all(_, Got, _) -> Got.
+
+%% `-s kernel_boot_probe socket_ioctl` runs prim_socket:ioctl/2,3,4 and
+%% socket:ioctl/2,3 with the argument errors, request numbers outside the
+%% switch of their argument count, and a closed socket.
+socket_ioctl() ->
+    {ok, S} = socket:open(inet, dgram, udp),
+    {'$socket', Ref} = S,
+    Raised = fun(Fun) -> try Fun() catch Class:Reason -> {Class, Reason} end end,
+    #{gifconf := Gifconf, sifflags := Sifflags} = persistent_term:get({prim_socket, ioctl_requests}),
+    Calls = [Raised(fun() -> prim_socket:ioctl(make_ref(), 0) end), Raised(fun() -> prim_socket:ioctl(Ref, -1) end),
+             Raised(fun() -> prim_socket:ioctl(Ref, 1 bsl 64) end), prim_socket:ioctl(Ref, 0),
+             prim_socket:ioctl(Ref, (1 bsl 64) - 1), prim_socket:ioctl(Ref, 0, x), prim_socket:ioctl(Ref, 0, x, y),
+             prim_socket:ioctl(Ref, Gifconf, x), prim_socket:ioctl(Ref, Sifflags), prim_socket:ioctl(Ref, foo),
+             Raised(fun() -> socket:ioctl(S, foo) end), socket:ioctl(S, tcp_info)],
+    ok = socket:close(S),
+    Closed = [prim_socket:ioctl(Ref, 0), prim_socket:ioctl(Ref, Gifconf), Raised(fun() -> prim_socket:ioctl(Ref, foo) end)],
+    erlang:display({socket_ioctl, Calls, Closed}),
+    init:stop().
+
+%% `-s kernel_boot_probe socket_ioctl_raw` runs socket:ioctl(S, gifconf),
+%% which ERTS runs with ioctl(2).
+socket_ioctl_raw() ->
+    {ok, S} = socket:open(inet, dgram, udp),
+    erlang:display({socket_ioctl_raw, socket:ioctl(S, gifconf)}),
+    init:stop().
+
+%% `-s kernel_boot_probe socket_sctp` runs socket:peeloff/2,
+%% prim_socket:socknames/2, and prim_socket:peernames/2 on a host whose
+%% pinned ERTS build has no SCTP.
+socket_sctp() ->
+    {ok, S} = socket:open(inet, stream, tcp),
+    {'$socket', Ref} = S,
+    Raised = fun(F) -> try F() catch Class:Reason -> {Class, Reason} end end,
+    erlang:display({socket_sctp, [Raised(fun() -> socket:peeloff(S, 1) end),
+                                  Raised(fun() -> prim_socket:peeloff(Ref, foo) end),
+                                  Raised(fun() -> prim_socket:socknames(Ref, 0) end),
+                                  Raised(fun() -> prim_socket:peernames(make_ref(), 0) end)]}),
+    init:stop().
 %% `-s kernel_boot_probe socket_msg` runs socket:sendmsg/2,3,4 and
 %% socket:recvmsg/1,2,3,4,5 on inet and inet6 datagram sockets and an inet stream socket, with the
 %% control messages of the options recvtos, recvttl, pktinfo, timestamp,
