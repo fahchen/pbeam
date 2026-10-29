@@ -1,6 +1,6 @@
 -module(port_probe).
 -export([exit_status/0, output/0, command/0, close/0, owner_exit/0, epipe/0, errors/0,
-         nul_name/0, spawn/0, options/0, directions/0, cd_status/0, sigchld_ignored/0, packet/0, packet_errors/0, eof/0, lines/0, monitor/0, fd/3, fd_steal/2, unsupported/1, terminal/0, high_fd/0, fd_closed/0, costs/1, measure/2, signals/0, busy/0]).
+         nul_name/0, spawn/0, options/0, directions/0, cd_status/0, sigchld_ignored/0, packet/0, packet_errors/0, eof/0, lines/0, monitor/0, fd/3, fd_steal/2, unsupported/1, terminal/0, high_fd/0, fd_closed/0, costs/1, measure/2, signals/0, busy/0, names/0]).
 
 %% Each result replaces a port with the atom port, because the port numbers
 %% of ERTS and PBeam differ.
@@ -584,9 +584,7 @@ unsupported(empty_line) ->
 unsupported(tcp_options) ->
     erlang:port_command(open_port({spawn_driver, "tcp_inet"}, [binary]), <<"x">>, [nosuspend]);
 unsupported(fd_list) ->
-    open_port({fd, 200, 200}, []);
-unsupported(register) ->
-    register(port_probe_cat, cat()).
+    open_port({fd, 200, 200}, []).
 
 %% A monitor of a port: the DOWN message at port_close/1, noproc for a
 %% port that closed, the exit reason of the owner, and no DOWN message
@@ -679,6 +677,50 @@ lists_seq(N) -> [N | lists_seq(N - 1)].
 lists_all([true | T]) -> lists_all(T);
 lists_all([]) -> true;
 lists_all(_) -> false.
+
+%% A registered port (register.c:175-253): its name in whereis/1,
+%% registered/0, port_info/1,2, each send form, and the port BIFs, and the
+%% loss of the name at unregister/1 and at the close (io.c:3904-3905).
+names() ->
+    process_flag(trap_exit, true),
+    E = fun(F) -> try F() catch C:R:S -> {C, R, error_cause(S)} end end,
+    P = cat(),
+    Q = cat(),
+    Before = [erlang:port_info(P, registered_name), lists:keyfind(registered_name, 1, erlang:port_info(P))],
+    Reg = register(pp, P),
+    Named = [whereis(pp) =:= P, lists:member(pp, registered()), erlang:port_info(P, registered_name),
+             hd(erlang:port_info(P)), E(fun() -> register(pp2, P) end), E(fun() -> register(pp, Q) end),
+             E(fun() -> register(pp, self()) end)],
+    pp ! {self(), {command, <<"a">>}},
+    A = data(P),
+    erlang:send(pp, {self(), {command, <<"b">>}}),
+    B = data(P),
+    {pp, node()} ! {self(), {command, <<"c">>}},
+    C = data(P),
+    true = port_command(pp, <<"d">>),
+    D = data(P),
+    Info = [erlang:port_info(pp, connected) =:= {connected, self()}, erlang:port_info(pp, registered_name)],
+    R = monitor(port, pp),
+    U1 = unregister(pp),
+    U2 = [whereis(pp), erlang:port_info(P, registered_name), E(fun() -> port_command(pp, <<"e">>) end)],
+    Unreg = [U1, U2, register(pp, P)],
+    true = port_close(pp),
+    Down = receive {'DOWN', R, port, Item, Reason} -> {Item, Reason} after 1000 -> missing end,
+    Closed = [whereis(pp), lists:member(pp, registered()), E(fun() -> register(pp, P) end),
+              E(fun() -> port_close(pp) end)],
+    true = register(qq, Q),
+    exit(Q, kill),
+    Killed = receive {'EXIT', Q, KillReason} -> KillReason after 1000 -> missing end,
+    [Before, Reg, Named, [A, B, C, D], Info, Unreg, Down, Closed, Killed, whereis(qq), flush()].
+
+error_cause([{_, _, _, Info} | _]) ->
+    case lists:keyfind(error_info, 1, Info) of
+        {error_info, #{cause := Cause}} -> Cause;
+        _ -> none
+    end.
+
+data(P) ->
+    receive {P, {data, Data}} -> Data after 1000 -> missing end.
 
 down(R, P) ->
     receive {'DOWN', R, port, P, Reason} -> Reason after 1000 -> missing end.

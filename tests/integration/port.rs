@@ -397,6 +397,18 @@ fn queues_the_output_of_a_busy_port_as_pinned_erts() {
 }
 
 #[test]
+fn registers_a_port_name_as_pinned_erts() {
+    // A port name works in whereis/1, registered/0, port_info/1,2, each
+    // send form, the port BIFs, and monitor/2, and the port loses it at
+    // unregister/1 and at the close (register.c:175-253, io.c:3904-3905,
+    // erl_bif_port.c:132-142).
+    assert_runs(
+        "names()",
+        "[[[],false],true,[true,true,{registered_name,pp},{registered_name,pp},{error,badarg,registered_name},{error,badarg,none},{error,badarg,none}],[<<97>>,<<98>>,<<99>>,<<100>>],[true,{registered_name,pp}],[true,[undefined,[],{error,badarg,none}],true],{{pp,nonode@nohost},normal},[undefined,false,{error,badarg,none},{error,badarg,none}],killed,undefined,[{'EXIT',port,normal}]]",
+    );
+}
+
+#[test]
 fn opens_a_port_on_an_fd_that_is_not_open_as_pinned_erts() {
     // `fd_start` checks only `sys_max_files()` (sys_drivers.c:822-824): the
     // port opens, and its write fails with `ebadf` (sys_drivers.c:1180-1184).
@@ -426,7 +438,6 @@ fn stops_the_run_for_each_port_part_that_is_not_implemented() {
             "fd_list",
             "unsupported open_port/2 without the binary option",
         ),
-        ("register", "unsupported erlang:register/2 with a port"),
     ] {
         let argument = Term::Atom(program.atom(case).unwrap());
         let error = program

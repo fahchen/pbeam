@@ -402,6 +402,9 @@ impl Scheduler {
             };
         let links = std::mem::take(&mut port.links);
         let monitors = std::mem::take(&mut port.monitors);
+        // The port loses its name under its lock, before its exit signals
+        // (`erts_deliver_port_exit`, io.c:3904-3905).
+        self.node.remove_port_name(id);
         port.closing |= queued;
         let serving = port.scheduler;
         let port = slot

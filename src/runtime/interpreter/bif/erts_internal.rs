@@ -935,8 +935,9 @@ pub(super) type Slot<'a> = Option<port::PortGuard<'a>>;
 
 /// Return the port table entry of `port`, as `sig_lookup_port` and
 /// `data_lookup_port` find the port (erl_bif_port.c:133-160), or `None`
-/// for a term that is not a port in the table. An atom names no port,
-/// because PBeam registers no port. The caller locks the port once with
+/// for a term that is not a port in the table. An atom gives the port
+/// that has it as its registered name (`lookup_port`, erl_bif_port.c:132-142).
+/// The caller locks the port once with
 /// [`lock_found`] and checks its state under that lock, as ERTS checks the
 /// state of a port under the port lock (`erts_port_lookup`, erl_port.h).
 ///
@@ -948,10 +949,15 @@ pub(super) type Slot<'a> = Option<port::PortGuard<'a>>;
 /// assert!(open(&mut slot).is_some());
 /// ```
 pub(super) fn found_port(scheduler: &mut Scheduler, port: &Term) -> Result<Found, BeamError> {
-    let Term::Port(id) = port else {
-        return Ok(None);
+    let id = match port {
+        Term::Port(id) => *id,
+        Term::Atom(name) => match scheduler.name_owner(scheduler.atoms.name_of(name)) {
+            Some(Named::Port(id)) => id,
+            _ => return Ok(None),
+        },
+        _ => return Ok(None),
     };
-    Ok(scheduler.node.port(*id).map(|cell| (*id, cell)))
+    Ok(scheduler.node.port(id).map(|cell| (id, cell)))
 }
 
 /// Lock the port of `found`.
@@ -1578,8 +1584,8 @@ pub(super) fn port_info(context: &mut BifContext<'_>, port: &Term) -> Result<Bif
     let scheduler = &mut *context.scheduler;
     let found = found_port(scheduler, port)?;
     let mut slot = lock_found(&found);
-    let info = match (port, located(&mut slot)) {
-        (&Term::Port(id), Some(port_state)) => {
+    let info = match (found.as_ref(), located(&mut slot)) {
+        (Some(&(id, _)), Some(port_state)) => {
             if let Some(denied) = port_denial(scheduler, &port_state.name, Operation::Inspect)? {
                 return Ok(denied);
             }
@@ -1587,14 +1593,16 @@ pub(super) fn port_info(context: &mut BifContext<'_>, port: &Term) -> Result<Bif
                 .current_process_mut()
                 .bump_reductions(PORT_REDUCTIONS);
             let port = &*port_state;
-            Term::list_from(
-                PORT_INFO_ITEMS
-                    .iter()
-                    .map(|&name| port_item(id, port, name))
-                    .collect::<Result<Vec<_>, _>>()?,
-            )
+            // `registered_name` comes first, and only for a port with a
+            // name (io.c:4796-4821).
+            let registered = scheduler.registered_port_name(id).map(registered_item);
+            let items = PORT_INFO_ITEMS
+                .iter()
+                .map(|&name| port_item(id, port, name))
+                .collect::<Result<Vec<_>, _>>()?;
+            Term::list_from(registered.into_iter().chain(items).collect::<Vec<_>>())
         }
-        (Term::Port(_) | Term::Atom(_), _) => Term::static_atom("undefined"),
+        (_, _) if matches!(port, Term::Port(_) | Term::Atom(_)) => Term::static_atom("undefined"),
         _ => Term::static_atom("badarg"),
     };
     drop(slot);
@@ -1615,14 +1623,19 @@ const PORT_INFO_ITEMS: [&str; 7] = [
 
 /// The items of `port_info/2` that PBeam does not give yet
 /// (`erts_bld_port_info`, `erl_bif_info.c:3654-3830`).
-const OTHER_PORT_ITEMS: [&str; 6] = [
-    "registered_name",
+const OTHER_PORT_ITEMS: [&str; 5] = [
     "memory",
     "monitors",
     "monitored_by",
     "queue_size",
     "locking",
 ];
+
+/// Return the item `{registered_name, Name}` of a port with the registered
+/// name `name` (erl_bif_info.c:3810-3818).
+fn registered_item(name: Atom) -> Term {
+    Term::tuple(vec![Term::static_atom("registered_name"), Term::Atom(name)])
+}
 
 /// Return the item `{Name, Value}` of the open port `port` with the number
 /// `id`, as `erts_bld_port_info` builds it (`erl_bif_info.c:3654-3830`),
@@ -1703,8 +1716,8 @@ pub(super) fn port_info_item(
     let scheduler = &mut *context.scheduler;
     let found = found_port(scheduler, port)?;
     let mut slot = lock_found(&found);
-    let info = match (port, located(&mut slot)) {
-        (&Term::Port(id), Some(port_state)) => {
+    let info = match (found.as_ref(), located(&mut slot)) {
+        (Some(&(id, _)), Some(port_state)) => {
             let name = match item {
                 Term::Atom(name) => scheduler.atoms.name_of(name).to_owned(),
                 _ => String::new(),
@@ -1712,7 +1725,7 @@ pub(super) fn port_info_item(
             let name = name.as_str();
             if !PORT_INFO_ITEMS.contains(&name)
                 && !OTHER_PORT_ITEMS.contains(&name)
-                && name != "parallelism"
+                && !matches!(name, "parallelism" | "registered_name")
             {
                 return Ok(signals_return(scheduler, port, Term::static_atom("badarg")));
             }
@@ -1746,9 +1759,16 @@ pub(super) fn port_info_item(
             scheduler
                 .current_process_mut()
                 .bump_reductions(PORT_REDUCTIONS);
-            port_item(id, port_state, name)?
+            if name == "registered_name" {
+                // A port without a name gives `[]` (erl_bif_info.c:3810-3823).
+                scheduler
+                    .registered_port_name(id)
+                    .map_or(Term::Nil, registered_item)
+            } else {
+                port_item(id, port_state, name)?
+            }
         }
-        (Term::Port(_) | Term::Atom(_), _) => Term::static_atom("undefined"),
+        (_, _) if matches!(port, Term::Port(_) | Term::Atom(_)) => Term::static_atom("undefined"),
         _ => Term::static_atom("badtype"),
     };
     drop(slot);
