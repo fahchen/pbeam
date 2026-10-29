@@ -15,7 +15,7 @@
 
 use std::cell::RefCell;
 use std::ffi::{c_int, c_void};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use super::env::Env;
 use super::layout::{ErlNifMonitor, ErlNifPid, NifTerm};
@@ -28,6 +28,41 @@ thread_local! {
     /// The context of the NIF call or of the load callback that runs on the
     /// thread, or `None`.
     static CONTEXT: RefCell<Option<Context>> = const { RefCell::new(None) };
+}
+
+/// The run that a thread of a NIF library finds: the atom table and the
+/// node of the run that loaded the library. ERTS keeps its atom table and
+/// its process registry for the whole life of the emulator
+/// (`erl_atom.c`, `erl_process.c`), so `enif_alloc_env`
+/// (`erl_nif.c:669-675`) and `enif_send` (`erl_nif.c:2296-2338`) run from
+/// a thread that the emulator does not manage. PBeam keeps the run of the
+/// last NIF library load here, and never clears it, as ERTS never clears
+/// its tables.
+static RUN: RwLock<Option<RunContext>> = RwLock::new(None);
+
+/// The run of the loaded NIF libraries.
+#[derive(Debug)]
+struct RunContext {
+    atoms: Arc<AtomTable>,
+    node: Arc<Node>,
+}
+
+/// Record the run of `atoms` and `node` as the run that a thread of a NIF
+/// library finds.
+pub(super) fn enter_run(atoms: &Arc<AtomTable>, node: &Arc<Node>) {
+    *RUN.write().expect("the run lock is not poisoned") = Some(RunContext {
+        atoms: Arc::clone(atoms),
+        node: Arc::clone(node),
+    });
+}
+
+/// Return the result of `read` with the run of the loaded NIF libraries,
+/// or `None` when no library has loaded.
+fn with_run<T>(read: impl FnOnce(&RunContext) -> T) -> Option<T> {
+    RUN.read()
+        .expect("the run lock is not poisoned")
+        .as_ref()
+        .map(read)
 }
 
 /// The context of one NIF call or load callback.
@@ -118,11 +153,14 @@ fn alive(pid: ProcessId) -> bool {
 /// `ErlNifEnv* enif_alloc_env(void)`: return a new process-independent env
 /// (`erl_nif.c:669-675`). Its terms stay valid until `enif_free_env`.
 ///
-/// On a thread that runs no NIF call, PBeam has no atom table for the env
-/// and returns NULL.
+/// A thread that runs no NIF call finds the run of the loaded libraries
+/// through [`RUN`], as ERTS finds its global tables from each thread. A
+/// thread of a run with no loaded library has no atom table for the env
+/// and gets NULL.
 #[unsafe(no_mangle)]
 pub extern "C" fn enif_alloc_env() -> *mut Env {
     with_context(|context| Box::into_raw(Box::new(Env::new(&context.atoms, None, &[]))))
+        .or_else(|| with_run(|run| Box::into_raw(Box::new(Env::new(&run.atoms, None, &[])))))
         .unwrap_or(std::ptr::null_mut())
 }
 
@@ -228,24 +266,39 @@ pub unsafe extern "C" fn enif_send(
     if !alive(target) {
         return 0;
     }
-    with_context(|context| {
-        let source = if msg_env.is_null() {
-            std::ptr::with_exposed_provenance_mut(context.env)
-        } else {
-            msg_env
-        };
-        // SAFETY: `source` is an env of `enif_alloc_env` or the env of the
-        // running call, which is alive until the call returns.
-        let Some(term) = unsafe { super::env::env(source) }.get(msg) else {
+    // The message term of a call comes from the env of the call when the
+    // NIF gives no message env, as ERTS reads it
+    // (`erl_nif.c:1100-1106`). A thread of a library gives the env of
+    // `enif_alloc_env` and no env of a call.
+    let in_call = with_context(|context| context.env);
+    let source = if !msg_env.is_null() {
+        msg_env
+    } else if let Some(env) = in_call {
+        std::ptr::with_exposed_provenance_mut(env)
+    } else {
+        return 0;
+    };
+    // SAFETY: `source` is an env of `enif_alloc_env` or the env of the
+    // running call, which is alive until the call returns.
+    let Some(term) = (unsafe { super::env::env(source) }).get(msg) else {
+        with_context(|context| {
             context.unsupported.get_or_insert_with(|| {
                 format!("enif_send sent the term {msg:#x}, which its env does not have")
             });
-            return 0;
-        };
-        context.sends.push((target, term));
-        1
-    })
-    .unwrap_or(0)
+        });
+        return 0;
+    };
+    // A call queues its messages for the caller's scheduler to send when
+    // the call returns. A thread of a library, which runs no call, sends
+    // through the node at once, as ERTS sends through the global process
+    // registry from each thread (`erl_nif.c:2296-2338`). The sender of the
+    // message is `None`, as a thread of a library is no process.
+    match with_context(|context| context.sends.push((target, term.clone()))) {
+        Some(()) => 1,
+        None => {
+            with_run(|run| run.node.send_message(0, None, term, target, None)).map_or(0, |()| 1)
+        }
+    }
 }
 
 /// `int enif_monitor_process(ErlNifEnv*, void*, const ErlNifPid*,
