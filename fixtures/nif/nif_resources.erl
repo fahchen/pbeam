@@ -38,7 +38,9 @@ results(Path) ->
     Lifetimes = lifetimes(),
     %% A and B stay live until here, so no collection before drops them.
     Live = [probe(5, A), probe(6, B)],
-    [Load, Outside, Types, Gets, Same, Text, Hashes, Maps, External, Ets, Lifetimes, Live].
+    Monitors = monitors(),
+    [Load, Outside, Types, Gets, Same, Text, Hashes, Maps, External, Ets, Lifetimes, Live,
+     Monitors].
 
 %% Load the library `Path` and return each case whose result is not the
 %% result of the pinned ERTS, as {Index, Result, Expected}.
@@ -76,6 +78,20 @@ lifetimes() ->
 
 %% Collect the garbage, wait for the scheduled destructors, and return
 %% the log of the destructor calls.
+%% enif_monitor_process of a live process gives 0, and of a process that
+%% is not alive 1. PBeam runs no down callback at the exit yet (row "NIF
+%% shared libraries" of docs/erts-differences.md), so the probe does not
+%% read the log of the down callback.
+monitors() ->
+    {Live, Reference} = spawn_monitor(fun() -> receive stop -> ok end end),
+    {LiveResult, Object} = probe(13, Live),
+    {Dead, DeadReference} = spawn_monitor(fun() -> ok end),
+    receive {'DOWN', DeadReference, process, _, _} -> ok end,
+    {DeadResult, _} = probe(13, Dead),
+    Live ! stop,
+    receive {'DOWN', Reference, process, _, _} -> ok end,
+    [LiveResult, DeadResult, is_reference(Object)].
+
 log() ->
     erlang:garbage_collect(),
     receive after 50 -> ok end,
@@ -102,7 +118,8 @@ expected() ->
      [true, false],
      [true, true],
      [[], ok, [1011], [10], [20], [30]],
-     [1, 2]].
+     [1, 2],
+     [0, 1, true]].
 
 probe(_Kind, _Arg) ->
     erlang:nif_error(not_loaded).
