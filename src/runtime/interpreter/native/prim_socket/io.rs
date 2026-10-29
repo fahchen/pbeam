@@ -478,9 +478,7 @@ fn read_entry(
 }
 
 /// Return the buffer size of a read of `size` bytes from `state`: `rBufSz`
-/// of the option `{otp, rcvbuf}` for 0 (`unix_socket_syncio.c:3900`). The
-/// buffer count `rNum` stays 0: PBeam does not set it
-/// (`prim_socket_nif.c:17061-17064`).
+/// of the option `{otp, rcvbuf}` for 0 (`unix_socket_syncio.c:3900`).
 fn buffer_size(state: &SocketState, size: u64) -> usize {
     if size == 0 {
         state.options.recv_buffer
@@ -497,6 +495,8 @@ fn buffer_size(state: &SocketState, size: u64) -> usize {
 /// `{invalid, {integer_range, Value}}` for a `Length` outside the `uint64`
 /// range or `Flags` outside the `int` range; `{error, closed}`;
 /// `{error, {invalid, state}}` with a current acceptor; `{ok, Data}`;
+/// `{more, Data}` while the buffers of `{otp, rcvbuf}` `{N, Size}` come;
+/// `{select_read, Data}` with `{otp, select_read}` and a reference;
 /// `{error, closed}` at the end of a stream; `select` or `{select, Data}`
 /// with the read select, or `timeout` or `{timeout, Data}` for the `Ref`
 /// `zero`, when fewer bytes than `Length` came; and `{error, Errno}`.
@@ -546,22 +546,42 @@ pub(super) fn recv(
         nix::sys::socket::MsgFlags::from_bits_retain(flags),
     );
     let read = match received.map_err(io::Error::from) {
-        Ok(0) if stream => return Ok(end_of_stream(state)),
-        Ok(read) => read,
-        Err(failure) => return recv_fail(scheduler, state, &failure, zero, key, caller, reference),
+        Ok(read) if read > 0 || !stream => read,
+        // Each other result ends the buffers of `rNum`
+        // (`recv_check_fail`, unix_socket_syncio.c:10153).
+        Ok(_) => {
+            state.recv_count_done = 0;
+            return Ok(end_of_stream(state));
+        }
+        Err(failure) => {
+            state.recv_count_done = 0;
+            return recv_fail(scheduler, state, &failure, zero, key, caller, reference);
+        }
     };
     buffer.truncate(read);
     let length = read as u64;
-    let counters = &mut state.counters;
-    counters.read_byte += length;
-    counters.read_pkg_max_count += length;
+    state.counters.read_byte += length;
+    state.counters.read_pkg_max_count += length;
     if read == buffer_size && size == 0 && stream {
-        // `recv_check_full_maybe_done` counts the bytes once, and
+        // `recv_check_full_maybe_done` counts the bytes once, gives
+        // `{more, Bin}` until `rNum` buffers came, and else
         // `recv_check_full_done` counts them again
         // (`unix_socket_syncio.c:10050-10137`).
-        counters.read_byte += length;
-        counters.read_pkg_max_count += length;
+        state.recv_count_done += 1;
+        if state.recv_count_done < state.options.recv_count {
+            let mut reader = state.reader.take();
+            make_current(scheduler, &mut reader, caller, reference, key);
+            state.reader = reader;
+            return Ok(BifResult::Value(Term::tuple(vec![
+                Term::static_atom("more"),
+                Term::binary(buffer),
+            ])));
+        }
+        state.counters.read_byte += length;
+        state.counters.read_pkg_max_count += length;
     }
+    state.recv_count_done = 0;
+    let counters = &mut state.counters;
     counters.read_pkg_max = counters.read_pkg_max.max(counters.read_pkg_max_count);
     counters.read_pkg_max_count = 0;
     let data = Term::binary(buffer);
@@ -579,6 +599,13 @@ pub(super) fn recv(
         ])));
     }
     state.counters.read_pkg += 1;
+    // With `selectRead`, a receive with a reference gives
+    // `{select_read, Bin}` and starts the next read select
+    // (`unix_socket_syncio.c:10122-10125`, `10397-10400`).
+    if state.select_read && !zero {
+        let data = Term::tuple(vec![atom(scheduler, "select_read")?, data]);
+        return Ok(recv_select(scheduler, state, key, caller, reference, data));
+    }
     state.reader = None;
     Ok(BifResult::Value(Term::tuple(vec![
         Term::static_atom("ok"),
@@ -592,9 +619,8 @@ pub(super) fn recv(
 /// checks of [`recv`]; `{ok, {SockAddr, Data}}` with one message, which
 /// the buffer of `Length` bytes truncates; `{error, closed}` at the end of
 /// a stream; `select` with the read select, or `timeout` for the `Ref`
-/// `zero`, after `EAGAIN`; and `{error, Errno}`. The option `select_read`
-/// that gives `{select_read, ...}` is not supported, so it keeps its
-/// default `false` (`prim_socket_nif.c:17070`).
+/// `zero`, after `EAGAIN`; `{select_read, {SockAddr, Data}}` with the
+/// option `select_read` and a reference; and `{error, Errno}`.
 ///
 /// `Flags` other than 0 go to `recvmsg(2)` (see [`recv_flagged`]).
 ///
@@ -645,6 +671,9 @@ pub(super) fn recvfrom(
         recv_flagged(&state, &mut buffer, flags)
     };
     let stream = state.kind == libc::SOCK_STREAM;
+    // `essio_recvfrom` ends the buffers of `rNum` at each result
+    // (`unix_socket_syncio.c:3948`, `10153`).
+    state.recv_count_done = 0;
     let (read, from) = match received.map_err(io::Error::from) {
         Ok((0, _)) if stream => return Ok(end_of_stream(state)),
         Ok(received) => received,
@@ -656,12 +685,21 @@ pub(super) fn recvfrom(
     counters.read_pkg += 1;
     counters.read_byte += length;
     counters.read_pkg_max = counters.read_pkg_max.max(length);
+    let from = source_term(scheduler, from.as_ref())?;
+    let result = Term::tuple(vec![from, Term::binary(buffer)]);
+    // With `selectRead`, `{select_read, {From, Bin}}` and the next read
+    // select (`unix_socket_syncio.c:3967-3970`).
+    if state.select_read && !zero {
+        let result = Term::tuple(vec![atom(scheduler, "select_read")?, result]);
+        return Ok(recv_select(
+            scheduler, state, key, caller, reference, result,
+        ));
+    }
     state.reader = None;
     drop(state);
-    let from = source_term(scheduler, from.as_ref())?;
     Ok(BifResult::Value(Term::tuple(vec![
         Term::static_atom("ok"),
-        Term::tuple(vec![from, Term::binary(buffer)]),
+        result,
     ])))
 }
 
