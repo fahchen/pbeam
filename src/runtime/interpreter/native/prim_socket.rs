@@ -193,7 +193,19 @@ pub(super) const BINDINGS: &[Binding] = &[
         name: "nif_recvmmsg",
         arity: 6,
         job: Job::Normal,
-        run: |scheduler, _| io::recvmmsg(scheduler),
+        run: |scheduler, arguments| {
+            io::recvmmsg(
+                scheduler,
+                &arguments[0],
+                [
+                    &arguments[1],
+                    &arguments[2],
+                    &arguments[3],
+                    &arguments[4],
+                    &arguments[5],
+                ],
+            )
+        },
     },
     Binding {
         name: "nif_recvmsg",
@@ -264,7 +276,15 @@ pub(super) const BINDINGS: &[Binding] = &[
         name: "nif_sendmmsg",
         arity: 4,
         job: Job::Normal,
-        run: |scheduler, _| io::sendmmsg(scheduler),
+        run: |scheduler, arguments| {
+            io::sendmmsg(
+                scheduler,
+                &arguments[0],
+                &arguments[1],
+                &arguments[2],
+                &arguments[3],
+            )
+        },
     },
     Binding {
         name: "nif_sendmsg",
