@@ -24,7 +24,7 @@ mod resource;
 pub(crate) mod thread;
 mod unsupported;
 
-pub(crate) use resource::{Resource, monitor_down};
+pub(crate) use resource::{Resource, find as find_resource, monitor_down};
 
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 
@@ -218,7 +218,13 @@ impl Library {
         process::enter_run(caller.atoms, caller.node);
         caller.node.load_nif_library();
         self.load.map_or(0, |load| {
-            let mut env = Env::load(caller.atoms, caller.process, info, &self.handle);
+            let mut env = Env::load(
+                caller.atoms,
+                caller.process,
+                info,
+                &self.handle,
+                caller.node,
+            );
             // PBeam has no `enif_priv_data` yet, so no call reads the
             // private data of the callback.
             let mut private: *mut c_void = std::ptr::null_mut();
