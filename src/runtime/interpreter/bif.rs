@@ -1070,7 +1070,7 @@ impl BeamProgram {
                 chunk: to_usize(*chunk),
                 matches: matches.clone(),
                 got: to_usize(*got),
-                writes: to_u64(*writes),
+                writes: (*writes).cast_unsigned(),
                 resumed: true,
             };
             let mut context = BifContext { scheduler };
