@@ -28,15 +28,29 @@ fn run(command: &mut Command) -> (Option<i32>, String, String) {
     )
 }
 
-/// Copy `examples/plug_hello` into `directory` and return the copy. The
-/// copy of `mix.exs` names the PBeam source of the test run and the
+/// Copy the sources and the dependencies of `examples/plug_hello` into
+/// `directory` and return the copy. The copy leaves out `_build`, which
+/// other tests write at the same time, so the copy compiles its own build.
+/// The copy of `mix.exs` names the PBeam source of the test run and the
 /// private release directory `directory/release`, so that the task writes
 /// no file of the repository build that other tests read.
 fn copied_example(directory: &Path) -> PathBuf {
     let example = directory.join("plug_hello");
+    fs::create_dir_all(&example).unwrap();
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/plug_hello");
     let status = Command::new("cp")
         .arg("-a")
-        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/plug_hello"))
+        .args(
+            [
+                "config",
+                "deps",
+                "lib",
+                "mix.exs",
+                "mix.lock",
+                ".formatter.exs",
+            ]
+            .map(|entry| source.join(entry)),
+        )
         .arg(&example)
         .status()
         .expect("cp runs");
@@ -134,6 +148,43 @@ fn stops_on_a_release_of_another_erts_version() {
     assert!(stderr.contains("14.2.1"), "{stderr}");
     assert!(stderr.contains(&pinned_otp()), "{stderr}");
     // The task wrote no executable.
+    assert!(!output.exists());
+    fs::remove_dir_all(&directory).unwrap();
+}
+
+#[test]
+fn stops_outside_the_prod_environment_and_on_a_release_without_an_erts_version() {
+    // With no `--release`, the task builds the release of the prod
+    // environment only. A release whose `releases/start_erl.data` names no
+    // ERTS version stops the task before the bundle.
+    let directory = directory("checks");
+    let example = copied_example(&directory);
+    let release = directory.join("release");
+    fs::create_dir_all(release.join("releases")).unwrap();
+    fs::write(release.join("releases/start_erl.data"), "").unwrap();
+    let output = directory.join("plug_hello.bundle");
+    let build = |release: Option<&Path>, environment: &str| {
+        let mut command = Command::new("mix");
+        command.arg("pbeam.build");
+        if let Some(release) = release {
+            command.arg("--release").arg(release);
+        }
+        run(command
+            .arg("--output")
+            .arg(&output)
+            .arg("--runtime")
+            .arg(env!("CARGO_BIN_EXE_pbeam"))
+            .arg("--tool")
+            .arg(env!("CARGO_BIN_EXE_pbeam_bundle"))
+            .current_dir(&example)
+            .env("MIX_ENV", environment))
+    };
+    let (status, stdout, stderr) = build(None, "dev");
+    assert_eq!(status, Some(1), "{stdout}{stderr}");
+    assert!(stderr.contains("MIX_ENV=prod"), "{stderr}");
+    let (status, stdout, stderr) = build(Some(&release), "prod");
+    assert_eq!(status, Some(1), "{stdout}{stderr}");
+    assert!(stderr.contains("names no ERTS version"), "{stderr}");
     assert!(!output.exists());
     fs::remove_dir_all(&directory).unwrap();
 }

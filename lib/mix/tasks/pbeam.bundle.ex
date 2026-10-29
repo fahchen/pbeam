@@ -114,17 +114,14 @@ defmodule Mix.Tasks.Pbeam.Bundle do
   # `mise.toml`, which the Rust build also reads (`otp_release` of
   # `build.rs`).
   defp pinned_otp do
-    pin =
+    "erlang = \"" <> pin =
       @source
       |> Path.join("mise.toml")
       |> File.read!()
       |> String.split("\n")
       |> Enum.find(&String.starts_with?(&1, "erlang = \""))
 
-    case pin do
-      nil -> Mix.raise("pbeam: mise.toml of the PBeam source pins no erlang version")
-      "erlang = \"" <> pin -> String.trim_trailing(pin, "\"")
-    end
+    String.trim_trailing(pin, "\"")
   end
 
   defp default_output(release, app) do
