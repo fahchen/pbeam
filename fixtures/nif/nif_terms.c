@@ -41,7 +41,8 @@
  *       it: cleared
  *   26  enif_make_new_atom_len of the first Len bytes of C3 A9 FF with the
  *       encoding Encoding of Arg [Encoding | Len], or none
- *   27  enif_compare of Arg with itself, which PBeam does not implement yet
+ *   27  enif_compare of Arg with itself and enif_system_info, which PBeam
+ *       does not implement yet: a stub with a result and a stub without one
  */
 #include <stdint.h>
 #include <string.h>
@@ -265,7 +266,9 @@ static ERL_NIF_TERM probe(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
                    : enif_make_atom(env, "none");
     }
     case 27:
-        return enif_make_int(env, enif_compare(argv[1], argv[1]));
+        value = enif_compare(argv[1], argv[1]);
+        enif_system_info(NULL, 0);
+        return enif_make_int(env, (int)value);
     case 24:
         return enif_make_int(env, enif_thread_type());
     case 25: {
