@@ -4,7 +4,7 @@ use socket2::{Domain, Socket, Type};
 
 use super::{
     super::{Control, MAGIC},
-    Event, Receiver, Sender,
+    Event, Output, Receiver, Sender,
 };
 use crate::{
     runtime::port::inet::{Inet, SocketType},
@@ -233,4 +233,46 @@ fn keeps_a_raw_packet_and_runs_nopush_as_the_host_does() {
         port.control(MAGIC + 7, &[23, 0, 0, 0, 2], ProcessId(1))
             .is_err()
     );
+}
+
+/// A send after a shutdown that waits for the queue gives `{error, closed}`
+/// and ends the socket, as `tcp_shutdown_error` does
+/// (inet_drv.c:12362-12376, 13962-13973).
+#[test]
+fn rejects_a_send_after_a_shutdown_that_waits_for_the_queue() {
+    let (local, _peer) = Socket::pair(Domain::UNIX, Type::STREAM, None).unwrap();
+    let mut port = Inet::new(SocketType::Stream).copy(local);
+    port.stream.output.extend([1, 2, 3]);
+    assert_eq!(
+        port.control(MAGIC + 44, &[2], ProcessId(1)).unwrap(),
+        Control::Reply(vec![1])
+    );
+    let tag = crate::term::external::local_reference(Reference(7), 0);
+    let mut bytes = u16::try_from(tag.len()).unwrap().to_be_bytes().to_vec();
+    bytes.extend(tag);
+    bytes.push(b'x');
+    let Output::Sent(events) = port.send(&bytes, ProcessId(2), 0).unwrap() else {
+        panic!("the send gives events");
+    };
+    assert!(events.contains(&Event::Replied {
+        sender: Sender {
+            caller: ProcessId(2),
+            tag: Reference(7),
+        },
+        result: Err("closed".to_owned()),
+    }));
+    assert_eq!(port.stream.pending_shutdown, None);
+}
+
+/// A shutdown that waited for the queue and then fails ends the socket, as
+/// `tcp_shutdown_error` does, and the next send gives `{error, closed}`
+/// (inet_drv.c:13962-13973).
+#[test]
+fn ends_the_socket_when_a_waiting_shutdown_fails() {
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, None).unwrap();
+    let mut port = Inet::new(SocketType::Stream).copy(socket);
+    port.stream.pending_shutdown = Some(1);
+    port.send_ready();
+    assert_eq!(port.stream.pending_shutdown, None);
+    assert!(port.stream.closed_send);
 }

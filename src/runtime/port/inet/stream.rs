@@ -611,16 +611,9 @@ impl Inet {
         }
         if self.stream.pending_shutdown.is_some() {
             // `tcp_inet_commandv` gives the error of `tcp_shutdown_error` to
-            // a send after a shutdown that waits for the queue.
-            let busy = self.stream.busy.take();
-            let mut events = self.send_failed(Some(sender));
-            if let Some(busy) = busy {
-                events.push(Event::Replied {
-                    sender: busy,
-                    result: Err("closed".to_owned()),
-                });
-            }
-            return Ok(Output::Sent(events));
+            // a send after a shutdown that waits for the queue. No send
+            // waits here: a busy port stops the send above.
+            return Ok(Output::Sent(self.send_failed(Some(sender))));
         }
         let reply = |result| Ok(Output::Sent(vec![Event::Replied { sender, result }]));
         if self.state != State::Connected {
