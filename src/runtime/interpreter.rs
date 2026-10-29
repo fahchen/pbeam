@@ -3,8 +3,8 @@ use super::{
     capability::{Policy, Restriction},
     dirty::{Output, Work},
     process::{
-        BifCall, DirtyCall, Frame, PendingBif, PendingTrap, ProcessState, ReceiveTimer, StackSlot,
-        Start, StartFlags,
+        BifCall, DirtyCall, Frame, PendingBif, PendingTrap, Priority, ProcessState, ReceiveTimer,
+        StackSlot, Start, StartFlags,
     },
     scheduler::{PolicyEnd, Received, Scheduler, Turn, node::Node},
     tty::InitialMode,
@@ -942,6 +942,14 @@ impl BeamProgram {
                 let id = scheduler.next_pid()?;
                 scheduler.mark_system(id);
                 scheduler.start_with_id(id, slot, frame, arguments.to_vec(), Vec::new())?;
+                // ERTS then starts `erts_code_purger` as a system process
+                // with high priority (`erl_init.c:2550-2557`). `code_server`
+                // sends it each purge and the end of each `-on_load`
+                // function (`erts_code_purger.erl:112-118`, `158-164`).
+                let module = scheduler.atoms.put("erts_code_purger")?;
+                let frame = initial_start(scheduler, &module, &function, 0)?;
+                let id = scheduler.next_pid()?;
+                scheduler.start_system(id, frame, Priority::High);
             }
             None => {}
         }
