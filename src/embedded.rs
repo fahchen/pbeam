@@ -328,7 +328,65 @@ fn boot_release(
     }
     command.env("RELEASE_ROOT", directory);
     command.env("RELEASE_SYS_CONFIG", release.join("sys"));
+    // The script takes the file name of `$0`, which names a symbolic link
+    // and not its target.
+    let program = env::args_os()
+        .next()
+        .map_or_else(|| executable.to_path_buf(), PathBuf::from);
+    command.envs(release_variables(directory, version, &program, |name| {
+        env::var_os(name).filter(|value| !value.is_empty())
+    }));
     command.exec()
+}
+
+/// Return the `RELEASE_*` variables that `bin/<name>` of a Mix release
+/// exports before `start` (`rel/templates` of Elixir 1.20.4, as
+/// `_build/prod/rel/<name>/bin/<name>` lines 17-46 show it) and that the
+/// release boot of the launcher gives a value: `RELEASE_NAME`, the stem of
+/// the `<name>.rel` file of `releases/<Vsn>`; `RELEASE_PROG`, the file name
+/// of `program`; `RELEASE_NODE`, the name; and `RELEASE_TMP`, `tmp` below
+/// the root. As the script does with `${VAR:-default}`, `existing` gives
+/// the non-empty value that the environment has, which wins.
+/// `RELEASE_VSN`, `RELEASE_COMMAND`, `RELEASE_MODE`,
+/// `RELEASE_DISTRIBUTION`, `RELEASE_BOOT_SCRIPT`, and
+/// `RELEASE_BOOT_SCRIPT_CLEAN` are the values that the launcher boots with:
+/// `version`, `start`, `embedded`, `none`, `start`, and `start_clean`. The
+/// launcher does not run `releases/<Vsn>/env.sh`.
+fn release_variables(
+    directory: &Path,
+    version: &str,
+    program: &Path,
+    existing: impl Fn(&str) -> Option<OsString>,
+) -> Vec<(&'static str, OsString)> {
+    let default = |name: &str, value: OsString| existing(name).unwrap_or(value);
+    let rel_name = fs::read_dir(directory.join("releases").join(version))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| PathBuf::from(entry.file_name()))
+        .find(|file| file.extension().is_some_and(|extension| extension == "rel"))
+        .and_then(|file| file.file_stem().map(OsString::from))
+        .unwrap_or_default();
+    let name = default("RELEASE_NAME", rel_name);
+    let program = program.file_name().map(OsString::from).unwrap_or_default();
+    vec![
+        ("RELEASE_NODE", default("RELEASE_NODE", name.clone())),
+        ("RELEASE_NAME", name),
+        // The script boots the release of `RELEASE_VSN`, and the launcher
+        // boots the version of `start_erl.data`, so the value is the version
+        // of this boot.
+        ("RELEASE_VSN", version.into()),
+        ("RELEASE_COMMAND", "start".into()),
+        ("RELEASE_PROG", default("RELEASE_PROG", program)),
+        ("RELEASE_MODE", "embedded".into()),
+        (
+            "RELEASE_TMP",
+            default("RELEASE_TMP", directory.join("tmp").into()),
+        ),
+        ("RELEASE_DISTRIBUTION", "none".into()),
+        ("RELEASE_BOOT_SCRIPT", "start".into()),
+        ("RELEASE_BOOT_SCRIPT_CLEAN", "start_clean".into()),
+    ]
 }
 
 /// Return the words of `options` as the shell splits an unquoted variable
