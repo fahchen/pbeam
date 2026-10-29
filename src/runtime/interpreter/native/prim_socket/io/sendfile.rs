@@ -20,6 +20,7 @@ use super::{
     select, socket_argument, write_entry, write_open,
 };
 use crate::runtime::files::{FileData, Files};
+use crate::runtime::host::errno::errno_code;
 use crate::runtime::port::inet::errno_name;
 use crate::runtime::sockets::SendfileCounters;
 
@@ -58,8 +59,11 @@ fn send_loop(
         } else {
             CHUNK
         };
-        let (written, errno) = send(offset, chunk as usize);
-        offset += written as i64;
+        let (written, errno) = send(
+            offset,
+            usize::try_from(chunk).expect("a chunk of at most CHUNK bytes fits in usize"),
+        );
+        offset += i64::try_from(written).expect("a send writes at most a chunk, which fits in i64");
         counters.calls += 1;
         if written != 0 {
             package += written;
@@ -94,8 +98,8 @@ fn host_sendfile(socket: &Socket, file: &File, offset: i64, count: usize) -> (u6
     let mut moved = offset;
     let result = nix::sys::sendfile::sendfile(socket, file, Some(&mut moved), count);
     (
-        (moved - offset) as u64,
-        result.err().map(|errno| errno as i32),
+        (moved - offset).cast_unsigned(),
+        result.err().map(errno_code),
     )
 }
 
@@ -105,11 +109,17 @@ fn host_sendfile(socket: &Socket, file: &File, offset: i64, count: usize) -> (u6
 /// `EINTR` sends no byte.
 #[cfg(target_vendor = "apple")]
 fn host_sendfile(socket: &Socket, file: &File, offset: i64, count: usize) -> (u64, Option<i32>) {
-    let (result, sent) =
-        nix::sys::sendfile::sendfile(file, socket, offset, Some(count as i64), None, None);
-    match result.err().map(|errno| errno as i32) {
+    let (result, sent) = nix::sys::sendfile::sendfile(
+        file,
+        socket,
+        offset,
+        Some(i64::try_from(count).expect("a chunk of at most CHUNK bytes fits in i64")),
+        None,
+        None,
+    );
+    match result.err().map(errno_code) {
         Some(errno) if errno != libc::EAGAIN && errno != libc::EINTR => (0, Some(errno)),
-        errno => (sent as u64, errno),
+        errno => (sent.cast_unsigned(), errno),
     }
 }
 

@@ -155,7 +155,7 @@ impl Scheduler {
         // `inet_set_opts` stores `send_timeout` unvalidated, and
         // `add_multi_timer` takes its 32 bits as milliseconds
         // (inet_drv.c:7099-7108, 13785-13792).
-        let timeout = tcp.send_timeout() as u32;
+        let timeout = tcp.send_timeout().cast_unsigned();
         if let Some(sender) = tcp
             .stream
             .busy

@@ -69,7 +69,10 @@ fn socket_counters(counters: &IoCounters) -> [(&'static str, Term); 16] {
 /// (`prim_socket_nif.c:4958-4989`). ERTS makes each value with
 /// `enif_make_uint`, so a value keeps its low 32 bits.
 fn sendfile_counters(counters: &SendfileCounters) -> [(&'static str, Term); 8] {
-    let uint = |value: u64| Term::Integer((value as u32).into());
+    let uint = |value: u64| {
+        let [b0, b1, b2, b3, ..] = value.to_le_bytes();
+        Term::Integer(u32::from_le_bytes([b0, b1, b2, b3]).into())
+    };
     [
         ("sendfile", uint(counters.calls)),
         ("sendfile_byte", uint(counters.byte)),

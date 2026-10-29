@@ -1424,7 +1424,7 @@ pub(super) fn recvmsg(
     // A read ends the buffers of `rNum` (unix_socket_syncio.c:4082).
     state.recv_count_done = 0;
     buffer.truncate(read);
-    let length = read as u64;
+    let length = to_u64(read);
     let counters = &mut state.counters;
     counters.read_pkg += 1;
     counters.read_byte += length;

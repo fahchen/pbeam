@@ -180,7 +180,7 @@ impl OutputQueue {
     /// Return the number of queued bytes, as `port_info/2` gives
     /// `queue_size` (`erl_bif_info.c:3855-3862`).
     pub(super) fn size(&self) -> u64 {
-        self.bytes.len() as u64
+        u64::try_from(self.bytes.len()).expect("a usize fits in u64")
     }
 
     /// Return true while the port is busy.

@@ -506,7 +506,7 @@ impl Child {
         match nix::unistd::write(input, bytes) {
             Ok(count) => Ok(count),
             Err(nix::errno::Errno::EAGAIN | nix::errno::Errno::EINTR) => Ok(0),
-            Err(errno) => Err(errno as c_int),
+            Err(errno) => Err(errno_code(errno)),
         }
     }
 

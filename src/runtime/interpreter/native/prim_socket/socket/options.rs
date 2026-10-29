@@ -1536,7 +1536,7 @@ fn getopt_otp(
         // `{N, Size}` while `rNum` is set, with `MKI` of the `unsigned int`
         // N, which wraps to an `int` (`prim_socket_nif.c:11838-11844`).
         OTP_RCVBUF if options.recv_count != 0 => Term::tuple(vec![
-            Term::Integer((options.recv_count as i32).into()),
+            Term::Integer((options.recv_count.cast_signed()).into()),
             size_term(options.recv_buffer),
         ]),
         OTP_RCVBUF => size_term(options.recv_buffer),
