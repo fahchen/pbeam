@@ -2996,6 +2996,9 @@ impl Scheduler {
     /// of a NIF library sends into the inbox (`enif_send`,
     /// `enif_monitor_process`).
     pub(super) fn drain_inbox(&mut self) -> bool {
+        if !self.multi && !self.node.has_nif_library() {
+            return false;
+        }
         let node = Arc::clone(&self.node);
         let mut deliveries = Vec::new();
         node.take(self.index, &mut deliveries);
