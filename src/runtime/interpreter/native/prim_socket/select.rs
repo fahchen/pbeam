@@ -370,6 +370,10 @@ fn accepted_socket(
                 writer: None,
                 counters: IoCounters::default(),
                 options,
+                select_read: false,
+                recv_count_done: 0,
+                sendfile: None,
+                sendfile_counters: None,
             },
         );
         sockets.registry

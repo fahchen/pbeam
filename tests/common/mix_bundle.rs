@@ -83,7 +83,7 @@ pub fn run_release_bundle(release: &Release) -> String {
     // release keeps running, so SIGTERM stops it, and the run removes its
     // extraction at the exit.
     let mut command = Command::new(&executable);
-    // `pbeam erl` rejects these erlexec variables, as `tests/feature/serve.rs`
+    // The run removes these erlexec variables, as `tests/feature/serve.rs`
     // records, so a shell setting does not change the run.
     for name in [
         "ERL_OTP29_FLAGS",

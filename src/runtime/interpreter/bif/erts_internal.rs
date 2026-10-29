@@ -17,7 +17,7 @@ use crate::runtime::{
         spawn::{self, Fds, ReadWrite, Setting, SpawnError, Streams},
     },
     port::{
-        self, Driver, Input, Lines, Packets, Port, PortCell, Program, Spawn,
+        self, Driver, Input, Lines, OutputQueue, Packets, Port, PortCell, Program, Spawn,
         inet::{Control, Event, Inet, OK, Output, SocketType},
     },
     signal::Signal,
@@ -202,15 +202,14 @@ pub(super) fn is_process_alive(
 /// `4906`).
 const PORT_REDUCTIONS: i32 = 40;
 
-/// The tuple options of `open_port/2` that ERTS accepts and PBeam does not
-/// support (`erl_bif_port.c:849-976`).
-const UNSUPPORTED_TUPLE_OPTIONS: [&str; 2] = ["busy_limits_port", "busy_limits_msgq"];
-
 /// The options of `open_port/2` that PBeam supports, as the fields of the
 /// ERTS `SysDriverOpts` and the port flags that `open_port` sets
 /// (`erl_bif_port.c:812-834`).
 #[derive(Debug)]
 struct PortSettings {
+    /// The low and the high limit of `{busy_limits_port, L}`: 4096 and
+    /// 8192 by default (`erl_bif_port.c:824-825`).
+    busy_limits: (u64, u64),
     /// `use_stdio` (the default) or `nouse_stdio`, and `stderr_to_stdout`.
     streams: Streams,
     /// `binary`: the data of a message is a binary.
@@ -390,6 +389,7 @@ pub(super) fn open_port(
         } else {
             Input::Write
         },
+        queue: OutputQueue::new(settings.busy_limits.0, settings.busy_limits.1),
     };
     let port = scheduler.open_port(path, Driver::Spawn(spawn))?;
     let reference = scheduler.make_ref()?;
@@ -579,6 +579,7 @@ fn open_fd_port(
             },
         }),
         input: port_input,
+        queue: OutputQueue::new(settings.busy_limits.0, settings.busy_limits.1),
     };
     let port = scheduler.open_port(name, Driver::Spawn(spawn))?;
     Ok(Value(Term::Port(port)))
@@ -608,6 +609,7 @@ fn port_settings(atoms: &AtomTable, settings: &Term) -> Result<Option<PortSettin
         return Ok(None);
     };
     let mut result = PortSettings {
+        busy_limits: (4096, 8192),
         streams: Streams {
             use_stdio: true,
             stderr_to_stdout: false,
@@ -628,7 +630,7 @@ fn port_settings(atoms: &AtomTable, settings: &Term) -> Result<Option<PortSettin
         },
     };
     for element in elements {
-        let option = match element {
+        match element {
             Term::Tuple(pair) if pair.len() == 2 => {
                 let Term::Atom(option) = &pair[0] else {
                     return Ok(None);
@@ -682,11 +684,22 @@ fn port_settings(atoms: &AtomTable, settings: &Term) -> Result<Option<PortSettin
                         _ => return Ok(None),
                     };
                     continue;
-                } else if option.is_one_of(&UNSUPPORTED_TUPLE_OPTIONS) {
-                    option
-                } else {
-                    return Ok(None);
+                } else if option.is_static("busy_limits_port") {
+                    let Some(limits) = busy_limits(&pair[1]) else {
+                        return Ok(None);
+                    };
+                    result.busy_limits = limits;
+                    continue;
+                } else if option.is_static("busy_limits_msgq") {
+                    // PBeam runs each port signal at once and keeps no
+                    // signal queue of a port, so the limits of the queue
+                    // never make the port busy.
+                    if busy_limits(&pair[1]).is_none() {
+                        return Ok(None);
+                    }
+                    continue;
                 }
+                return Ok(None);
             }
             Term::Atom(option) => {
                 if option.is_static("use_stdio") {
@@ -717,11 +730,9 @@ fn port_settings(atoms: &AtomTable, settings: &Term) -> Result<Option<PortSettin
                 } else {
                     return Ok(None);
                 }
-                continue;
             }
             _ => return Ok(None),
-        };
-        return Err(unsupported_option(atoms.name_of(option)));
+        }
     }
     // Mutually exclusive settings (`erl_bif_port.c:1018-1022`).
     if (result.streams.stderr_to_stdout && !result.streams.use_stdio)
@@ -785,20 +796,6 @@ fn line_size(size: i32) -> Result<Lines, BeamError> {
             "unsupported open_port/2 option {line, L} whose low 32 bits are not positive: see \"Ports\" in docs/erts-differences.md",
         )),
     }
-}
-
-/// Return the runtime error of an option of `open_port/2` that ERTS accepts
-/// and PBeam does not support.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert!(unsupported_option("hide").to_string().starts_with("unsupported open_port/2 option hide"));
-/// ```
-fn unsupported_option(name: &str) -> BeamError {
-    error(format!(
-        "unsupported open_port/2 option {name}: see \"Ports\" in docs/erts-differences.md"
-    ))
 }
 
 /// Return the native bytes of each file name of the proper list `args`, as
@@ -903,6 +900,30 @@ fn native_name(atoms: &AtomTable, name: &Term, allow_empty: bool) -> Option<Vec<
     native_filename(name, filename_encoding())
 }
 
+/// Return the limits `{Low, High}` or `disabled` of `{busy_limits_port, L}`
+/// and `{busy_limits_msgq, L}`, as `open_port/2` reads them
+/// (`erl_bif_port.c:920-975`): each limit is an integer from 1 to 2^64 - 2,
+/// and a low limit above the high limit becomes the high limit. `disabled`
+/// gives limits that no queue reaches (`ERL_DRV_BUSY_MSGQ_DISABLED`).
+fn busy_limits(term: &Term) -> Option<(u64, u64)> {
+    let limit = |term: &Term| {
+        let value = match term {
+            Term::Integer(value) => u64::try_from(*value).ok()?,
+            Term::BigInt(value) => num_traits::ToPrimitive::to_u64(&**value)?,
+            _ => return None,
+        };
+        (1..u64::MAX).contains(&value).then_some(value)
+    };
+    match term {
+        Term::Atom(atom) if atom.is_static("disabled") => Some((u64::MAX, u64::MAX)),
+        Term::Tuple(pair) if pair.len() == 2 => {
+            let (low, high) = (limit(&pair[0])?, limit(&pair[1])?);
+            Some((low.min(high), high))
+        }
+        _ => None,
+    }
+}
+
 /// The port table entry of a port term: its identifier and the handle of
 /// its lock.
 pub(super) type Found = Option<(PortId, PortCell)>;
@@ -912,8 +933,9 @@ pub(super) type Slot<'a> = Option<port::PortGuard<'a>>;
 
 /// Return the port table entry of `port`, as `sig_lookup_port` and
 /// `data_lookup_port` find the port (erl_bif_port.c:133-160), or `None`
-/// for a term that is not a port in the table. An atom names no port,
-/// because PBeam registers no port. The caller locks the port once with
+/// for a term that is not a port in the table. An atom gives the port
+/// that has it as its registered name (`lookup_port`, erl_bif_port.c:132-142).
+/// The caller locks the port once with
 /// [`lock_found`] and checks its state under that lock, as ERTS checks the
 /// state of a port under the port lock (`erts_port_lookup`, erl_port.h).
 ///
@@ -925,10 +947,15 @@ pub(super) type Slot<'a> = Option<port::PortGuard<'a>>;
 /// assert!(open(&mut slot).is_some());
 /// ```
 pub(super) fn found_port(scheduler: &mut Scheduler, port: &Term) -> Result<Found, BeamError> {
-    let Term::Port(id) = port else {
-        return Ok(None);
+    let id = match port {
+        Term::Port(id) => *id,
+        Term::Atom(name) => match scheduler.name_owner(scheduler.atoms.name_of(name)) {
+            Some(Named::Port(id)) => id,
+            _ => return Ok(None),
+        },
+        _ => return Ok(None),
     };
-    Ok(scheduler.node.port(*id).map(|cell| (*id, cell)))
+    Ok(scheduler.node.port(id).map(|cell| (id, cell)))
 }
 
 /// Lock the port of `found`.
@@ -988,10 +1015,18 @@ pub(super) fn port_command(
     data: &Term,
     options: &Term,
 ) -> Result<BifResult, BeamError> {
-    if *options != Term::nil() {
-        return Err(error(
-            "unsupported erlang:port_command/3 options: see \"Ports\" in docs/erts-differences.md",
-        ));
+    // The options are a list of `force` and `nosuspend`
+    // (`erl_bif_port.c:175-190`).
+    let (mut force, mut nosuspend) = (false, false);
+    for option in options.proper_list().into_iter().flatten().chain(
+        // A term that is not a proper list is a bad option.
+        (options.proper_list().is_none()).then_some(options),
+    ) {
+        match option {
+            Term::Atom(atom) if atom.is_static("force") => force = true,
+            Term::Atom(atom) if atom.is_static("nosuspend") => nosuspend = true,
+            _ => return Ok(Value(Term::static_atom("badopt"))),
+        }
     }
     let scheduler = &mut *context.scheduler;
     // One lock of the port covers the check, the capability, and the
@@ -999,15 +1034,49 @@ pub(super) fn port_command(
     // port lock does in `erts_port_output` (io.c:1715-2088).
     let found = found_port(scheduler, port)?;
     let mut slot = lock_found(&found);
-    let (Some(port_state), Some(bytes), Some(&(id, _))) =
-        (open(&mut slot), iolist::iodata_bytes(data), found.as_ref())
-    else {
+    // The data is checked after `force` and after the busy state
+    // (erl_bif_port.c:195-198; `erts_port_output`, io.c:1752-1756).
+    let (Some(port_state), Some(&(id, _))) = (open(&mut slot), found.as_ref()) else {
         drop(slot);
         return Ok(signals_return(scheduler, port, Term::static_atom("badarg")));
     };
+    // A busy `tcp_inet` port queues each send as a waiter (see
+    // `Inet::send`), so `force` and `nosuspend` on it are not implemented.
+    if (force || nosuspend) && matches!(port_state.driver, Driver::Inet(_)) {
+        return Err(error(
+            "unsupported erlang:port_command/3 options of a tcp_inet port: see \"tcp_inet ports\" in docs/erts-differences.md",
+        ));
+    }
+    // The spawn driver has no `ERL_DRV_FLAG_SOFT_BUSY`, so `force` gives
+    // `notsup` (`erl_bif_port.c:195-198`).
+    if force {
+        drop(slot);
+        return Ok(Value(Term::static_atom("notsup")));
+    }
     if let Some(denied) = port_denial(scheduler, &port_state.name, Operation::Command)? {
         return Ok(denied);
     }
+    // A busy port gives `false` with `nosuspend`, and else suspends the
+    // caller until the port is not busy and runs the BIF again
+    // (`erl_bif_port.c:211-219`).
+    if let Driver::Spawn(spawn) = &mut port_state.driver
+        && spawn.queue.busy()
+    {
+        if nosuspend {
+            drop(slot);
+            return Ok(signals_return(scheduler, port, Term::static_atom("false")));
+        }
+        spawn.queue.suspend(scheduler.current_process().id);
+        return Ok(BifResult::Suspend {
+            module: "erts_internal",
+            function: "port_command",
+            arguments: vec![port.clone(), data.clone(), options.clone()],
+        });
+    }
+    let Some(bytes) = iolist::iodata_bytes(data) else {
+        drop(slot);
+        return Ok(signals_return(scheduler, port, Term::static_atom("badarg")));
+    };
     let written = output(scheduler, id, port_state, bytes)?;
     drop(slot);
     written.finish(scheduler, id)?;
@@ -1077,6 +1146,9 @@ fn output(
             port_state.output += bytes.len() as u64;
             return Ok(match sent {
                 Output::Sent(events) => {
+                    // A send that made the port busy starts its send timer
+                    // (`add_multi_timer`, inet_drv.c:13785-13792).
+                    scheduler.tcp_send_timer(id, tcp);
                     Written::Step(scheduler.send_events(id, port_state, events)?)
                 }
                 Output::Failed => Written::Failed,
@@ -1087,7 +1159,7 @@ fn output(
     // (`sys_drivers.c:1153-1158`).
     let size = bytes.len() as u64;
     let written = spawn.packets.frame(bytes).ok_or(libc::EINVAL);
-    let written = written.and_then(|framed| spawn.program.write_input(&framed));
+    let written = written.and_then(|framed| spawn.write(&framed));
     Ok(match written {
         Ok(()) => {
             port_state.output += size;
@@ -1514,8 +1586,8 @@ pub(super) fn port_info(context: &mut BifContext<'_>, port: &Term) -> Result<Bif
     let scheduler = &mut *context.scheduler;
     let found = found_port(scheduler, port)?;
     let mut slot = lock_found(&found);
-    let info = match (port, located(&mut slot)) {
-        (&Term::Port(id), Some(port_state)) => {
+    let info = match (found.as_ref(), located(&mut slot)) {
+        (Some(&(id, _)), Some(port_state)) => {
             if let Some(denied) = port_denial(scheduler, &port_state.name, Operation::Inspect)? {
                 return Ok(denied);
             }
@@ -1523,14 +1595,16 @@ pub(super) fn port_info(context: &mut BifContext<'_>, port: &Term) -> Result<Bif
                 .current_process_mut()
                 .bump_reductions(PORT_REDUCTIONS);
             let port = &*port_state;
-            Term::list_from(
-                PORT_INFO_ITEMS
-                    .iter()
-                    .map(|&name| port_item(id, port, name))
-                    .collect::<Result<Vec<_>, _>>()?,
-            )
+            // `registered_name` comes first, and only for a port with a
+            // name (io.c:4796-4821).
+            let registered = scheduler.registered_port_name(id).map(registered_item);
+            let items = PORT_INFO_ITEMS
+                .iter()
+                .map(|&name| port_item(id, port, name))
+                .collect::<Result<Vec<_>, _>>()?;
+            Term::list_from(registered.into_iter().chain(items).collect::<Vec<_>>())
         }
-        (Term::Port(_) | Term::Atom(_), _) => Term::static_atom("undefined"),
+        (_, _) if matches!(port, Term::Port(_) | Term::Atom(_)) => Term::static_atom("undefined"),
         _ => Term::static_atom("badarg"),
     };
     drop(slot);
@@ -1551,14 +1625,19 @@ const PORT_INFO_ITEMS: [&str; 7] = [
 
 /// The items of `port_info/2` that PBeam does not give yet
 /// (`erts_bld_port_info`, `erl_bif_info.c:3654-3830`).
-const OTHER_PORT_ITEMS: [&str; 6] = [
-    "registered_name",
+const OTHER_PORT_ITEMS: [&str; 5] = [
     "memory",
     "monitors",
     "monitored_by",
     "queue_size",
     "locking",
 ];
+
+/// Return the item `{registered_name, Name}` of a port with the registered
+/// name `name` (erl_bif_info.c:3810-3818).
+fn registered_item(name: Atom) -> Term {
+    Term::tuple(vec![Term::static_atom("registered_name"), Term::Atom(name)])
+}
 
 /// Return the item `{Name, Value}` of the open port `port` with the number
 /// `id`, as `erts_bld_port_info` builds it (`erl_bif_info.c:3654-3830`),
@@ -1639,8 +1718,8 @@ pub(super) fn port_info_item(
     let scheduler = &mut *context.scheduler;
     let found = found_port(scheduler, port)?;
     let mut slot = lock_found(&found);
-    let info = match (port, located(&mut slot)) {
-        (&Term::Port(id), Some(port_state)) => {
+    let info = match (found.as_ref(), located(&mut slot)) {
+        (Some(&(id, _)), Some(port_state)) => {
             let name = match item {
                 Term::Atom(name) => scheduler.atoms.name_of(name).to_owned(),
                 _ => String::new(),
@@ -1648,12 +1727,31 @@ pub(super) fn port_info_item(
             let name = name.as_str();
             if !PORT_INFO_ITEMS.contains(&name)
                 && !OTHER_PORT_ITEMS.contains(&name)
-                && name != "parallelism"
+                && !matches!(name, "parallelism" | "registered_name")
             {
                 return Ok(signals_return(scheduler, port, Term::static_atom("badarg")));
             }
             if let Some(denied) = port_denial(scheduler, &port_state.name, Operation::Inspect)? {
                 return Ok(denied);
+            }
+            // The queue of a spawn port (`erts_port_ioq_size`,
+            // erl_bif_info.c:3855-3862).
+            if name == "queue_size"
+                && let Driver::Spawn(spawn) = &port_state.driver
+            {
+                let size = Term::Integer(
+                    spawn
+                        .queue
+                        .size()
+                        .try_into()
+                        .expect("a queue below 2^63 bytes"),
+                );
+                scheduler
+                    .current_process_mut()
+                    .bump_reductions(PORT_REDUCTIONS);
+                drop(slot);
+                let item = Term::tuple(vec![Term::static_atom("queue_size"), size]);
+                return Ok(signals_return(scheduler, port, item));
             }
             if OTHER_PORT_ITEMS.contains(&name) {
                 return Err(error(format!(
@@ -1663,9 +1761,16 @@ pub(super) fn port_info_item(
             scheduler
                 .current_process_mut()
                 .bump_reductions(PORT_REDUCTIONS);
-            port_item(id, port_state, name)?
+            if name == "registered_name" {
+                // A port without a name gives `[]` (erl_bif_info.c:3810-3823).
+                scheduler
+                    .registered_port_name(id)
+                    .map_or(Term::Nil, registered_item)
+            } else {
+                port_item(id, port_state, name)?
+            }
         }
-        (Term::Port(_) | Term::Atom(_), _) => Term::static_atom("undefined"),
+        (_, _) if matches!(port, Term::Port(_) | Term::Atom(_)) => Term::static_atom("undefined"),
         _ => Term::static_atom("badtype"),
     };
     drop(slot);

@@ -25,6 +25,13 @@ defmodule PlugHelloTest do
     assert ["text/plain" <> _] = Plug.Conn.get_resp_header(conn, "content-type")
   end
 
+  test "GET /executable answers PBEAM_EXECUTABLE" do
+    conn = PlugHello.call(conn(:get, "/executable"), PlugHello.init([]))
+    assert conn.status == 200
+    assert conn.resp_body == inspect(System.get_env("PBEAM_EXECUTABLE"))
+    assert ["text/plain" <> _] = Plug.Conn.get_resp_header(conn, "content-type")
+  end
+
   test "another path answers 404" do
     assert PlugHello.call(conn(:get, "/other"), []).status == 404
     assert PlugHello.call(conn(:post, "/"), []).status == 404
