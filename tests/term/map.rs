@@ -619,7 +619,7 @@ fn sorts_pairs_by_the_flatmap_key_order() {
         (Term::static_atom("value"), Term::Integer(2)),
         (Term::Integer(7), Term::Integer(3)),
     ];
-    Map::sort_pairs(&mut pairs, &test_atom_table()).unwrap();
+    Map::sort_pairs(&mut pairs, &test_atom_table());
     let sorted: Vec<_> = pairs.iter().map(|(key, _)| key.clone()).collect();
     assert_eq!(
         sorted,
@@ -645,7 +645,7 @@ fn sorts_pairs_by_the_flatmap_key_order() {
         ),
         (Term::static_atom("abs"), Term::Integer(5)),
     ];
-    Map::sort_pairs(&mut compound, &test_atom_table()).unwrap();
+    Map::sort_pairs(&mut compound, &test_atom_table());
     let values: Vec<_> = compound.iter().map(|(_, value)| value.clone()).collect();
     assert_eq!(values, [5, 4, 3, 2, 1].map(Term::Integer));
     // ERTS compares two references by their number words (`utils.c:2239-2290`),
@@ -654,7 +654,7 @@ fn sorts_pairs_by_the_flatmap_key_order() {
         (Term::Reference(Reference(2)), Term::Integer(2)),
         (Term::Reference(Reference(1)), Term::Integer(1)),
     ];
-    Map::sort_pairs(&mut references, &test_atom_table()).unwrap();
+    Map::sort_pairs(&mut references, &test_atom_table());
     let values: Vec<_> = references.iter().map(|(_, value)| value.clone()).collect();
     assert_eq!(values, [1, 2].map(Term::Integer));
     // An alias reference compares by its three number words (`src/term/order.rs`),
@@ -669,7 +669,7 @@ fn sorts_pairs_by_the_flatmap_key_order() {
             Term::Integer(1),
         ),
     ];
-    Map::sort_pairs(&mut aliases, &test_atom_table()).unwrap();
+    Map::sort_pairs(&mut aliases, &test_atom_table());
     let values: Vec<_> = aliases.iter().map(|(_, value)| value.clone()).collect();
     assert_eq!(values, [1, 2].map(Term::Integer));
 }
@@ -1139,7 +1139,7 @@ fn records_the_map_operation_cost() {
             let mut sum = 0;
             for key in 0..MAP_COST_ROUNDS {
                 let mut pairs = vec![(Term::Integer(1 + key as i64), Term::Integer(2))];
-                Map::sort_pairs(&mut pairs, &test_atom_table()).unwrap();
+                Map::sort_pairs(&mut pairs, &test_atom_table());
                 let mut map = hashmap.clone();
                 map.update(
                     pairs

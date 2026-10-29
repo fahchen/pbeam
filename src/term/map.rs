@@ -662,27 +662,14 @@ impl Map {
     ///     (Term::static_atom("abs"), Term::Integer(1)),
     ///     (Term::static_atom("value"), Term::Integer(2)),
     /// ];
-    /// Map::sort_pairs(&mut pairs, &atoms)?;
+    /// Map::sort_pairs(&mut pairs, &atoms);
     /// // value has atom index 745, abs has atom index 762, and an atom
     /// // comes before a tuple.
     /// assert_eq!(pairs[0].0, Term::static_atom("value"));
     /// assert_eq!(pairs[2].0, Term::tuple(vec![]));
     /// ```
-    ///
-    /// # Errors
-    ///
-    /// Sort the pairs in the flatmap key order.
-    ///
-    /// Return a runtime error when the order depends on an alias reference,
-    /// which has no PBeam term order. Compiled code cannot get this error:
-    /// the ERTS loader sorts only literal keys, and a literal cannot hold a
-    /// reference.
-    pub(crate) fn sort_pairs(
-        pairs: &mut [(Term, Term)],
-        atoms: &AtomTable,
-    ) -> Result<(), BeamError> {
+    pub(crate) fn sort_pairs(pairs: &mut [(Term, Term)], atoms: &AtomTable) {
         pairs.sort_by(|(left, _), (right, _)| flatmap_order(left, right, atoms));
-        Ok(())
     }
 
     /// Set a key to a value. Replace the value when the key exists. A
@@ -1559,11 +1546,6 @@ impl Node {
 /// // An integer is less than a float in the exact order.
 /// assert_eq!(flatmap_order(&Term::Float(1.0), &Term::Integer(2), &atoms), Ordering::Greater);
 /// ```
-///
-/// # Errors
-///
-/// Return a runtime error when the order depends on two different
-/// references, which have no PBeam term order.
 pub(crate) fn flatmap_order(left: &Term, right: &Term, atoms: &AtomTable) -> Ordering {
     match (left, right) {
         (Term::Atom(left), Term::Atom(right)) => left.index().cmp(&right.index()),
