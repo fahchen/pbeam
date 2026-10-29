@@ -14,11 +14,11 @@
 //! env, because the C code keeps it after the call (`erl_nif.h:201-203`).
 
 use std::cell::RefCell;
-use std::ffi::c_int;
+use std::ffi::{c_int, c_void};
 use std::sync::Arc;
 
 use super::env::Env;
-use super::layout::{ErlNifPid, NifTerm};
+use super::layout::{ErlNifMonitor, ErlNifPid, NifTerm};
 use crate::AtomTable;
 use crate::Term;
 use crate::runtime::scheduler::node::Node;
@@ -42,16 +42,18 @@ pub(super) struct Context {
     /// The messages of `enif_send`: the receiver and the message, in send
     /// order.
     sends: Vec<(ProcessId, Term)>,
-    /// The text of the first broken contract of `enif_send`, or `None`.
+    /// The text of the runtime error of the call: the first broken
+    /// contract of `enif_send`, or the name of the first `enif_*` function
+    /// that PBeam does not implement, or `None`.
     unsupported: Option<String>,
 }
 
-/// The messages and the broken contract of a call that ended.
+/// The messages and the runtime error of a call that ended.
 #[derive(Debug)]
 pub(super) struct Ended {
     /// The messages of `enif_send`, in send order.
     pub(super) sends: Vec<(ProcessId, Term)>,
-    /// The text of the first broken contract of `enif_send`, or `None`.
+    /// The text of the runtime error of the call, or `None`.
     pub(super) unsupported: Option<String>,
 }
 
@@ -93,6 +95,17 @@ pub(super) fn within<T>(
 /// on a thread that runs no NIF call.
 fn with_context<T>(read: impl FnOnce(&mut Context) -> T) -> Option<T> {
     CONTEXT.with_borrow_mut(|context| context.as_mut().map(read))
+}
+
+/// Record the name of an unsupported `enif_*` function of the call that
+/// runs on the thread, so the call gives a runtime error when it returns.
+/// A thread that runs no NIF call records nothing.
+pub(super) fn record_unsupported(name: &str) {
+    with_context(|context| {
+        context.unsupported.get_or_insert_with(|| {
+            format!("the NIF called {name}, which PBeam does not implement yet")
+        });
+    });
 }
 
 /// Return true when the local process `pid` exists and does not exit, as
@@ -233,6 +246,47 @@ pub unsafe extern "C" fn enif_send(
         1
     })
     .unwrap_or(0)
+}
+
+/// `int enif_monitor_process(ErlNifEnv*, void*, const ErlNifPid*,
+/// ErlNifMonitor*)`: watch the process `to_pid` for the resource object
+/// `obj` and return 0, or return -1 when the type of the object has no
+/// down callback, and 1 when the process does not exist, as ERTS gives for
+/// a monitor signal that it cannot send (`erl_nif.c:3933-3990`).
+///
+/// PBeam does not run the down callback of the type yet: it writes a
+/// monitor of zero words, which `enif_demonitor_process` and
+/// `enif_compare_monitors` do not use.
+///
+/// # Safety
+///
+/// `obj` is the data of a live resource object, `to_pid` points to a valid
+/// `ErlNifPid`, and `monitor` is NULL or points to a writable
+/// `ErlNifMonitor`, as the C API requires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn enif_monitor_process(
+    _env: *mut Env,
+    obj: *mut c_void,
+    to_pid: *const ErlNifPid,
+    monitor: *mut ErlNifMonitor,
+) -> c_int {
+    // SAFETY: the C API gives a valid `ErlNifPid`.
+    let target = unsafe { to_pid.read() }.process();
+    with_context(|context| {
+        if !super::resource::has_down(obj.expose_provenance()) {
+            return -1;
+        }
+        if context.node.live_owner(target).is_none() {
+            return 1;
+        }
+        if !monitor.is_null() {
+            // SAFETY: the C API requires that a `monitor` that is not NULL
+            // points to a writable `ErlNifMonitor`.
+            unsafe { monitor.write(ErlNifMonitor { words: [0; 4] }) };
+        }
+        0
+    })
+    .unwrap_or(1)
 }
 
 #[cfg(test)]

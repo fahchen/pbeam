@@ -21,6 +21,8 @@ mod layout;
 mod mutex;
 mod process;
 mod resource;
+pub(crate) mod thread;
+mod unsupported;
 
 pub(crate) use resource::Resource;
 
