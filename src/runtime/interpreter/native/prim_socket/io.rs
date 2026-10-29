@@ -15,6 +15,7 @@ use std::os::fd::AsRawFd;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use nix::sys::socket::{MsgFlags, SockaddrStorage};
+use socket2::SockAddr;
 
 use super::select::{fd, monitor, select};
 use super::socket::{
@@ -430,15 +431,9 @@ pub(super) fn sendmsg(
     if let Some(result) = write_entry(scheduler, &state, "nif_sendmsg/5", caller)? {
         return Ok(result);
     }
-    let address = match field(&scheduler.atoms, message, "addr") {
-        Some(address) => match sockaddr(scheduler, address)? {
-            Some(address) => Some(address),
-            None => {
-                drop(state);
-                return Ok(invalid(atom(scheduler, "addr")?));
-            }
-        },
-        None => None,
+    let address = match message_address(scheduler, message)? {
+        Ok(address) => address,
+        Err(result) => return Ok(result),
     };
     let buffers = match iovec(iov) {
         Some((buffers, data_in_tail)) if !data_in_tail || state.kind == libc::SOCK_STREAM => {
@@ -450,33 +445,88 @@ pub(super) fn sendmsg(
         drop(state);
         return Ok(invalid(atom(scheduler, "iov")?));
     };
-    let control = match field(&scheduler.atoms, message, "ctrl") {
-        Some(ctrl) => match decode_cmsgs(scheduler, ctrl, state.options.send_ctrl)? {
-            Some(control) => Some(control),
-            None => {
-                drop(state);
-                return Ok(invalid(atom(scheduler, "ctrl")?));
-            }
-        },
-        None => None,
+    let control = match message_control(scheduler, message, state.options.send_ctrl)? {
+        Ok(control) => control,
+        Err(result) => return Ok(result),
     };
     let size = buffers.iter().map(|buffer| buffer.len()).sum();
+    state.counters.write_tries += 1;
+    let sent = send_message(
+        &state,
+        address.as_ref(),
+        &buffers,
+        control.as_deref(),
+        flags,
+    );
+    let request = (key, caller, reference);
+    send_result(scheduler, state, sent, size, data_in_tail, request)
+}
+
+/// Return the address of the `addr` of the message `message`, `None`
+/// without `addr`, or `{invalid, addr}` for an `addr` that does not decode,
+/// as `essio_sendmsg` reads it (`unix_socket_syncio.c:3148-3172`).
+///
+/// # Errors
+///
+/// A native `sockaddr` stops the run (see `socket::sockaddr`).
+fn message_address(
+    scheduler: &mut Scheduler,
+    message: &Term,
+) -> Result<Result<Option<SockAddr>, BifResult>, BeamError> {
+    let Some(address) = field(&scheduler.atoms, message, "addr") else {
+        return Ok(Ok(None));
+    };
+    match sockaddr(scheduler, address)? {
+        Some(address) => Ok(Ok(Some(address))),
+        None => Ok(Err(invalid(atom(scheduler, "addr")?))),
+    }
+}
+
+/// Return the control buffer of the `ctrl` of the message `message` in
+/// `capacity` bytes, `None` without `ctrl`, or `{invalid, ctrl}` for a
+/// `ctrl` that does not decode, as `essio_sendmsg` reads it
+/// (`unix_socket_syncio.c:3299-3326`).
+///
+/// # Errors
+///
+/// A control message `value` that PBeam does not decode stops the run.
+fn message_control(
+    scheduler: &mut Scheduler,
+    message: &Term,
+    capacity: usize,
+) -> Result<Result<Option<Vec<u8>>, BifResult>, BeamError> {
+    let Some(ctrl) = field(&scheduler.atoms, message, "ctrl") else {
+        return Ok(Ok(None));
+    };
+    match decode_cmsgs(scheduler, ctrl, capacity)? {
+        Some(control) => Ok(Ok(Some(control))),
+        None => Ok(Err(invalid(atom(scheduler, "ctrl")?))),
+    }
+}
+
+/// Send one message of the binaries `buffers` to `address` with the
+/// control buffer `control` and `flags`, as the `sendmsg(2)` of
+/// `essio_sendmsg` does (`unix_socket_syncio.c:3338`).
+fn send_message(
+    state: &SocketState,
+    address: Option<&SockAddr>,
+    buffers: &[&[u8]],
+    control: Option<&[u8]>,
+    flags: i32,
+) -> io::Result<usize> {
     let slices: Vec<IoSlice<'_>> = buffers.iter().map(|buffer| IoSlice::new(buffer)).collect();
     let mut header = socket2::MsgHdr::new().with_buffers(&slices);
-    if let Some(address) = &address {
+    if let Some(address) = address {
         header = header.with_addr(address);
     }
-    if let Some(control) = &control {
+    if let Some(control) = control {
         header = header.with_control(control);
     }
-    state.counters.write_tries += 1;
     let host = state
         .socket
         .as_ref()
         .expect("an open socket has a host socket");
-    let sent = host.sendmsg(&header, flags);
-    let request = (key, caller, reference);
-    send_result(scheduler, state, sent, size, data_in_tail, request)
+    host.sendmsg(&header, flags)
 }
 
 /// Run `prim_socket:nif_sendmmsg/4` on a host without `sendmmsg(2)`, as
@@ -797,7 +847,7 @@ pub(super) fn recvfrom(
     if let Some(result) = read_entry(scheduler, &state, name, caller)? {
         return Ok(result);
     }
-    let mut buffer = vec![0; buffer_size(&state, size)];
+    let mut buffer = vec![0; self::buffer_size(&state, size)];
     let received = if flags == 0 {
         state.counters.read_tries += 1;
         let host = state
@@ -807,10 +857,7 @@ pub(super) fn recvfrom(
         nix::sys::socket::recvfrom::<SockaddrStorage>(host.as_raw_fd(), &mut buffer)
     } else {
         if !flagged_source_known(&state, flags) {
-            return Err(error(format!(
-                "prim_socket:{name}: the flags {flags} on a socket of the domain {} are not supported: see \"NIF stubs\" in docs/erts-differences.md",
-                state.domain
-            )));
+            return Err(unknown_source(name, &state, flags));
         }
         state.counters.read_tries += 1;
         recv_flagged(&state, &mut buffer, flags)
@@ -936,21 +983,10 @@ pub(super) fn recvmsg(
         return Ok(result);
     }
     if !flagged_source_known(&state, flags) {
-        return Err(error(format!(
-            "prim_socket:{name}: the flags {flags} on a socket of the domain {} are not supported: see \"NIF stubs\" in docs/erts-differences.md",
-            state.domain
-        )));
+        return Err(unknown_source(name, &state, flags));
     }
-    let size = match size {
-        0 => state.options.recv_buffer,
-        size => usize::try_from(size).expect("a length in the ssize_t range"),
-    };
-    let control_size = match control_size {
-        0 => state.options.recv_ctrl,
-        size => usize::try_from(size).expect("a length in the ssize_t range"),
-    };
-    let mut buffer = vec![0; size];
-    let mut control = vec![0; control_size];
+    let mut buffer = vec![0; self::buffer_size(&state, size)];
+    let mut control = vec![0; control_buffer_size(&state, control_size)];
     state.counters.read_tries += 1;
     let received = recv_message(&state, &mut buffer, &mut control, flags);
     let stream = state.kind == libc::SOCK_STREAM;
@@ -970,7 +1006,40 @@ pub(super) fn recvmsg(
     counters.read_pkg += 1;
     counters.read_byte += length;
     counters.read_pkg_max = counters.read_pkg_max.max(length);
-    let ctrl = encode_cmsgs(scheduler, &control)?;
+    let message = message_term(scheduler, buffer, &control, from, message_flags)?;
+    // With `selectRead`, `{select_read, Msg}` and the next read select
+    // (`unix_socket_syncio.c:4095-4098`).
+    if state.select_read && !zero {
+        let result = Term::tuple(vec![atom(scheduler, "select_read")?, message]);
+        return Ok(recv_select(
+            scheduler, state, key, caller, reference, result,
+        ));
+    }
+    state.reader = None;
+    drop(state);
+    Ok(BifResult::Value(Term::tuple(vec![
+        Term::static_atom("ok"),
+        message,
+    ])))
+}
+
+/// Return the message `#{iov => [Data], ctrl => Cmsgs, flags => Flags}`
+/// of the data `buffer`, the control buffer `control`, and the
+/// `msg_flags` `message_flags`, with the source address `from` as `addr`
+/// when the host gives one, as `encode_msg` makes it
+/// (`unix_socket_syncio.c:7579-7713`).
+///
+/// # Errors
+///
+/// A control message that PBeam does not encode stops the run.
+fn message_term(
+    scheduler: &mut Scheduler,
+    buffer: Vec<u8>,
+    control: &[u8],
+    from: Option<SockaddrStorage>,
+    message_flags: i32,
+) -> Result<Term, BeamError> {
+    let ctrl = encode_cmsgs(scheduler, control)?;
     let mut entries = vec![
         (
             atom(scheduler, "iov")?,
@@ -988,24 +1057,30 @@ pub(super) fn recvmsg(
             source_term(scheduler, Some(&from))?,
         ));
     }
-    let message = Term::Map(
+    Ok(Term::Map(
         crate::term::Map::from_pairs(entries, &scheduler.atoms)
             .expect("atom keys fit each map form"),
-    );
-    // With `selectRead`, `{select_read, Msg}` and the next read select
-    // (`unix_socket_syncio.c:4095-4098`).
-    if state.select_read && !zero {
-        let result = Term::tuple(vec![atom(scheduler, "select_read")?, message]);
-        return Ok(recv_select(
-            scheduler, state, key, caller, reference, result,
-        ));
+    ))
+}
+
+/// Return the control buffer size of a read with `size` bytes from
+/// `state`: `rCtrlSz` of the option `{otp, rcvctrlbuf}` for 0
+/// (`unix_socket_syncio.c:3999`).
+fn control_buffer_size(state: &SocketState, size: u64) -> usize {
+    if size == 0 {
+        state.options.recv_ctrl
+    } else {
+        usize::try_from(size).expect("a length in the ssize_t range")
     }
-    state.reader = None;
-    drop(state);
-    Ok(BifResult::Value(Term::tuple(vec![
-        Term::static_atom("ok"),
-        message,
-    ])))
+}
+
+/// Return the error of a receive with `flags` on a socket for which
+/// [`flagged_source_known`] is `false`.
+fn unknown_source(name: &str, state: &SocketState, flags: i32) -> BeamError {
+    error(format!(
+        "prim_socket:{name}: the flags {flags} on a socket of the domain {} are not supported: see \"NIF stubs\" in docs/erts-differences.md",
+        state.domain
+    ))
 }
 
 /// Receive one message into `buffer` and `control` with `flags`, as the
