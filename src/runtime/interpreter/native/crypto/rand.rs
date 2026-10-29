@@ -117,7 +117,7 @@ fn mpint(term: &Term) -> Option<BigNum> {
     // `bn.c:34-35` rejects a binary above `INT_MAX - 4` bytes.
     let bytes = term
         .binary_bytes()
-        .filter(|bytes| bytes.len() <= i32::MAX as usize - 4)?;
+        .filter(|bytes| bytes.len() <= super::INT_MAX - 4)?;
     let (length, number) = bytes.split_first_chunk::<4>()?;
     let length = usize::try_from(i32::from_be_bytes(*length)).ok()?;
     (length == number.len())

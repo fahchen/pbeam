@@ -419,7 +419,11 @@ pub(super) unsafe extern "C" fn enif_compare_monitors(
     // SAFETY: the C API gives valid `ErlNifMonitor`s.
     let [one, two] = [monitor1, monitor2].map(|monitor| unsafe { monitor.read() }.words);
     let bytes = |words: [usize; 4]| words.map(usize::to_ne_bytes);
-    bytes(one).cmp(&bytes(two)) as c_int
+    match bytes(one).cmp(&bytes(two)) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    }
 }
 
 #[cfg(test)]

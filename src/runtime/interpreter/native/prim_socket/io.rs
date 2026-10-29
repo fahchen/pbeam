@@ -25,6 +25,16 @@ use crate::runtime::scheduler::poll::Direction;
 use crate::runtime::sockets::{CLOSED, CLOSING, SELECTED, SocketState};
 use crate::term::{ProcessId, Reference};
 
+/// A byte count of one socket call fits in `u64`.
+fn to_u64(count: usize) -> u64 {
+    u64::try_from(count).expect("a byte count fits in u64")
+}
+
+/// A byte count of one socket call fits in `i64`.
+fn to_i64(count: usize) -> i64 {
+    i64::try_from(count).expect("a byte count fits in i64")
+}
+
 /// The most elements of the I/O vector of one `nif_sendv/3` call,
 /// `iov_max`, which is `sysconf(_SC_IOV_MAX)` (`prim_socket_nif.c:18981-18990`):
 /// 1024 on Linux and macOS.
@@ -359,21 +369,21 @@ fn send_result(
         Ok(written) if tail == IovTail::Present => {
             // `send_check_retry` with the `sendRef` `iov`
             // (`unix_socket_syncio.c:7091-7155`).
-            state.counters.write_pkg_max_count += written as u64;
+            state.counters.write_pkg_max_count += to_u64(written);
             let iov = atom(scheduler, "iov")?;
             let mut writer = state.writer.take();
             make_current(scheduler, &mut writer, caller, &iov, key);
             state.writer = writer;
             Ok(BifResult::Value(Term::tuple(vec![
                 iov,
-                Term::Integer(written as i64),
+                Term::Integer(to_i64(written)),
             ])))
         }
         Ok(written) => {
             let counters = &mut state.counters;
             counters.write_pkg += 1;
-            counters.write_byte += written as u64;
-            counters.write_pkg_max_count += written as u64;
+            counters.write_byte += to_u64(written);
+            counters.write_pkg_max_count += to_u64(written);
             counters.write_pkg_max = counters.write_pkg_max.max(counters.write_pkg_max_count);
             counters.write_pkg_max_count = 0;
             state.writer = None;
@@ -406,7 +416,7 @@ fn send_retry(
     reference: &Term,
 ) -> BifResult {
     if let Some(written) = written {
-        state.counters.write_pkg_max_count += written as u64;
+        state.counters.write_pkg_max_count += to_u64(written);
     }
     let mut writer = state.writer.take();
     make_current(scheduler, &mut writer, caller, reference, key);
@@ -424,7 +434,7 @@ fn send_retry(
     BifResult::Value(match written {
         Some(written) => Term::tuple(vec![
             Term::static_atom("select"),
-            Term::Integer(written as i64),
+            Term::Integer(to_i64(written)),
         ]),
         None => Term::static_atom("select"),
     })
@@ -605,7 +615,7 @@ pub(super) fn recv(
         }
     };
     buffer.truncate(read);
-    let length = read as u64;
+    let length = to_u64(read);
     let counters = &mut state.counters;
     counters.read_byte += length;
     counters.read_pkg_max_count += length;
@@ -715,7 +725,7 @@ pub(super) fn recvfrom(
         }
     };
     buffer.truncate(read);
-    let length = read as u64;
+    let length = to_u64(read);
     let counters = &mut state.counters;
     counters.read_pkg += 1;
     counters.read_byte += length;

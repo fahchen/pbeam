@@ -456,7 +456,7 @@ impl Env {
 
 /// Return the atom handle of `atom`, the same in each env of the node.
 fn atom_handle(atom: &Atom) -> NifTerm {
-    ATOM_HANDLE | atom.index() as NifTerm
+    ATOM_HANDLE | NifTerm::try_from(atom.index()).expect("a u32 atom index fits in NifTerm")
 }
 
 /// Return the bytes that `enif_get_string` writes for `list` with the
@@ -1183,9 +1183,10 @@ pub(super) unsafe extern "C" fn enif_make_list_from_array(
 ) -> NifTerm {
     // SAFETY: the C API gives the env of the current call.
     let env = unsafe { env(env_pointer) };
+    let count = usize::try_from(cnt).expect("a c_uint fits in usize");
     // SAFETY: the C API requires that `arr` points to `cnt` readable
     // `ERL_NIF_TERM`s; the walk reads no handle for 0 terms.
-    let handles: Vec<NifTerm> = (0..cnt as usize)
+    let handles: Vec<NifTerm> = (0..count)
         .map(|index| unsafe { arr.add(index).read() })
         .collect();
     let elements: Vec<Term> = handles.into_iter().map(|handle| env.term(handle)).collect();
@@ -1515,8 +1516,9 @@ pub(super) unsafe extern "C" fn enif_make_tuple_from_array(
 ) -> NifTerm {
     // SAFETY: the C API gives the env of the current call.
     let env = unsafe { env(env_pointer) };
-    let mut elements = Vec::with_capacity(cnt as usize);
-    for index in 0..cnt as usize {
+    let count = usize::try_from(cnt).expect("a c_uint fits in usize");
+    let mut elements = Vec::with_capacity(count);
+    for index in 0..count {
         // SAFETY: the C API requires that `arr` points to `cnt` readable
         // `ERL_NIF_TERM`s; the walk reads no handle for 0 terms.
         let handle = unsafe { arr.add(index).read() };

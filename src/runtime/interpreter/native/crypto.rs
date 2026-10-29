@@ -70,6 +70,21 @@ use pkey::{pkey_crypt_nif, pkey_sign_nif, pkey_verify_nif};
 use rand::{rand_seed_nif, rand_uniform_nif, strong_rand_bytes_nif, strong_rand_range_nif};
 use std::collections::HashMap;
 
+/// The C `INT_MAX` as a `usize`, for the size checks of the NIFs that pass a
+/// length to OpenSSL as a C `int`.
+#[expect(
+    clippy::as_conversions,
+    reason = "i32::MAX fits in usize on every target, and TryFrom is not const"
+)]
+const INT_MAX: usize = i32::MAX as usize;
+
+/// The low 32 bits of `value` as a C `int`, as the C conversion of a
+/// `size_t` or `unsigned long` argument to an `int` parameter does.
+fn low_i32(value: u64) -> i32 {
+    let [b0, b1, b2, b3, ..] = value.to_le_bytes();
+    i32::from_le_bytes([b0, b1, b2, b3])
+}
+
 /// The functions of the ERTS `crypto` NIF library, as `(name, arity)` in
 /// the order of `nif_funcs` (`crypto.c:68-145`). `erlang:load_nif/2`
 /// checks each of them in this order. `BINDINGS` lists the bindings.
@@ -898,11 +913,13 @@ fn hash_info(scheduler: &mut Scheduler, digest_type: &Term) -> Result<BifResult,
         ),
         (
             Term::Atom(scheduler.atoms.put("size")?),
-            Term::Integer(digest.size() as i64),
+            Term::Integer(i64::try_from(digest.size()).expect("a digest size fits in i64")),
         ),
         (
             Term::Atom(scheduler.atoms.put("block_size")?),
-            Term::Integer(digest.block_size() as i64),
+            Term::Integer(
+                i64::try_from(digest.block_size()).expect("a digest block size fits in i64"),
+            ),
         ),
     ];
     let map = Map::from_pairs(pairs, &scheduler.atoms).expect("atom keys fit each map form");
@@ -1101,7 +1118,7 @@ fn hash_final_xof_nif(
     let Some(length) = unsigned(length).and_then(|length| u32::try_from(length).ok()) else {
         return c_error(scheduler, "badarg", "hash.c", 573, 1, "Bad len");
     };
-    let mut output = vec![0; (length >> 3) as usize];
+    let mut output = vec![0; usize::try_from(length >> 3).expect("a u32 fits in usize")];
     match hasher.finish_xof(&mut output) {
         Ok(()) => Ok(BifResult::Value(Term::binary(output))),
         Err(_) => c_error(
@@ -1193,7 +1210,7 @@ fn pbkdf2_hmac_nif(
     }
     // `PKCS5_PBKDF2_HMAC` takes the iterations as a C `int`
     // (pbkdf2_hmac.c:58-61), so the high 32 bits do not count.
-    let iterations = (iterations as u32) as i32;
+    let iterations = low_i32(iterations);
     if iterations <= 0 {
         return low_level_call_failed(scheduler);
     }
@@ -1202,11 +1219,11 @@ fn pbkdf2_hmac_nif(
     // the call (OpenSSL `pbkdf2.c:397`); another length above `INT_MAX`,
     // with an `int` of 0 for which ERTS gives uninitialized bytes, stops
     // the run (row "NIF stubs" of `docs/erts-differences.md`).
-    let int_max = i32::MAX as usize;
-    if key_length > int_max && ((key_length as u32) as i32) < 0 {
+    let key_length_int = low_i32(u64::try_from(key_length).expect("a usize fits in u64"));
+    if key_length > INT_MAX && key_length_int < 0 {
         return low_level_call_failed(scheduler);
     }
-    if key_length > int_max || password.len() > int_max || salt.len() > int_max {
+    if key_length > INT_MAX || password.len() > INT_MAX || salt.len() > INT_MAX {
         return Err(error(
             "crypto:pbkdf2_hmac_nif/5 does not support a key, password, or salt longer than INT_MAX bytes"
                 .to_owned(),
@@ -1261,7 +1278,7 @@ impl Hash {
         openssl::pkcs5::pbkdf2_hmac(
             password,
             salt,
-            iterations as usize,
+            usize::try_from(iterations).expect("the iterations are positive"),
             self.message_digest(),
             &mut output[start..],
         )
@@ -1349,8 +1366,7 @@ fn mac_nif(
     let failed = [
         (text.is_none(), 193, 3, "Bad text"),
         (
-            text.as_ref()
-                .is_some_and(|text| text.len() > i32::MAX as usize),
+            text.as_ref().is_some_and(|text| text.len() > INT_MAX),
             196,
             3,
             "Too long text",

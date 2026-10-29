@@ -482,7 +482,7 @@ fn compress_parameter(
     // libzstd reads each `int` parameter as an `int`, and the safe API
     // converts the `u32` back to the same `int` (`zstd-safe` `set_parameter`).
     let int = |parameter: fn(u32) -> CParameter| match integer(value) {
-        Some(int) => Ok(Some(parameter(int as u32))),
+        Some(int) => Ok(Some(parameter(int.cast_unsigned()))),
         None => Err(Native::InvalidValue(value.clone())),
     };
     match name {
@@ -508,6 +508,16 @@ fn compress_parameter(
         "dictIDFlag" => flag(CParameter::DictIdFlag),
         _ => Err(Native::InvalidKey(key.clone())),
     }
+}
+
+/// The `ZSTD_c_strategy` value of a strategy, which `zstd-sys` gives as an
+/// enum.
+#[expect(
+    clippy::as_conversions,
+    reason = "Strategy is a plain bindgen enum with the values 1 to 9 and has no conversion to i32"
+)]
+fn strategy_code(strategy: Strategy) -> i32 {
+    strategy as i32
 }
 
 /// Return the strategy parameter of a `strategy` value
@@ -573,7 +583,7 @@ fn set_compress_parameter_nif(
         (Ok(compressor), Ok(Some(parameter))) => match compressor.cctx.set_parameter(parameter) {
             Ok(_) => {
                 if let CParameter::Strategy(strategy) = parameter {
-                    compressor.strategy = strategy as i32;
+                    compressor.strategy = strategy_code(strategy);
                 }
                 Native::Ok
             }
@@ -660,7 +670,7 @@ fn set_decompress_parameter_nif(
         (Ok(decompressor), Some(value)) => {
             match decompressor
                 .dctx
-                .set_parameter(DParameter::WindowLogMax(value as u32))
+                .set_parameter(DParameter::WindowLogMax(value.cast_unsigned()))
             {
                 Ok(_) => Native::Ok,
                 Err(code) => Native::Zstd(code),
@@ -789,9 +799,9 @@ fn decompress(
             };
         }
         if let Ok(Some(size)) = find_decompressed_size(binary)
-            && size < chunk_size as u64
+            && size < u64::try_from(chunk_size).expect("a usize fits in u64")
         {
-            chunk_size = size as usize;
+            chunk_size = usize::try_from(size).expect("the size is below the usize chunk size");
         }
         decompressor.in_use = true;
     }

@@ -175,7 +175,7 @@ const PKTTYPES: [&str; 8] = [
 #[cfg(target_os = "linux")]
 pub(super) fn read() -> Result<Vec<Entry>, Failure> {
     nix::ifaddrs::getifaddrs()
-        .map_err(|errno| Failure::Errno(errno as c_int))?
+        .map_err(|errno| Failure::Errno(super::errno_code(errno)))?
         .map(entry)
         .collect()
 }

@@ -186,7 +186,7 @@ pub(super) fn ng_crypto_update_nif(
         (data.is_none(), 745, "expected binary"),
         (
             data.as_ref()
-                .is_some_and(|data| data.len() > i32::MAX as usize),
+                .is_some_and(|data| data.len() > super::INT_MAX),
             748,
             "too long data",
         ),
@@ -196,7 +196,9 @@ pub(super) fn ng_crypto_update_nif(
     }
     let data = data.unwrap_or_default();
     let output = with_cipher(scheduler, context, |state| {
-        state.size = state.size.wrapping_add(data.len() as u32);
+        state.size = state.size.wrapping_add(
+            u32::try_from(data.len()).expect("the check bounds data to INT_MAX bytes"),
+        );
         let mut output = Vec::new();
         state
             .context
@@ -253,7 +255,7 @@ pub(super) fn ng_crypto_get_data_nif(
 ) -> Result<BifResult, BeamError> {
     let data = with_cipher(scheduler, context, |state| {
         (
-            state.size as i32,
+            state.size.cast_signed(),
             state.padded_size,
             padding_name(state.padding),
             state.encrypt != 0,
@@ -328,8 +330,9 @@ fn aead_init(scheduler: &Scheduler, arguments: &[Term]) -> Result<AeadContext, C
         Term::Integer(length) => u32::try_from(*length).ok(),
         _ => None,
     };
-    let tag_length = tag_length.ok_or(("badarg", 109, 2, "Bad Tag length"))? as usize;
-    if tag_length > i32::MAX as usize || key.len() > i32::MAX as usize {
+    let tag_length = usize::try_from(tag_length.ok_or(("badarg", 109, 2, "Bad Tag length"))?)
+        .expect("a u32 fits in usize");
+    if tag_length > super::INT_MAX || key.len() > super::INT_MAX {
         return Err(("badarg", 113, 1, "key or tag too long"));
     }
     let index = cipher_index(scheduler, &arguments[0])

@@ -830,8 +830,16 @@ fn error_errno(atoms: &AtomTable, errno: libc::c_int) -> Result<Term, BeamError>
 /// assert_eq!(MAXIOV, 1024);
 /// ```
 #[cfg(target_os = "macos")]
+#[expect(
+    clippy::as_conversions,
+    reason = "IOV_MAX is a small positive c_int, and TryFrom is not const"
+)]
 const MAXIOV: usize = libc::IOV_MAX as usize;
 #[cfg(not(target_os = "macos"))]
+#[expect(
+    clippy::as_conversions,
+    reason = "UIO_MAXIOV is a small positive c_int, and TryFrom is not const"
+)]
 const MAXIOV: usize = libc::UIO_MAXIOV as usize;
 
 /// Run `prim_tty:write_nif(TTY, IOVec)`, as the ERTS NIF `tty_write_nif`

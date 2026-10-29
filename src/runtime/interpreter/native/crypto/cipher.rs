@@ -154,7 +154,8 @@ pub(super) fn cipher_info_nif(
         Some(&(_, kind)) => Term::Integer(kind),
         None => Term::static_atom("undefined"),
     };
-    let size = |value: usize| Term::Integer(value as i64);
+    let size =
+        |value: usize| Term::Integer(i64::try_from(value).expect("a cipher size fits in i64"));
     let aead = Term::static_atom(if index >= FIRST_AEAD { "true" } else { "false" });
     let pairs = [
         ("type", kind),
@@ -346,7 +347,7 @@ pub(super) fn ng_crypto_one_time_nif(
         (data.is_none(), 851, "expected binary as data"),
         (
             data.as_ref()
-                .is_some_and(|data| data.len() > i32::MAX as usize),
+                .is_some_and(|data| data.len() > super::INT_MAX),
             854,
             "too long data",
         ),
@@ -387,7 +388,7 @@ fn one_time(
     context
         .cipher_update_vec(data, &mut output)
         .map_err(|_| ("error", 475, -1, "Can't update"))?;
-    let size = data.len() as u32;
+    let size = u32::try_from(data.len()).expect("the caller bounds data to INT_MAX bytes");
     let mut padded_size = -1;
     final_output(
         &mut context,
@@ -481,10 +482,12 @@ pub(super) fn final_output(
 ) -> Result<(), CipherFailure> {
     let encrypt = direction == CipherDirection::Encrypt;
     let block_size = context.block_size();
-    let pad_size = (block_size - size as usize % block_size) % block_size;
+    let pad_size = (block_size - usize::try_from(size).expect("a u32 fits in usize") % block_size)
+        % block_size;
     if encrypt {
         let pkcs_block = padding == Padding::Pkcs && pad_size == 0;
-        *padded_size = if pkcs_block { block_size } else { pad_size } as i32;
+        *padded_size = i32::try_from(if pkcs_block { block_size } else { pad_size })
+            .expect("a cipher block size fits in i32");
     }
     if padding == Padding::Undefined {
         return Ok(());
@@ -561,7 +564,9 @@ fn aead(scheduler: &Scheduler, arguments: &[Term]) -> Result<Option<Term>, Ciphe
     // decryption (aead.c:199-208).
     let tag = match (encrypt, &arguments[5]) {
         (0, tag) => Err(iodata_bytes(tag).ok_or(("badarg", 205, 5, "non-binary Tag"))?),
-        (_, Term::Integer(length)) if u32::try_from(*length).is_ok() => Ok(*length as usize),
+        (_, Term::Integer(length)) if u32::try_from(*length).is_ok() => {
+            Ok(usize::try_from(*length).expect("the guard bounds the tag length to u32"))
+        }
         _ => return Err(("badarg", 201, 5, "Bad Tag length")),
     };
     let tag_length = tag.as_ref().map_or_else(Vec::len, |length| *length);
@@ -570,7 +575,7 @@ fn aead(scheduler: &Scheduler, arguments: &[Term]) -> Result<Option<Term>, Ciphe
         .filter(|&index| CIPHERS[index].2 == 0 || CIPHERS[index].2 == key.len());
     let failed = [
         (
-            sizes.iter().any(|&size| size > i32::MAX as usize),
+            sizes.iter().any(|&size| size > super::INT_MAX),
             ("badarg", 215, 5, "binary too long"),
         ),
         (

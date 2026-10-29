@@ -788,7 +788,7 @@ fn gives_the_argument_number_of_each_aead_context_error() {
         let mut bad = [state.clone(), empty.clone(), empty.clone(), empty.clone()];
         bad[index] = Term::Integer(1);
         let result = aead_cipher_context_nif(&mut scheduler, &bad).unwrap();
-        let argument = index as i64;
+        let argument = i64::try_from(index).unwrap();
         assert_c_error(
             result,
             &atoms,

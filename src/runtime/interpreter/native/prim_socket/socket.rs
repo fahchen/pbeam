@@ -488,7 +488,12 @@ pub(super) fn sockaddr(
 ) -> Result<Option<SockAddr>, BeamError> {
     let get = |name: &str| field(&scheduler.atoms, address, name);
     let family = get("family");
-    let port = || get("port").and_then(int).map(|port| port as u16);
+    let port = || {
+        get("port").and_then(int).map(|port| {
+            let [low, high, ..] = port.to_le_bytes();
+            u16::from_le_bytes([low, high])
+        })
+    };
     match family.and_then(|family| atom_name(scheduler, family)) {
         Some("inet") => {
             let address = get("addr").and_then(|address| in_addr(scheduler, address));

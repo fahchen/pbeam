@@ -123,7 +123,7 @@ fn compress_with_window(data: &[u8], window_bits: i32) -> Vec<u8> {
             .unwrap(),
         Status::StreamEnd
     );
-    output.truncate(deflate.total_out() as usize);
+    output.truncate(usize::try_from(deflate.total_out()).unwrap());
     output
 }
 
@@ -340,8 +340,8 @@ fn learns_the_window_size_of_a_header_split_across_calls() {
     // of that header.
     let first = compress_with_window(b"hello hello hello", 9);
     let far: Vec<u8> = (0..600)
-        .map(|value| (value % 251) as u8)
-        .chain((0..600).map(|value| (value % 251) as u8))
+        .map(|value| u8::try_from(value % 251).unwrap())
+        .chain((0..600).map(|value| u8::try_from(value % 251).unwrap()))
         .collect();
     let second = compress_with_window(&far, 15);
     let (head, rest) = first.split_at(1);
@@ -365,7 +365,7 @@ fn learns_the_window_size_of_a_header_split_across_calls() {
     )
     .unwrap();
     assert_eq!(tag(&scheduler, &result), "finished");
-    assert_eq!(output_bytes(&result), [] as [u8; 0]);
+    assert_eq!(output_bytes(&result), [0u8; 0]);
     enqueue(&mut scheduler, &stream, rest);
     let result = inflate_nif(
         &mut scheduler,
@@ -437,8 +437,8 @@ fn keeps_the_learned_window_size_across_inflate_reset() {
     // need a distance of 600, so a window-9 inflate raises a data error.
     let first = compress_with_window(b"hello hello hello", 9);
     let far: Vec<u8> = (0..600)
-        .map(|value| (value % 251) as u8)
-        .chain((0..600).map(|value| (value % 251) as u8))
+        .map(|value| u8::try_from(value % 251).unwrap())
+        .chain((0..600).map(|value| u8::try_from(value % 251).unwrap()))
         .collect();
     let second = compress_with_window(&far, 15);
     let mut scheduler = scheduler();
@@ -481,8 +481,8 @@ fn keeps_the_learned_window_size_across_reset_with_a_zlib_wrapper() {
     // (`inflate.c:539-545`), and `inflateReset` keeps it.
     let first = compress_with_window(b"hello hello hello", 9);
     let far: Vec<u8> = (0..600)
-        .map(|value| (value % 251) as u8)
-        .chain((0..600).map(|value| (value % 251) as u8))
+        .map(|value| u8::try_from(value % 251).unwrap())
+        .chain((0..600).map(|value| u8::try_from(value % 251).unwrap()))
         .collect();
     let second = compress_with_window(&far, 15);
     let mut scheduler = scheduler();
@@ -565,8 +565,8 @@ fn keeps_the_learned_window_size_across_the_automatic_reset() {
     // which keeps the window size that the first header told.
     let first = compress_with_window(b"hello", 9);
     let far: Vec<u8> = (0..600)
-        .map(|value| (value % 251) as u8)
-        .chain((0..600).map(|value| (value % 251) as u8))
+        .map(|value| u8::try_from(value % 251).unwrap())
+        .chain((0..600).map(|value| u8::try_from(value % 251).unwrap()))
         .collect();
     let second = compress_with_window(&far, 15);
     let mut both = first;
@@ -943,7 +943,9 @@ fn gives_continue_when_the_output_chunk_fills() {
     let mut scheduler = scheduler();
     let stream = stream(&mut scheduler);
     start_deflate(&mut scheduler, &stream);
-    let data: Vec<u8> = (0..100_000).map(|value| (value * 37 % 251) as u8).collect();
+    let data: Vec<u8> = (0..100_000)
+        .map(|value| u8::try_from(value * 37 % 251).unwrap())
+        .collect();
     enqueue(&mut scheduler, &stream, &data);
     let result = deflate_nif(
         &mut scheduler,
@@ -1032,7 +1034,7 @@ fn resets_an_inflate_stream_with_its_window_bits() {
             .unwrap(),
         Status::StreamEnd
     );
-    compressed.truncate(deflate.total_out() as usize);
+    compressed.truncate(usize::try_from(deflate.total_out()).unwrap());
     enqueue(&mut scheduler, &stream, &compressed);
     let result = inflate_nif(
         &mut scheduler,
@@ -1075,7 +1077,7 @@ fn gives_need_dictionary_for_a_stream_with_a_dictionary() {
         )
         .unwrap();
     assert_eq!(status, Status::StreamEnd);
-    compressed.truncate(deflate.total_out() as usize);
+    compressed.truncate(usize::try_from(deflate.total_out()).unwrap());
     enqueue(&mut scheduler, &stream, &compressed);
     let result = inflate_nif(
         &mut scheduler,
@@ -1155,7 +1157,7 @@ fn gives_each_end_of_stream_behavior() {
     )
     .unwrap();
     assert_eq!(tag(&second_scheduler, &result), "finished");
-    assert_eq!(output_bytes(&result), [] as [u8; 0]);
+    assert_eq!(output_bytes(&result), [0u8; 0]);
     let result = inflate_end_nif(&mut second_scheduler, &second_stream).unwrap();
     assert_eq!(atom_name(&second_scheduler, &result), "ok");
     // `error` raises a data error.

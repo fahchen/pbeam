@@ -352,6 +352,22 @@ fn int(term: &Term) -> Option<i32> {
     }
 }
 
+/// The low 16 bits of `value`, as the C cast to `uint16_t` keeps them.
+fn low_u16(value: u32) -> u16 {
+    let [low, high, ..] = value.to_le_bytes();
+    u16::from_le_bytes([low, high])
+}
+
+/// The `errno` value of `errno`. The `nix` type is a `repr(i32)` enum with
+/// no conversion to an integer.
+#[expect(
+    clippy::as_conversions,
+    reason = "nix::errno::Errno is a repr(i32) enum and has no From or TryFrom to i32"
+)]
+fn errno_code(errno: nix::errno::Errno) -> c_int {
+    errno as c_int
+}
+
 /// Read `term` as `enif_get_uint`.
 fn uint(term: &Term) -> Option<u32> {
     match term {
@@ -363,16 +379,15 @@ fn uint(term: &Term) -> Option<u32> {
 /// The first bytes of a socket address of the family `family` and the
 /// size `length`: `sa_len` and the `sa_family_t` of one byte on macOS, and
 /// the `sa_family_t` of two bytes on Linux. Each C cast truncates.
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn header(length: usize, family: c_int) -> Vec<u8> {
     #[cfg(target_os = "linux")]
     {
         let _ = length;
-        (family as u16).to_ne_bytes().to_vec()
+        low_u16(family.cast_unsigned()).to_ne_bytes().to_vec()
     }
     #[cfg(not(target_os = "linux"))]
     {
-        vec![length as u8, family as u8]
+        vec![length.to_le_bytes()[0], family.to_le_bytes()[0]]
     }
 }
 
@@ -424,12 +439,11 @@ fn sockaddr(atoms: &AtomTable, term: &Term) -> Result<Option<Vec<u8>>, BeamError
 
 /// Decode an IPv4 socket address, as `esock_decode_sockaddr_in` does
 /// (`socket_util.c:1118-1166`): `htons` truncates the port to 16 bits.
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn inet(port: Option<&Term>, address: Option<&Term>, atoms: &AtomTable) -> Option<Vec<u8>> {
     let port = port.and_then(int)?;
     let address = in_addr(address?, atoms)?;
     let mut bytes = header(16, libc::AF_INET);
-    bytes.extend_from_slice(&(port as u16).to_be_bytes());
+    bytes.extend_from_slice(&low_u16(port.cast_unsigned()).to_be_bytes());
     bytes.extend_from_slice(&address);
     bytes.extend_from_slice(&[0; 8]);
     Some(bytes)
@@ -463,7 +477,6 @@ fn in_addr(term: &Term, atoms: &AtomTable) -> Option<[u8; 4]> {
 /// address, as `esock_decode_sockaddr_in6` does (`socket_util.c:1239-1325`).
 /// ERTS sets `sin6_len` to the size of a `sockaddr_in`, 16, not 28
 /// (`socket_util.c:1252-1254`).
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn inet6(fields: [Option<Term>; 4], atoms: &AtomTable) -> Result<Option<Vec<u8>>, BeamError> {
     let [port, flowinfo, scope_id, address] = fields;
     let port = port.as_ref().and_then(int);
@@ -478,7 +491,7 @@ fn inet6(fields: [Option<Term>; 4], atoms: &AtomTable) -> Result<Option<Vec<u8>>
         return Ok(None);
     };
     let mut bytes = header(16, libc::AF_INET6);
-    bytes.extend_from_slice(&(port as u16).to_be_bytes());
+    bytes.extend_from_slice(&low_u16(port.cast_unsigned()).to_be_bytes());
     bytes.extend_from_slice(&flowinfo.to_ne_bytes());
     bytes.extend_from_slice(&address);
     bytes.extend_from_slice(&scope_id.to_ne_bytes());
@@ -736,7 +749,6 @@ fn socktype(atoms: &AtomTable, socktype: c_int) -> Result<Term, BeamError> {
 /// and the scope id signed. Each other address stops the run with a
 /// runtime error: `getaddrinfo` with NULL hints gives only these two
 /// families.
-#[allow(clippy::cast_possible_wrap)]
 fn encode_sockaddr(atoms: &AtomTable, bytes: &[u8]) -> Result<Term, BeamError> {
     let family = if bytes.len() >= 2 {
         family_of(bytes)
@@ -773,8 +785,14 @@ fn encode_sockaddr(atoms: &AtomTable, bytes: &[u8]) -> Result<Term, BeamError> {
                     Term::Integer(u16::from_be_bytes([bytes[2], bytes[3]]).into()),
                 ),
                 (key("addr")?, Term::tuple(address)),
-                (key("flowinfo")?, Term::Integer((word(4) as i32).into())),
-                (key("scope_id")?, Term::Integer((word(24) as i32).into())),
+                (
+                    key("flowinfo")?,
+                    Term::Integer(word(4).cast_signed().into()),
+                ),
+                (
+                    key("scope_id")?,
+                    Term::Integer(word(24).cast_signed().into()),
+                ),
             ]
         }
         _ => {
@@ -793,11 +811,6 @@ fn encode_sockaddr(atoms: &AtomTable, bytes: &[u8]) -> Result<Term, BeamError> {
 /// a string of at most 255 bytes, or no entry, gives `{error, einval}`.
 /// The protocol `"any"` gives NULL. ERTS keeps the port in a `short`, so a
 /// port above 32767 is negative.
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::cast_possible_wrap
-)]
 fn getservbyname(name: &Term, protocol: &Term) -> Result<BifResult, BeamError> {
     let name = c_string(name, Some(255));
     let protocol = c_string(protocol, Some(255));
@@ -808,7 +821,11 @@ fn getservbyname(name: &Term, protocol: &Term) -> Result<BifResult, BeamError> {
             netdb::getservbyname(&name, protocol.as_deref())
         },
         |scheduler, port| match port {
-            Some(port) => success(Term::Integer((u16::from_be(port as u16) as i16).into())),
+            Some(port) => success(Term::Integer(
+                u16::from_be(low_u16(port.cast_unsigned()))
+                    .cast_signed()
+                    .into(),
+            )),
             None => failure(&scheduler.atoms, "einval"),
         },
     )
@@ -818,7 +835,6 @@ fn getservbyname(name: &Term, protocol: &Term) -> Result<BifResult, BeamError> {
 /// (`prim_net_nif.c:4170-4257`, `5015`): a port that is not an `unsigned
 /// int`, or a protocol that is not a string of at most 255 bytes, or no
 /// entry, gives `{error, einval}`. `htons` truncates the port to 16 bits.
-#[allow(clippy::cast_possible_truncation)]
 fn getservbyport(port: &Term, protocol: &Term) -> Result<BifResult, BeamError> {
     let port = uint(port);
     let protocol = c_string(protocol, Some(255));
@@ -826,7 +842,7 @@ fn getservbyport(port: &Term, protocol: &Term) -> Result<BifResult, BeamError> {
         move || {
             let (port, protocol) = (port?, protocol?);
             let protocol = (protocol.as_bytes() != b"any").then_some(protocol);
-            netdb::getservbyport(c_int::from((port as u16).to_be()), protocol.as_deref())
+            netdb::getservbyport(c_int::from(low_u16(port).to_be()), protocol.as_deref())
         },
         |scheduler, name| match name {
             Some(name) => success(latin1(&name)),
@@ -893,14 +909,13 @@ fn getifaddrs(atoms: &AtomTable, extra: &Term) -> Result<BifResult, BeamError> {
 /// not a string of at most `IF_NAMESIZE` (16) bytes gives
 /// `{error, einval}`, and a failed `if_nametoindex` gives
 /// `{error, Errno}`. `MKI` makes the index signed.
-#[allow(clippy::cast_possible_wrap)]
 fn if_name2index(atoms: &AtomTable, name: &Term) -> Result<BifResult, BeamError> {
     let Some(name) = c_string(name, Some(16)) else {
         return failure(atoms, "einval");
     };
     match nix::net::if_::if_nametoindex(name.as_c_str()) {
-        Ok(index) => success(Term::Integer((index as i32).into())),
-        Err(errno) => failure(atoms, &errno_id(errno as c_int)),
+        Ok(index) => success(Term::Integer(index.cast_signed().into())),
+        Err(errno) => failure(atoms, &errno_id(errno_code(errno))),
     }
 }
 
@@ -922,7 +937,6 @@ fn if_index2name(atoms: &AtomTable, index: &Term) -> Result<BifResult, BeamError
 /// Give the result of `nif_if_names/0` (`prim_net_nif.c:4413-4494`) for the
 /// result of `if_nameindex`: `{ok, [{Index, Name}]}`, or `{error, Errno}`.
 /// `MKI` makes each index signed.
-#[allow(clippy::cast_possible_wrap)]
 fn if_names(
     atoms: &AtomTable,
     interfaces: nix::Result<nix::net::if_::Interfaces>,
@@ -930,11 +944,11 @@ fn if_names(
     match interfaces {
         Ok(interfaces) => success(Term::list_from(interfaces.iter().map(|interface| {
             Term::tuple(vec![
-                Term::Integer((interface.index() as i32).into()),
+                Term::Integer(interface.index().cast_signed().into()),
                 latin1(interface.name().to_bytes()),
             ])
         }))),
-        Err(errno) => failure(atoms, &errno_id(errno as c_int)),
+        Err(errno) => failure(atoms, &errno_id(errno_code(errno))),
     }
 }
 

@@ -467,7 +467,7 @@ fn sign_options(
     term: &Term,
     argument: usize,
 ) -> Result<SignOptions, Failure> {
-    let argument = argument as i64;
+    let argument = i64::try_from(argument).expect("an argument position fits in i64");
     if !matches!(term, Term::Nil) && term.cons_cell().is_none() {
         return Err(badarg(400, argument, "Expected a list"));
     }

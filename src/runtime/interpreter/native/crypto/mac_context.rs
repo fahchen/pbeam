@@ -316,7 +316,7 @@ pub(super) fn mac_update_nif(
         (data.is_none(), 807, "Bad text"),
         (
             data.as_ref()
-                .is_some_and(|data| data.len() > i32::MAX as usize),
+                .is_some_and(|data| data.len() > super::INT_MAX),
             810,
             "Too long text",
         ),

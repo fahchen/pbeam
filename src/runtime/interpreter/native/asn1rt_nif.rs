@@ -137,7 +137,7 @@ impl Per<'_> {
 
     /// Set the output byte at `ptr` to the low byte of `value`.
     fn set(&mut self, value: i32) {
-        self.out[self.p] = value as u8;
+        self.out[self.p] = value.to_le_bytes()[0];
     }
 
     /// Set the output byte at `ptr` to itself or `value`.
@@ -259,7 +259,8 @@ impl Per<'_> {
             }
             Ordering::Less => {
                 let ret = self.insert_octets_as_bits(desired_len)?;
-                self.ip += (in_len - desired_len) as usize;
+                self.ip += usize::try_from(in_len - desired_len)
+                    .expect("the Less arm has in_len above desired_len");
                 Some(ret)
             }
         }
@@ -359,12 +360,12 @@ fn checked(ret: i32) -> Option<i32> {
 /// The C `int` shift `value << amount`. The shift instructions of the
 /// pinned ERTS hosts use the amount modulo 32.
 fn shl(value: i32, amount: i32) -> i32 {
-    value.wrapping_shl(amount as u32)
+    value.wrapping_shl(amount.cast_unsigned())
 }
 
 /// The C `int` shift `value >> amount`, with the amount modulo 32.
 fn shr(value: i32, amount: i32) -> i32 {
-    value.wrapping_shr(amount as u32)
+    value.wrapping_shr(amount.cast_unsigned())
 }
 
 /// The C macro `CEIL(X,Y)` (`asn1_erl_nif.c:57`).
@@ -428,7 +429,7 @@ fn read_length(per: &mut Per<'_>, width: LengthWidth) -> i32 {
 /// outside the term and gives no stable result. Set `truncated` and return
 /// `None` for that input.
 fn per_complete(input: &[u8], truncated: &mut bool) -> Option<Vec<u8>> {
-    let in_len = input.len() as i64;
+    let in_len = i64::try_from(input.len()).expect("a binary length fits in i64");
     let mut per = Per {
         input,
         ip: 0,
@@ -693,7 +694,10 @@ fn decode_ber_tlv_raw(scheduler: &mut Scheduler, data: &Term) -> Result<BifResul
         )),
         Err(BerError { reason, position }) => {
             let reason = Term::Atom(scheduler.atoms.put(reason)?);
-            let detail = Term::tuple(vec![reason, Term::Integer(position as i64)]);
+            let detail = Term::tuple(vec![
+                reason,
+                Term::Integer(i64::try_from(position).expect("a binary position fits in i64")),
+            ]);
             error_tuple(scheduler, detail)
         }
     }
@@ -756,16 +760,16 @@ fn ber_encode(tlv: &Term, reversed: &mut Vec<u8>) -> Option<()> {
 /// and 17 of `tag`, and the tag number from its low 16 bits, in reverse
 /// order.
 fn ber_encode_tag(tag: u32, form: u8, reversed: &mut Vec<u8>) {
-    let head = form | ((tag & 0x30000) >> 10) as u8;
+    let head = form | u8::try_from((tag & 0x30000) >> 10).expect("two class bits fit in u8");
     let mut number = tag & 0xffff;
     if number <= 30 {
-        reversed.push(head | number as u8);
+        reversed.push(head | u8::try_from(number).expect("a tag number up to 30 fits in u8"));
         return;
     }
-    reversed.push((number & 127) as u8);
+    reversed.push(u8::try_from(number & 127).expect("7 bits fit in u8"));
     number >>= 7;
     while number > 0 {
-        reversed.push((number & 127) as u8 | 0x80);
+        reversed.push(u8::try_from(number & 127).expect("7 bits fit in u8") | 0x80);
         number >>= 7;
     }
     reversed.push(head | 0x1f);
@@ -774,12 +778,12 @@ fn ber_encode_tag(tag: u32, form: u8, reversed: &mut Vec<u8>) {
 /// `ber_encode_length` (`asn1_erl_nif.c:1137-1163`), in reverse order.
 fn ber_encode_length(mut size: usize, reversed: &mut Vec<u8>) {
     if size < 128 {
-        reversed.push(size as u8);
+        reversed.push(u8::try_from(size).expect("a size below 128 fits in u8"));
         return;
     }
     let mut chunks = 0u8;
     while size > 0 {
-        reversed.push((size & 0xff) as u8);
+        reversed.push(size.to_le_bytes()[0]);
         size >>= 8;
         chunks += 1;
     }
