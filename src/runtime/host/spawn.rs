@@ -306,8 +306,8 @@ fn start(
         os_pid,
         // ERTS closes the parent end that its direction does not use
         // after the handshake (`sys_drivers.c:1320-1329`).
-        input: read_write.write.then_some(input),
-        output: read_write.read.then_some(output),
+        input: read_write.write.then(|| nonblocking(input)),
+        output: read_write.read.then(|| nonblocking(output)),
         status,
     })
 }
@@ -331,8 +331,8 @@ fn failed(
     let _ = File::from(status_writer).write_all(&wait_status.to_ne_bytes());
     Child {
         os_pid: 0,
-        input: read_write.write.then_some(input),
-        output: read_write.read.then_some(output),
+        input: read_write.write.then(|| nonblocking(input)),
+        output: read_write.read.then(|| nonblocking(output)),
         status,
     }
 }
@@ -388,10 +388,25 @@ pub(crate) fn serve(
     });
     Ok(Child {
         os_pid: std::process::id().try_into().unwrap_or(0),
-        input: Some(input),
-        output: Some(output),
+        input: Some(nonblocking(input)),
+        output: Some(nonblocking(output)),
         status,
     })
+}
+
+/// Return the parent end `fd` of a pipe of a port with `O_NONBLOCK`, as
+/// `spawn_start` sets the read end of the output pipe and the write end of
+/// the input pipe (`SET_NONBLOCKING`, `sys_drivers.c:497-498`). A write
+/// takes what the pipe holds and returns at once. A read of an empty pipe
+/// fails with `EAGAIN` and does not block the scheduler: a ready report
+/// can name an fd that a port closed and a new port got again.
+fn nonblocking(fd: OwnedFd) -> OwnedFd {
+    // The flag change of a valid pipe fd does not fail.
+    let _ = nix::fcntl::fcntl(
+        &fd,
+        nix::fcntl::FcntlArg::F_SETFL(nix::fcntl::OFlag::O_NONBLOCK),
+    );
+    fd
 }
 
 impl Child {
@@ -474,25 +489,30 @@ impl Child {
         })
     }
 
-    /// Write all bytes of `bytes` to the input of the child, as `output`
-    /// of the spawn driver writes them with `writev` (`sys_drivers.c:1140-1203`).
-    /// The pipe is blocking, so the write returns when the child has read
-    /// the bytes that do not fit in the pipe. Return the `errno` of a
-    /// failed write, for example `EPIPE` when the child closed its input.
+    /// Write what the input pipe takes of `bytes` without a wait, and return
+    /// the count: 0 when the pipe is full or a signal stops the write, as
+    /// the driver writes its non-blocking fd (`sys_drivers.c:1102-1120`,
+    /// `1473-1490`). A port with the `in` option fails with `EBADF`.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(child.write_input(b"hello"), Ok(()));
+    /// assert_eq!(child.write_some(b"hi"), Ok(2));
     /// ```
-    pub(crate) fn write_input(&self, bytes: &[u8]) -> Result<(), c_int> {
-        // A port with the `in` option has no write end: the `writev` of
-        // the driver on its closed fd fails with `EBADF`
-        // (`sys_drivers.c:1145`, `1177`, `1180-1184`).
+    pub(crate) fn write_some(&self, bytes: &[u8]) -> Result<usize, c_int> {
         let Some(input) = &self.input else {
             return Err(libc::EBADF);
         };
-        output::write_all(input.as_raw_fd(), &mut [IoSlice::new(bytes)])
+        match nix::unistd::write(input, bytes) {
+            Ok(count) => Ok(count),
+            Err(nix::errno::Errno::EAGAIN | nix::errno::Errno::EINTR) => Ok(0),
+            Err(errno) => Err(errno as c_int),
+        }
+    }
+
+    /// Return the write end of the input pipe, or `None` with `in`.
+    pub(crate) fn input_fd(&self) -> Option<c_int> {
+        self.input.as_ref().map(AsRawFd::as_raw_fd)
     }
 }
 
