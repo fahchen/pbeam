@@ -102,8 +102,12 @@ monitors() ->
     receive {'DOWN', VictimReference, process, _, _} -> ok end,
     VictimLog = log(),
     [LiveResult, DeadResult, {First, Second, Same, Differ, Demonitor, Again}, Released, NoDown,
-     Log, VictimResult, VictimLog, probe(17, 0), is_reference(Object), is_reference(Pair),
-     is_reference(VictimObject)].
+     Log, VictimResult, VictimLog, downs(), probe(17, 0), is_reference(Object),
+     is_reference(Pair), is_reference(VictimObject)].
+
+%% Return the messages of the down callback, in their order.
+downs() ->
+    receive {down, Id} -> [Id | downs()] after 0 -> [] end.
 
 log() ->
     erlang:garbage_collect(),
@@ -132,8 +136,8 @@ expected() ->
      [true, true],
      [[], ok, [1011], [10], [20], [30]],
      [1, 2],
-     [0, 1, {0, 0, true, true, 0, 1}, 0, -1, [8, 2005, 2006], 0, [2005], {true, 2}, true, true,
-      true]].
+     [0, 1, {0, 0, true, true, 0, 1}, 0, -1, [8, 2005, 2006], 0, [2005], [5, 6, 5], {true, 2},
+      true, true, true]].
 
 probe(_Kind, _Arg) ->
     erlang:nif_error(not_loaded).

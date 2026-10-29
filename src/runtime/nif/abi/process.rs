@@ -255,8 +255,10 @@ pub unsafe extern "C" fn enif_is_process_alive(_env: *mut Env, pid: *const ErlNi
 /// The scheduler of the caller sends the message when the call returns.
 ///
 /// A `msg` that the env does not have breaks the C API contract, and the
-/// call gives a runtime error. On a thread that runs no NIF call, the call
-/// returns 0.
+/// call gives a runtime error. A thread, a down callback, or a destructor
+/// that runs no NIF call sends through the inbox of the scheduler of the
+/// receiver. With no message env and no env, it sends only an atom, and
+/// gets 0 for another term.
 ///
 /// # Safety
 ///
@@ -265,7 +267,7 @@ pub unsafe extern "C" fn enif_is_process_alive(_env: *mut Env, pid: *const ErlNi
 /// the C API requires.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn enif_send(
-    _env: *mut Env,
+    env: *mut Env,
     to_pid: *const ErlNifPid,
     msg_env: *mut Env,
     msg: NifTerm,
@@ -286,6 +288,11 @@ pub unsafe extern "C" fn enif_send(
     } else if let Some(env) = in_call {
         // SAFETY: the env of the running call is alive until it returns.
         unsafe { super::env::env(std::ptr::with_exposed_provenance_mut(env)) }.get(msg)
+    } else if !env.is_null() {
+        // A down callback or a destructor gives its env, which has no
+        // process, and ERTS copies the term from it (`erl_nif.c:965-993`).
+        // SAFETY: the C API gives the env of the running callback.
+        unsafe { super::env::env(env) }.get(msg)
     } else {
         with_run(|run| Env::new(&run.atoms, None, &[]).get(msg)).flatten()
     };

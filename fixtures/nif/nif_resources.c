@@ -38,7 +38,8 @@
  *   17  the load results of enif_init_resource_type: {FIsNull, TriedF}
  *
  * The load callback also opens the type e with enif_init_resource_type,
- * whose down callback adds 2000 + the id of the object to the log, and the
+ * whose down callback adds 2000 + the id of the object to the log and sends
+ * {down, Id} with its env to the caller of the last probe 13, and the
  * type f with only ERL_NIF_RT_TAKEOVER.
  */
 #include <stddef.h>
@@ -66,12 +67,19 @@ static void dtor_b(ErlNifEnv *env, void *obj)
     log_ids[log_len++] = 1000 + ((object *)obj)->id;
 }
 
+static ErlNifPid watcher;
+static int watcher_set;
+
 static void down_e(ErlNifEnv *env, void *obj, ErlNifPid *pid, ErlNifMonitor *mon)
 {
-    (void)env;
+    int id = ((object *)obj)->id;
     (void)pid;
     (void)mon;
-    log_ids[log_len++] = 2000 + ((object *)obj)->id;
+    log_ids[log_len++] = 2000 + id;
+    if (watcher_set) {
+        enif_send(env, &watcher, NULL,
+                  enif_make_tuple(env, 2, enif_make_atom(env, "down"), enif_make_int(env, id)));
+    }
 }
 
 static int load(ErlNifEnv *env, void **priv, ERL_NIF_TERM info)
@@ -132,6 +140,7 @@ static ERL_NIF_TERM probe(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
         if (!enif_get_local_pid(env, argv[1], &pid)) {
             return enif_make_badarg(env);
         }
+        watcher_set = enif_self(env, &watcher) != NULL;
         monitored = enif_alloc_resource(type_e, sizeof(object));
         monitored->id = 5;
         result = enif_monitor_process(env, monitored, &pid, NULL);
