@@ -4,7 +4,7 @@
 -behaviour(supervisor).
 -export([main/0, main/1, lookup/0, gethost/0, supports/0, socket/0, sockopt/0, socket_select/0, socket_io/0,
          socket_dgram/0,         socket_acceptors/0, socket_connect_invalid/0, socket_recvfrom_flags/0, socket_recvfrom_local_flags/0,
-         socket_recvfrom_errqueue/0, socket_sendv/0, socket_backend_tcp/0, socket_backend_udp/0, sockopt_otp/0, sockopt_select_read/0, sockopt_host/0, sockopt_raw/0, sockopt_pkt/0, start/2, stop/1, init/1]).
+         socket_recvfrom_errqueue/0, socket_sendv/0, socket_msg/0, socket_backend_tcp/0, socket_backend_udp/0, sockopt_otp/0, sockopt_select_read/0, sockopt_host/0, sockopt_raw/0, sockopt_pkt/0, start/2, stop/1, init/1]).
 
 %% `erl -noshell -boot start_clean -pa fixtures/boot -s kernel_boot_probe
 %% main -kernel logger_level warning` runs main/0 in the boot process of init after the boot script
@@ -436,6 +436,97 @@ socket_recvfrom_flags() ->
     Counters = [maps:with(Keys, maps:get(counters, socket:info(S))) || S <- [U2, A]],
     erlang:display({socket_recvfrom_flags, Udp, Inet6, Stream, Counters}),
     init:stop().
+
+%% `-s kernel_boot_probe socket_msg` runs socket:sendmsg/2,3,4,
+%% socket:recvmsg/1,2,3,4,5, socket:sendmmsg/4, and socket:recvmmsg/6 on
+%% inet and inet6 datagram sockets and an inet stream socket, with the
+%% control messages of the options recvtos, recvttl, pktinfo, timestamp,
+%% recvtclass, recvhoplimit, and recvpktinfo. The source address shows as
+%% whether it is the address of the sender, and the time of a timestamp as
+%% the keys of its map.
+socket_msg() ->
+    Loopback = #{family => inet, addr => {127, 0, 0, 1}, port => 0},
+    {ok, U1} = socket:open(inet, dgram, udp),
+    {ok, U2} = socket:open(inet, dgram, udp),
+    ok = socket:bind(U1, Loopback),
+    ok = socket:bind(U2, Loopback),
+    {ok, A1} = socket:sockname(U1),
+    {ok, A2} = socket:sockname(U2),
+    Msg = fun({Tag, #{addr := Addr} = M}) -> {Tag, sorted(M#{addr := Addr =:= A1})}; (Other) -> sorted(Other) end,
+    Send = fun(Ctrl) -> socket:sendmsg(U1, #{addr => A2, iov => [<<"c">>], ctrl => Ctrl}) end,
+    Plain = [socket:recvmsg(U2, 0, 0, [], 0), socket:sendmsg(U1, #{addr => A2, iov => [<<"he">>, <<>>, <<"llo">>]}),
+             Msg(socket:recvmsg(U2, 0, 0, [], 1000)), socket:sendmsg(U1, #{addr => A2, iov => [<<"abc">>]}, [], 1000),
+             Msg(socket:recvmsg(U2, 2, 0, [], 1000)), socket:sendmsg(U1, #{addr => A2, iov => [<<"d">>]}, []),
+             Msg(socket:recvmsg(U2, 0, 0, [peek], 1000)), Msg(socket:recvmsg(U2, 1000)), Msg(socket:recvmsg(U2, [], 0)),
+             socket:sendmsg(U1, #{addr => A2, iov => [<<"e">>]}), Msg(socket:recvmsg(U2, 0, 0, 1000)),
+             socket:setopt(U2, otp, select_read, true), socket:sendmsg(U1, #{addr => A2, iov => [<<"f">>]}),
+             Msg(socket:recvmsg(U2, 0, 0, [], 1000)), socket:setopt(U2, otp, select_read, false)],
+    Opts = [socket:setopt(U2, ip, recvtos, true), socket:setopt(U2, ip, recvttl, true)],
+    Ctrl = [Send([#{level => ip, type => tos, value => 16}]), Msg(socket:recvmsg(U2, 0, 0, [], 1000)),
+            Send([#{level => ip, type => tos, value => lowdelay}]), Msg(socket:recvmsg(U2, 0, 0, [], 1000)),
+            Send([#{level => ip, type => tos, data => <<32>>}]), Msg(socket:recvmsg(U2, 0, 16, [], 1000)),
+            Send([#{level => ip, type => ttl, value => 9}]), Msg(socket:recvmsg(U2, 0, 0, [], 1000)),
+            Send([#{level => ip, type => ttl, data => 10}]), Msg(socket:recvmsg(U2, 0, 0, [], 1000)),
+            Send([#{level => 0, type => 1, data => true}]), Msg(socket:recvmsg(U2, 0, 0, [], 1000)),
+            Send([#{level => ip, type => 1, data => false}, #{level => ip, type => ttl, value => 3}]),
+            Msg(socket:recvmsg(U2, 0, 0, [], 1000)),
+            Send([#{level => ip, type => recvttl, value => 1}]), Send([#{level => ip, type => tos, value => 1, data => <<1>>}]),
+            Send([#{level => ip, type => tos}]), Send([#{level => ip, value => 1}]), Send([#{level => 1.5, type => tos, value => 1}]),
+            Send([#{level => ip, type => nosuch, data => <<1>>}]), Send([#{level => ip, type => "tos", data => <<1>>}]),
+            Send([#{level => ip, type => tos, data => 1.5}]), Send([#{level => ip, type => tos, value => 1.5}]),
+            Send([#{level => ip, type => ttl, value => nosuch}]), Send([#{level => ip, type => tos, data => <<0:16000>>}]),
+            Send([not_a_map]), Msg(socket:recvmsg(U2, 0, 0, [], 100)),
+            socket:setopt(U2, ip, recvtos, false), socket:setopt(U2, ip, recvttl, false),
+            socket:setopt(U2, ip, pktinfo, true), Send([]), Msg(socket:recvmsg(U2, 0, 0, [], 1000)),
+            socket:setopt(U2, ip, pktinfo, false), socket:setopt(U2, socket, timestamp, true), Send([]),
+            case socket:recvmsg(U2, 0, 0, [], 1000) of
+                {ok, #{ctrl := Cs}} -> [{L, T, lists:sort(maps:keys(V))} || #{level := L, type := T, value := V} <- Cs];
+                Other -> Other
+            end, socket:setopt(U2, socket, timestamp, false)],
+    Loopback6 = #{family => inet6, addr => loopback, port => 0},
+    {ok, V1} = socket:open(inet6, dgram, udp),
+    {ok, V2} = socket:open(inet6, dgram, udp),
+    ok = socket:bind(V1, Loopback6),
+    ok = socket:bind(V2, Loopback6),
+    {ok, B2} = socket:sockname(V2),
+    Six = fun({ok, M}) -> {ok, sorted(maps:remove(addr, M))}; (Other) -> Other end,
+    Send6 = fun(C6) -> socket:sendmsg(V1, #{addr => B2, iov => [<<"six">>], ctrl => C6}) end,
+    Inet6 = [socket:setopt(V2, ipv6, recvtclass, true), Send6([#{level => ipv6, type => tclass, value => 32}]),
+             Six(socket:recvmsg(V2, 0, 0, [], 1000)), socket:setopt(V2, ipv6, recvtclass, false),
+             catch socket:setopt(V2, ipv6, recvhoplimit, true), Send6([#{level => ipv6, type => hoplimit, value => 5}]),
+             catch socket:setopt(V2, ipv6, recvhoplimit, false), catch socket:setopt(V2, ipv6, recvpktinfo, true),
+             Send6([]), Six(socket:recvmsg(V2, 0, 0, [], 1000)), catch socket:setopt(V2, ipv6, recvpktinfo, false),
+             Send6([#{level => ipv6, type => 99, data => <<1, 2, 3>>}]), Six(socket:recvmsg(V2, 0, 0, [], 1000))],
+    {ok, L} = socket:open(inet, stream, tcp),
+    ok = socket:bind(L, Loopback),
+    ok = socket:listen(L),
+    {ok, Addr} = socket:sockname(L),
+    {ok, C} = socket:open(inet, stream, tcp),
+    ok = socket:connect(C, Addr),
+    {ok, A} = socket:accept(L),
+    Stream = [socket:sendmsg(C, #{iov => [<<"st">>, <<"ream">>]}), sorted(socket:recvmsg(A, 0, 0, [], 1000)),
+              socket:recvmsg(A, 0, 0, [], 0), socket:sendmsg(C, #{iov => [<<"x">>]}),
+              sorted(socket:recvmsg(A, 0, 0, [], 1000)), socket:shutdown(C, write), socket:recvmsg(A, 0, 0, [], 1000),
+              socket:recvmsg(A, 0, 0, [], 0)],
+    Keys = [read_byte, read_pkg, read_pkg_max, read_fails, write_pkg, write_byte, write_fails],
+    Counters = [sorted(maps:with(Keys, maps:get(counters, socket:info(S)))) || S <- [U1, U2, A, C]],
+    Mmsg = case os:type() of
+               {unix, darwin} ->
+                   Raised = fun(F) -> try F() catch Class:Reason -> {Class, Reason} end end,
+                   [Raised(fun() -> socket:sendmmsg(U1, [#{addr => A2, iov => [<<"m">>]}], [], infinity) end),
+                    Raised(fun() -> socket:recvmmsg(U2, 1, 0, 0, [], infinity) end)];
+               _ -> skipped
+           end,
+    erlang:display({socket_msg, Plain, Opts, Ctrl, Inet6, Stream, Counters, Mmsg}),
+    init:stop().
+
+%% Return `Term` with each map as the sorted list of its pairs: the order of
+%% the atom keys of a map follows the atom index, which differs between
+%% PBeam and ERTS for an atom that is not static.
+sorted(Map) when is_map(Map) -> lists:sort([{Key, sorted(Value)} || Key := Value <- Map]);
+sorted(List) when is_list(List) -> [sorted(Element) || Element <- List];
+sorted(Tuple) when is_tuple(Tuple) -> list_to_tuple(sorted(tuple_to_list(Tuple)));
+sorted(Term) -> Term.
 
 %% `-s kernel_boot_probe socket_recvfrom_local_flags` receives with the flag
 %% peek on a local datagram socket.
