@@ -8,6 +8,7 @@
 //! `prim_buffer`.
 
 use std::collections::HashMap;
+use std::fs::File;
 use std::sync::{Arc, Mutex};
 
 use socket2::Socket;
@@ -133,6 +134,7 @@ impl Sockets {
         // A close cancels each select before the fd closes.
         let aborted = socket.stop(poll);
         socket.socket = None;
+        socket.sendfile = None;
         socket.read |= CLOSING | CLOSED;
         socket.write |= CLOSING | CLOSED;
         let (domain, kind, protocol) = (socket.domain, socket.kind, socket.protocol);
@@ -234,6 +236,31 @@ pub(super) struct IoCounters {
     pub(super) write_waits: u64,
 }
 
+/// The sendfile counters of `ESockSendfileCounters`, which
+/// `esock_socket_info_counters` adds to the counters after the first
+/// sendfile (`prim_socket_nif.c:4958-4989`).
+#[derive(Debug, Default, Clone, Copy)]
+pub(super) struct SendfileCounters {
+    /// `cnt`, the `sendfile(2)` calls.
+    pub(super) calls: u64,
+    /// `byteCnt`.
+    pub(super) byte: u64,
+    /// `fails`.
+    pub(super) fails: u64,
+    /// `max`.
+    pub(super) max: u64,
+    /// `maxCnt`, the bytes of the sendfile in progress.
+    pub(super) max_count: u64,
+    /// `pkg`, the calls that sent bytes.
+    pub(super) pkg: u64,
+    /// `pkgMax`.
+    pub(super) pkg_max: u64,
+    /// `tries`.
+    pub(super) tries: u64,
+    /// `waits`.
+    pub(super) waits: u64,
+}
+
 /// The `otp` level options that a socket keeps, as `alloc_descriptor` sets
 /// them (`prim_socket_nif.c:17061-17068`). An accepted socket inherits them
 /// (`unix_socket_syncio.c:2843-2849`).
@@ -243,6 +270,10 @@ pub(super) struct OtpOptions {
     pub(super) iow: bool,
     /// `rBufSz`, the buffer size of a receive with length 0.
     pub(super) recv_buffer: usize,
+    /// `rNum`, the count `N` of `{otp, rcvbuf}` `{N, Size}`: a receive with
+    /// length 0 that fills the buffer gives `{more, Bin}` until `N` buffers
+    /// came (`unix_socket_syncio.c:10050-10090`), or 0.
+    pub(super) recv_count: u32,
     /// `rCtrlSz`, the value of `{otp, rcvctrlbuf}`.
     pub(super) recv_ctrl: usize,
     /// `wCtrlSz`, the value of `{otp, sndctrlbuf}`.
@@ -257,6 +288,7 @@ impl Default for OtpOptions {
         Self {
             iow: false,
             recv_buffer: 8 * 1024,
+            recv_count: 0,
             recv_ctrl: 1024,
             send_ctrl: 1024,
         }
@@ -301,6 +333,15 @@ pub(super) struct SocketState {
     pub(super) counters: IoCounters,
     /// The `otp` level options.
     pub(super) options: OtpOptions,
+    /// `selectRead`, the value of `{otp, select_read}`, which an accepted
+    /// socket does not inherit (`unix_socket_syncio.c:2843-2850`).
+    pub(super) select_read: bool,
+    /// `rNumCnt`, the buffers of [`OtpOptions::recv_count`] that came.
+    pub(super) recv_count_done: u32,
+    /// `sendfileHandle`, the copy of the file of the sendfile in progress.
+    pub(super) sendfile: Option<File>,
+    /// `sendfileCountersP`, from the first sendfile of the socket on.
+    pub(super) sendfile_counters: Option<SendfileCounters>,
 }
 
 impl SocketState {

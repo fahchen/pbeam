@@ -1387,15 +1387,16 @@ fn send_exit(
     let scheduler = &mut *context.scheduler;
     let caller = scheduler.current_process_mut();
     let (caller_id, trap_exit) = (caller.id, caller.trap_exit);
-    let (target, alias) = match id {
-        Term::Pid(target) => (Some(*target), None),
-        Term::Reference(reference) => {
-            let Some(owner) = scheduler.alias_owner(*reference) else {
+    // A resource term is a magic reference (`erl_nif.c:3197-3204`).
+    let (target, alias) = match (id, id.reference()) {
+        (Term::Pid(target), _) => (Some(*target), None),
+        (_, Some(reference)) => {
+            let Some(owner) = scheduler.alias_owner(reference) else {
                 return Ok(Value(Term::static_atom("true")));
             };
-            (Some(owner), Some(*reference))
+            (Some(owner), Some(reference))
         }
-        Term::Port(_) => (None, None),
+        (Term::Port(_), _) => (None, None),
         _ => return Ok(BifResult::badarg()),
     };
     if target != Some(caller_id) {
@@ -1484,10 +1485,11 @@ pub(super) fn demonitor(
             _ => return BifResult::badarg(),
         }
     }
-    let Term::Reference(reference) = reference else {
+    // A resource term is a magic reference (`erl_nif.c:3197-3204`).
+    let Some(id) = reference.reference() else {
         return BifResult::badarg();
     };
-    if context.scheduler.demonitor(*reference) {
+    if context.scheduler.demonitor(id) {
         return Value(Term::static_atom("true"));
     }
     let result = Term::static_atom(if info { "false" } else { "true" });
@@ -1497,11 +1499,7 @@ pub(super) fn demonitor(
     Trap {
         module: "erts_internal",
         function: "flush_monitor_messages",
-        arguments: vec![
-            Term::Reference(*reference),
-            Term::static_atom("false"),
-            result,
-        ],
+        arguments: vec![reference.clone(), Term::static_atom("false"), result],
     }
 }
 
@@ -4901,6 +4899,8 @@ fn destination(to: &Term) -> Option<Destination<'_>> {
     Some(match to {
         Term::Pid(pid) => Destination::Pid(*pid),
         Term::Reference(reference) => Destination::Alias(*reference),
+        // A resource term is a magic reference (`erl_nif.c:3197-3204`).
+        Term::Resource(resource) => Destination::Alias(resource.reference()),
         Term::Atom(name) => Destination::Name(name),
         Term::Port(id) => Destination::Port(*id),
         Term::Tuple(elements) => match elements.as_ref() {
@@ -4980,24 +4980,23 @@ fn deliver_to(
             scheduler.send_alias_message(reference, message);
             return Ok(Ok(Sent::Local));
         }
-        Destination::Name(atom) => {
-            let name = scheduler.atoms.name_of(atom);
-            match scheduler.whereis(name) {
-                Some(target) => Some(target),
-                None => return Ok(Err(BifResult::badarg())),
-            }
-        }
-        Destination::NodeName(atom) => scheduler.whereis(scheduler.atoms.name_of(atom)),
+        // A name of a port sends to the port (`erts_whereis_name`,
+        // register.c:309-380).
+        Destination::Name(atom) => match scheduler.name_owner(scheduler.atoms.name_of(atom)) {
+            Some(Named::Process(target)) => Some(target),
+            Some(Named::Port(id)) => return port_send(scheduler, id, &message),
+            None => return Ok(Err(BifResult::badarg())),
+        },
+        Destination::NodeName(atom) => match scheduler.name_owner(scheduler.atoms.name_of(atom)) {
+            Some(Named::Process(target)) => Some(target),
+            Some(Named::Port(id)) => return port_send(scheduler, id, &message),
+            None => None,
+        },
         Destination::Remote(node) => {
             scheduler.send_to_remote_node(node);
             return Ok(Ok(Sent::NoConnect));
         }
-        Destination::Port(id) => {
-            return Ok(match erts_internal::port_bang(scheduler, id, &message)? {
-                Some(denied) => Err(denied),
-                None => Ok(Sent::Local),
-            });
-        }
+        Destination::Port(id) => return port_send(scheduler, id, &message),
     };
     if let Some(target) = target {
         if let Some(denied) = io_service::send_denial(scheduler, target, &message)? {
@@ -5007,6 +5006,19 @@ fn deliver_to(
         scheduler.send_message(caller, target, message);
     }
     Ok(Ok(Sent::Local))
+}
+
+/// Send `message` to the port `id`, as `Port ! Message` does (see
+/// [`erts_internal::port_bang`]).
+fn port_send(
+    scheduler: &mut Scheduler,
+    id: crate::term::PortId,
+    message: &Term,
+) -> Result<Result<Sent, BifResult>, BeamError> {
+    Ok(match erts_internal::port_bang(scheduler, id, message)? {
+        Some(denied) => Err(denied),
+        None => Ok(Sent::Local),
+    })
 }
 
 /// Run `erlang:unregister(Name)`: remove the registered name `Name` and
@@ -5990,8 +6002,12 @@ fn process_info_values(
             arity,
         } => MfaNames::Atoms(module.clone(), function.clone(), *arity),
     };
+    // A suspended process is `suspended` before `running`
+    // (`erts_process_state2status`, erl_process.c:9304-9330).
     let status = if process.exiting.is_some() {
         "exiting"
+    } else if process.suspended {
+        "suspended"
     } else if caller || process.dirty_started() {
         "running"
     } else if process.waiting {
@@ -6415,16 +6431,17 @@ pub(super) fn unalias(
     context: &mut BifContext<'_>,
     reference: &Term,
 ) -> Result<BifResult, BeamError> {
-    let Term::Reference(reference) = reference else {
+    // A resource term is a magic reference (`erl_nif.c:3197-3204`).
+    let Some(reference) = reference.reference() else {
         return Ok(BifResult::badarg());
     };
     let scheduler = &mut *context.scheduler;
     let caller = scheduler.current_process().id;
-    if !reference.is_pid_reference() || scheduler.alias_owner(*reference) != Some(caller) {
+    if !reference.is_pid_reference() || scheduler.alias_owner(reference) != Some(caller) {
         return Ok(Value(Term::static_atom("false")));
     }
     let process = scheduler.current_process_mut();
-    let Some(origin) = process.monitors.get_mut(reference) else {
+    let Some(origin) = process.monitors.get_mut(&reference) else {
         return Ok(Value(Term::static_atom("false")));
     };
     if origin.alias.is_none() {
@@ -6435,7 +6452,7 @@ pub(super) fn unalias(
     if origin.monitor.is_some() {
         origin.alias = None;
     } else {
-        process.monitors.remove(reference);
+        process.monitors.remove(&reference);
     }
     Ok(Value(Term::static_atom("true")))
 }
@@ -7131,13 +7148,12 @@ pub(super) fn cancel_timer(
     reference: &Term,
     options: &Term,
 ) -> Result<BifResult, BeamError> {
-    let (Some((asynchronous, info)), Term::Reference(reference)) =
-        (timer_options(options), reference)
+    let (Some((asynchronous, info)), Some(id)) = (timer_options(options), reference.reference())
     else {
         return Ok(BifResult::badarg());
     };
     let scheduler = &mut *context.scheduler;
-    let result = match scheduler.cancel_bif_timer(*reference) {
+    let result = match scheduler.cancel_bif_timer(id) {
         Some(end) => Term::Integer(Timers::time_left(scheduler.timers.now(), end)),
         None => Term::static_atom("false"),
     };
@@ -7150,7 +7166,7 @@ pub(super) fn cancel_timer(
     let caller = scheduler.current_process_mut().id;
     let message = Term::tuple(vec![
         Term::static_atom("cancel_timer"),
-        Term::Reference(*reference),
+        reference.clone(),
         result,
     ]);
     scheduler.deliver(caller, message);

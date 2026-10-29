@@ -4,7 +4,7 @@
 -behaviour(supervisor).
 -export([main/0, main/1, lookup/0, gethost/0, supports/0, socket/0, sockopt/0, socket_select/0, socket_io/0,
          socket_dgram/0,         socket_acceptors/0, socket_connect_invalid/0, socket_recvfrom_flags/0, socket_recvfrom_local_flags/0,
-         socket_recvfrom_errqueue/0, socket_sendv/0, socket_backend_tcp/0, socket_backend_udp/0, sockopt_otp/0, sockopt_host/0, sockopt_raw/0, sockopt_pkt/0, start/2, stop/1, init/1]).
+         socket_recvfrom_errqueue/0, socket_sendv/0, socket_msg/0, socket_mmsg/0, socket_sctp/0, socket_sendfile/0, socket_ioctl/0, socket_ioctl_raw/0, socket_backend_tcp/0, socket_backend_udp/0, sockopt_otp/0, sockopt_select_read/0, sockopt_host/0, sockopt_raw/0, sockopt_pkt/0, start/2, stop/1, init/1]).
 
 %% `erl -noshell -boot start_clean -pa fixtures/boot -s kernel_boot_probe
 %% main -kernel logger_level warning` runs main/0 in the boot process of init after the boot script
@@ -437,6 +437,337 @@ socket_recvfrom_flags() ->
     erlang:display({socket_recvfrom_flags, Udp, Inet6, Stream, Counters}),
     init:stop().
 
+%% `-s kernel_boot_probe socket_sendfile` runs socket:sendfile/2,3,4,5 and
+%% prim_socket:sendfile/4,5 and sendfile_deferred_close/1 on an inet
+%% stream socket: a whole file, a part, an offset after the end, an
+%% offset that the host rejects, the argument errors, a file that is
+%% closed, a send that waits for the write select, and a send with a
+%% timeout. The bytes of a send that waits depend on the host buffers, so
+%% the probe shows only whether they are a positive integer.
+socket_sendfile() ->
+    Base = "/tmp/kernel_boot_probe_sendfile_" ++ os:getpid(),
+    Small = Base ++ ".small",
+    Big = Base ++ ".big",
+    Data = list_to_binary([X rem 251 || X <- lists:seq(1, 100000)]),
+    ok = file:write_file(Small, Data),
+    ok = file:write_file(Big, binary:copy(Data, 80)),
+    {ok, F} = file:open(Small, [raw, read, binary]),
+    {ok, G} = file:open(Big, [raw, read, binary]),
+    Pair = fun(Shrink) ->
+                   {ok, L} = socket:open(inet, stream, tcp),
+                   ok = socket:bind(L, #{family => inet, addr => {127, 0, 0, 1}, port => 0}),
+                   ok = socket:listen(L),
+                   {ok, Addr} = socket:sockname(L),
+                   {ok, C} = socket:open(inet, stream, tcp),
+                   [ok = socket:setopt(C, socket, sndbuf, 4096) || Shrink],
+                   ok = socket:connect(C, Addr),
+                   {ok, A} = socket:accept(L),
+                   [ok = socket:setopt(A, socket, rcvbuf, 4096) || Shrink],
+                   ok = socket:close(L),
+                   {C, A}
+           end,
+    Parent = self(),
+    {C, A} = Pair(false),
+    {'$socket', Ref} = C,
+    %% A second process reads while the sendfile runs.
+    Sent = fun(Send, N) ->
+                   spawn(fun() -> Parent ! {got, socket:recv(A, N, 5000)} end),
+                   Result = Send(),
+                   receive {got, Got} -> {Result, Got} after 6000 -> {Result, missing} end
+           end,
+    Plain = [Sent(fun() -> socket:sendfile(C, F) end, 100000) =:= {{ok, 100000}, {ok, Data}},
+             Sent(fun() -> socket:sendfile(C, F, 10, 20) end, 20) =:= {{ok, 20}, {ok, binary:part(Data, 10, 20)}},
+             Sent(fun() -> socket:sendfile(C, F, 99990, 100, infinity) end, 10)
+                 =:= {{ok, 10}, {ok, binary:part(Data, 99990, 10)}},
+             socket:sendfile(C, F, 200000, 0), socket:sendfile(C, F, -1, 0)],
+    Raised = fun(Fun) -> try Fun() catch Class:Reason -> {Class, Reason} end end,
+    FRef = prim_file:internal_get_nif_resource(F),
+    Args = [Raised(fun() -> socket:sendfile(C, not_a_file) end), Raised(fun() -> socket:sendfile(C, F, -1, -1) end),
+            Raised(fun() -> prim_socket:sendfile(Ref, 0, 0, not_a_ref) end),
+            Raised(fun() -> prim_socket:sendfile(Ref, foo, 0, make_ref()) end),
+            Raised(fun() -> prim_socket:sendfile(Ref, 0, foo, make_ref()) end),
+            Raised(fun() -> prim_socket:sendfile(Ref, 1 bsl 63, foo, make_ref()) end),
+            Raised(fun() -> prim_socket:sendfile(Ref, 1 bsl 63, 0, make_ref()) end),
+            Raised(fun() -> prim_socket:sendfile(Ref, 0, -1, make_ref()) end),
+            Raised(fun() -> prim_socket:sendfile(Ref, 0, 1 bsl 64, make_ref()) end),
+            Raised(fun() -> prim_socket:sendfile(Ref, FRef, 0, 0, not_a_ref) end),
+            Raised(fun() -> prim_socket:sendfile(Ref, not_a_ref, 0, 0, make_ref()) end),
+            Raised(fun() -> prim_socket:sendfile(make_ref(), FRef, 0, 0, make_ref()) end),
+            Raised(fun() -> prim_socket:sendfile(Ref, make_ref(), 0, 0, make_ref()) end),
+            Raised(fun() -> prim_socket:sendfile(Ref, Ref, 0, 0, make_ref()) end),
+            Raised(fun() -> prim_socket:sendfile(Ref, 0, 0, make_ref()) end),
+            Raised(fun() -> prim_socket:sendfile(Ref, 0, (1 bsl 64) - 1, make_ref()) end),
+            Raised(fun() -> prim_socket:sendfile_deferred_close(Ref) end),
+            Raised(fun() -> prim_socket:sendfile_deferred_close(make_ref()) end)],
+    {ok, Closed} = file:open(Small, [raw, read, binary]),
+    ok = file:close(Closed),
+    Gone = socket:sendfile(C, Closed),
+    %% The calls, the chunks, and the waits depend on the host buffers.
+    Keys = [sendfile_byte, sendfile_fails, sendfile_max, sendfile_tries, write_byte, write_pkg],
+    Counters = maps:with(Keys, maps:get(counters, socket:info(C))),
+    {C2, A2} = Pair(true),
+    {'$socket', Ref2} = C2,
+    Size = byte_size(Data) * 80,
+    Positive = fun(N) -> is_integer(N) andalso N > 0 end,
+    Waits = case socket:sendfile(C2, G, 0, 0, nowait) of
+                {select, {{select_info, sendfile, Handle} = Info, Bytes2}} ->
+                    [Positive(Bytes2), socket:sendfile(C2, F, 0, 1, nowait),
+                     case Raised(fun() -> prim_socket:sendfile(Ref2, Bytes2, 0, make_ref()) end) of
+                         {select, N2} when is_integer(N2) -> select;
+                         Cont -> Cont
+                     end,
+                     prim_socket:sendfile_deferred_close(Ref2),
+                     Raised(fun() -> prim_socket:sendfile(Ref2, Bytes2, 0, Handle) end),
+                     case socket:cancel(C2, Info) of
+                         {error, {invalid, {select_info, Tag, _}}} -> {invalid, Tag};
+                         Cancel -> Cancel
+                     end, prim_socket:sendfile_deferred_close(Ref2)];
+                Other -> Other
+            end,
+    _ = socket:close(C2),
+    _ = socket:close(A2),
+    {C3, A3} = Pair(true),
+    Reader = spawn(fun() -> Parent ! {read, read_all(A3, 0, Size)} end),
+    Whole = socket:sendfile(C3, G),
+    Read = receive {read, N} -> N after 10000 -> missing end,
+    Info3 = maps:get(counters, socket:info(C3)),
+    Whole3 = [Whole, Read, Positive(maps:get(sendfile_waits, Info3)), maps:get(sendfile_tries, Info3),
+              maps:get(sendfile_byte, Info3), maps:get(sendfile_max, Info3), maps:get(sendfile_fails, Info3)],
+    exit(Reader, kill),
+    {C4, A4} = Pair(true),
+    Timeout = case socket:sendfile(C4, G, 0, 0, 200) of
+                  {error, {timeout, Bytes}} -> [Positive(Bytes), socket:sendfile(C4, F, 0, 1, 0)];
+                  Other4 -> Other4
+              end,
+    [_ = socket:close(S) || S <- [C, A, C3, A3, C4, A4]],
+    Shut = [socket:sendfile(C, F), prim_socket:sendfile(Ref, 0, 0, make_ref())],
+    ok = file:close(F),
+    ok = file:close(G),
+    ok = file:delete(Small),
+    ok = file:delete(Big),
+    erlang:display({socket_sendfile, Plain, Args, Gone, lists:sort(maps:to_list(Counters)), Waits, Whole3, Timeout, Shut}),
+    init:stop().
+
+read_all(S, Got, Size) when Got < Size ->
+    case socket:recv(S, 0, 5000) of
+        {ok, B} -> read_all(S, Got + byte_size(B), Size);
+        Other -> {Got, Other}
+    end;
+read_all(_, Got, _) -> Got.
+
+%% `-s kernel_boot_probe socket_ioctl` runs prim_socket:ioctl/2,3,4 and
+%% socket:ioctl/2,3 with the argument errors, request numbers outside the
+%% switch of their argument count, and a closed socket.
+socket_ioctl() ->
+    {ok, S} = socket:open(inet, dgram, udp),
+    {'$socket', Ref} = S,
+    Raised = fun(Fun) -> try Fun() catch Class:Reason -> {Class, Reason} end end,
+    #{gifconf := Gifconf, sifflags := Sifflags} = persistent_term:get({prim_socket, ioctl_requests}),
+    Calls = [Raised(fun() -> prim_socket:ioctl(make_ref(), 0) end), Raised(fun() -> prim_socket:ioctl(Ref, -1) end),
+             Raised(fun() -> prim_socket:ioctl(Ref, 1 bsl 64) end), prim_socket:ioctl(Ref, 0),
+             prim_socket:ioctl(Ref, (1 bsl 64) - 1), prim_socket:ioctl(Ref, 0, x), prim_socket:ioctl(Ref, 0, x, y),
+             prim_socket:ioctl(Ref, Gifconf, x), prim_socket:ioctl(Ref, Sifflags), prim_socket:ioctl(Ref, foo),
+             Raised(fun() -> socket:ioctl(S, foo) end), socket:ioctl(S, tcp_info)],
+    ok = socket:close(S),
+    Closed = [prim_socket:ioctl(Ref, 0), prim_socket:ioctl(Ref, Gifconf), Raised(fun() -> prim_socket:ioctl(Ref, foo) end)],
+    erlang:display({socket_ioctl, Calls, Closed}),
+    init:stop().
+
+%% `-s kernel_boot_probe socket_ioctl_raw` runs socket:ioctl(S, gifconf),
+%% which ERTS runs with ioctl(2).
+socket_ioctl_raw() ->
+    {ok, S} = socket:open(inet, dgram, udp),
+    erlang:display({socket_ioctl_raw, socket:ioctl(S, gifconf)}),
+    init:stop().
+
+%% `-s kernel_boot_probe socket_sctp` runs socket:peeloff/2,
+%% prim_socket:socknames/2, and prim_socket:peernames/2 on a host whose
+%% pinned ERTS build has no SCTP.
+socket_sctp() ->
+    {ok, S} = socket:open(inet, stream, tcp),
+    {'$socket', Ref} = S,
+    Raised = fun(F) -> try F() catch Class:Reason -> {Class, Reason} end end,
+    erlang:display({socket_sctp, [Raised(fun() -> socket:peeloff(S, 1) end),
+                                  Raised(fun() -> prim_socket:peeloff(Ref, foo) end),
+                                  Raised(fun() -> prim_socket:socknames(Ref, 0) end),
+                                  Raised(fun() -> prim_socket:peernames(make_ref(), 0) end)]}),
+    init:stop().
+%% `-s kernel_boot_probe socket_msg` runs socket:sendmsg/2,3,4 and
+%% socket:recvmsg/1,2,3,4,5 on inet and inet6 datagram sockets and an inet stream socket, with the
+%% control messages of the options recvtos, recvttl, pktinfo, timestamp,
+%% recvtclass, recvhoplimit, and recvpktinfo. The source address shows as
+%% whether it is the address of the sender, and the time of a timestamp as
+%% the keys of its map.
+socket_msg() ->
+    Loopback = #{family => inet, addr => {127, 0, 0, 1}, port => 0},
+    {ok, U1} = socket:open(inet, dgram, udp),
+    {ok, U2} = socket:open(inet, dgram, udp),
+    ok = socket:bind(U1, Loopback),
+    ok = socket:bind(U2, Loopback),
+    {ok, A1} = socket:sockname(U1),
+    {ok, A2} = socket:sockname(U2),
+    Msg = fun({Tag, #{addr := Addr} = M}) -> {Tag, sorted(M#{addr := Addr =:= A1})}; (Other) -> sorted(Other) end,
+    Send = fun(Ctrl) -> socket:sendmsg(U1, #{addr => A2, iov => [<<"c">>], ctrl => Ctrl}) end,
+    Plain = [socket:recvmsg(U2, 0, 0, [], 0), socket:sendmsg(U1, #{addr => A2, iov => [<<"he">>, <<>>, <<"llo">>]}),
+             Msg(socket:recvmsg(U2, 0, 0, [], 1000)), socket:sendmsg(U1, #{addr => A2, iov => [<<"abc">>]}, [], 1000),
+             Msg(socket:recvmsg(U2, 2, 0, [], 1000)), socket:sendmsg(U1, #{addr => A2, iov => [<<"d">>]}, []),
+             Msg(socket:recvmsg(U2, 0, 0, [peek], 1000)), Msg(socket:recvmsg(U2, 1000)), Msg(socket:recvmsg(U2, [], 0)),
+             socket:sendmsg(U1, #{addr => A2, iov => [<<"e">>]}), Msg(socket:recvmsg(U2, 0, 0, 1000)),
+             socket:setopt(U2, otp, select_read, true), socket:sendmsg(U1, #{addr => A2, iov => [<<"f">>]}),
+             Msg(socket:recvmsg(U2, 0, 0, [], 1000)), socket:setopt(U2, otp, select_read, false)],
+    Opts = [socket:setopt(U2, ip, recvtos, true), socket:setopt(U2, ip, recvttl, true)],
+    Ctrl = [Send([#{level => ip, type => tos, value => 16}]), Msg(socket:recvmsg(U2, 0, 0, [], 1000)),
+            Send([#{level => ip, type => tos, value => lowdelay}]), Msg(socket:recvmsg(U2, 0, 0, [], 1000)),
+            Send([#{level => ip, type => tos, data => <<32>>}]), Msg(socket:recvmsg(U2, 0, 16, [], 1000)),
+            Send([#{level => ip, type => ttl, value => 9}]), Msg(socket:recvmsg(U2, 0, 0, [], 1000)),
+            Send([#{level => ip, type => ttl, data => 10}]), Msg(socket:recvmsg(U2, 0, 0, [], 1000)),
+            Send([#{level => 0, type => 1, data => true}]), Msg(socket:recvmsg(U2, 0, 0, [], 1000)),
+            Send([#{level => ip, type => 1, data => false}, #{level => ip, type => ttl, value => 3}]),
+            Msg(socket:recvmsg(U2, 0, 0, [], 1000)),
+            Send([#{level => ip, type => recvttl, value => 1}]), Send([#{level => ip, type => tos, value => 1, data => <<1>>}]),
+            Send([#{level => ip, type => tos}]), Send([#{level => ip, value => 1}]), Send([#{level => 1.5, type => tos, value => 1}]),
+            Send([#{level => ip, type => nosuch, data => <<1>>}]), Send([#{level => ip, type => "tos", data => <<1>>}]),
+            Send([#{level => ip, type => tos, data => 1.5}]), Send([#{level => ip, type => tos, value => 1.5}]),
+            Send([#{level => ip, type => ttl, value => nosuch}]), Send([#{level => ip, type => tos, data => <<0:16000>>}]),
+            Send([not_a_map]), Msg(socket:recvmsg(U2, 0, 0, [], 100)),
+            socket:setopt(U2, ip, recvtos, false), socket:setopt(U2, ip, recvttl, false),
+            socket:setopt(U2, ip, pktinfo, true), Send([]), Msg(socket:recvmsg(U2, 0, 0, [], 1000)),
+            socket:setopt(U2, ip, pktinfo, false), socket:setopt(U2, socket, timestamp, true), Send([]),
+            case socket:recvmsg(U2, 0, 0, [], 1000) of
+                {ok, #{ctrl := Cs}} -> [{L, T, lists:sort(maps:keys(V))} || #{level := L, type := T, value := V} <- Cs];
+                Other -> Other
+            end, socket:setopt(U2, socket, timestamp, false)],
+    Loopback6 = #{family => inet6, addr => loopback, port => 0},
+    {ok, V1} = socket:open(inet6, dgram, udp),
+    {ok, V2} = socket:open(inet6, dgram, udp),
+    ok = socket:bind(V1, Loopback6),
+    ok = socket:bind(V2, Loopback6),
+    {ok, B2} = socket:sockname(V2),
+    Six = fun({ok, M}) -> {ok, sorted(maps:remove(addr, M))}; (Other) -> Other end,
+    Send6 = fun(C6) -> socket:sendmsg(V1, #{addr => B2, iov => [<<"six">>], ctrl => C6}) end,
+    Inet6 = [socket:setopt(V2, ipv6, recvtclass, true), Send6([#{level => ipv6, type => tclass, value => 32}]),
+             Six(socket:recvmsg(V2, 0, 0, [], 1000)), socket:setopt(V2, ipv6, recvtclass, false),
+             catch socket:setopt(V2, ipv6, recvhoplimit, true), Send6([#{level => ipv6, type => hoplimit, value => 5}]),
+             catch socket:setopt(V2, ipv6, recvhoplimit, false), catch socket:setopt(V2, ipv6, recvpktinfo, true),
+             Send6([]), Six(socket:recvmsg(V2, 0, 0, [], 1000)), catch socket:setopt(V2, ipv6, recvpktinfo, false),
+             Send6([#{level => ipv6, type => 99, data => <<1, 2, 3>>}]), Six(socket:recvmsg(V2, 0, 0, [], 1000))],
+    {ok, L} = socket:open(inet, stream, tcp),
+    ok = socket:bind(L, Loopback),
+    ok = socket:listen(L),
+    {ok, Addr} = socket:sockname(L),
+    {ok, C} = socket:open(inet, stream, tcp),
+    ok = socket:connect(C, Addr),
+    {ok, A} = socket:accept(L),
+    Stream = [socket:sendmsg(C, #{iov => [<<"st">>, <<"ream">>]}), sorted(socket:recvmsg(A, 0, 0, [], 1000)),
+              socket:recvmsg(A, 0, 0, [], 0), socket:sendmsg(C, #{iov => [<<"x">>]}),
+              sorted(socket:recvmsg(A, 0, 0, [], 1000)), socket:shutdown(C, write), socket:recvmsg(A, 0, 0, [], 1000),
+              socket:recvmsg(A, 0, 0, [], 0)],
+    Keys = [read_byte, read_pkg, read_pkg_max, read_fails, write_pkg, write_byte, write_fails],
+    Counters = [sorted(maps:with(Keys, maps:get(counters, socket:info(S)))) || S <- [U1, U2, A, C]],
+    erlang:display({socket_msg, Plain, Opts, Ctrl, Inet6, Stream, Counters}),
+    init:stop().
+
+%% `-s kernel_boot_probe socket_mmsg` runs socket:sendmmsg/4 and
+%% socket:recvmmsg/6, and prim_socket:sendmmsg/4 and recvmmsg/6 for the
+%% argument checks, which come before the `error:notsup` of macOS. On Linux
+%% it sends and receives on inet datagram sockets with control messages,
+%% sends no message, fails at the first and at a later message, receives
+%% with a select, with `zero`, with `{otp, select_read}`, and with the flags
+%% peek and trunc, and it sends a partial message, receives parts of a
+%% stream, and receives at the end of a stream.
+socket_mmsg() ->
+    Loopback = #{family => inet, addr => {127, 0, 0, 1}, port => 0},
+    {ok, U1} = socket:open(inet, dgram, udp),
+    {ok, U2} = socket:open(inet, dgram, udp),
+    ok = socket:bind(U1, Loopback),
+    ok = socket:bind(U2, Loopback),
+    {ok, A1} = socket:sockname(U1),
+    {ok, A2} = socket:sockname(U2),
+    {'$socket', R1} = U1,
+    {'$socket', R2} = U2,
+    Raised = fun(F) -> try F() catch Class:Reason -> {Class, Reason} end end,
+    Ref = make_ref(),
+    Checks = [Raised(fun() -> prim_socket:sendmmsg(R1, [], [], notref) end),
+              Raised(fun() -> prim_socket:recvmmsg(R2, 1, 0, 0, [], notref) end)
+              | [Raised(fun() -> prim_socket:recvmmsg(R2, V, B, C, [], Ref) end)
+                 || {V, B, C} <- [{0, 0, 0}, {1 bsl 32, 0, 0}, {-1, 0, 0}, {-1, a, 0}, {1, -1, 0}, {1, 0, -1}]]],
+    Mmsg = case os:type() of
+               {unix, darwin} ->
+                   [Raised(fun() -> socket:sendmmsg(U1, [#{addr => A2, iov => [<<"m">>]}], [], infinity) end),
+                    Raised(fun() -> socket:recvmmsg(U2, 1, 0, 0, [], infinity) end)];
+               _ ->
+                   socket_mmsg_linux(U1, U2, A1, A2, Loopback)
+           end,
+    erlang:display({socket_mmsg, Checks, Mmsg}),
+    init:stop().
+
+socket_mmsg_linux(U1, U2, A1, A2, Loopback) ->
+    Raised = fun(F) -> try F() catch Class:Reason -> {Class, Reason} end end,
+    Msg = fun(#{addr := Addr} = M) -> sorted(M#{addr := Addr =:= A1}); (M) -> sorted(M) end,
+    Msgs = fun({Tag, Ms}) when is_list(Ms) -> {Tag, [Msg(M) || M <- Ms]}; (Other) -> Other end,
+    Big = <<0:70000/unit:8>>,
+    Send = fun(Ms) -> socket:sendmmsg(U1, [M#{addr => A2} || M <- Ms], [], infinity) end,
+    Dgram = [Send([]), socket:setopt(U2, ip, recvtos, true),
+             Send([#{iov => [<<"a">>]}, #{iov => [<<"b">>, <<>>, <<"c">>], ctrl => [#{level => ip, type => tos, value => 16}]}]),
+             Msgs(socket:recvmmsg(U2, 4, 0, 0, [], 1000)), socket:setopt(U2, ip, recvtos, false),
+             Send([#{iov => [Big]}]), Send([#{iov => [<<"d">>]}, #{iov => [Big]}, #{iov => [<<"e">>]}]),
+             Msgs(socket:recvmmsg(U2, 4, 0, 0, [], 1000)),
+             Raised(fun() -> Send([#{iov => [<<"f">>]}, #{}]) end),
+             Raised(fun() -> Send([#{iov => [<<"g">>], ctrl => [#{level => ip, type => tos, data => 1.5}]}]) end),
+             Send([#{iov => [<<"hello">>]}]), Msgs(socket:recvmmsg(U2, 2, 0, 0, [peek], 1000)),
+             Msgs(socket:recvmmsg(U2, 1, 2, 0, [trunc], 1000)), socket:recvmmsg(U2, 1, 0, 0, [], 0)],
+    {select, {select_info, recvmmsg, H1}} = socket:recvmmsg(U2, 2, 0, 0, [], nowait),
+    ok = Send([#{iov => [<<"i">>]}]),
+    Select = [receive {'$socket', U2, select, H1} -> selected after 1000 -> none end,
+              Msgs(socket:recvmmsg(U2, 2, 0, 0, [], nowait)),
+              Send([#{iov => [<<"j">>]}]), Msgs(socket:recvmmsg(U2, 1, 0, 0, [peek], 1000)),
+              socket:setopt(U2, otp, select_read, true),
+              case socket:recvmmsg(U2, 2, 0, 0, [], nowait) of
+                  {select_read, {Info2, Ms2}} -> {select_read, socket:cancel(U2, Info2), Msgs({ok, Ms2})};
+                  Other2 -> Other2
+              end, socket:setopt(U2, otp, select_read, false)],
+    {ok, L} = socket:open(inet, stream, tcp),
+    ok = socket:bind(L, Loopback),
+    ok = socket:listen(L),
+    {ok, Addr} = socket:sockname(L),
+    {ok, C} = socket:open(inet, stream, tcp),
+    ok = socket:connect(C, Addr),
+    {ok, A} = socket:accept(L),
+    Huge = <<0:(64 bsl 20)/unit:8>>,
+    Partial = case socket:sendmmsg(C, [#{iov => [<<"st">>]}, #{iov => [<<"ream">>]}, #{iov => [Huge]}], [], infinity) of
+                  {ok, [Rest]} -> {ok, 0 < iolist_size(Rest), iolist_size(Rest) < byte_size(Huge)};
+                  Other3 -> Other3
+              end,
+    Parts = sorted(socket:recvmmsg(A, 3, 2, 0, [], 1000)),
+    Fill = fun F() ->
+                   case socket:sendmmsg(C, [#{iov => [<<0:65536/unit:8>>]}], [], nowait) of
+                       {select, {select_info, sendmmsg, H}} -> H;
+                       _ -> F()
+                   end
+           end,
+    H2 = Fill(),
+    drain(A),
+    Stream = [receive {'$socket', C, select, H2} -> selected after 1000 -> none end,
+              socket:shutdown(C, write), sorted(socket:recvmmsg(A, 2, 0, 0, [], 1000))],
+    Keys = [read_byte, read_pkg, read_pkg_max, read_fails, read_tries, write_pkg, write_byte, write_fails, write_tries],
+    Counters = [sorted(maps:with(Keys, maps:get(counters, socket:info(S)))) || S <- [U1, U2]],
+    [Dgram, Select, Partial, Parts, Stream, Counters].
+
+%% Read the data of the stream socket `S` until no data comes in 200 ms.
+drain(S) ->
+    case socket:recv(S, 0, [], 200) of
+        {ok, _} -> drain(S);
+        {error, _} -> ok
+    end.
+
+%% Return `Term` with each map as the sorted list of its pairs: the order of
+%% the atom keys of a map follows the atom index, which differs between
+%% PBeam and ERTS for an atom that is not static.
+sorted(Map) when is_map(Map) -> lists:sort([{Key, sorted(Value)} || Key := Value <- Map]);
+sorted(List) when is_list(List) -> [sorted(Element) || Element <- List];
+sorted(Tuple) when is_tuple(Tuple) -> list_to_tuple(sorted(tuple_to_list(Tuple)));
+sorted(Term) -> Term.
+
 %% `-s kernel_boot_probe socket_recvfrom_local_flags` receives with the flag
 %% peek on a local datagram socket.
 socket_recvfrom_local_flags() ->
@@ -771,7 +1102,7 @@ sockopt_host() ->
     ok = socket:connect(C, #{family => inet, addr => loopback, port => 9}),
     Mtu = [socket:setopt(U, {ip, mtu}, 1500), socket:getopt(U, {ip, mtu}), socket:getopt(C, {ip, mtu})],
     B = {socket, bindtodevice},
-    Device = [[socket:getopt(S, B), socket:setopt(S, B, "lo"), socket:getopt(S, B), socket:setopt(S, B, <<"lo">>),
+    Device = [[socket:getopt(S, B), socket:setopt(S, B, "lo"), socket:getopt(S, B), socket:setopt(S, B, <<"lo", 0>>),
                socket:setopt(S, B, ""), socket:getopt(S, B), socket:setopt(S, B, <<"lo", 0, "x">>), socket:getopt(S, B),
                socket:setopt(S, B, "abcdefghijklmno"), socket:setopt(S, B, "abcdefghijklmnop"),
                socket:setopt(S, B, <<"abcdefghijklmnopqrstu">>), socket:setopt(S, B, [108, 256]),
@@ -784,7 +1115,7 @@ sockopt_host() ->
     Congestion = [socket:getopt(T, Cc), socket:setopt(T, Cc, "reno"), socket:getopt(T, Cc),
                   socket:setopt(T, Cc, <<"cubic", 0, "x">>), socket:getopt(T, Cc),
                   socket:setopt(T, Cc, "abcdefghijklmnop"), socket:setopt(T, Cc, lists:duplicate(256, $a)), socket:setopt(T, Cc, lists:duplicate(257, $a)),
-                  socket:setopt(T, Cc, <<"abcdefghijklmnopqrstu">>), socket:setopt(T, Cc, foo),
+                  socket:setopt(T, Cc, <<"abcdefghijklmnopqrstu", 0>>), socket:setopt(T, Cc, foo),
                   socket:setopt(T, Cc, [$r, foo])],
     M6 = #{multiaddr => {16#ff02, 0, 0, 0, 0, 0, 0, 16#fb}, interface => 0},
     Add6 = {ipv6, add_membership},
@@ -946,6 +1277,55 @@ sockopt_otp() ->
                                                         {rcvbuf, 1}, {rcvctrlbuf, 1}, {sndctrlbuf, 1},
                                                         {controlling_process, Self}]],
     erlang:display(unmap({sockopt_otp, Flags, Sizes, Linger, Priority, Raise, Inherit, Recv, Owner, Down, Closed})),
+    init:stop().
+
+%% `-s kernel_boot_probe sockopt_select_read` runs {otp, select_read} true
+%% and {otp, rcvbuf} {N, Size}: the values, the inheritance of an accepted
+%% socket, {more, Bin} until N buffers came, {select_read, Bin} of
+%% nif_recv/4 and nif_recvfrom/4 with a reference, and the select message.
+sockopt_select_read() ->
+    {ok, L} = socket:open(inet, stream, tcp),
+    Values = [socket:setopt(L, {otp, select_read}, true), socket:getopt(L, {otp, select_read}),
+              socket:setopt(L, {otp, rcvbuf}, {1 bsl 31, 8}), socket:getopt(L, {otp, rcvbuf}),
+              socket:setopt(L, {otp, rcvbuf}, {0, 8}), socket:setopt(L, {otp, rcvbuf}, {1 bsl 32, 8}),
+              socket:setopt(L, {otp, rcvbuf}, {2, foo}), socket:setopt(L, {otp, rcvbuf}, {2, 4}),
+              socket:getopt(L, {otp, rcvbuf})],
+    ok = socket:bind(L, #{family => inet, addr => loopback, port => 0}),
+    ok = socket:listen(L),
+    {ok, #{port := Port}} = socket:sockname(L),
+    {ok, C} = socket:open(inet, stream, tcp),
+    ok = socket:connect(C, #{family => inet, addr => loopback, port => Port}),
+    {ok, A} = socket:accept(L, 1000),
+    Inherit = [socket:getopt(A, {otp, select_read}), socket:getopt(A, {otp, rcvbuf})],
+    ok = socket:send(C, <<"0123456789abcdef">>),
+    timer:sleep(100),
+    More = [prim_socket:recv(element(2, A), 0, [], zero), prim_socket:recv(element(2, A), 0, [], zero),
+            socket:recv(A, 0, 0)],
+    ok = socket:setopt(A, {otp, select_read}, true),
+    ok = socket:setopt(A, {otp, rcvbuf}, 64),
+    ok = socket:send(C, <<"xyz">>),
+    timer:sleep(100),
+    Ref = make_ref(),
+    Select = prim_socket:recv(element(2, A), 0, [], Ref),
+    ok = socket:send(C, <<"w">>),
+    Message = receive {'$socket', A, select, Ref} -> select after 1000 -> missing end,
+    Zero = prim_socket:recv(element(2, A), 0, [], zero),
+    {ok, U1} = socket:open(inet, dgram, udp),
+    {ok, U2} = socket:open(inet, dgram, udp),
+    ok = socket:bind(U2, #{family => inet, addr => loopback, port => 0}),
+    {ok, Addr} = socket:sockname(U2),
+    ok = socket:setopt(U2, {otp, select_read}, true),
+    ok = socket:sendto(U1, <<"dgram">>, Addr),
+    timer:sleep(100),
+    Ref2 = make_ref(),
+    From = case prim_socket:recvfrom(element(2, U2), 0, [], Ref2) of
+               {select_read, {#{family := inet}, Bin}} -> {select_read, Bin};
+               Other -> Other
+           end,
+    ok = socket:sendto(U1, <<"again">>, Addr),
+    Message2 = receive {'$socket', U2, select, Ref2} -> select after 1000 -> missing end,
+    [ok = socket:close(S) || S <- [A, C, L, U1, U2]],
+    erlang:display({sockopt_select_read, Values, Inherit, More, Select, Message, Zero, From, Message2}),
     init:stop().
 
 %% unmap/1 replaces each map with its sorted list of pairs.

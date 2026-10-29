@@ -4,8 +4,9 @@
 //! `bin/plug_hello start` does: the pinned ERTS with the `erl` of the
 //! release, and PBeam with `pbeam erl`. The one-file run also compares the
 //! SIGTERM shutdown notice and the exit status with the pinned ERTS. The
-//! example starts Bandit on the port of the `PORT` variable, so each run
-//! gets a free port and the runs do not collide. The ERTS run and the pbeam
+//! example starts Bandit on the port of the `PORT` variable. Each run sets
+//! `PORT=0`, so the host gives Bandit a free port, and the test reads the
+//! port from the startup line of Bandit. The ERTS run and the pbeam
 //! run also serve `GET /` with `accept-encoding: zstd` first, which makes
 //! Bandit compress the body with `zstd:compress/2` and a context, and
 //! compare the compressed response.
@@ -13,7 +14,7 @@
 use std::{
     fs,
     io::{BufRead, BufReader, Read, Write},
-    net::{TcpListener, TcpStream},
+    net::TcpStream,
     os::unix::{fs::PermissionsExt, process::CommandExt},
     path::PathBuf,
     process::{Child, Command, ExitStatus, Stdio},
@@ -50,9 +51,7 @@ type Response<Body> = (String, String, Body);
 
 /// One run at a time builds the example and starts its server on it.
 ///
-/// Two concurrent runs could otherwise pick the same port between the probe
-/// and the bind, and the request of one run would reach the server of the
-/// other. A run that builds the example writes `target/examples/plug_hello`
+/// A run that builds the example writes `target/examples/plug_hello`
 /// with `mix release --overwrite`, which removes the release directory
 /// before it writes it, and a run that builds a bundle reads that
 /// directory: the two must not overlap.
@@ -62,9 +61,10 @@ type Response<Body> = (String, String, Body);
 /// take it again.
 static ONE_FILE_RUN: Mutex<()> = Mutex::new(());
 
-/// The variables that `pbeam erl` rejects when they are set and not empty,
-/// as the flags of `erlexec` that PBeam does not read. Each run removes
-/// them, so that a shell setting does not change the runs.
+/// The variables of `erlexec`: the flag variables, whose flags `pbeam erl`
+/// adds to the arguments as `erlexec` does, and `ERL_EPMD_PORT`, which it
+/// rejects. Each run removes them, so that a shell setting does not change
+/// the runs.
 const ERL_FLAG_VARIABLES: [&str; 5] = [
     "ERL_OTP29_FLAGS",
     "ERL_AFLAGS",
@@ -183,10 +183,9 @@ fn serves_concurrent_requests_on_several_schedulers_as_pinned_erts() {
 /// run with `SIGTERM`, and return the line of the scheduler count and the
 /// responses.
 fn serve_concurrently(command: &mut Command) -> (Option<String>, Vec<Response<String>>) {
-    let port = free_port();
     let mut child = without_erl_flags(command)
         .env("ELIXIR_ERL_OPTIONS", SCHEDULER_OPTIONS)
-        .env("PORT", port.to_string())
+        .env("PORT", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -197,15 +196,10 @@ fn serve_concurrently(command: &mut Command) -> (Option<String>, Vec<Response<St
     let stdout_reader = collect(child.stdout.take().unwrap(), Arc::clone(&stdout));
     let stderr = Arc::new(Mutex::new(Vec::new()));
     let stderr_reader = collect(child.stderr.take().unwrap(), Arc::clone(&stderr));
-    let responses = wait_for_server(&mut child, port).and_then(|_| {
+    let port = wait_for_port(&mut child, &stdout);
+    let responses = port.clone().and_then(|port| {
         let requests: Vec<_> = (0..CONCURRENT_REQUESTS)
-            .map(|_| {
-                thread::spawn(move || {
-                    TcpStream::connect(("127.0.0.1", port))
-                        .map_err(|error| error.to_string())
-                        .and_then(request)
-                })
-            })
+            .map(|_| thread::spawn(move || connect(port).and_then(request)))
             .collect();
         requests
             .into_iter()
@@ -218,7 +212,7 @@ fn serve_concurrently(command: &mut Command) -> (Option<String>, Vec<Response<St
     let stdout = String::from_utf8_lossy(&stdout.lock().unwrap()).into_owned();
     let responses = responses.unwrap_or_else(|error| {
         panic!(
-            "the run on port {port}: {error}\nstatus: {status:?}\nstdout: {stdout}\nstderr: {}",
+            "the run on port {port:?}: {error}\nstatus: {status:?}\nstdout: {stdout}\nstderr: {}",
             String::from_utf8_lossy(&stderr.lock().unwrap())
         )
     });
@@ -362,13 +356,12 @@ fn builds_the_one_file_executable_with_the_mix_task_and_runs_it_clean() {
     assert!(status.success(), "the task writes the executable");
     let executable = clean.join("plug_hello");
     fs::copy(&output, &executable).unwrap();
-    let port = free_port();
     let mut command = Command::new(&executable);
     command
         .current_dir(&clean)
         .env_clear()
         .env("HOME", &home)
-        .env("PORT", port.to_string())
+        .env("PORT", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -383,8 +376,8 @@ fn builds_the_one_file_executable_with_the_mix_task_and_runs_it_clean() {
     let stdout_reader = collect(child.stdout.take().unwrap(), Arc::clone(&stdout));
     let stderr = Arc::new(Mutex::new(Vec::new()));
     let stderr_reader = collect(child.stderr.take().unwrap(), Arc::clone(&stderr));
-    let stream = wait_for_server(&mut child, port);
-    let response = stream.and_then(request);
+    let port = wait_for_port(&mut child, &stdout);
+    let response = port.clone().and_then(connect).and_then(request);
     let status = stop_with_term(child);
     stdout_reader.join().unwrap();
     stderr_reader.join().unwrap();
@@ -411,7 +404,7 @@ fn builds_the_one_file_executable_with_the_mix_task_and_runs_it_clean() {
     fs::remove_dir_all(&directory).unwrap();
     let response = response.unwrap_or_else(|error| {
         panic!(
-            "the clean run on port {port}: {error}\nstatus: {status:?}\nstdout: {}\nstderr: {}",
+            "the clean run on port {port:?}: {error}\nstatus: {status:?}\nstdout: {}\nstderr: {}",
             text(&stdout),
             text(&stderr)
         )
@@ -442,12 +435,22 @@ fn gives_the_command_line_arguments_of_the_executable_to_the_release() {
     fs::create_dir_all(&clean).unwrap();
     fs::create_dir_all(&temporary).unwrap();
     let output = build_one_file(&directory, &clean);
-    let port = free_port();
-    let mut child = without_erl_flags(&mut Command::new(&output))
+    // The run starts through `PATH`, so `PBEAM_EXECUTABLE` must not be the
+    // bare name of the command line.
+    let path = std::env::join_paths(std::iter::once(clean.clone()).chain(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    )))
+    .unwrap();
+    let mut child = without_erl_flags(&mut Command::new("plug_hello"))
         .args(["a", "erl", "--c"])
         .current_dir(&clean)
+        .env("PATH", path)
         .env("TMPDIR", &temporary)
-        .env("PORT", port.to_string())
+        .env("PORT", "0")
+        // The re-exec of `pbeam erl` reads the flag variables as `erlexec`
+        // does, so the `-extra` word of `ERL_ZFLAGS` follows the arguments
+        // of the command line (`erlexec.c:2195-2201`, `2255-2260`).
+        .env("ERL_ZFLAGS", "-extra z")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -458,18 +461,19 @@ fn gives_the_command_line_arguments_of_the_executable_to_the_release() {
     let stdout_reader = collect(child.stdout.take().unwrap(), Arc::clone(&stdout));
     let stderr = Arc::new(Mutex::new(Vec::new()));
     let stderr_reader = collect(child.stderr.take().unwrap(), Arc::clone(&stderr));
-    let stream = wait_for_server(&mut child, port);
-    let response = stream.and_then(|stream| request_argv_after_cli(port, stream));
+    let port = wait_for_port(&mut child, &stdout);
+    let response = port
+        .clone()
+        .and_then(|port| request_argv_after_cli(port, connect(port)?));
     // The launcher exports the `RELEASE_*` variables of `bin/plug_hello`
     // (#1311).
-    let release = TcpStream::connect(("127.0.0.1", port))
-        .map_err(|error| error.to_string())
-        .and_then(|stream| {
-            exchange(
-                stream,
-                b"GET /release HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
-            )
-        });
+    let release = port.clone().and_then(connect).and_then(|stream| {
+        exchange(
+            stream,
+            b"GET /release HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+    });
+    let executable = port.clone().and_then(request_executable);
     let status = stop_with_term(child);
     stdout_reader.join().unwrap();
     stderr_reader.join().unwrap();
@@ -487,14 +491,14 @@ fn gives_the_command_line_arguments_of_the_executable_to_the_release() {
     );
     let (_status_line, _headers, body) = response.unwrap_or_else(|error| {
         panic!(
-            "the one-file run with arguments on port {port}: {error}\nstdout: {}\nstderr: {}",
+            "the one-file run with arguments on port {port:?}: {error}\nstdout: {}\nstderr: {}",
             text(&stdout),
             text(&stderr)
         )
     });
     assert_eq!(
         body,
-        "[\"a\", \"erl\", \"--c\"]",
+        "[\"a\", \"erl\", \"--c\", \"z\"]",
         "stdout: {}\nstderr: {}",
         text(&stdout),
         text(&stderr)
@@ -505,16 +509,16 @@ fn gives_the_command_line_arguments_of_the_executable_to_the_release() {
         "[\"plug_hello\", \"0.1.0\", \"start\", \"plug_hello\", \"embedded\", \
          \"plug_hello\", \"none\", \"start\", \"start_clean\"]"
     );
+    assert_eq!(executable.unwrap(), executable_body(&output));
     fs::remove_dir_all(&directory).unwrap();
 }
 
 /// Run the release of `release` on the pinned ERTS, send `GET /`, and
 /// return the response.
 fn erts_release_response(release: &std::path::Path) -> (String, String, String) {
-    let port = free_port();
     let mut child = without_erl_flags(&mut Command::new(release.join("bin").join("plug_hello")))
         .arg("start")
-        .env("PORT", port.to_string())
+        .env("PORT", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -525,8 +529,8 @@ fn erts_release_response(release: &std::path::Path) -> (String, String, String) 
     let stdout_reader = collect(child.stdout.take().unwrap(), Arc::clone(&stdout));
     let stderr = Arc::new(Mutex::new(Vec::new()));
     let stderr_reader = collect(child.stderr.take().unwrap(), Arc::clone(&stderr));
-    let stream = wait_for_server(&mut child, port);
-    let response = stream.and_then(request);
+    let port = wait_for_port(&mut child, &stdout);
+    let response = port.clone().and_then(connect).and_then(request);
     let status = stop_with_term(child);
     stdout_reader.join().unwrap();
     stderr_reader.join().unwrap();
@@ -538,7 +542,7 @@ fn erts_release_response(release: &std::path::Path) -> (String, String, String) 
     );
     response.unwrap_or_else(|error| {
         panic!(
-            "the ERTS release on port {port}: {error}\nstdout: {}\nstderr: {}",
+            "the ERTS release on port {port:?}: {error}\nstdout: {}\nstderr: {}",
             String::from_utf8_lossy(&stdout.lock().unwrap()),
             String::from_utf8_lossy(&stderr.lock().unwrap())
         )
@@ -557,11 +561,12 @@ fn serve_one_file() -> (String, String, String) {
     fs::create_dir_all(&clean).unwrap();
     fs::create_dir_all(&temporary).unwrap();
     let output = build_one_file(&directory, &clean);
-    let port = free_port();
-    let mut child = without_erl_flags(&mut Command::new(&output))
+    // The run starts through a relative path, which the child resolves in
+    // its working directory `clean`.
+    let mut child = without_erl_flags(&mut Command::new("./plug_hello"))
         .current_dir(&clean)
         .env("TMPDIR", &temporary)
-        .env("PORT", port.to_string())
+        .env("PORT", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -572,8 +577,9 @@ fn serve_one_file() -> (String, String, String) {
     let stdout_reader = collect(child.stdout.take().unwrap(), Arc::clone(&stdout));
     let stderr = Arc::new(Mutex::new(Vec::new()));
     let stderr_reader = collect(child.stderr.take().unwrap(), Arc::clone(&stderr));
-    let stream = wait_for_server(&mut child, port);
-    let response = stream.and_then(request);
+    let port = wait_for_port(&mut child, &stdout);
+    let response = port.clone().and_then(connect).and_then(request);
+    let executable = port.clone().and_then(request_executable);
     // SIGTERM reaches the boot of the extracted release, because the
     // launcher is the boot. The run removes its extraction at the exit.
     let status = stop_with_term(child);
@@ -602,13 +608,14 @@ fn serve_one_file() -> (String, String, String) {
     let (erts_status, erts_notice) = shutdown_on_erts();
     assert_eq!(status.code(), erts_status);
     assert_eq!(notice, erts_notice);
+    assert_eq!(executable.unwrap(), executable_body(&output));
     fs::remove_dir_all(&directory).unwrap();
     response.unwrap_or_else(|error| {
         let text = |bytes: &Arc<Mutex<Vec<u8>>>| {
             String::from_utf8_lossy(&bytes.lock().unwrap()).into_owned()
         };
         panic!(
-            "the one-file run on port {port}: {error}\nstatus: {status:?}\nstdout: {}\nstderr: {}",
+            "the one-file run on port {port:?}: {error}\nstatus: {status:?}\nstdout: {}\nstderr: {}",
             text(&stdout),
             text(&stderr)
         )
@@ -659,12 +666,11 @@ fn stop_with_term(mut child: Child) -> ExitStatus {
 /// Run the release on the pinned ERTS, wait until its server accepts,
 /// send `SIGTERM`, and return the exit status and the SIGTERM notice.
 fn shutdown_on_erts() -> (Option<i32>, Option<String>) {
-    let port = free_port();
     let mut child = without_erl_flags(&mut Command::new(
         release_directory().join("bin").join("plug_hello"),
     ))
     .arg("start")
-    .env("PORT", port.to_string())
+    .env("PORT", "0")
     .stdin(Stdio::null())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())
@@ -675,13 +681,13 @@ fn shutdown_on_erts() -> (Option<i32>, Option<String>) {
     let stdout_reader = collect(child.stdout.take().unwrap(), Arc::clone(&stdout));
     let stderr = Arc::new(Mutex::new(Vec::new()));
     let stderr_reader = collect(child.stderr.take().unwrap(), Arc::clone(&stderr));
-    let started = wait_for_server(&mut child, port);
+    let started = wait_for_port(&mut child, &stdout).and_then(connect);
     let status = stop_with_term(child);
     stdout_reader.join().unwrap();
     stderr_reader.join().unwrap();
     started.unwrap_or_else(|error| {
         panic!(
-            "the ERTS release on port {port}: {error}\nstderr: {}",
+            "the ERTS release: {error}\nstderr: {}",
             String::from_utf8_lossy(&stderr.lock().unwrap())
         )
     });
@@ -727,13 +733,12 @@ fn serve(arguments: &[&str], pbeam: Option<&str>) -> (Response<String>, Response
     let _serialized = ONE_FILE_RUN
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let port = free_port();
     let mut command = Command::new("bash");
     command
         .arg("scripts/example.sh")
         .args(arguments)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .env("PORT", port.to_string())
+        .env("PORT", "0")
         .env_remove("PBEAM_BIN")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -754,13 +759,11 @@ fn serve(arguments: &[&str], pbeam: Option<&str>) -> (Response<String>, Response
     let stdout_reader = collect(child.stdout.take().unwrap(), Arc::clone(&stdout));
     let stderr = Arc::new(Mutex::new(Vec::new()));
     let stderr_reader = collect(child.stderr.take().unwrap(), Arc::clone(&stderr));
-    let stream = wait_for_server(&mut child, port);
-    let response = stream
-        .and_then(|stream| exchange(stream, ZSTD_REQUEST))
-        .and_then(|zstd| {
-            let stream = TcpStream::connect(("127.0.0.1", port)).map_err(|error| error.to_string());
-            Ok((stream.and_then(request)?, zstd))
-        });
+    let port = wait_for_port(&mut child, &stdout);
+    let response = port.clone().and_then(|port| {
+        let zstd = exchange(connect(port)?, ZSTD_REQUEST)?;
+        Ok((connect(port).and_then(request)?, zstd))
+    });
     let status = stop(child);
     stdout_reader.join().unwrap();
     stderr_reader.join().unwrap();
@@ -770,7 +773,7 @@ fn serve(arguments: &[&str], pbeam: Option<&str>) -> (Response<String>, Response
     let stderr = text(&stderr);
     response.unwrap_or_else(|error| {
         panic!(
-            "{arguments:?} on port {port}: {error}\nstatus: {status:?}\nstdout: {stdout}\nstderr: {stderr}"
+            "{arguments:?} on port {port:?}: {error}\nstatus: {status:?}\nstdout: {stdout}\nstderr: {stderr}"
         )
     })
 }
@@ -788,46 +791,50 @@ fn collect(
     })
 }
 
-/// Return a free port of the loopback address that no earlier call of this
-/// process returned.
+/// Wait until the run writes the startup line of Bandit, and return the
+/// port of that line. Give up when the child exits or when
+/// [`START_TIME_LIMIT`] passes.
 ///
-/// The probe closes its listener before the server of the run binds the port,
-/// so the host can give the port to the server of another run of this test
-/// binary, and then the request of the run reaches the wrong server. A port
-/// that this function returned once is never returned again, so two runs of
-/// the binary cannot pick one port.
-fn free_port() -> u16 {
-    static USED: Mutex<Option<std::collections::HashSet<u16>>> = Mutex::new(None);
-    let mut used = USED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let used = used.get_or_insert_with(std::collections::HashSet::new);
+/// Each run gives the example the port 0 (`PORT=0`), so the host binds a
+/// free port for Bandit, and Bandit writes the bound port in its startup
+/// line after the bind (`bandit.ex:357-358`, `436-447`). A port that the
+/// test picked and released before the server binds it can go to another
+/// socket of the host, also to the local end of a connection of another
+/// test, and then the server stops with `eaddrinuse`.
+fn wait_for_port(child: &mut Child, stdout: &Mutex<Vec<u8>>) -> Result<u16, String> {
+    let deadline = Instant::now() + START_TIME_LIMIT;
     loop {
-        let port = TcpListener::bind("127.0.0.1:0")
-            .expect("the loopback address has a free port")
-            .local_addr()
-            .expect("the listener has an address")
-            .port();
-        if used.insert(port) {
-            return port;
+        if let Some(port) = bound_port(&String::from_utf8_lossy(&stdout.lock().unwrap())) {
+            return Ok(port);
         }
+        if let Some(status) = child.try_wait().expect("the child has a status") {
+            return Err(format!("the example ended with {status}"));
+        }
+        if Instant::now() >= deadline {
+            return Err("the example wrote no startup line of Bandit".to_owned());
+        }
+        thread::sleep(Duration::from_millis(100));
     }
 }
 
-/// Connect to `port` until the server accepts, and return the stream. Give
-/// up when the child exits or when [`START_TIME_LIMIT`] passes.
-fn wait_for_server(child: &mut Child, port: u16) -> Result<TcpStream, String> {
-    let deadline = Instant::now() + START_TIME_LIMIT;
-    loop {
-        match TcpStream::connect(("127.0.0.1", port)) {
-            Ok(stream) => return Ok(stream),
-            Err(_) if Instant::now() < deadline => {
-                if let Some(status) = child.try_wait().expect("the child has a status") {
-                    return Err(format!("the example ended with {status}"));
-                }
-                thread::sleep(Duration::from_millis(100));
-            }
-            Err(error) => return Err(format!("no server on port {port}: {error}")),
-        }
-    }
+/// Return the port of the startup line of Bandit in `output`, for example
+/// `Running PlugHello with Bandit 1.12.5 at 0.0.0.0:53978 (http)`.
+fn bound_port(output: &str) -> Option<u16> {
+    output.lines().find_map(|line| {
+        let (_, address) = line.split_once(" with Bandit ")?.1.split_once(" at ")?;
+        address
+            .strip_suffix(" (http)")?
+            .rsplit_once(':')?
+            .1
+            .parse()
+            .ok()
+    })
+}
+
+/// Connect to the server on `port`.
+fn connect(port: u16) -> Result<TcpStream, String> {
+    TcpStream::connect(("127.0.0.1", port))
+        .map_err(|error| format!("no server on port {port}: {error}"))
 }
 
 /// Send `GET /` and return the status line, the headers without `date`, one
@@ -865,6 +872,23 @@ fn request_argv(stream: TcpStream) -> Result<Response<String>, String> {
     let (status, headers, body) = exchange(stream, request)?;
     let body = String::from_utf8(body).map_err(|error| error.to_string())?;
     Ok((status, headers, body))
+}
+
+/// Send `GET /executable` to the server on `port` and return the body: the
+/// example answers it with `PBEAM_EXECUTABLE` of the release, as `inspect/1`
+/// writes it. The caller stops the server before it reads the result.
+fn request_executable(port: u16) -> Result<String, String> {
+    let stream = TcpStream::connect(("127.0.0.1", port)).map_err(|error| error.to_string())?;
+    let request = b"GET /executable HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    String::from_utf8(exchange(stream, request)?.2).map_err(|error| error.to_string())
+}
+
+/// Return the body of `GET /executable` for the executable `output`: its
+/// absolute path without symbolic links, as `inspect/1` writes the string.
+fn executable_body(output: &std::path::Path) -> String {
+    let path = fs::canonicalize(output).unwrap();
+    assert!(path.is_absolute());
+    format!("{:?}", path.to_str().unwrap())
 }
 
 /// Send the bytes of `request` and return the status line, the headers
@@ -961,7 +985,7 @@ fn nif_record(pbeam: Option<&str>) -> String {
         .args(["-eval", &probe])
         .env("RELEASE_ROOT", &release)
         .env("RELEASE_SYS_CONFIG", &config)
-        .env("PORT", free_port().to_string())
+        .env("PORT", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

@@ -53,6 +53,10 @@ fn raises_invalid_for_an_otp_option_number_without_a_getter() {
         writer: None,
         counters: IoCounters::default(),
         options: OtpOptions::default(),
+        select_read: false,
+        recv_count_done: 0,
+        sendfile: None,
+        sendfile_counters: None,
     }));
     let Ok(BifResult::Raise { reason, .. }) = getopt_otp(scheduler, &state, 1005) else {
         panic!("no raise");
