@@ -39,6 +39,11 @@ const CALLS: u64 = 20_000_000;
 /// let ns = measure_pbeam("dispatch_probe", "floor_ext_loop", 1);
 /// assert!(ns > 0.0);
 /// ```
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "the probe reports an average of nanoseconds as `f64`"
+)]
 fn measure_pbeam(module: &str, name: &str, arity: u32) -> f64 {
     let start = Instant::now();
     let mut hits = 0u64;
@@ -60,6 +65,11 @@ fn measure_pbeam(module: &str, name: &str, arity: u32) -> f64 {
 /// let ns = measure_heavy("erlang", "put", 2);
 /// assert!(ns > 0.0);
 /// ```
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "the probe reports an average of nanoseconds as `f64`"
+)]
 fn measure_heavy(module: &str, name: &str, arity: u32) -> f64 {
     let start = Instant::now();
     let mut hits = 0u64;
@@ -271,7 +281,8 @@ fn binary_to_list_reads_the_chunks_of_an_appended_binary_with_no_join() {
     let mut binary = Binary::from(vec![7]);
     let mut bytes = vec![7_u8];
     for step in 1..3_000_u32 {
-        let suffix = vec![(step % 251) as u8; 1_000];
+        let suffix =
+            vec![u8::try_from(step % 251).expect("a remainder of 251 fits in `u8`"); 1_000];
         binary = Binary::concat(&binary, &suffix);
         bytes.extend(&suffix);
     }
@@ -301,8 +312,8 @@ fn binary_to_list_reads_the_chunks_of_an_appended_binary_with_no_join() {
         result = super::erlang::b2l_chunk(
             &mut process,
             source,
-            *offset as usize,
-            *rest as usize,
+            usize::try_from(*offset).expect("a trap keeps a non-negative offset"),
+            usize::try_from(*rest).expect("a trap keeps a non-negative rest"),
             list.clone(),
             4_000,
         );

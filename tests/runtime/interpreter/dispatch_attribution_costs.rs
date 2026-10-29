@@ -44,6 +44,11 @@ use crate::{
     term::{AtomTable, ProcessId},
 };
 
+/// Return a count of the fixtures as the sum of a probe.
+fn unsigned(value: usize) -> u64 {
+    u64::try_from(value).expect("a fixture count fits in `u64`")
+}
+
 /// The number of timed runs of one operation. The report gives the minimum
 /// of the runs, as the term and drop measurements do.
 const RUNS: usize = 9;
@@ -69,6 +74,11 @@ fn report(name: &str, ns: f64) {
 /// let ns = cost(|| black_box(1u64));
 /// assert!(ns >= 0.0);
 /// ```
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "the probe reports an average of nanoseconds as `f64`"
+)]
 fn cost(mut operation: impl FnMut() -> u64) -> f64 {
     let mut best = f64::INFINITY;
     for _ in 0..RUNS {
@@ -95,6 +105,11 @@ fn cost(mut operation: impl FnMut() -> u64) -> f64 {
 /// let ns = cost_with(|| 1u64, |state| { *state += 1; *state });
 /// assert!(ns >= 0.0);
 /// ```
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "the probe reports an average of nanoseconds as `f64`"
+)]
 fn cost_with<State>(
     mut setup: impl FnMut() -> State,
     mut operation: impl FnMut(&mut State) -> u64,
@@ -279,7 +294,7 @@ fn prints_the_cost_of_every_instruction_part() {
                 .jump_targets
                 .get(black_box(&3))
                 .expect("label 3 exists");
-            index as u64
+            unsigned(index)
         }),
     );
     report(
@@ -287,7 +302,7 @@ fn prints_the_cost_of_every_instruction_part() {
         cost(|| {
             let function = function_at_label(black_box(&module), black_box(1))
                 .expect("label 1 starts a function");
-            function.start as u64
+            unsigned(function.start)
         }),
     );
     report(
@@ -295,7 +310,7 @@ fn prints_the_cost_of_every_instruction_part() {
         cost(|| {
             let frame = code_table::frame(black_box(&module), black_box(1), black_box(1))
                 .expect("floor_loop/1 exists");
-            frame.next_instruction as u64
+            unsigned(frame.next_instruction)
         }),
     );
 
@@ -309,7 +324,8 @@ fn prints_the_cost_of_every_instruction_part() {
         cost_with(
             || {
                 let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
-                process.fcalls = OPERATIONS as i32 + 1;
+                process.fcalls =
+                    i32::try_from(OPERATIONS).expect("the operations fit in `i32`") + 1;
                 process
             },
             |process| u64::from(light_bif_switch(process)),
@@ -346,7 +362,7 @@ fn prints_the_cost_of_every_instruction_part() {
             },
             |(process, cursor, _scheduler)| {
                 cursor.commit(black_box(process));
-                cursor.position as u64
+                unsigned(cursor.position)
             },
         ),
     );
@@ -362,7 +378,7 @@ fn prints_the_cost_of_every_instruction_part() {
                 cursor
                     .refresh(black_box(scheduler))
                     .expect("the module is loaded");
-                cursor.position as u64
+                unsigned(cursor.position)
             },
         ),
     );
@@ -385,7 +401,7 @@ fn prints_the_cost_of_every_instruction_part() {
             },
             |(cursor, _module)| {
                 cursor.module = Arc::clone(black_box(&other));
-                cursor.position as u64
+                unsigned(cursor.position)
             },
         ),
     );
@@ -402,7 +418,7 @@ fn prints_the_cost_of_every_instruction_part() {
                 cursor
                     .refresh(black_box(scheduler))
                     .expect("the module is loaded");
-                cursor.position as u64
+                unsigned(cursor.position)
             },
         ),
     );
@@ -415,7 +431,7 @@ fn prints_the_cost_of_every_instruction_part() {
         cost(|| {
             let values =
                 read_bif_arguments(black_box(&process), black_box(&arguments)).expect("x0 is set");
-            values.with(<[&crate::term::Term]>::len) as u64
+            unsigned(values.with(<[&crate::term::Term]>::len))
         }),
     );
     let mut scheduler = Scheduler::new(AtomTable::new());

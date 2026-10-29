@@ -8,7 +8,7 @@ use num_bigint::{BigInt, Sign};
 use num_traits::ToPrimitive;
 
 use super::BifResult::Value;
-use super::{BeamError, BifResult, ExceptionClass, Scheduler, Term};
+use super::{BeamError, BifResult, ExceptionClass, Scheduler, Term, to_i64, to_u64, to_usize};
 use crate::runtime::atomics::{ATOMIC_BYTES, Array};
 use crate::term::{Map, Signedness};
 use std::sync::Arc;
@@ -77,7 +77,7 @@ pub(super) fn new(
         } else {
             Signedness::Unsigned
         },
-        size as usize,
+        to_usize(size),
     ) {
         return Ok(system_limit());
     }
@@ -322,7 +322,10 @@ pub(super) fn info(scheduler: &mut Scheduler, reference: &Term) -> Result<BifRes
         (Term::static_atom("max"), max),
         (Term::static_atom("memory"), Term::Integer(array.memory())),
         (Term::static_atom("min"), min),
-        (Term::static_atom("size"), Term::Integer(array.len() as i64)),
+        (
+            Term::static_atom("size"),
+            Term::Integer(to_i64(array.len())),
+        ),
     ];
     // ponytail: each key is a static atom, so `from_pairs` cannot fail.
     let map = Map::from_pairs(pairs, &scheduler.atoms).expect("static atom keys fit each map form");
@@ -386,7 +389,7 @@ pub(super) fn counters_new(scheduler: &mut Scheduler, size: &Term) -> Result<Bif
     if !scheduler
         .node()
         .counters
-        .create(id, Signedness::Signed, size as usize)
+        .create(id, Signedness::Signed, to_usize(size))
     {
         return Ok(system_limit());
     }
@@ -507,7 +510,7 @@ pub(super) fn counters_info(
     let Some(array) = scheduler.node().counters.array(reference) else {
         return Ok(BifResult::badarg());
     };
-    let size = array.len() as u64;
+    let size = to_u64(array.len());
     let per_line = CACHE_LINE_BYTES / ATOMIC_BYTES;
     let cache_lines = atomics_per_counter(scheduler) * size.div_ceil(per_line);
     let memory = COUNTERS_HEADER_BYTES + cache_lines * CACHE_LINE_BYTES;
@@ -529,7 +532,7 @@ pub(super) fn counters_info(
 /// Return the atomics of one counter in ERTS: one for each scheduler and
 /// one for the base value (`ATOMICS_PER_COUNTER`, `erl_bif_counters.c:50`).
 fn atomics_per_counter(scheduler: &Scheduler) -> u64 {
-    scheduler.scheduler_count() as u64 + 1
+    scheduler.scheduler_count().cast_unsigned() + 1
 }
 
 /// Return the counter array of `reference` and the position that `index`
@@ -596,7 +599,7 @@ fn system_limit() -> BifResult {
 /// ```
 fn position(array: &Array, index: &Term) -> Option<usize> {
     let index = to_uword(index).ok()?.checked_sub(1)?;
-    (index < array.len() as u64).then_some(index as usize)
+    (index < to_u64(array.len())).then_some(to_usize(index))
 }
 
 /// Return the bits of the value `term` for an array, as `get_value`
@@ -661,8 +664,8 @@ fn signed_bits(term: &Term) -> Option<i64> {
 /// ```
 fn unsigned_bits(term: &Term) -> Option<i64> {
     match term {
-        Term::Integer(value) => u64::try_from(*value).ok().map(|value| value as i64),
-        Term::BigInt(value) => value.to_u64().map(|value| value as i64),
+        Term::Integer(value) => u64::try_from(*value).ok().map(u64::cast_signed),
+        Term::BigInt(value) => value.to_u64().map(u64::cast_signed),
         _ => None,
     }
 }
@@ -682,7 +685,7 @@ fn value(signedness: Signedness, bits: i64) -> Term {
     if signedness == Signedness::Signed {
         Term::Integer(bits)
     } else {
-        Term::from_bigint(BigInt::from(bits as u64))
+        Term::from_bigint(BigInt::from(bits.cast_unsigned()))
     }
 }
 

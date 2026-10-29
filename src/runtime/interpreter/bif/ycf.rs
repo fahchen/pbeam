@@ -1,7 +1,7 @@
 //! The reduction counter of the BIFs that ERTS runs as Yielding C Fun
 //! (YCF) code, as `erts_ycf_trap_driver` drives them (`utils.c:3733-3819`).
 
-use super::ProcessState;
+use super::{ProcessState, to_i64};
 
 /// The end of one call of a YCF BIF.
 #[derive(Debug, PartialEq)]
@@ -46,9 +46,9 @@ pub(super) fn run_units(
 ) -> YcfTurn {
     // A `long` count (`utils.c:3743`): a negative budget yields after the
     // first unit, as a budget of 0 does.
-    let start = per_reduction as i64 * process.bif_reductions_signed();
+    let start = to_i64(per_reduction) * process.bif_reductions_signed();
     let mut counter = start;
-    let per_reduction = per_reduction as i64;
+    let per_reduction = to_i64(per_reduction);
     for (index, &unit) in units.iter().enumerate().skip(done) {
         counter -= i64::from(unit);
         if counter <= 0 {

@@ -89,7 +89,7 @@ fn reads_no_byte_of_an_iodata_that_has_no_budget() {
         .unwrap()
         .is_some()
     );
-    assert_eq!(bytes, [] as [u8; 0]);
+    assert_eq!(bytes, Vec::<u8>::new());
     let mut budget = 0;
     assert!(
         read(&Term::nil(), &mut budget, &mut |_| {})

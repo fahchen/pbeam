@@ -896,7 +896,7 @@ fn import_target(scheduler: &Scheduler, import: &Instruction) -> Option<usize> {
     };
     let module = scheduler.code.get("fixture").expect("fixture is loaded");
     let loaded = scheduler.code.loaded_by_id(module.id).unwrap();
-    loaded.imports[*import as usize]
+    loaded.imports[usize::try_from(*import).expect("a u32 fits in usize")]
         .get()
         .map(|target| target.frame().next_instruction)
 }
@@ -3332,10 +3332,10 @@ fn borrows_literal_and_register_operands_without_a_copy() {
         unreachable!("the fixture holds terms");
     };
     let read =
-        |operand: &Operand| read_operand(operand, &registers, &stack).unwrap() as *const Term;
-    assert_eq!(read(&literal), literal_term as *const Term);
-    assert_eq!(read(&Operand::X(0)), x0 as *const Term);
-    assert_eq!(read(&Operand::Y(0)), y0 as *const Term);
+        |operand: &Operand| std::ptr::from_ref(read_operand(operand, &registers, &stack).unwrap());
+    assert_eq!(read(&literal), std::ptr::from_ref(literal_term));
+    assert_eq!(read(&Operand::X(0)), std::ptr::from_ref(x0));
+    assert_eq!(read(&Operand::Y(0)), std::ptr::from_ref(y0));
 }
 
 #[test]
@@ -4013,7 +4013,7 @@ fn rejects_an_apply_with_a_stack_mismatch_and_raises_badarg() {
 /// Run `main/0` as a tail `call_ext` of `module:name` with `arguments`
 /// in `x0` onwards.
 fn call_ext_with(module: &str, name: &str, arguments: Vec<Term>) -> Result<Term, crate::BeamError> {
-    let arity = arguments.len() as u32;
+    let arity = u32::try_from(arguments.len()).expect("a fixture call has few arguments");
     let mut body: Vec<Instruction> = arguments
         .into_iter()
         .zip(0..)
@@ -5542,7 +5542,7 @@ fn loop_body(module: &BeamModule, function: &str) -> Vec<usize> {
     };
     // The loader replaces the fail label of the test with the index of the
     // instruction after the label, so the operand is the clause position.
-    let clause = fail_label as usize;
+    let clause = usize::try_from(fail_label).expect("a u32 fits in usize");
     let end = (clause..instructions.len())
         .find(|index| {
             matches!(
@@ -5906,7 +5906,7 @@ fn traps_a_call_that_meets_a_fixed_clear() {
         ("delete", vec![]),
     ];
     for (number, (function, mut arguments)) in calls.into_iter().enumerate() {
-        let id = Reference(number as u64);
+        let id = Reference(u64::try_from(number).expect("a fixture index fits in u64"));
         let mut table = Table::new(owner, Access::Public, 1, TableType::Set);
         for key in 0..300 {
             table.insert(&scheduler.atoms, vec![Term::Integer(key)]);
@@ -6009,7 +6009,7 @@ fn requeues_a_waiting_process_with_more_cleanup_than_a_turn() {
     process.waiting = true;
     scheduler.insert(process);
     scheduler.schedule_next().unwrap();
-    let turn = crate::runtime::scheduler::CONTEXT_REDS as u64;
+    let turn = u64::from(crate::runtime::scheduler::CONTEXT_REDS.cast_unsigned());
     for number in 0..=turn {
         let id = Reference(number);
         scheduler.ets.exclusive().create(

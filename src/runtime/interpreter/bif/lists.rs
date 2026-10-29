@@ -116,6 +116,11 @@ pub(super) fn keysearch(
     clippy::float_cmp,
     reason = "a small integer equals a float only when the float is exactly that integer, as `eq` in `utils.c` compares"
 )]
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "the C `(double)` conversion of a small integer rounds as `as` does"
+)]
 fn key_equal(key: &Term, element: &Term) -> bool {
     match (key.small_integer(), element) {
         (Some(key), Term::Float(element)) => key as f64 == *element,
@@ -148,7 +153,7 @@ fn key_search(
     let (Some(index), Some(mut elements)) = (index, list.list_iter()) else {
         return BifResult::badarg();
     };
-    let max_iter = 10 * CONTEXT_REDS as usize;
+    let max_iter = 10 * usize::try_from(CONTEXT_REDS).expect("CONTEXT_REDS is positive");
     let found = elements.by_ref().take(max_iter).find(
         |element| matches!(element, Term::Tuple(elements) if elements.get(index).is_some_and(|element| key_equal(key, element))),
     );
@@ -209,7 +214,10 @@ pub(super) fn member(
     let max_iter = 16 * reds_left;
     // `BIF_RET2` and `BUMP_REDS` with `reds_left - max_iter / 16`, where
     // `max_iter` counts down for each compared element.
-    let cost = |compared: usize| (reds_left - (max_iter - compared) / 16) as i32;
+    let cost = |compared: usize| {
+        i32::try_from(reds_left - (max_iter - compared) / 16)
+            .expect("the cost is at most the reductions left")
+    };
     let mut compared = 0;
     for item in elements.by_ref().take(max_iter) {
         compared += 1;
@@ -289,7 +297,10 @@ pub(super) fn reverse(
         walked += 1;
         reversed = Term::cons(element.clone(), reversed);
     }
-    process.bump_reductions((walked / 60) as i32);
+    process.bump_reductions(
+        i32::try_from(walked / 60)
+            .expect("the walk reads at most the cells that the budget allows"),
+    );
     let rest = elements.rest();
     if rest.is_nonempty_list() {
         process.bump_all_reductions();

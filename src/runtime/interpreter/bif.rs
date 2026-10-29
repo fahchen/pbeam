@@ -660,7 +660,9 @@ macro_rules! bifs {
             #[cfg(test)]
             super::RESOLVE_CALLS.with(|calls| calls.set(calls.get() + 1));
             let index = BIFS.binary_search(&(module, name, arity)).ok()?;
-            Some(BIF_IDS[index].unwrap_or(BifId::Unimplemented(index as u16)))
+            Some(BIF_IDS[index].unwrap_or(BifId::Unimplemented(
+                u16::try_from(index).expect("the BIF table has fewer than 65536 entries"),
+            )))
         }
 
         /// Return the module, the name, and the arity of the entry of `id`.
@@ -676,7 +678,7 @@ macro_rules! bifs {
         /// ```
         pub(crate) fn mfa(id: BifId) -> (&'static str, &'static str, u32) {
             if let BifId::Unimplemented(index) = id {
-                return BIFS[index as usize];
+                return BIFS[usize::from(index)];
             }
             BIFS[BIF_IDS
                 .iter()
@@ -807,7 +809,11 @@ impl BeamProgram {
         name: &str,
         arguments: &[Term],
     ) -> Result<BifResult, BeamError> {
-        let resolved = resolve(module, name, arguments.len() as u32);
+        let resolved = resolve(
+            module,
+            name,
+            u32::try_from(arguments.len()).expect("an argument list has fewer than 2^32 terms"),
+        );
         match resolved {
             Some(id) => Self::bif_slice(scheduler, id, arguments),
             None => Self::named_bif(scheduler, module, name, arguments),
@@ -1030,7 +1036,7 @@ impl BeamProgram {
         {
             let mut context = BifContext { scheduler };
             let state = ets::ListState {
-                done: *done as usize,
+                done: to_usize(*done),
                 bag: bag.is_list().then(|| bag.clone()),
                 check: ets::Check::from_term(check),
                 new: new.first().map_or(ets::New::No, ets::New::from_term),
@@ -1038,7 +1044,13 @@ impl BeamProgram {
                     .into_iter()
                     .find(|cause| matches!(bag, Term::Atom(atom) if atom.is_static(cause))),
             };
-            return ets::insert_list(&mut context, *id, objects, *keypos as i32, state);
+            return ets::insert_list(
+                &mut context,
+                *id,
+                objects,
+                i32::try_from(*keypos).expect("a trap keeps the key position of a table"),
+                state,
+            );
         }
         if let (
             "ets",
@@ -1055,14 +1067,14 @@ impl BeamProgram {
         ) = (module, function, arguments.as_slice())
         {
             let state = ets::MatchState {
-                chunk: *chunk as usize,
+                chunk: to_usize(*chunk),
                 matches: matches.clone(),
-                got: *got as usize,
-                writes: *writes as u64,
+                got: to_usize(*got),
+                writes: to_u64(*writes),
                 resumed: true,
             };
             let mut context = BifContext { scheduler };
-            return ets::match_trap(&mut context, *id, pattern, *bucket as usize, state);
+            return ets::match_trap(&mut context, *id, pattern, to_usize(*bucket), state);
         }
         if let ("ets", "lookup" | "member" | "delete" | "insert" | "insert_new", [table, key]) =
             (module, function, arguments.as_slice())
@@ -1168,16 +1180,16 @@ impl BeamProgram {
         ) = (module, function, arguments.as_mut_slice())
             && let Some(stack) = stack.proper_list()
         {
-            let bits = bytes.bit_size() as u64;
+            let bits = to_u64(bytes.bit_size());
             let bytes = BitWriter::from_bytes(std::mem::take(bytes).take_bytes(), bits);
             let process = scheduler.current_process_mut();
-            let reds_left = process.bif_reductions_left()? as i64;
+            let reds_left = to_i64(process.bif_reductions_left()?);
             return Ok(iolist::l2b_copy(
                 process,
                 reds_left,
                 term,
                 &stack.collect::<Vec<_>>(),
-                *size as usize,
+                to_usize(*size),
                 bytes,
             ));
         }
@@ -1236,9 +1248,9 @@ impl BeamProgram {
             return Ok(binary::longest_common_turn(
                 scheduler.current_process_mut(),
                 binaries,
-                *index as usize,
-                *smallest as u64,
-                *position as u64,
+                to_usize(*index),
+                to_u64(*smallest),
+                to_u64(*position),
                 if function == "binary_longest_suffix_trap" {
                     binary::CommonEnd::Suffix
                 } else {
@@ -1263,19 +1275,19 @@ impl BeamProgram {
                 subtract::continue_trap(process, atoms, state)
             }
             ("maps", "merge_trap", [merged, Term::Integer(steps)]) => {
-                maps::merge_trap(process, merged.clone(), *steps as usize)
+                maps::merge_trap(process, merged.clone(), to_usize(*steps))
             }
             ("maps", "from_list_trap", [list, Term::Integer(done)]) => {
-                maps::from_list(process, list, *done as usize, atoms)
+                maps::from_list(process, list, to_usize(*done), atoms)
             }
             ("maps", "from_keys_trap", [keys, value, Term::Integer(done)]) => {
-                maps::from_keys(process, keys, value, *done as usize, atoms)
+                maps::from_keys(process, keys, value, to_usize(*done), atoms)
             }
             ("maps", "keys_trap", [map, Term::Integer(done)]) => {
-                maps::keys(process, map, *done as usize)
+                maps::keys(process, map, to_usize(*done))
             }
             ("maps", "values_trap", [map, Term::Integer(done)]) => {
-                maps::values(process, map, *done as usize)
+                maps::values(process, map, to_usize(*done))
             }
             ("erlang", "characters_to_utf8_trap", [Term::Binary(bytes), rest, encoding]) => {
                 unicode::utf8_trap(process, bytes.clone().to_bytes(), rest, encoding)
@@ -1292,7 +1304,7 @@ impl BeamProgram {
             ) => unicode::list_trap(
                 process,
                 bytes.clone().to_bytes(),
-                *characters as usize,
+                to_usize(*characters),
                 rest,
                 if encoding.is_static("latin1") {
                     crate::runtime::unicode::CharEncoding::Latin1
@@ -1304,7 +1316,7 @@ impl BeamProgram {
                 unicode::finish_trap(
                     process,
                     result.clone(),
-                    *remaining as usize,
+                    to_usize(*remaining),
                     "characters_to_list_trap_2",
                 )
             }
@@ -1317,13 +1329,13 @@ impl BeamProgram {
                     Term::Integer(characters),
                 ],
             ) if let Some(bytes) = bytes.bytes() => {
-                unicode::analyze_turn(process, bytes, *end as usize, *characters as usize)
+                unicode::analyze_turn(process, bytes, to_usize(*end), to_usize(*characters))
             }
             ("erlang", "characters_to_list_trap_4", [result, Term::Integer(remaining)]) => {
                 unicode::finish_trap(
                     process,
                     result.clone(),
-                    *remaining as usize,
+                    to_usize(*remaining),
                     "characters_to_list_trap_4",
                 )
             }
@@ -1334,7 +1346,7 @@ impl BeamProgram {
                     process,
                     term,
                     &stack.collect::<Vec<_>>(),
-                    *size as usize,
+                    to_usize(*size),
                 )
             }
             (
@@ -1353,7 +1365,7 @@ impl BeamProgram {
             ) if let Some(stack) = stack.proper_list()
                 && let Some(iovec) = iovec.proper_list() =>
             {
-                let reds_left = process.bif_reductions_left()? as i64;
+                let reds_left = to_i64(process.bif_reductions_left()?);
                 Ok(iolist::iovec_copy(
                     process,
                     reds_left,
@@ -1377,8 +1389,8 @@ impl BeamProgram {
                 Ok(erlang::b2l_chunk(
                     process,
                     binary,
-                    *offset as usize,
-                    *remaining as usize,
+                    to_usize(*offset),
+                    to_usize(*remaining),
                     list.clone(),
                     reds_left,
                 ))
@@ -1403,14 +1415,14 @@ impl BeamProgram {
                         "invariant error: the unit {unit} of a list_to_bitstring trap is not 1 or 8"
                     ))
                 })?;
-                let reds_left = process.bif_reductions_left()? as i64;
+                let reds_left = to_i64(process.bif_reductions_left()?);
                 Ok(iolist::l2b_size(
                     process,
                     reds_left,
                     arg,
                     term,
                     &stack.collect::<Vec<_>>(),
-                    *size as usize,
+                    to_usize(*size),
                     unit,
                 ))
             }

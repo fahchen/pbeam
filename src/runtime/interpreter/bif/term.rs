@@ -21,7 +21,10 @@ use num_bigint::{BigInt, Sign};
 use num_traits::ToPrimitive;
 
 use super::BifResult::Value;
-use super::{BeamError, BifContext, BifResult, Binary, Term, error, integer, records};
+use super::{
+    BeamError, BifContext, BifResult, Binary, Term, error, integer, records, to_i64, to_u64,
+    to_usize,
+};
 use crate::runtime::interpreter::code_table::CodeTable;
 use crate::runtime::unicode::CharEncoding;
 use crate::term::{
@@ -136,12 +139,16 @@ fn parse_options(options: &Term) -> Option<Options> {
                 };
                 if name.is_static("minor_version") {
                     parsed.minor = match value {
-                        0..=2 => *value as u8,
+                        0..=2 => {
+                            u8::try_from(*value).expect("the pattern bounds the version to 0..=2")
+                        }
                         _ => return None,
                     };
                 } else if name.is_static("compressed") {
                     parsed.level = match value {
-                        0..=9 => *value as u32,
+                        0..=9 => {
+                            u32::try_from(*value).expect("the pattern bounds the level to 0..=9")
+                        }
                         _ => return None,
                     };
                 } else {
@@ -381,7 +388,7 @@ fn compress_term(body: &[u8], level: u32) -> Vec<u8> {
     {
         return [
             &[VERSION_MAGIC, COMPRESSED][..],
-            &(body.len() as u32).to_be_bytes(),
+            &be32(body.len()),
             &compressed,
         ]
         .concat();
@@ -420,7 +427,7 @@ fn deflate(bytes: &[u8], level: u32) -> Option<Vec<u8>> {
 /// The errors of [`encode`].
 pub(super) fn external_size(atoms: &AtomTable, term: &Term) -> Result<BifResult, BeamError> {
     let body = encode(term, atoms, &Options::default())?;
-    Ok(Value(Term::Integer(1 + body.len() as i64)))
+    Ok(Value(Term::Integer(1 + to_i64(body.len()))))
 }
 
 /// Run `erlang:external_size(Term, Options)`, as `external_size_2`
@@ -450,7 +457,7 @@ pub(super) fn external_size_2(
     };
     let body = encode(term, atoms, &options)?;
     let local = if options.local { 5 } else { 0 };
-    Ok(Value(Term::Integer(1 + local + body.len() as i64)))
+    Ok(Value(Term::Integer(1 + local + to_i64(body.len()))))
 }
 
 /// Return the external term bytes of `term` without `VERSION_MAGIC`, as
@@ -504,7 +511,7 @@ fn encode_parts(
             .filter(|(depth, _)| *depth == pending.len())
         {
             fun_sizes.pop();
-            let size = (out.len() - start) as u32;
+            let size = low_u32(to_u64(out.len() - start));
             out[start..start + 4].copy_from_slice(&size.to_be_bytes());
         }
         let Some(term) = pending.pop() else {
@@ -528,7 +535,7 @@ fn encode_parts(
             Term::Cons(_) => {
                 if let Some(bytes) = list_string(term) {
                     out.push(107);
-                    out.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
+                    out.extend_from_slice(&be16(bytes.len()));
                     out.extend_from_slice(&bytes);
                 } else {
                     let mut heads = Vec::new();
@@ -538,23 +545,26 @@ fn encode_parts(
                         walk = tail;
                     }
                     out.push(108);
-                    out.extend_from_slice(&(heads.len() as u32).to_be_bytes());
+                    out.extend_from_slice(&be32(heads.len()));
                     pending.push(walk);
                     pending.extend(heads.into_iter().rev());
                 }
             }
             Term::Tuple(elements) => {
                 if elements.len() <= 0xff {
-                    out.extend_from_slice(&[104, elements.len() as u8]);
+                    out.extend_from_slice(&[
+                        104,
+                        u8::try_from(elements.len()).expect("the branch bounds the arity to 255"),
+                    ]);
                 } else {
                     out.push(105);
-                    out.extend_from_slice(&(elements.len() as u32).to_be_bytes());
+                    out.extend_from_slice(&be32(elements.len()));
                 }
                 pending.extend(elements.iter().rev());
             }
             Term::Map(map) => {
                 out.push(116);
-                out.extend_from_slice(&(map.len() as u32).to_be_bytes());
+                out.extend_from_slice(&be32(map.len()));
                 let mut pairs: Vec<(&Term, &Term)> = map.iter().collect();
                 if options.deterministic {
                     pairs.sort_by(|(left, _), (right, _)| exact_map_key_order(left, right, atoms));
@@ -580,7 +590,7 @@ fn encode_parts(
                 }
                 if let Some(bytes) = binary.bytes() {
                     out.push(109);
-                    out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+                    out.extend_from_slice(&be32(bytes.len()));
                     out.extend_from_slice(bytes);
                 } else {
                     // `BIT_BINARY_EXT` holds the byte count, the count of
@@ -590,8 +600,8 @@ fn encode_parts(
                     let tail = binary.bit_size() % 8;
                     let bytes = &binary.bit_bytes()[..binary.bit_size().div_ceil(8)];
                     out.push(77);
-                    out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
-                    out.push(tail as u8);
+                    out.extend_from_slice(&be32(bytes.len()));
+                    out.push(u8::try_from(tail).expect("a tail has fewer than 8 bits"));
                     out.extend_from_slice(bytes);
                     if let Some(last) = out.last_mut() {
                         *last &= 0xFF << (8 - tail);
@@ -601,8 +611,8 @@ fn encode_parts(
             Term::Pid(ProcessId(data)) => {
                 out.push(88);
                 encode_sysname(atoms, options, &mut out);
-                out.extend_from_slice(&((data & u64::from(MAX_PID_NUMBER)) as u32).to_be_bytes());
-                out.extend_from_slice(&((data >> PID_NUMBER_BITS) as u32).to_be_bytes());
+                out.extend_from_slice(&low_u32(data & u64::from(MAX_PID_NUMBER)).to_be_bytes());
+                out.extend_from_slice(&low_u32(data >> PID_NUMBER_BITS).to_be_bytes());
                 out.extend_from_slice(&0u32.to_be_bytes());
             }
             Term::Port(port) => {
@@ -646,10 +656,10 @@ fn encode_parts(
                     out.push(112);
                     fun_sizes.push((pending.len(), out.len()));
                     out.extend_from_slice(&[0; 4]);
-                    out.push(lambda.arity() as u8);
+                    out.push(u8::try_from(lambda.arity()).expect("a fun arity is at most 255"));
                     out.extend_from_slice(lambda.uniq());
                     out.extend_from_slice(&lambda.index().to_be_bytes());
-                    out.extend_from_slice(&(fun.free().len() as u32).to_be_bytes());
+                    out.extend_from_slice(&be32(fun.free().len()));
                     encode_atom(atoms.name_of(lambda.module()), options, &mut out);
                     encode_integer(i64::from(lambda.old_index()), &mut out);
                     encode_integer(i64::from(lambda.old_unique()), &mut out);
@@ -665,7 +675,7 @@ fn encode_parts(
             Term::Record(record) => {
                 let def = record.def();
                 out.push(67);
-                out.extend_from_slice(&(def.order.len() as u32).to_be_bytes());
+                out.extend_from_slice(&be32(def.order.len()));
                 out.push(u8::from(def.is_exported));
                 encode_atom(atoms.name_of(&def.module), options, &mut out);
                 encode_atom(atoms.name_of(&def.name), options, &mut out);
@@ -726,12 +736,15 @@ fn encode_atom(name: &str, options: &Options, out: &mut Vec<u8>) {
     match (latin1.is_some(), bytes.len() <= 0xff) {
         (true, _) => {
             out.push(100);
-            out.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
+            out.extend_from_slice(&be16(bytes.len()));
         }
-        (false, true) => out.extend_from_slice(&[119, bytes.len() as u8]),
+        (false, true) => out.extend_from_slice(&[
+            119,
+            u8::try_from(bytes.len()).expect("the match bounds the name to 255 bytes"),
+        ]),
         (false, false) => {
             out.push(118);
-            out.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
+            out.extend_from_slice(&be16(bytes.len()));
         }
     }
     out.extend_from_slice(bytes);
@@ -745,12 +758,36 @@ fn latin1(name: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
+/// Return the low 32 bits of a number, as `put_int32` of `external.c` writes
+/// an unsigned number of more bits.
+fn low_u32(value: u64) -> u32 {
+    u32::try_from(value & u64::from(u32::MAX)).expect("the mask keeps 32 bits")
+}
+
+/// Return a count as the 4 big-endian bytes of `put_int32`, which keep the
+/// low 32 bits.
+fn be32(count: usize) -> [u8; 4] {
+    low_u32(to_u64(count)).to_be_bytes()
+}
+
+/// Return a length as 2 big-endian bytes. The callers bound the length to
+/// 65535: an atom name has at most 255 characters, and a string list has at
+/// most 65535 bytes.
+fn be16(length: usize) -> [u8; 2] {
+    u16::try_from(length)
+        .expect("the format bounds the length to 65535")
+        .to_be_bytes()
+}
+
 /// Write an integer as the `SMALL_DEF` branch of `enc_term`
 /// (`external.c:3552-3577`): `SMALL_INTEGER_EXT` below 256, `INTEGER_EXT`
 /// in the 32-bit range, and else `SMALL_BIG_EXT`.
 fn encode_integer(value: i64, out: &mut Vec<u8>) {
     if (0..256).contains(&value) {
-        out.extend_from_slice(&[97, value as u8]);
+        out.extend_from_slice(&[
+            97,
+            u8::try_from(value).expect("the range check bounds the value to 0..256"),
+        ]);
     } else if let Ok(value) = i32::try_from(value) {
         out.push(98);
         out.extend_from_slice(&value.to_be_bytes());
@@ -761,7 +798,7 @@ fn encode_integer(value: i64, out: &mut Vec<u8>) {
             .iter()
             .rposition(|&byte| byte != 0)
             .map_or(0, |index| index + 1);
-        out.push(first as u8);
+        out.push(u8::try_from(first).expect("a 64-bit magnitude has at most 8 bytes"));
         out.push(u8::from(value < 0));
         out.extend_from_slice(&bytes[..first]);
     }
@@ -774,10 +811,10 @@ fn encode_big(value: &BigInt, out: &mut Vec<u8>) {
     let (sign, bytes) = value.to_bytes_le();
     if bytes.len() <= 0xff {
         out.push(110);
-        out.push(bytes.len() as u8);
+        out.push(u8::try_from(bytes.len()).expect("the branch bounds the length to 255"));
     } else {
         out.push(111);
-        out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+        out.extend_from_slice(&be32(bytes.len()));
     }
     out.push(u8::from(sign == Sign::Minus));
     out.extend_from_slice(&bytes);
@@ -795,7 +832,7 @@ fn list_string(term: &Term) -> Option<Vec<u8>> {
         if !(0..256).contains(value) || bytes.len() == 0xffff {
             return None;
         }
-        bytes.push(*value as u8);
+        bytes.push(u8::try_from(*value).expect("the range check bounds the value to 0..256"));
         walk = tail;
     }
     walk.is_nil().then_some(bytes)
@@ -844,7 +881,7 @@ pub(super) fn binary_to_term(
     match decoder.decode_input(seed) {
         Ok((term, used_bytes)) if used => Ok(Value(Term::tuple(vec![
             term,
-            Term::Integer(used_bytes as i64),
+            Term::Integer(to_i64(used_bytes)),
         ]))),
         Ok((term, _)) => Ok(Value(term)),
         Err(DecodeError::Badarg) => Ok(BifResult::badarg()),
@@ -1010,6 +1047,11 @@ fn check_skip(input: &[u8], index: &mut usize, count: usize) -> Result<(), Decod
     Ok(())
 }
 
+/// Take a big-endian number of `count` bytes at `index` as a length.
+fn check_length(input: &[u8], index: &mut usize, count: usize) -> Result<usize, DecodeError> {
+    Ok(usize::try_from(check_number(input, index, count)?).expect("a u32 fits in usize"))
+}
+
 /// Take a big-endian number of `count` bytes at `index`.
 fn check_number(input: &[u8], index: &mut usize, count: usize) -> Result<u32, DecodeError> {
     let start = *index;
@@ -1059,7 +1101,7 @@ fn check_sysname(input: &[u8], index: &mut usize, scope: NodeScope) -> Result<()
         }
         100 | 118 => {
             *index += 1;
-            let length = check_number(input, index, 2)? as usize;
+            let length = check_length(input, index, 2)?;
             check_atom_name(input, index, length)
         }
         115 | 119 => {
@@ -1099,7 +1141,7 @@ fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
             99 => check_skip(input, &mut index, FLOAT_TEXT_SIZE)?,
             70 => check_skip(input, &mut index, 8)?,
             100 | 118 => {
-                let length = check_number(input, &mut index, 2)? as usize;
+                let length = check_length(input, &mut index, 2)?;
                 check_atom_name(input, &mut index, length)?;
             }
             115 | 119 => {
@@ -1109,11 +1151,11 @@ fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
             }
             106 => {}
             107 => {
-                let length = check_number(input, &mut index, 2)? as usize;
+                let length = check_length(input, &mut index, 2)?;
                 check_skip(input, &mut index, length)?;
             }
             108 => {
-                let count = check_number(input, &mut index, 4)? as usize;
+                let count = check_length(input, &mut index, 4)?;
                 frames.push(CheckFrame {
                     kind: CheckKind::List,
                     remaining: count,
@@ -1132,7 +1174,7 @@ fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
                 }
             }
             105 => {
-                let count = check_number(input, &mut index, 4)? as usize;
+                let count = check_length(input, &mut index, 4)?;
                 if count > MAX_TUPLE_SIZE {
                     return Err(DecodeError::Badarg);
                 }
@@ -1145,7 +1187,7 @@ fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
                 }
             }
             116 => {
-                let count = check_number(input, &mut index, 4)? as usize;
+                let count = check_length(input, &mut index, 4)?;
                 let terms = count.checked_mul(2).ok_or(DecodeError::Badarg)?;
                 if terms != 0 {
                     frames.push(CheckFrame {
@@ -1156,11 +1198,11 @@ fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
                 }
             }
             109 => {
-                let length = check_number(input, &mut index, 4)? as usize;
+                let length = check_length(input, &mut index, 4)?;
                 check_skip(input, &mut index, length)?;
             }
             77 => {
-                let length = check_number(input, &mut index, 4)? as usize;
+                let length = check_length(input, &mut index, 4)?;
                 let bits = *input.get(index).ok_or(DecodeError::Badarg)?;
                 index += 1;
                 if length == 0 || !(1..=8).contains(&bits) {
@@ -1174,7 +1216,7 @@ fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
                 check_skip(input, &mut index, 1 + length)?;
             }
             111 => {
-                let length = check_number(input, &mut index, 4)? as usize;
+                let length = check_length(input, &mut index, 4)?;
                 check_skip(input, &mut index, 1 + length)?;
             }
             88 | 120 => {
@@ -1196,7 +1238,7 @@ fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
                 check_tiny_creation(input, &mut index)?;
             }
             90 => {
-                let count = check_number(input, &mut index, 2)? as usize;
+                let count = check_length(input, &mut index, 2)?;
                 if count > MAX_REFERENCE_NUMBERS {
                     return Err(DecodeError::Badarg);
                 }
@@ -1204,7 +1246,7 @@ fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
                 check_skip(input, &mut index, 4 + 4 * count)?;
             }
             114 => {
-                let count = check_number(input, &mut index, 2)? as usize;
+                let count = check_length(input, &mut index, 2)?;
                 if count > MAX_REFERENCE_NUMBERS {
                     return Err(DecodeError::Badarg);
                 }
@@ -1225,7 +1267,7 @@ fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
                 // unique value, the creator pid, and the free variables
                 // (`enc_term`, `external.c:3976-4005`).
                 check_skip(input, &mut index, 4 + 1 + 16 + 4)?;
-                let free = check_number(input, &mut index, 4)? as usize;
+                let free = check_length(input, &mut index, 4)?;
                 if free > MAX_FUN_ARG {
                     return Err(DecodeError::Badarg);
                 }
@@ -1240,7 +1282,7 @@ fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
                 // The field count, the exported flag, the module and the
                 // name, the field names, and the values (`dec_term`,
                 // `external.c:5264-5330`).
-                let count = check_number(input, &mut index, 4)? as usize;
+                let count = check_length(input, &mut index, 4)?;
                 let exported = *input.get(index).ok_or(DecodeError::Badarg)?;
                 index += 1;
                 if exported > 1 {
@@ -1377,6 +1419,11 @@ impl Decoder<'_> {
         ))
     }
 
+    /// Take a big-endian 32-bit number as a length.
+    fn length(&mut self) -> Result<usize, DecodeError> {
+        Ok(usize::try_from(self.u32()?).expect("a u32 fits in usize"))
+    }
+
     /// Take a big-endian 32-bit number.
     fn u32(&mut self) -> Result<u32, DecodeError> {
         Ok(u32::from_be_bytes(
@@ -1401,18 +1448,19 @@ impl Decoder<'_> {
     /// `declared` bytes, as `erl_zlib_uncompress` requires. Return the bytes
     /// and the number of compressed bytes that the stream uses.
     fn inflate(&mut self, declared: u32) -> Result<(Vec<u8>, usize), DecodeError> {
+        let declared = usize::try_from(declared).expect("a u32 fits in usize");
         let compressed = &self.input[self.pos..];
         let mut decompress = Decompress::new(true);
         let mut out = Vec::new();
         let mut chunk = vec![0u8; 64 * 1024];
         loop {
             let (before_in, before_out) = (decompress.total_in(), decompress.total_out());
-            let input = &compressed[before_in as usize..];
+            let input = &compressed[to_usize(before_in)..];
             let status = decompress
                 .decompress(input, &mut chunk, FlushDecompress::None)
                 .map_err(|_| DecodeError::Badarg)?;
-            out.extend_from_slice(&chunk[..(decompress.total_out() - before_out) as usize]);
-            if out.len() > declared as usize {
+            out.extend_from_slice(&chunk[..to_usize(decompress.total_out() - before_out)]);
+            if out.len() > declared {
                 return Err(DecodeError::Badarg);
             }
             let stalled =
@@ -1426,10 +1474,10 @@ impl Decoder<'_> {
                 }
             }
         }
-        if out.len() != declared as usize {
+        if out.len() != declared {
             return Err(DecodeError::Badarg);
         }
-        Ok((out, decompress.total_in() as usize))
+        Ok((out, to_usize(decompress.total_in())))
     }
 
     /// Decode one term, as `dec_term` (`external.c:4270-5340`) does. The
@@ -1504,7 +1552,7 @@ impl Decoder<'_> {
                         Term::list_from(bytes.iter().map(|&byte| Term::Integer(i64::from(byte))))
                     }
                     108 => {
-                        let count = self.u32()? as usize;
+                        let count = self.length()?;
                         if count > self.remaining() {
                             return Err(DecodeError::Badarg);
                         }
@@ -1532,7 +1580,7 @@ impl Decoder<'_> {
                         }
                     }
                     105 => {
-                        let count = self.u32()? as usize;
+                        let count = self.length()?;
                         if count > MAX_TUPLE_SIZE || count > self.remaining() {
                             return Err(DecodeError::Badarg);
                         }
@@ -1548,7 +1596,7 @@ impl Decoder<'_> {
                         }
                     }
                     116 => {
-                        let count = self.u32()? as usize;
+                        let count = self.length()?;
                         if count
                             .checked_mul(2)
                             .is_none_or(|terms| terms > self.remaining())
@@ -1567,11 +1615,11 @@ impl Decoder<'_> {
                         }
                     }
                     109 => {
-                        let count = self.u32()? as usize;
+                        let count = self.length()?;
                         Term::binary(self.take(count)?.to_vec())
                     }
                     77 => {
-                        let count = self.u32()? as usize;
+                        let count = self.length()?;
                         let bits = self.u8()?;
                         if count == 0 || !(1..=8).contains(&bits) {
                             return Err(DecodeError::Badarg);
@@ -1586,7 +1634,7 @@ impl Decoder<'_> {
                         self.big(count)?
                     }
                     111 => {
-                        let count = self.u32()? as usize;
+                        let count = self.length()?;
                         self.big(count)?
                     }
                     88 => self.pid(4)?,
@@ -1620,8 +1668,8 @@ impl Decoder<'_> {
                         let arity = self.take(1)?[0];
                         let uniq: [u8; 16] =
                             self.take(16)?.try_into().expect("16 bytes of the MD5");
-                        let index = self.u32()? as i32;
-                        let free = self.u32()? as usize;
+                        let index = self.u32()?.cast_signed();
+                        let free = self.length()?;
                         frames.push(Frame {
                             kind: FrameKind::Fun { arity, uniq, index },
                             remaining: 4 + free,
@@ -1634,7 +1682,7 @@ impl Decoder<'_> {
                         // The field count, the export flag that `validate`
                         // checks, then the module, the name, the field names,
                         // and the values (`dec_term`, `external.c:5257-5380`).
-                        let count = self.u32()? as usize;
+                        let count = self.length()?;
                         let exported = self.u8()? == 1;
                         frames.push(Frame {
                             kind: FrameKind::Record {
@@ -2151,6 +2199,11 @@ impl Decoder<'_> {
     /// key of `fun_cmp` (`erl_fun.c:79-85`), or else a new stub entry with
     /// the decoded values (`erts_fun_entry_get_or_make_stub`,
     /// `erl_fun.c:299-309`).
+    #[expect(
+        clippy::as_conversions,
+        clippy::cast_possible_truncation,
+        reason = "ERTS keeps the old index and the old unique value in a C `int` (`erl_fun.c:299-304`), so they wrap to 32 bits"
+    )]
     fn complete_fun(
         &mut self,
         arity: u8,
@@ -2211,7 +2264,7 @@ impl Decoder<'_> {
         Ok(Term::Fun(Fun::external(
             module.clone(),
             function.clone(),
-            arity as u32,
+            u32::try_from(arity).expect("the checks above bound the arity to a u32"),
         )))
     }
 }

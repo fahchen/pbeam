@@ -21,6 +21,10 @@ use crate::runtime::scheduler::CONTEXT_REDS;
 /// `BYTES_PER_REDUCTION` (`erl_bif_chksum.c:286`).
 const BYTES_PER_REDUCTION: u64 = 10;
 /// `CHUNK_PER_SCHEDULE` (`erl_bif_chksum.c:287`).
+#[expect(
+    clippy::as_conversions,
+    reason = "`From` is not const, and `CONTEXT_REDS` is a positive constant"
+)]
 const CHUNK_PER_SCHEDULE: u64 = BYTES_PER_REDUCTION * CONTEXT_REDS as u64;
 /// The adler32 modulus `BASE` of zlib `adler32.c`.
 const BASE: u64 = 65521;
@@ -57,7 +61,7 @@ fn adler32(adler: u32, buf: &[u8]) -> u32 {
         if sum2 >= BASE {
             sum2 -= BASE;
         }
-        return (adler | (sum2 << 16)) as u32;
+        return u32::try_from(adler | (sum2 << 16)).expect("both sums are below 2^16");
     }
     if buf.len() < 16 {
         for byte in buf {
@@ -68,7 +72,7 @@ fn adler32(adler: u32, buf: &[u8]) -> u32 {
             adler -= BASE;
         }
         sum2 %= BASE;
-        return (adler | (sum2 << 16)) as u32;
+        return u32::try_from(adler | (sum2 << 16)).expect("both sums are below 2^16");
     }
     for block in buf.chunks(NMAX) {
         for byte in block {
@@ -78,7 +82,7 @@ fn adler32(adler: u32, buf: &[u8]) -> u32 {
         adler %= BASE;
         sum2 %= BASE;
     }
-    (adler | (sum2 << 16)) as u32
+    u32::try_from(adler | (sum2 << 16)).expect("both sums are below 2^16")
 }
 
 /// Return the zlib `adler32_combine_(adler1, adler2, len2)` for a length
@@ -90,6 +94,11 @@ fn adler32(adler: u32, buf: &[u8]) -> u32 {
 /// ```rust,ignore
 /// assert_eq!(adler32_combine(1, 2, 0), 3);
 /// ```
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "`adler32_combine_3` truncates the combined sums to 32 bits, and a sum of a crafted checksum can exceed 16 bits"
+)]
 fn adler32_combine(adler1: u32, adler2: u32, len2: u32) -> u32 {
     let (adler1, adler2) = (u64::from(adler1), u64::from(adler2));
     let rem = u64::from(len2) % BASE;

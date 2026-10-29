@@ -1222,7 +1222,8 @@ impl BeamProgram {
                 Issuer::Host(policy) => scheduler.revoke_issued(&policy.revocations()),
                 Issuer::Module { policy, .. } => {
                     if let Some((function, arguments)) = scheduler.next_policy_request() {
-                        let arity = arguments.len() as u32;
+                        let arity = u32::try_from(arguments.len())
+                            .expect("an argument list has fewer than 2^32 terms");
                         let frame = scheduler.code.mfa_frame(policy, function, arity)?;
                         scheduler.begin_policy_call(frame, arguments);
                     }
@@ -1298,7 +1299,8 @@ impl BeamProgram {
                 // (`beam_common.c:1455-1459`), so the stack trace is the one
                 // frame `{erlang, apply, [Module, Function, Arguments],
                 // [{error_info, ...}]}`.
-                let arity = process.registers.len() as u32;
+                let arity = u32::try_from(process.registers.len())
+                    .expect("the registers number fewer than 2^32");
                 let arguments = call_arguments(&process.registers, arity)?;
                 let call = vec![
                     Term::Atom(module),
@@ -1307,7 +1309,8 @@ impl BeamProgram {
                 ];
                 Self::apply_error(scheduler, call, "system_limit", ApplySite::ProcessStart)?
             } else {
-                let arity = process.registers.len() as u32;
+                let arity = u32::try_from(process.registers.len())
+                    .expect("the registers number fewer than 2^32");
                 // The start of a process is a tail call of the MFA from the
                 // initial function of ERTS (`i_apply_only`,
                 // `erl_process.c:12616`), which goes to the export entry of
@@ -1461,23 +1464,27 @@ impl BeamProgram {
                     write(process, destination, value)?;
                 }
                 Instruction::Allocate { stack_size } => {
-                    current_frame(process)
-                        .stack
-                        .resize_with(*stack_size as usize, || StackSlot::Empty);
+                    current_frame(process).stack.resize_with(
+                        usize::try_from(*stack_size).expect("a u32 fits in usize"),
+                        || StackSlot::Empty,
+                    );
                 }
                 Instruction::Deallocate { stack_size } => {
                     let stack = &mut current_frame(process).stack;
-                    if stack.len() != *stack_size as usize {
+                    if stack.len() != usize::try_from(*stack_size).expect("a u32 fits in usize") {
                         return Err(error("invalid BEAM stack size"));
                     }
                     stack.clear();
                 }
                 Instruction::Trim { count, remaining } => {
                     let stack = &mut current_frame(process).stack;
-                    if stack.len() != *count as usize + *remaining as usize {
+                    if stack.len()
+                        != usize::try_from(*count).expect("a u32 fits in usize")
+                            + usize::try_from(*remaining).expect("a u32 fits in usize")
+                    {
                         return Err(error("invalid BEAM stack size"));
                     }
-                    stack.drain(..*count as usize);
+                    stack.drain(..usize::try_from(*count).expect("a u32 fits in usize"));
                 }
                 Instruction::Call {
                     arity,
@@ -1506,7 +1513,9 @@ impl BeamProgram {
                     target,
                     deallocate,
                 } => {
-                    if *deallocate as usize != current_frame(process).stack.len() {
+                    if usize::try_from(*deallocate).expect("a u32 fits in usize")
+                        != current_frame(process).stack.len()
+                    {
                         return Err(error("invalid BEAM tail-call stack size"));
                     }
                     check_local_call_arguments(&process.registers, *arity)?;
@@ -1521,7 +1530,7 @@ impl BeamProgram {
                 } => {
                     let passed = matches!(
                         read_ref(process, value)?,
-                        Term::Tuple(elements) if elements.len() == *arity as usize
+                        Term::Tuple(elements) if elements.len() == usize::try_from(*arity).expect("a u32 fits in usize")
                     );
                     if !passed {
                         cursor.position = label_position(*fail_label)?;
@@ -1551,7 +1560,10 @@ impl BeamProgram {
                     let target = match read_ref(process, value)? {
                         Term::Tuple(elements) => choices
                             .iter()
-                            .find(|(arity, _)| *arity as usize == elements.len())
+                            .find(|(arity, _)| {
+                                usize::try_from(*arity).expect("a u32 fits in usize")
+                                    == elements.len()
+                            })
                             .map_or(*fail_label, |(_, label)| *label),
                         _ => *fail_label,
                     };
@@ -1773,7 +1785,7 @@ impl BeamProgram {
                     let handler = label_position(*label)?;
                     let slot = current_frame(process)
                         .stack
-                        .get_mut(*register as usize)
+                        .get_mut(usize::try_from(*register).expect("a u32 fits in usize"))
                         .ok_or_else(|| {
                             error(format!("register y{register} is outside allocated range"))
                         })?;
@@ -2004,7 +2016,10 @@ impl BeamProgram {
                     };
                     match result {
                         Ok(value) => write(process, destination, value)?,
-                        Err(_) if *fail_label != 0 => cursor.position = *fail_label as usize,
+                        Err(_) if *fail_label != 0 => {
+                            cursor.position =
+                                usize::try_from(*fail_label).expect("a u32 fits in usize");
+                        }
                         Err(reason) => {
                             cursor.commit(process);
                             if let Some(outcome) = raise_in_function(scheduler, reason)? {
@@ -2219,7 +2234,7 @@ impl BeamProgram {
                     let passed = matches!(
                         read_ref(process, value)?,
                         Term::Tuple(fields)
-                            if fields.len() == *arity as usize
+                            if fields.len() == usize::try_from(*arity).expect("a u32 fits in usize")
                                 && fields.first() == Some(tag)
                     );
                     if !passed {
@@ -2319,7 +2334,10 @@ impl BeamProgram {
                     match bytes {
                         Some((bits, ())) => {
                             let position = state.position();
-                            let bits = state.bits_at(position - bits as usize, position);
+                            let bits = state.bits_at(
+                                position - usize::try_from(bits).expect("a u64 fits in usize"),
+                                position,
+                            );
                             write(process, destination, Term::Binary(bits))?;
                         }
                         None => cursor.position = label_position(*fail_label)?,
@@ -2376,7 +2394,7 @@ impl BeamProgram {
                             let read = state.read_bits(bits)?;
                             bounded_segment_integer(
                                 &read,
-                                bits as usize,
+                                usize::try_from(bits).expect("a u64 fits in usize"),
                                 Endian::from(*little),
                                 Signedness::from(*signed),
                             )
@@ -2394,7 +2412,11 @@ impl BeamProgram {
                 } => {
                     let (process, atoms) = scheduler.current_process_and_atoms();
                     let position = match_context(process, context, atoms)?.position();
-                    write(process, destination, Term::Integer(position as i64))?;
+                    write(
+                        process,
+                        destination,
+                        Term::Integer(i64::try_from(position).expect("a bit position fits in i64")),
+                    )?;
                 }
                 // ERTS `bs_set_position` sets `sb->start` to the unsigned
                 // value of the position (emu bs_instrs.tab:1120-1123). The
@@ -2705,7 +2727,7 @@ impl BeamProgram {
                     let Term::Tuple(fields) = read_ref(process, tuple)? else {
                         return Err(error("BEAM tuple element source is not a tuple"));
                     };
-                    let index = *index as usize;
+                    let index = usize::try_from(*index).expect("a u32 fits in usize");
                     let Some(field) = fields.get(index) else {
                         return Err(error(format!("BEAM tuple has no element {index}")));
                     };
@@ -2733,7 +2755,7 @@ impl BeamProgram {
                     let fields = std::sync::Arc::make_mut(fields.arc_mut());
                     for (position, value) in updates {
                         let value = read(process, value)?;
-                        let field = (*position as usize)
+                        let field = (usize::try_from(*position).expect("a u32 fits in usize"))
                             .checked_sub(1)
                             .and_then(|index| fields.get_mut(index))
                             .ok_or_else(|| {
@@ -3148,7 +3170,7 @@ impl BeamProgram {
         scheduler.sync_code();
         // The loader checks each import index against the import table, and
         // the code table makes one slot for each import.
-        let index = import as usize;
+        let index = usize::try_from(import).expect("a u32 fits in usize");
         let Import {
             module,
             name,
@@ -3162,7 +3184,10 @@ impl BeamProgram {
             Some(deallocate) if matches!(kind, ImportKind::ApplyFun | ImportKind::Apply) => {
                 release_frame(process, deallocate)?;
             }
-            Some(deallocate) if deallocate as usize != current_frame(process).stack.len() => {
+            Some(deallocate)
+                if usize::try_from(deallocate).expect("a u32 fits in usize")
+                    != current_frame(process).stack.len() =>
+            {
                 return Err(error("invalid BEAM tail-call stack size"));
             }
             _ => {}
@@ -3608,7 +3633,8 @@ impl BeamProgram {
         if !proper {
             return Self::apply_error(scheduler, call, "badarg", site);
         }
-        let arity = arguments.len() as u32;
+        let arity =
+            u32::try_from(arguments.len()).expect("an argument list has fewer than 2^32 terms");
         let process = scheduler.current_process_mut();
         if start {
             // ERTS applies this MFA from `beam_run_process`
@@ -3719,7 +3745,8 @@ impl BeamProgram {
             let raised = bif_error(scheduler, "erlang", "apply", call, raised, 0)?;
             return Self::finish_bif(scheduler, raised, CallKind::Body);
         }
-        let arity = arguments.len() as u32;
+        let arity =
+            u32::try_from(arguments.len()).expect("an argument list has fewer than 2^32 terms");
         // The arguments replace the fun in x0, so the call reads the fun first.
         let call = FunCall::new(read_ref(process, &Operand::X(0))?, arity);
         for (index, argument) in (0..).zip(arguments) {
@@ -3795,7 +3822,8 @@ impl BeamProgram {
                 module, function, ..
             } => return self.call_mfa(scheduler, module, function, arity, entry),
         };
-        let total_arity = arity + free.len() as u32;
+        let total_arity =
+            arity + u32::try_from(free.len()).expect("a fun has fewer than 2^32 free variables");
         scheduler.sync_code();
         let module = scheduler.atoms.name_of(lambda.module()).to_owned();
         let Some(frame) = scheduler.code.fun_frame(&module, lambda, total_arity)? else {
@@ -3878,7 +3906,7 @@ impl BeamProgram {
         let frame = Term::tuple(vec![
             Term::Atom(scheduler.atoms.put(&module)?),
             Term::Atom(scheduler.atoms.put(&function)?),
-            Term::Integer(arity as i64),
+            Term::Integer(i64::try_from(arity).expect("an arity fits in i64")),
             location,
         ]);
         let process = scheduler.current_process_mut();
@@ -4457,7 +4485,7 @@ fn current_frame(process: &mut ProcessState) -> &mut Frame {
 /// ```
 fn release_frame(process: &mut ProcessState, deallocate: u32) -> Result<(), BeamError> {
     let stack = &mut current_frame(process).stack;
-    if stack.len() != deallocate as usize {
+    if stack.len() != usize::try_from(deallocate).expect("a u32 fits in usize") {
         return Err(error("invalid BEAM tail-call stack size"));
     }
     stack.clear();
@@ -4665,14 +4693,18 @@ fn take_owned(process: &mut ProcessState, destination: Register) -> Option<Term>
     match destination {
         Register::X(index) => process
             .registers
-            .get_mut(index as usize)
+            .get_mut(usize::try_from(index).expect("a u32 fits in usize"))
             .and_then(Option::as_mut)
             .filter(|term| term.unique())
             .map(|slot| std::mem::replace(slot, Term::nil())),
         Register::Y(index) => process
             .frames
             .last_mut()
-            .and_then(|frame| frame.stack.get_mut(index as usize))
+            .and_then(|frame| {
+                frame
+                    .stack
+                    .get_mut(usize::try_from(index).expect("a u32 fits in usize"))
+            })
             .and_then(|slot| match slot {
                 StackSlot::Term(term) if term.unique() => {
                     Some(std::mem::replace(term, Term::nil()))
@@ -4994,7 +5026,7 @@ fn label_position(target: u32) -> Result<usize, BeamError> {
     if target == 0 {
         return Err(error("missing BEAM label 0"));
     }
-    Ok(target as usize)
+    Ok(usize::try_from(target).expect("a u32 fits in usize"))
 }
 
 /// Return the label of the choice that equals `value` in the ordered choice
@@ -5127,7 +5159,7 @@ fn read_test_operand<'a>(
 /// ```
 fn read_x_register(registers: &[Option<Term>], index: u32) -> Result<&Term, BeamError> {
     registers
-        .get(index as usize)
+        .get(usize::try_from(index).expect("a u32 fits in usize"))
         .and_then(Option::as_ref)
         .ok_or_else(|| error(format!("register x{index} is unset")))
 }
@@ -5144,7 +5176,7 @@ fn read_x_register(registers: &[Option<Term>], index: u32) -> Result<&Term, Beam
 /// assert!(read_y_register(&stack, 1).is_err());
 /// ```
 fn read_y_register(stack: &[StackSlot], index: u32) -> Result<&Term, BeamError> {
-    match stack.get(index as usize) {
+    match stack.get(usize::try_from(index).expect("a u32 fits in usize")) {
         Some(StackSlot::Term(value)) => Ok(value),
         // The BEAM validator never lets an instruction read a catch tag.
         Some(StackSlot::Catch(_)) => {
@@ -5227,7 +5259,9 @@ fn match_context_size<T: Borrow<Term>>(
         } else {
             bits.div_ceil(8)
         };
-        return Ok(Some(Term::Integer(size as i64)));
+        return Ok(Some(Term::Integer(
+            i64::try_from(size).expect("a size fits in i64"),
+        )));
     }
     match values
         .iter()
@@ -5299,7 +5333,7 @@ fn debug_operand(operand: &Operand, atoms: &AtomTable) -> String {
 /// assert_eq!(read_float_register(&process, 2)?, 1.5);
 /// ```
 fn write_float_register(process: &mut ProcessState, register: u32, value: f64) {
-    let index = register as usize;
+    let index = usize::try_from(register).expect("a u32 fits in usize");
     if index >= process.float_registers.len() {
         process.float_registers.resize(index + 1, 0.0);
     }
@@ -5322,7 +5356,7 @@ fn write_float_register(process: &mut ProcessState, register: u32, value: f64) {
 fn read_float_register(process: &ProcessState, register: u32) -> Result<f64, BeamError> {
     process
         .float_registers
-        .get(register as usize)
+        .get(usize::try_from(register).expect("a u32 fits in usize"))
         .copied()
         .ok_or_else(|| error(format!("float register fr{register} has no value")))
 }
@@ -5549,13 +5583,16 @@ fn read_owned_bif_arguments(
 /// ```
 fn call_arguments(registers: &[Option<Term>], arity: u32) -> Result<Vec<Term>, BeamError> {
     (0..arity)
-        .map(
-            |index| match registers.get(index as usize).and_then(Clone::clone) {
+        .map(|index| {
+            match registers
+                .get(usize::try_from(index).expect("a u32 fits in usize"))
+                .and_then(Clone::clone)
+            {
                 Some(Term::MatchContext(_)) => Err(match_context_escape(&Operand::X(index))),
                 Some(value) => Ok(value),
                 None => Err(error(format!("call argument x{index} is unset"))),
-            },
-        )
+            }
+        })
         .collect()
 }
 
@@ -5573,7 +5610,12 @@ fn call_arguments(registers: &[Option<Term>], arity: u32) -> Result<Vec<Term>, B
 /// assert!(check_local_call_arguments(&registers, 2).is_err());
 /// ```
 fn check_local_call_arguments(registers: &[Option<Term>], arity: u32) -> Result<(), BeamError> {
-    match (0..arity).find(|&index| !matches!(registers.get(index as usize), Some(Some(_)))) {
+    match (0..arity).find(|&index| {
+        !matches!(
+            registers.get(usize::try_from(index).expect("a u32 fits in usize")),
+            Some(Some(_))
+        )
+    }) {
         Some(index) => Err(error(format!("call argument x{index} is unset"))),
         None => Ok(()),
     }
@@ -5594,8 +5636,12 @@ fn check_local_call_arguments(registers: &[Option<Term>], arity: u32) -> Result<
 /// ```
 fn check_remote_call_arguments(registers: &[Option<Term>], arity: u32) -> Result<(), BeamError> {
     check_local_call_arguments(registers, arity)?;
-    match (0..arity).find(|&index| matches!(registers[index as usize], Some(Term::MatchContext(_))))
-    {
+    match (0..arity).find(|&index| {
+        matches!(
+            registers[usize::try_from(index).expect("a u32 fits in usize")],
+            Some(Term::MatchContext(_))
+        )
+    }) {
         Some(index) => Err(match_context_escape(&Operand::X(index))),
         None => Ok(()),
     }
@@ -5837,7 +5883,7 @@ fn binary_match(
     let state = &*context;
     let start = state.position();
     for (index, command) in commands.iter().enumerate() {
-        let remaining = state.remaining_bits() as u64;
+        let remaining = u64::try_from(state.remaining_bits()).expect("a bit count fits in u64");
         let too_few_bits = |size: &u64| {
             error(format!(
                 "invariant error: a bs_match command needs {size} bits, but {remaining} bits remain"
@@ -5867,7 +5913,7 @@ fn binary_match(
                 // pinned ERTS then fails the `tag_val_def` assertion.
                 let value = bounded_segment_integer(
                     &bits,
-                    *size as usize,
+                    usize::try_from(*size).expect("a u64 fits in usize"),
                     Endian::from(*little),
                     Signedness::from(*signed),
                 )
@@ -5892,9 +5938,17 @@ fn binary_match(
             }
             BinaryMatchCommand::Equal { size, value } => {
                 let bits = state.read_bits(*size).ok_or_else(|| too_few_bits(size))?;
-                let equal = segment_equals(&bits, *size as usize, *value);
+                let equal = segment_equals(
+                    &bits,
+                    usize::try_from(*size).expect("a u64 fits in usize"),
+                    *value,
+                );
                 if !equal {
-                    state.set_position(start + equal_read_end(commands, index, test_heap) as usize);
+                    state.set_position(
+                        start
+                            + usize::try_from(equal_read_end(commands, index, test_heap))
+                                .expect("a u64 fits in usize"),
+                    );
                     return Ok(false);
                 }
             }
@@ -6022,7 +6076,12 @@ impl BinaryPart<'_> {
                 value,
                 bits,
             } => match value {
-                Term::Binary(binary) if binary.bit_size() as u64 >= *bits => None,
+                Term::Binary(binary)
+                    if u64::try_from(binary.bit_size()).expect("a bit size fits in u64")
+                        >= *bits =>
+                {
+                    None
+                }
                 Term::Binary(_) => Some(BinarySegmentFailure::badarg(
                     *segment,
                     "binary",
@@ -6037,7 +6096,9 @@ impl BinaryPart<'_> {
                 )),
             },
             BinaryPart::Shared(binary, _, segment, unit)
-                if !(binary.bit_size() as u64).is_multiple_of(*unit) =>
+                if !u64::try_from(binary.bit_size())
+                    .expect("a bit size fits in u64")
+                    .is_multiple_of(*unit) =>
             {
                 Some(BinarySegmentFailure::badarg(
                     *segment,
@@ -6081,10 +6142,16 @@ impl BinaryPart<'_> {
 /// assert_eq!(float_segment_bits(1, &Term::Integer(-3), 32), Ok(0xC040_0000));
 /// assert!(float_segment_bits(1, &Term::static_atom("a"), 64).is_err());
 /// ```
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    reason = "ERTS converts a small integer or a double to the float of the segment size with one C cast, which rounds (`erts_bs_put_float`, `erl_bits.c:1340-1452`)"
+)]
 fn float_segment_bits(segment: u64, value: &Term, bits: u64) -> Result<i64, BinarySegmentFailure> {
     let fail = |info, term| BinarySegmentFailure::badarg(segment, "float", info, term);
     if !matches!(bits, 16 | 32 | 64) {
-        return Err(fail("invalid", Term::Integer(bits as i64)));
+        return Err(fail("invalid", Term::Integer(bits.cast_signed())));
     }
     let number = match (value.small_integer(), value) {
         (Some(small), _) => Ok(small),
@@ -6096,8 +6163,8 @@ fn float_segment_bits(segment: u64, value: &Term, bits: u64) -> Result<i64, Bina
         _ => return Err(fail("type", value.clone())),
     };
     Ok(match (bits, number) {
-        (64, Ok(small)) => (small as f64).to_bits() as i64,
-        (64, Err(float)) => float.to_bits() as i64,
+        (64, Ok(small)) => (small as f64).to_bits().cast_signed(),
+        (64, Err(float)) => float.to_bits().cast_signed(),
         (32, Ok(small)) => i64::from((small as f32).to_bits()),
         (32, Err(float)) => i64::from((float as f32).to_bits()),
         // `FP16_FROM_FP64` (erl_bits.c:45-53) casts a small integer straight
@@ -6123,8 +6190,8 @@ fn float_segment_bits(segment: u64, value: &Term, bits: u64) -> Result<i64, Bina
 /// ```
 fn f64_to_f16(value: f64) -> u16 {
     let bits = value.to_bits();
-    let sign = ((bits >> 48) & 0x8000) as u16;
-    let exponent = ((bits >> 52) & 0x7FF) as i32;
+    let sign = u16::try_from((bits >> 48) & 0x8000).expect("the mask keeps the sign bit");
+    let exponent = i32::try_from((bits >> 52) & 0x7FF).expect("11 bits fit in i32");
     if exponent == 0 {
         return sign;
     }
@@ -6144,13 +6211,16 @@ fn f64_to_f16(value: f64) -> u16 {
         if exponent > 15 {
             return sign | 0x7C00;
         }
-        return sign | (((exponent + 15) as u16) << 10) | (keep & 0x3FF) as u16;
+        return sign
+            | (u16::try_from(exponent + 15).expect("the exponent is in the range of binary16")
+                << 10)
+            | u16::try_from(keep & 0x3FF).expect("the mask keeps 10 bits");
     }
-    let shift = (28 - exponent) as u32;
+    let shift = u32::try_from(28 - exponent).expect("an exponent below -14 gives a positive shift");
     if shift > 63 {
         return sign;
     }
-    sign | round(mantissa >> shift, shift) as u16
+    sign | u16::try_from(round(mantissa >> shift, shift)).expect("the shift leaves at most 10 bits")
 }
 
 /// Return the size in bits of an `integer` segment, or the exception
@@ -6180,7 +6250,7 @@ fn integer_segment_bits(form: SizeForm, size: &Term, unit: u64) -> Result<u64, &
         (Some(bits), _)
             if bits >= 0 && (form == SizeForm::Fixed || unit == 1 || bits >> 52 == 0) =>
         {
-            Ok((bits as u64).saturating_mul(unit))
+            Ok(bits.cast_unsigned().saturating_mul(unit))
         }
         (Some(bits), _) if bits >= 0 => Err("system_limit"),
         (None, Term::Integer(bits)) if *bits >= 0 => Err("system_limit"),
@@ -6558,7 +6628,11 @@ fn create_binary(
                 segment, "binary", "type", value,
             )));
         };
-        if unit > 1 && !(start.bit_size() as u64).is_multiple_of(unit) {
+        if unit > 1
+            && !u64::try_from(start.bit_size())
+                .expect("a bit size fits in u64")
+                .is_multiple_of(unit)
+        {
             return Ok(Err(BinarySegmentFailure::badarg(
                 segment, "binary", "unit", value,
             )));
@@ -6613,7 +6687,7 @@ fn create_binary(
     Ok(Ok(Term::Binary(match &prefix {
         Some(start) if bits.is_multiple_of(8) => Binary::concat(start, &bytes),
         Some(start) => {
-            let size = start.bit_size() + bits as usize;
+            let size = start.bit_size() + usize::try_from(bits).expect("a u64 fits in usize");
             Binary::concat(start, &bytes).bits(0, size)
         }
         None => bitstring(bytes, bits),
@@ -6676,11 +6750,13 @@ fn write_binary_parts(
                 value: Term::Binary(binary),
                 bits,
                 ..
-            } if binary.bit_size() as u64 >= *bits => {
+            } if u64::try_from(binary.bit_size()).expect("a bit size fits in u64") >= *bits => {
                 // `erts_bs_put_binary` uses one reduction for each 8192
                 // copied bits (erl_bits.c:1306).
-                writer.push_binary(binary, *bits as usize);
-                let reductions = *bits / BITS_PER_REDUCTION as u64;
+                writer.push_binary(binary, usize::try_from(*bits).expect("a u64 fits in usize"));
+                let reductions = *bits
+                    / u64::try_from(BITS_PER_REDUCTION)
+                        .expect("the bits of a reduction fit in u64");
                 process.bump_reductions(i32::try_from(reductions).unwrap_or(i32::MAX));
             }
             BinaryPart::Sized { .. } => {
@@ -6805,7 +6881,7 @@ fn bitstring(bytes: Vec<u8>, bits: u64) -> Binary {
     if bits.is_multiple_of(8) {
         binary
     } else {
-        binary.bits(0, bits as usize)
+        binary.bits(0, usize::try_from(bits).expect("a u64 fits in usize"))
     }
 }
 
@@ -6854,7 +6930,7 @@ fn private_append(
     };
     write(process, source, Term::Nil)?;
     if binary.bit_size().is_multiple_of(8) {
-        let size = binary.bit_size() + bits as usize;
+        let size = binary.bit_size() + usize::try_from(bits).expect("a u64 fits in usize");
         if !binary.append_in_place(&bytes) {
             *binary = Binary::concat(binary, &bytes);
         }
@@ -6866,7 +6942,10 @@ fn private_append(
         // the writer copies them, and then the new bits.
         let mut writer = BitWriter::default();
         writer.push_binary(binary, binary.bit_size());
-        writer.push_binary(&bitstring(bytes, bits), bits as usize);
+        writer.push_binary(
+            &bitstring(bytes, bits),
+            usize::try_from(bits).expect("a u64 fits in usize"),
+        );
         let (bytes, bits) = writer.into_bytes();
         *binary = bitstring(bytes, bits);
     }
@@ -6910,7 +6989,7 @@ fn raise_binary_failure(
 ) -> Result<Option<Outcome>, BeamError> {
     let (module_atom, function_atom, arity) = current_function(scheduler, module)?;
     let cause = Term::tuple(vec![
-        Term::Integer(failure.segment as i64),
+        Term::Integer(failure.segment.cast_signed()),
         Term::static_atom(failure.operation),
         Term::static_atom(failure.info),
         failure.value,
@@ -7371,12 +7450,12 @@ fn write_operand(
             return Err(error(format!("unsupported BEAM literal index {index}")));
         }
         Operand::X(index) => {
-            let index = *index as usize;
+            let index = usize::try_from(*index).expect("a u32 fits in usize");
             registers.resize(registers.len().max(index + 1), None);
             registers[index] = Some(value);
         }
         Operand::Y(index) => {
-            let index = *index as usize;
+            let index = usize::try_from(*index).expect("a u32 fits in usize");
             if index >= stack.len() {
                 return Err(error(format!(
                     "register y{index} is outside allocated range"

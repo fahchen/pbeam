@@ -1258,7 +1258,7 @@ pub(in crate::runtime) fn frame_at(
     let (name, function_arity) = module
         .tables
         .functions
-        .get(function as usize)
+        .get(usize::try_from(function).expect("a u32 fits in usize"))
         .expect("the loader resolves a call label to a function");
     if *function_arity != arity {
         return Err(error(format!(
@@ -1270,7 +1270,7 @@ pub(in crate::runtime) fn frame_at(
     Ok(Frame {
         module_id: module.id,
         function: *name,
-        next_instruction: target as usize,
+        next_instruction: usize::try_from(target).expect("a u32 fits in usize"),
         stack: Vec::new(),
     })
 }

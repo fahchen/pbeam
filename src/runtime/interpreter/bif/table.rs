@@ -16,7 +16,8 @@ use super::BifResult::{Raise, Value};
 use super::{
     Arc, BeamError, BifContext, BifResult, ExceptionClass, Term, atomics, binary, chksum, erlang,
     erts_internal, ets, file, float, hash, integer, iolist, lists, maps, math, native, os, packet,
-    persistent_term, re, records, subtract, term, timer, unicode, unresolved_mfa, unsupported_port,
+    persistent_term, re, records, subtract, term, timer, to_i64, unicode, unresolved_mfa,
+    unsupported_port,
 };
 use crate::runtime::host::filename_encoding;
 use crate::runtime::time;
@@ -333,7 +334,7 @@ bifs! {
     erlang:trace_delivered/1 => unsupported,
     erlang:trace_info/2 => unsupported,
     erlang:trunc/1 as ErlangTrunc1 => |_, [term]| Ok(erlang::trunc(term)),
-    erlang:tuple_size/1 as ErlangTupleSize1 => |_, [term]| Ok(match term { Term::Tuple(elements) => Value(Term::Integer(elements.len() as i64)), _ => BifResult::badarg() }),
+    erlang:tuple_size/1 as ErlangTupleSize1 => |_, [term]| Ok(match term { Term::Tuple(elements) => Value(Term::Integer(to_i64(elements.len()))), _ => BifResult::badarg() }),
     erlang:tuple_to_list/1 as ErlangTupleToList1 => |_, [tuple]| Ok(erlang::tuple_to_list(tuple)),
     erlang:unalias/1 as ErlangUnalias1 => |cx, [reference]| erlang::unalias(cx, reference),
     erlang:unique_integer/0 as ErlangUniqueInteger0 => |cx, []| Ok(Value(Term::Integer(cx.scheduler.unique_integer()?))),
@@ -353,7 +354,7 @@ bifs! {
     erts_debug:dirty_io/2 => unsupported,
     erts_debug:disassemble/1 => unsupported,
     erts_debug:dist_ext_to_term/2 => unsupported,
-    erts_debug:flat_size/1 as ErtsDebugFlatSize1 => |_, [term]| Ok(Value(Term::Integer(crate::term::flat_size(term) as i64))),
+    erts_debug:flat_size/1 as ErtsDebugFlatSize1 => |_, [term]| Ok(Value(Term::Integer(to_i64(crate::term::flat_size(term))))),
     erts_debug:get_internal_state/1 => unsupported,
     erts_debug:instructions/0 => unsupported,
     erts_debug:interpreter_size/0 => unsupported,
@@ -642,7 +643,7 @@ pub(in crate::runtime::interpreter) fn dispatch_leaf(
             integer::arith(Arith::Minus, left, right),
         )),
         (BifId::ErlangTupleSize1, &[term]) => Ok(match term {
-            Term::Tuple(elements) => Value(Term::Integer(elements.len() as i64)),
+            Term::Tuple(elements) => Value(Term::Integer(to_i64(elements.len()))),
             _ => BifResult::badarg(),
         }),
         (BifId::ErlangElement2, &[index, tuple]) => Ok(erlang::element(index, tuple)),

@@ -18,7 +18,7 @@ use num_bigint::BigInt;
 use num_traits::Signed;
 
 use super::BifResult::Value;
-use super::{BifResult, ExceptionClass, Scheduler, Term, erlang};
+use super::{BifResult, ExceptionClass, Scheduler, Term, erlang, to_i64, to_usize};
 use crate::runtime::scheduler::CONTEXT_REDS;
 use crate::term::{Division, MAX_BIG_DIGITS, ShiftDirection, fits_big_arity};
 
@@ -106,7 +106,7 @@ fn system_limit() -> BifResult {
 /// ```
 fn digits(term: &Term) -> usize {
     match term {
-        Term::BigInt(value) => value.bits().div_ceil(64) as usize,
+        Term::BigInt(value) => to_usize(value.bits().div_ceil(64)),
         _ => 1,
     }
 }
@@ -114,6 +114,11 @@ fn digits(term: &Term) -> usize {
 /// Return whether a term is an ERTS small integer.
 fn is_small(term: &Term) -> bool {
     term.small_integer().is_some()
+}
+
+/// Return `count`, at most `CONTEXT_REDS`, as the reductions of a bump.
+fn capped(count: usize) -> i32 {
+    i32::try_from(count).map_or(CONTEXT_REDS, |count| count.min(CONTEXT_REDS))
 }
 
 /// Return the reductions of `bump_reds_linear` (`erl_arith.c:56-72`) for
@@ -129,7 +134,7 @@ fn is_small(term: &Term) -> bool {
 fn linear(words: usize) -> i32 {
     // From `CONTEXT_REDS * 16` words, the count is above `CONTEXT_REDS`,
     // so the bump empties the budget as `BUMP_ALL_REDS` does.
-    (words / WORDS_PER_REDUCTION + 1).min(CONTEXT_REDS as usize) as i32
+    capped(words / WORDS_PER_REDUCTION + 1)
 }
 
 /// Return the reductions of `bump_reds_quadratic` (`erl_arith.c:74-86`)
@@ -145,7 +150,7 @@ fn quadratic(left: usize, right: usize) -> i32 {
     // A size of `CONTEXT_REDS * 16` digits or more gives a count above
     // `CONTEXT_REDS`, so the bump empties the budget as `BUMP_ALL_REDS`
     // does. Each size is at most 2^16 - 1, so the product fits.
-    (left * right / WORDS_PER_REDUCTION + 1).min(CONTEXT_REDS as usize) as i32
+    capped(left * right / WORDS_PER_REDUCTION + 1)
 }
 
 /// Return the integer `value` as a BIF result in its canonical form, or
@@ -454,11 +459,16 @@ pub(super) fn shift(left: &Term, right: &Term, direction: ShiftDirection) -> Cha
         if amount < SMALL_SHIFT_LIMIT {
             let shifted = i128::from(small) << amount;
             if (i128::from(MIN_SMALL)..=i128::from(MAX_SMALL)).contains(&shifted) {
-                return (Value(Term::Integer(shifted as i64)), 0);
+                return (
+                    Value(Term::Integer(i64::try_from(shifted).expect(
+                        "the range check bounds the value to a small integer",
+                    ))),
+                    0,
+                );
             }
         }
     }
-    let size = digits(left) as i64;
+    let size = to_i64(digits(left));
     let result_size = if amount > 0 {
         size + amount / DIGIT_BITS
     } else if size <= -amount / DIGIT_BITS {
@@ -466,18 +476,18 @@ pub(super) fn shift(left: &Term, right: &Term, direction: ShiftDirection) -> Cha
     } else {
         size - (-amount / DIGIT_BITS)
     };
-    if result_size - 8 > MAX_BIG_DIGITS as i64 {
+    if result_size - 8 > to_i64(MAX_BIG_DIGITS) {
         return (system_limit(), 0);
     }
-    let reductions = linear(result_size as usize + 2);
+    let reductions = linear(to_usize(result_size) + 2);
     let value = left
         .bigint()
         .expect("the shifted term is an integer")
         .into_owned();
     let shifted = if amount > 0 {
-        value << amount as u64
+        value << amount.cast_unsigned()
     } else {
-        value >> (-amount) as u64
+        value >> (-amount).cast_unsigned()
     };
     (big_result(shifted), reductions)
 }

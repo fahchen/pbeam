@@ -9,7 +9,7 @@
 //! continues with no cost in the next turn.
 
 use super::BifResult::{Trap, TrapBif, Value};
-use super::{BeamError, BifResult, ProcessState, Term, error};
+use super::{BeamError, BifResult, ProcessState, Term, error, to_i64, to_usize};
 use crate::runtime::scheduler::CONTEXT_REDS;
 use crate::runtime::unicode::{
     CharEncoding, Utf8Output, Utf8State, analyze_utf8, build_utf8, code_points, is_incomplete,
@@ -44,7 +44,7 @@ const ONHEAP_BINARY_LIMIT: i64 = 64;
 /// assert_eq!(allowed_iterations(&process), 30);
 /// ```
 fn allowed_iterations(process: &ProcessState) -> i64 {
-    let left = process.bif_reductions_or_zero() as i64 * LOOP_FACTOR;
+    let left = to_i64(process.bif_reductions_or_zero()) * LOOP_FACTOR;
     left.min(i64::from(CONTEXT_REDS) * LOOP_FACTOR)
 }
 
@@ -59,7 +59,9 @@ fn allowed_iterations(process: &ProcessState) -> i64 {
 /// assert_eq!(process.fcalls, 7);
 /// ```
 fn cost_to_proc(process: &mut ProcessState, steps: i64) {
-    process.bump_reductions((steps / LOOP_FACTOR) as i32);
+    // `BUMP_REDS` takes a `Sint` of reductions, and a count above `i32::MAX`
+    // empties the budget.
+    process.bump_reductions(i32::try_from(steps / LOOP_FACTOR).unwrap_or(i32::MAX));
 }
 
 /// Run `unicode:characters_to_binary/2`: convert `chardata` to one UTF-8
@@ -124,7 +126,7 @@ pub(super) fn characters_to_binary(
     let Some(cost) = utf8_need(subject, charset) else {
         return Ok(BifResult::badarg());
     };
-    let simple = (cost / SIMPLE_FACTOR) as i64;
+    let simple = to_i64(cost / SIMPLE_FACTOR);
     cost_to_proc(process, simple);
     if let Some(bytes) = subject.binary_bytes()
         && charset == CharEncoding::Unicode
@@ -296,7 +298,7 @@ pub(super) fn characters_to_list(
     let Some(cost) = utf8_need(chardata, charset) else {
         return Ok(BifResult::badarg());
     };
-    let simple = (cost / SIMPLE_FACTOR) as i64;
+    let simple = to_i64(cost / SIMPLE_FACTOR);
     cost_to_proc(process, simple);
     let left = (allowed_iterations(process) - simple).max(1);
     Ok(list_turn(
@@ -357,7 +359,7 @@ fn list_turn(
             function: "characters_to_list_trap_1",
             arguments: vec![
                 Term::binary(output.bytes),
-                Term::Integer(output.characters as i64),
+                Term::Integer(to_i64(output.characters)),
                 leftover_before(leftover, rest),
                 Term::static_atom(match charset {
                     CharEncoding::Latin1 => "latin1",
@@ -447,7 +449,7 @@ pub(super) fn analyze_turn(
 ) -> Result<BifResult, BeamError> {
     let mut left = allowed_iterations(process);
     let (state, counted, end) = analyze_utf8(bytes, start, &mut left);
-    cost_to_proc(process, counted as i64);
+    cost_to_proc(process, to_i64(counted));
     let characters = characters + counted;
     if state == Utf8State::AnalyzeMore {
         process.bump_all_reductions();
@@ -456,8 +458,8 @@ pub(super) fn analyze_turn(
             function: "characters_to_list_trap_3",
             arguments: vec![
                 Term::binary(bytes.to_vec()),
-                Term::Integer(end as i64),
-                Term::Integer(characters as i64),
+                Term::Integer(to_i64(end)),
+                Term::Integer(to_i64(characters)),
             ],
         });
     }
@@ -516,12 +518,12 @@ pub(super) fn finish_list(
     if remaining == 0 {
         return Value(result);
     }
-    let built = if left < remaining as i64 {
-        left.max(1) as usize
+    let built = if left < to_i64(remaining) {
+        to_usize(left.max(1))
     } else {
         remaining
     };
-    cost_to_proc(process, built as i64);
+    cost_to_proc(process, to_i64(built));
     if built == remaining {
         return Value(result);
     }
@@ -529,7 +531,7 @@ pub(super) fn finish_list(
     TrapBif {
         module: "erlang",
         function: trap,
-        arguments: vec![result, Term::Integer((remaining - built) as i64)],
+        arguments: vec![result, Term::Integer(to_i64(remaining - built))],
     }
 }
 

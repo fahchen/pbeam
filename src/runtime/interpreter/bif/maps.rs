@@ -2,7 +2,7 @@
 
 use super::BifResult::Value;
 use super::ycf::{YcfTurn, run_units};
-use super::{BeamError, BifResult, ExceptionClass, Insert, Map, ProcessState, Term, error};
+use super::{BeamError, BifResult, ExceptionClass, Insert, Map, ProcessState, Term, error, to_i64};
 use crate::term::{AtomTable, Direction, debug_term, from_list_units};
 
 /// Run `maps:keys/1`: return the keys of a map in map order, as ERTS
@@ -62,7 +62,7 @@ pub(super) fn keys(
         YcfTurn::Yield(done) => Ok(BifResult::TrapBif {
             module: "maps",
             function: "keys_trap",
-            arguments: vec![map.clone(), Term::Integer(done as i64)],
+            arguments: vec![map.clone(), Term::Integer(to_i64(done))],
         }),
     }
 }
@@ -107,7 +107,7 @@ pub(super) fn size(map: &Term) -> BifResult {
     let Term::Map(entries) = map else {
         return error_with("badmap", map);
     };
-    Value(Term::Integer(entries.len() as i64))
+    Value(Term::Integer(to_i64(entries.len())))
 }
 
 /// Run `maps:find/2`: return `{ok, Value}` for a key that the map holds and
@@ -247,7 +247,7 @@ pub(super) fn from_list(
         YcfTurn::Yield(done) => Ok(BifResult::TrapBif {
             module: "maps",
             function: "from_list_trap",
-            arguments: vec![list.clone(), Term::Integer(done as i64)],
+            arguments: vec![list.clone(), Term::Integer(to_i64(done))],
         }),
         YcfTurn::Done(_) if pairs.is_none() && done > 0 => Err(error(
             "unsupported maps:from_list/1 call: maps:from_list/1 finds a bad element after a trap, \
@@ -323,7 +323,7 @@ pub(super) fn from_keys(
         YcfTurn::Yield(done) => Ok(BifResult::TrapBif {
             module: "maps",
             function: "from_keys_trap",
-            arguments: vec![keys.clone(), value.clone(), Term::Integer(done as i64)],
+            arguments: vec![keys.clone(), value.clone(), Term::Integer(to_i64(done))],
         }),
         YcfTurn::Done(_) if !proper && done > 0 => Err(error(
             "unsupported maps:from_keys/2 call: maps:from_keys/2 finds an improper tail after a \
@@ -432,7 +432,8 @@ pub(super) fn map_next(
     let Some(chunk) = entries.chunk(path, budget, direction)? else {
         return Ok(BifResult::badarg());
     };
-    process.fcalls -= (PAIR_REDUCTIONS * chunk.counted) as i32;
+    process.fcalls -= i32::try_from(PAIR_REDUCTIONS * chunk.counted)
+        .expect("the chunk counts at most the pairs that the budget allows");
     let pairs = chunk.pairs.into_iter();
     let next = chunk.next.map(Term::Integer);
     Ok(Value(match direction {
@@ -496,7 +497,10 @@ fn ordered_next(process: &mut ProcessState, path: &Term, entries: &Map, map: &Te
     if rest.is_nonempty_list() {
         process.bump_all_reductions();
     } else {
-        process.bump_reductions((ORDERED_ITER_FACTOR * taken.len()) as i32);
+        process.bump_reductions(
+            i32::try_from(ORDERED_ITER_FACTOR * taken.len())
+                .expect("the walk takes at most the keys that the budget allows"),
+        );
     }
     Value(iterator_pairs(pairs.into_iter(), next))
 }
@@ -614,10 +618,12 @@ pub(super) fn merge_trap(
         return Ok(BifResult::TrapBif {
             module: "maps",
             function: "merge_trap",
-            arguments: vec![merged, Term::Integer((steps - budget) as i64)],
+            arguments: vec![merged, Term::Integer(to_i64(steps - budget))],
         });
     }
-    process.bump_reductions((steps / LOOP_FACTOR) as i32);
+    process.bump_reductions(
+        i32::try_from(steps / LOOP_FACTOR).expect("the steps are below the budget"),
+    );
     Ok(Value(merged))
 }
 
@@ -774,7 +780,7 @@ pub(super) fn values(
         YcfTurn::Yield(done) => Ok(BifResult::TrapBif {
             module: "maps",
             function: "values_trap",
-            arguments: vec![map.clone(), Term::Integer(done as i64)],
+            arguments: vec![map.clone(), Term::Integer(to_i64(done))],
         }),
     }
 }

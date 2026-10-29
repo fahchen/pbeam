@@ -3,7 +3,7 @@
 use std::ffi::c_int;
 
 use super::BifResult::{Trap, Value};
-use super::{AtomTable, BeamError, BifContext, BifResult, ExceptionClass, Term, iolist};
+use super::{AtomTable, BeamError, BifContext, BifResult, ExceptionClass, Term, iolist, to_i64};
 use crate::runtime::pcre2;
 use crate::runtime::scheduler::CONTEXT_REDS;
 use crate::runtime::unicode::CharEncoding;
@@ -703,6 +703,11 @@ fn capture_field(atoms: &AtomTable, code: &pcre2::Code, element: &Term) -> Optio
     }
 }
 
+/// Return the number of a named group as an `int` field, as ERTS reads it.
+fn group_index(number: u32) -> i32 {
+    i32::try_from(number).expect("PCRE2 limits a group number to 65535")
+}
+
 /// Return the field of the group name `name` of `code`, as
 /// `build_one_capture` (`erl_bif_re.c:1269-1307`) makes it. Without the
 /// `dupnames` compile bit, that function reads the number with
@@ -733,14 +738,19 @@ fn name_field(code: &pcre2::Code, name: &[u8]) -> Field {
         .collect();
     if !code.has_dupnames() {
         return match entries.as_slice() {
-            [(number, _)] => Field::Index(*number as i32),
+            [(number, _)] => Field::Index(group_index(*number)),
             _ => Field::Index(-1),
         };
     }
     match entries.as_slice() {
         [] => Field::Index(-1),
-        [(number, _)] => Field::Index(*number as i32),
-        entries => Field::Duplicate(entries.iter().map(|&(number, _)| number as i32).collect()),
+        [(number, _)] => Field::Index(group_index(*number)),
+        entries => Field::Duplicate(
+            entries
+                .iter()
+                .map(|&(number, _)| group_index(number))
+                .collect(),
+        ),
     }
 }
 
@@ -762,7 +772,7 @@ fn name_fields(code: &pcre2::Code) -> Vec<Field> {
     if !code.has_dupnames() {
         return names
             .into_iter()
-            .map(|(number, _)| Field::Index(number as i32))
+            .map(|(number, _)| Field::Index(group_index(number)))
             .collect();
     }
     let mut fields = Vec::new();
@@ -774,8 +784,13 @@ fn name_fields(code: &pcre2::Code) -> Vec<Field> {
         }
         let entries = &names[start..end];
         fields.push(match entries {
-            [(number, _)] => Field::Index(*number as i32),
-            _ => Field::Duplicate(entries.iter().map(|&(number, _)| number as i32).collect()),
+            [(number, _)] => Field::Index(group_index(*number)),
+            _ => Field::Duplicate(
+                entries
+                    .iter()
+                    .map(|&(number, _)| group_index(number))
+                    .collect(),
+            ),
         });
         start = end;
     }
@@ -827,7 +842,7 @@ fn exec_return(
     let Some(kind) = capture.kind else {
         return Term::static_atom("match");
     };
-    let rc = rc as usize;
+    let rc = usize::try_from(rc).expect("the check above keeps a positive count");
     let ovector = data.ovector(rc);
     let element = |index: usize| capture_element(kind, ovector, index, subject);
     let elements: Vec<Term> = match &capture.groups {
@@ -846,7 +861,15 @@ fn exec_return(
                         usize::try_from(index)
                             .is_ok_and(|index| index < rc && ovector[index * 2] != pcre2::UNSET)
                     })
-                    .map_or_else(|| empty_element(kind), |&index| element(index as usize)),
+                    .map_or_else(
+                        || empty_element(kind),
+                        |&index| {
+                            element(
+                                usize::try_from(index)
+                                    .expect("the search keeps a non-negative index"),
+                            )
+                        },
+                    ),
             })
             .collect(),
     };
@@ -921,8 +944,8 @@ fn capture_element(kind: ReturnType, ovector: &[usize], index: usize, subject: &
     let bytes = &subject[from..to];
     match kind {
         ReturnType::Index => Term::tuple(vec![
-            Term::Integer(from as i64),
-            Term::Integer((to - from) as i64),
+            Term::Integer(to_i64(from)),
+            Term::Integer(to_i64(to - from)),
         ]),
         ReturnType::List => Term::list_from(bytes.iter().map(|&byte| Term::Integer(byte.into()))),
         ReturnType::Binary => Term::binary(bytes.to_vec()),
@@ -947,12 +970,13 @@ const MAX_LOOP_LIMIT: i32 = CONTEXT_REDS * LOOP_FACTOR;
 ///
 /// ```rust,ignore
 /// assert_eq!(loop_limit(1), 16);
-/// assert_eq!(loop_limit(CONTEXT_REDS as u64), 64000);
+/// assert_eq!(loop_limit(u64::from(CONTEXT_REDS.cast_unsigned())), 64000);
 /// assert_eq!(loop_limit(u64::MAX), 64000);
 /// ```
 fn loop_limit(reds: u64) -> i32 {
-    let limit = reds.wrapping_mul(LOOP_FACTOR as u64);
-    i32::try_from(limit.min(MAX_LOOP_LIMIT as u64)).expect("the limit fits in i32")
+    let limit = reds.wrapping_mul(u64::from(LOOP_FACTOR.cast_unsigned()));
+    i32::try_from(limit.min(u64::from(MAX_LOOP_LIMIT.cast_unsigned())))
+        .expect("the limit fits in i32")
 }
 
 /// Return the number of offset pairs of the match data of a precompiled
@@ -971,7 +995,8 @@ fn loop_limit(reds: u64) -> i32 {
 /// assert_eq!(ovec_pairs(-1), 0);
 /// ```
 fn ovec_pairs(count: i64) -> u32 {
-    (count as u64).wrapping_add(1) as u32
+    let sum = count.cast_unsigned().wrapping_add(1);
+    u32::try_from(sum & u64::from(u32::MAX)).expect("the mask keeps the low 32 bits")
 }
 
 /// Whether a match run is the first run of a `re:run/3` call.
@@ -1197,7 +1222,8 @@ pub(super) fn run(
                     .then_some(parsed.match_limit_recursion),
             )
         });
-    let start = parsed.startoffset as usize;
+    let start = usize::try_from(parsed.startoffset)
+        .expect("`option_integer` keeps the offset non-negative");
 
     // The match and the capture specification, which reads the ovector of
     // the match. A precompiled pattern gives a borrow of the resources of
@@ -1240,7 +1266,7 @@ pub(super) fn run(
         // in one call, so it adds each ended turn here and starts a fresh
         // budget.
         context.scheduler.account_turn();
-        limit = loop_limit(CONTEXT_REDS as u64);
+        limit = loop_limit(u64::from(CONTEXT_REDS.cast_unsigned()));
         data.set_loops_left(limit);
         data.clear_restart();
         rc = data.resume();

@@ -3,11 +3,11 @@
 use std::cmp::Ordering;
 
 use super::BifResult::Value;
-use super::erlang::signals_return;
+use super::erlang::{c_int, signals_return};
 use super::{
     AtomTable, BeamError, BifContext, BifResult, ExceptionClass, ProcessId, Scheduler,
     SpawnOptions, Target, Term, boot_denial, code, create_process, denial, error, iolist, maps,
-    other_process_denial, print_term, resolve,
+    other_process_denial, print_term, resolve, to_i64, to_u64, to_usize,
 };
 use crate::beam::code::PrepareError;
 use crate::runtime::process::LinkId;
@@ -531,8 +531,10 @@ fn open_fd_port(
             "unsupported open_port/2 without the binary option: see \"Ports\" in docs/erts-differences.md",
         ));
     }
-    let (Ok(input), Ok(output)) = (i32::try_from(input as u64), i32::try_from(output as u64))
-    else {
+    let (Ok(input), Ok(output)) = (
+        i32::try_from(input.cast_unsigned()),
+        i32::try_from(output.cast_unsigned()),
+    ) else {
         return Ok(Value(Term::static_atom("einval")));
     };
     // `fd_start` refuses an fd at or above `sys_max_files()`, the soft
@@ -540,8 +542,10 @@ fn open_fd_port(
     // `in` or `out` keeps, which `open_port` gives as `einval`.
     let max = nix::sys::resource::getrlimit(nix::sys::resource::Resource::RLIMIT_NOFILE)
         .map_or(u64::MAX, |(soft, _)| soft);
-    if (settings.read_write.read && input as u64 >= max)
-        || (settings.read_write.write && output as u64 >= max)
+    if (settings.read_write.read
+        && u64::try_from(input).expect("the conversion above keeps a non-negative fd") >= max)
+        || (settings.read_write.write
+            && u64::try_from(output).expect("the conversion above keeps a non-negative fd") >= max)
     {
         return Ok(Value(Term::static_atom("einval")));
     }
@@ -655,8 +659,8 @@ fn port_settings(atoms: &AtomTable, settings: &Term) -> Result<Option<PortSettin
                     // ERTS keeps the small integer in the C `int`
                     // `packet_bytes`, which holds its low 32 bits
                     // (`erl_bif_port.c:850-861`).
-                    match pair[1].small_integer().map(|size| size as i32) {
-                        Some(size @ (1 | 2 | 4)) => result.packet = size as usize,
+                    match pair[1].small_integer().map(c_int) {
+                        Some(size @ (1 | 2 | 4)) => result.packet = to_usize(size),
                         _ => return Ok(None),
                     }
                     continue;
@@ -666,7 +670,7 @@ fn port_settings(atoms: &AtomTable, settings: &Term) -> Result<Option<PortSettin
                     // (`erl_bif_port.c:862-869`, `1139-1140`;
                     // `io.c:3149-3155`).
                     match pair[1].small_integer() {
-                        Some(size) if size > 0 => result.line = Some(size as i32),
+                        Some(size) if size > 0 => result.line = Some(c_int(size)),
                         _ => return Ok(None),
                     }
                     continue;
@@ -1097,7 +1101,7 @@ fn output(
         Driver::Inet(tcp) => {
             let caller = scheduler.current_process_mut().id;
             let sent = tcp.send(&bytes, caller, scheduler.local_node_hash())?;
-            port_state.output += bytes.len() as u64;
+            port_state.output += to_u64(bytes.len());
             return Ok(match sent {
                 Output::Sent(events) => {
                     Written::Step(scheduler.send_events(id, port_state, events)?)
@@ -1108,7 +1112,7 @@ fn output(
     };
     // A packet that does not fit in its header fails with `EINVAL`
     // (`sys_drivers.c:1153-1158`).
-    let size = bytes.len() as u64;
+    let size = to_u64(bytes.len());
     let written = spawn.packets.frame(bytes).ok_or(libc::EINVAL);
     let written = written.and_then(|framed| spawn.program.write_input(&framed));
     Ok(match written {
@@ -1861,7 +1865,7 @@ pub(super) fn list_to_integer(list: &Term, base: &Term) -> BifResult {
         return atom("not_a_list");
     };
     let base = match base.small_integer() {
-        Some(base @ 2..=36) => base as u32,
+        Some(base @ 2..=36) => u32::try_from(base).expect("the pattern bounds the base to 2..=36"),
         _ => return atom("badarg"),
     };
     let byte = |term: &Term| term.small_integer().map(|value| value.to_le_bytes()[0]);
@@ -1897,7 +1901,7 @@ pub(super) fn list_to_integer(list: &Term, base: &Term) -> BifResult {
             Value(Term::tuple(vec![Term::Integer(0), rest.clone()]))
         };
     }
-    let digits_per_small = DIGITS_PER_SMALL[base as usize - 2];
+    let digits_per_small = DIGITS_PER_SMALL[to_usize(base) - 2];
     let (mut value, mut count) = (0_i64, 0);
     while count <= digits_per_small {
         let Some((head, tail)) = rest.cons_cell() else {
@@ -1954,7 +1958,10 @@ pub(super) fn binary_to_integer(binary: &Term, base: &Term) -> BifResult {
     let Some(bytes) = binary.binary_bytes() else {
         return badarg();
     };
-    chars_to_integer(bytes, base as u32)
+    chars_to_integer(
+        bytes,
+        u32::try_from(base).expect("the filter bounds the base to 2..=36"),
+    )
 }
 
 /// Return the integer that the byte text `text` reads as in `base`, as
@@ -1989,7 +1996,7 @@ fn chars_to_integer(text: &[u8], base: u32) -> BifResult {
     if digits.is_empty() {
         return Value(Term::Integer(0));
     }
-    if digits.len() > DIGITS_PER_SMALL[base as usize - 2] as usize {
+    if digits.len() > to_usize(DIGITS_PER_SMALL[to_usize(base) - 2]) {
         return Value(Term::static_atom("big"));
     }
     let mut value = 0_i64;
@@ -2121,7 +2128,8 @@ pub(super) fn processes_next(
         return Ok(BifResult::badarg());
     };
     // `MAX(ERTS_BIF_REDS_LEFT(c_p), 1)` (`erl_ptab.c:1486`).
-    let max_pids = scheduler.current_process().bif_reductions_or_zero().max(1) as u64;
+    let max_pids = scheduler.current_process().bif_reductions_or_zero().max(1);
+    let max_pids = to_u64(max_pids);
     let limit = PTAB_SIZE.min(first.saturating_add(max_pids * PTAB_REDS_MULTIPLIER));
     if first > limit {
         return Ok(BifResult::badarg());
@@ -2130,18 +2138,18 @@ pub(super) fn processes_next(
         return Ok(Value(Term::static_atom("none")));
     }
     let hidden = super::erlang::hidden_policy(scheduler);
-    let found = scheduler.ptab_indexed(first, limit, max_pids as usize, |id| Some(id) != hidden);
+    let found = scheduler.ptab_indexed(first, limit, to_usize(max_pids), |id| Some(id) != hidden);
     let next = match found.last() {
-        Some((index, _)) if found.len() as u64 == max_pids => index + 1,
+        Some((index, _)) if to_u64(found.len()) == max_pids => index + 1,
         _ => limit,
     };
     let pids: Vec<Term> = found.into_iter().map(|(_, id)| Term::Pid(id)).collect();
     let scanned = (next - first) / PTAB_REDS_MULTIPLIER + 1;
     scheduler
         .current_process_mut()
-        .bump_reductions(scanned as i32);
+        .bump_reductions(i32::try_from(scanned).expect("the process table bounds the scan"));
     Ok(Value(Term::tuple(vec![
-        Term::Integer(next as i64),
+        Term::Integer(to_i64(next)),
         Term::list_from(pids),
     ])))
 }
@@ -2431,6 +2439,10 @@ pub(super) fn spawn_system_process(
 /// // The list of the bytes of "ab... ".
 /// ```
 pub(super) fn term_to_string(atoms: &AtomTable, term: &Term, limit: &Term) -> BifResult {
+    #[expect(
+        clippy::as_conversions,
+        reason = "`From` is not const, and `i32::MAX` fits in `i64`"
+    )]
     const INT_MAX: i64 = i32::MAX as i64;
     let limit = match limit {
         Term::Integer(limit) if (2..INT_MAX).contains(limit) => *limit,

@@ -4,6 +4,7 @@
 //! (`bif.c:3699-3725`) give them.
 
 use super::BifResult::Value;
+use super::erlang::c_int;
 use super::{BifResult, Term};
 use crate::term::float_text::{self, TrailingZeros};
 
@@ -29,7 +30,9 @@ fn byte_text(list: &Term) -> Option<Vec<u8>> {
     let mut text = Vec::new();
     for element in list.proper_list()? {
         match element.small_integer() {
-            Some(byte @ 0..=255) => text.push(byte as u8),
+            Some(byte @ 0..=255) => {
+                text.push(u8::try_from(byte).expect("the pattern bounds the byte to 0..=255"));
+            }
             _ => return None,
         }
     }
@@ -216,7 +219,7 @@ fn float_text_of(float: &Term, options: &Term) -> Option<Vec<u8>> {
             Term::Tuple(elements) if elements.len() == 2 => {
                 let count = elements[1].small_integer()?;
                 // The C assignment to `int` keeps the low 32 bits.
-                decimals = count as i32;
+                decimals = c_int(count);
                 format = match &elements[0] {
                     Term::Atom(atom) if atom.is_static("decimals") => Format::Fixed,
                     Term::Atom(atom) if atom.is_static("scientific") => Format::Scientific,

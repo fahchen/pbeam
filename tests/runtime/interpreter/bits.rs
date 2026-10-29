@@ -3,7 +3,7 @@ use crate::term::{Binary, Endian};
 
 /// The result of a writer that wrote the whole bytes `bytes`.
 fn whole(bytes: Vec<u8>) -> (Vec<u8>, u64) {
-    let bits = bytes.len() as u64 * 8;
+    let bits = u64::try_from(bytes.len()).expect("a vector length fits in `u64`") * 8;
     (bytes, bits)
 }
 

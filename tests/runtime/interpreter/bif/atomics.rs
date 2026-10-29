@@ -46,7 +46,10 @@ fn reads_a_machine_word_as_term_to_uword_does() {
     // the machine word, gives `badarg` for each other term, and
     // `system_limit` for a positive integer above the word.
     assert_eq!(word(to_uword(&Term::Integer(0))), 0);
-    assert_eq!(word(to_uword(&Term::Integer(i64::MAX))), i64::MAX as u64);
+    assert_eq!(
+        word(to_uword(&Term::Integer(i64::MAX))),
+        i64::MAX.cast_unsigned()
+    );
     assert_eq!(
         word(to_uword(&Term::from_bigint(BigInt::from(1u64 << 63)))),
         1 << 63

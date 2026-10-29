@@ -559,7 +559,7 @@ fn max_gen_gcs(value: i64) -> u16 {
     clippy::cast_possible_truncation,
     reason = "the C `int` of ERTS keeps the low 32 bits of the number"
 )]
-fn c_int(value: i64) -> i32 {
+pub(super) fn c_int(value: i64) -> i32 {
     value as i32
 }
 

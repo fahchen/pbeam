@@ -19,7 +19,7 @@
 //! ([`Scheduler::persistent_term_progress`]).
 
 use super::BifResult::Value;
-use super::{BeamError, BifContext, BifResult, Map, Scheduler, Term, denial};
+use super::{BeamError, BifContext, BifResult, Map, Scheduler, Term, denial, to_i64, to_usize};
 use crate::runtime::capability::{CapabilityKind, Operation};
 use crate::runtime::persistent_term::Change;
 use std::sync::{Arc, atomic::Ordering};
@@ -48,11 +48,11 @@ pub(super) fn resume(
     Some(match (function, arguments) {
         ("get_all_wait", []) => get_all_start(scheduler),
         ("get_all_trap", [all, Term::Integer(entries)]) => {
-            chunk_trap(scheduler, "get_all_trap", all.clone(), *entries as usize)
+            chunk_trap(scheduler, "get_all_trap", all.clone(), to_usize(*entries))
         }
         ("info_wait", []) => info_start(scheduler),
         ("info_trap", [info, Term::Integer(entries)]) => {
-            chunk_trap(scheduler, "info_trap", info.clone(), *entries as usize)
+            chunk_trap(scheduler, "info_trap", info.clone(), to_usize(*entries))
         }
         ("put_wait", [key, value, Term::Atom(new)]) => {
             let mode = if new.is_static("true") {
@@ -63,11 +63,11 @@ pub(super) fn resume(
             put_start(scheduler, key, value, mode)
         }
         ("put_common_trap", [key, value, Term::Integer(copied)]) => {
-            put_trap(scheduler, key, value, *copied as usize)
+            put_trap(scheduler, key, value, to_usize(*copied))
         }
         ("erase_wait", [key]) => erase_start(scheduler, key),
         ("erase_trap", [key, Term::Integer(first), Term::Integer(second)]) => {
-            erase_trap(scheduler, key, *first as usize, *second as usize)
+            erase_trap(scheduler, key, to_usize(*first), to_usize(*second))
         }
         ("thread_progress", [value]) => thread_progress(value.clone()),
         _ => return None,
@@ -190,8 +190,8 @@ fn info_start(scheduler: &mut Scheduler) -> BifResult {
     }
     let (count, memory) = scheduler.node().persistent_terms().terms.info();
     let pairs = vec![
-        (Term::static_atom("count"), Term::Integer(count as i64)),
-        (Term::static_atom("memory"), Term::Integer(memory as i64)),
+        (Term::static_atom("count"), Term::Integer(to_i64(count))),
+        (Term::static_atom("memory"), Term::Integer(to_i64(memory))),
     ];
     // ponytail: each key is a static atom, so `from_pairs` cannot fail.
     let map = Map::from_pairs(pairs, &scheduler.atoms).expect("static atom keys fit each map form");
@@ -282,10 +282,12 @@ fn chunk_trap(
         return BifResult::TrapBif {
             module: "persistent_term",
             function,
-            arguments: vec![all, Term::Integer((entries - max_iter) as i64)],
+            arguments: vec![all, Term::Integer(to_i64(entries - max_iter))],
         };
     }
-    process.bump_reductions(entries as i32);
+    process.bump_reductions(
+        i32::try_from(entries).expect("the entries are at most the reductions left"),
+    );
     release(scheduler);
     Value(all)
 }
@@ -405,12 +407,14 @@ fn erase_trap(
             function: "erase_trap",
             arguments: vec![
                 key.clone(),
-                Term::Integer(first as i64),
-                Term::Integer(second as i64),
+                Term::Integer(to_i64(first)),
+                Term::Integer(to_i64(second)),
             ],
         };
     }
-    process.bump_reductions((copied / ITERATIONS_PER_RED) as i32);
+    process.bump_reductions(
+        i32::try_from(copied / ITERATIONS_PER_RED).expect("the copy is at most the budget"),
+    );
     schedule(
         scheduler,
         Change::Erase(key.clone()),
@@ -575,11 +579,13 @@ fn put_trap(scheduler: &mut Scheduler, key: &Term, value: &Term, copied: usize) 
             arguments: vec![
                 key.clone(),
                 value.clone(),
-                Term::Integer((copied - budget) as i64),
+                Term::Integer(to_i64(copied - budget)),
             ],
         };
     }
-    process.bump_reductions((copied / ITERATIONS_PER_RED) as i32);
+    process.bump_reductions(
+        i32::try_from(copied / ITERATIONS_PER_RED).expect("the copy is at most the budget"),
+    );
     schedule(
         scheduler,
         Change::Put(key.clone(), value.clone()),

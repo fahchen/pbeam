@@ -2,7 +2,7 @@
 //! can each trap (`erl_bif_lists.c:340-1083`).
 
 use super::BifResult::Value;
-use super::{AtomTable, BeamError, BifResult, ProcessState, Term};
+use super::{AtomTable, BeamError, BifResult, ProcessState, Term, to_i64};
 use std::cmp::Ordering;
 
 /// The most elements of a list that a naive scan keeps in its array
@@ -17,6 +17,11 @@ enum Side {
     Left,
     /// The right list of `--`.
     Right,
+}
+
+/// Return the reductions of the steps that a stage counted.
+fn reds(steps: usize) -> i32 {
+    i32::try_from(steps).expect("a stage counts at most the steps of its budget")
 }
 
 /// The stage of a subtraction (`ErtsSubtractCtxStage`,
@@ -305,7 +310,7 @@ impl Subtract {
         if !rest.is_list() {
             return Ok(Step::Badarg);
         }
-        process.bump_reductions((count / ELEMENTS_PER_RED) as i32);
+        process.bump_reductions(reds(count / ELEMENTS_PER_RED));
         self.iterator = rest;
         if side == Side::Left {
             self.left_remaining += count;
@@ -375,7 +380,7 @@ impl Subtract {
             checks += self.elements.len().max(1);
             self.iterator = next.clone();
         }
-        process.bump_reductions((checks.min(budget) / CHECKS_PER_RED) as i32);
+        process.bump_reductions(reds(checks.min(budget) / CHECKS_PER_RED));
         if self.iterator.is_nonempty_list() {
             return Ok(Step::Trap);
         }
@@ -417,7 +422,7 @@ impl Subtract {
                 None => self.result.push(value.clone()),
                 Some(found) => {
                     if self.elements.len() == 1 {
-                        process.bump_reductions((checks.min(budget) / CHECKS_PER_RED) as i32);
+                        process.bump_reductions(reds(checks.min(budget) / CHECKS_PER_RED));
                         let kept = std::mem::take(&mut self.result);
                         return Ok(Step::Done(Term::list_with_tail(kept, next.clone())));
                     }
@@ -427,7 +432,7 @@ impl Subtract {
             checks += self.elements.len();
             self.iterator = next.clone();
         }
-        process.bump_reductions((checks.min(budget) / CHECKS_PER_RED) as i32);
+        process.bump_reductions(reds(checks.min(budget) / CHECKS_PER_RED));
         if self.iterator.is_nonempty_list() {
             return Ok(Step::Trap);
         }
@@ -470,7 +475,7 @@ impl Subtract {
             self.iterator = next.clone();
             insertions += 1;
         }
-        process.bump_reductions((insertions / INSERTIONS_PER_RED) as i32);
+        process.bump_reductions(reds(insertions / INSERTIONS_PER_RED));
         if self.iterator.is_nonempty_list() {
             return Ok(Step::Trap);
         }
@@ -511,7 +516,7 @@ impl Subtract {
                 Err(_) => self.result.push(value.clone()),
                 Ok(found) => {
                     if self.right_remaining == 1 {
-                        process.bump_reductions((checks / CHECKS_PER_RED) as i32);
+                        process.bump_reductions(reds(checks / CHECKS_PER_RED));
                         let kept = std::mem::take(&mut self.result);
                         return Ok(Step::Done(Term::list_with_tail(kept, next.clone())));
                     }
@@ -526,7 +531,7 @@ impl Subtract {
             self.iterator = next.clone();
             checks += 1;
         }
-        process.bump_reductions((checks / CHECKS_PER_RED) as i32);
+        process.bump_reductions(reds(checks / CHECKS_PER_RED));
         if self.iterator.is_nonempty_list() {
             return Ok(Step::Trap);
         }
@@ -570,19 +575,23 @@ impl Subtract {
     /// let terms = state.into_terms();
     /// let state = Subtract::from_terms(&terms.try_into().unwrap());
     /// ```
+    #[expect(
+        clippy::as_conversions,
+        reason = "a cast reads the discriminant of the fieldless `Stage`"
+    )]
     fn into_terms(self) -> Vec<Term> {
         let (set, counts): (Vec<_>, Vec<_>) = self
             .set
             .into_iter()
-            .map(|(element, count)| (element, Term::Integer(count as i64)))
+            .map(|(element, count)| (element, Term::Integer(to_i64(count))))
             .unzip();
         vec![
             Term::Integer(self.stage as i64),
             self.left,
             self.right,
             self.iterator,
-            Term::Integer(self.left_remaining as i64),
-            Term::Integer(self.right_remaining as i64),
+            Term::Integer(to_i64(self.left_remaining)),
+            Term::Integer(to_i64(self.right_remaining)),
             Term::list_from(self.elements),
             Term::list_from(set),
             Term::list_from(counts),

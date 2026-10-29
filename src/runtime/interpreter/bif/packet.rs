@@ -6,7 +6,7 @@
 //! error.
 
 use super::BifResult::Value;
-use super::{BeamError, BifContext, BifResult, Term, error};
+use super::{BeamError, BifContext, BifResult, Term, error, to_i64, to_u64};
 use crate::term::{AtomTable, Binary};
 
 /// The HTTP methods that `packet_parse_http` returns as atoms, in the order
@@ -133,7 +133,7 @@ pub(super) fn decode_packet(
         if !(0..=i64::from(u32::MAX)).contains(value) {
             return Ok(BifResult::badarg());
         }
-        let value = *value as u64;
+        let value = u64::try_from(*value).expect("the range check keeps the value in 0..=u32::MAX");
         match context.scheduler.atoms.name_of(name) {
             "packet_size" => packet_size = value,
             "line_length" => line_length = value,
@@ -219,14 +219,14 @@ fn packet_length(bytes: &[u8], packet_size: u64, line_length: u64, form: HttpLin
     let mut start = 0;
     loop {
         let Some(offset) = bytes[start..].iter().position(|byte| *byte == b'\n') else {
-            if max_length != 0 && n as u64 >= max_length {
+            if max_length != 0 && to_u64(n) >= max_length {
                 return -1;
             }
             return 0;
         };
         let end = start + offset + 1;
         if form == HttpLine::Start {
-            if max_length != 0 && end as u64 > max_length {
+            if max_length != 0 && to_u64(end) > max_length {
                 return -1;
             }
             return i64::try_from(end).expect("a packet length fits an i64");
@@ -237,12 +237,12 @@ fn packet_length(bytes: &[u8], packet_size: u64, line_length: u64, form: HttpLin
                 start = end;
                 continue;
             }
-            if max_length != 0 && end as u64 > max_length {
+            if max_length != 0 && to_u64(end) > max_length {
                 return -1;
             }
             return i64::try_from(end).expect("a packet length fits an i64");
         }
-        if max_length != 0 && end as u64 > max_length {
+        if max_length != 0 && to_u64(end) > max_length {
             return -1;
         }
         return 0;
@@ -490,7 +490,7 @@ fn header_line(atoms: &AtomTable, bytes: &[u8], n: usize) -> Result<Option<Term>
     };
     Ok(Some(Term::tuple(vec![
         Term::Atom(atoms.put("http_header")?),
-        Term::Integer(bit as i64),
+        Term::Integer(to_i64(bit)),
         header,
         binary(&bytes[..name_len]),
         binary(&bytes[ptr..ptr + left]),
