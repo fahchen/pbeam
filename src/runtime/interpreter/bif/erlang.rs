@@ -6109,7 +6109,12 @@ impl ProcessInfoRequest<'_> {
                 i64::try_from(std::mem::size_of::<ProcessState>() + process.allocated_bytes())
                     .map_err(|_| error("the process memory exceeds the PBeam integer range"))?,
             ),
-            "messages" => Term::list_from(process.mailbox.messages()),
+            // The list holds the messages that the count holds: for a
+            // request signal, the messages before it, as ERTS answers with
+            // the queue up to the request (erl_bif_info.c:1690-1736).
+            "messages" => {
+                Term::list_from(process.mailbox.messages().into_iter().take(self.messages))
+            }
             "min_heap_size" => Term::Integer(values.heap_flags.min_heap_size),
             "min_bin_vheap_size" => Term::Integer(values.heap_flags.min_bin_vheap_size),
             "fullsweep_after" => Term::Integer(i64::from(values.heap_flags.fullsweep_after)),
