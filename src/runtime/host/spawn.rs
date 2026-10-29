@@ -304,7 +304,7 @@ fn start(
         // ERTS closes the parent end that its direction does not use
         // after the handshake (`sys_drivers.c:1320-1329`).
         input: read_write.write.then(|| nonblocking(input)),
-        output: read_write.read.then_some(output),
+        output: read_write.read.then(|| nonblocking(output)),
         status,
     })
 }
@@ -329,7 +329,7 @@ fn failed(
     Child {
         os_pid: 0,
         input: read_write.write.then(|| nonblocking(input)),
-        output: read_write.read.then_some(output),
+        output: read_write.read.then(|| nonblocking(output)),
         status,
     }
 }
@@ -386,15 +386,17 @@ pub(crate) fn serve(
     Ok(Child {
         os_pid: std::process::id().try_into().unwrap_or(0),
         input: Some(nonblocking(input)),
-        output: Some(output),
+        output: Some(nonblocking(output)),
         status,
     })
 }
 
-/// Return the write end `fd` of the input pipe of a port with
-/// `O_NONBLOCK`, as `spawn_start` sets it (`SET_NONBLOCKING`,
-/// `sys_drivers.c:498`), so a write takes what the pipe holds and returns
-/// at once.
+/// Return the parent end `fd` of a pipe of a port with `O_NONBLOCK`, as
+/// `spawn_start` sets the read end of the output pipe and the write end of
+/// the input pipe (`SET_NONBLOCKING`, `sys_drivers.c:497-498`). A write
+/// takes what the pipe holds and returns at once. A read of an empty pipe
+/// fails with `EAGAIN` and does not block the scheduler: a ready report
+/// can name an fd that a port closed and a new port got again.
 fn nonblocking(fd: OwnedFd) -> OwnedFd {
     // The flag change of a valid pipe fd does not fail.
     let _ = nix::fcntl::fcntl(
