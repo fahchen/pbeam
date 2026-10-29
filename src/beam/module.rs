@@ -153,6 +153,10 @@ pub struct BeamModule {
     /// name and its arity. The name itself stays in the name table of the
     /// module tables.
     pub(crate) exports: HashMap<(NameId, u32), u32>,
+    /// The name and the arity of each export, in the order of the `ExpT`
+    /// chunk, in which the ERTS loader puts the export entries
+    /// (`jit/asm_load.c:1180-1186`).
+    pub(crate) export_order: Vec<(NameId, u32)>,
     /// The MD5 of the module, as `beam_file.c:1751-1830` computes it.
     pub(crate) md5: [u8; 16],
     /// The imports of the module, in the order of its `ImpT` chunk. A
@@ -534,7 +538,7 @@ fn resolve_branch(target: &mut u32, jump_targets: &LabelMap<usize>) -> Result<()
 }
 
 impl BeamModule {
-    /// Return the module `name` with `exports`, `imports`, and the decoded
+    /// Return the module `name` with `exports` in chunk order, `imports`, and the decoded
     /// `instructions`, and build the side tables of the stream. Each export
     /// name goes into the name table of the module, so its name lives in one
     /// place. Each branch label and each call label becomes the resolved
@@ -548,19 +552,20 @@ impl BeamModule {
     /// ```
     pub(crate) fn new(
         name: String,
-        exports: HashMap<(String, u32), u32>,
+        exports: impl IntoIterator<Item = ((String, u32), u32)>,
         imports: Vec<Import>,
         mut instructions: Vec<Instruction>,
     ) -> Result<Self, BeamError> {
         let mut tables = ModuleTables::build(&name, &mut instructions, NameTable::default())?;
-        let exports = exports
+        let export_order: Vec<_> = exports
             .into_iter()
             .map(|((function, arity), label)| ((tables.names.intern(&function), arity), label))
             .collect();
         Ok(BeamModule {
             name,
             id: ModuleId::next(),
-            exports,
+            exports: export_order.iter().copied().collect(),
+            export_order: export_order.into_iter().map(|(export, _)| export).collect(),
             md5: [0; 16],
             imports,
             instructions,

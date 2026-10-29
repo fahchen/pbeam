@@ -807,6 +807,8 @@ const ALLOCATORS: &[&str] = &[
 /// The allocators of `ALLOCATORS` that the default emulator flags enable as
 /// `alloc_util` allocators: each one except `sys_alloc` and `test_alloc`
 /// (`erl_alloc.c:3471-3474`; the pinned ERTS gives `notsup` for the two).
+/// The order is the order of the allocator numbers, which is the order of
+/// `erlang:system_info(alloc_util_allocators)` (`erl_alloc.c:2788-2820`).
 const ALLOC_UTIL_ALLOCATORS: &[&str] = &[
     "temp_alloc",
     "sl_alloc",
@@ -3486,6 +3488,16 @@ pub(super) fn system_info(scheduler: &mut Scheduler, item: &Term) -> Result<BifR
                 ]));
             }
             Ok(Value(Term::list_from(entries)))
+        }
+        // The allocators of the `alloc_util` set of the pinned build, in
+        // the order of their allocator numbers, without `sys_alloc` and
+        // `test_alloc` (`erl_alloc.types:71-85`, `erl_alloc.c:2788-2820`).
+        Term::Atom(atom) if atoms.name_of(atom) == "alloc_util_allocators" => {
+            let mut allocators = Vec::with_capacity(ALLOC_UTIL_ALLOCATORS.len());
+            for name in ALLOC_UTIL_ALLOCATORS {
+                allocators.push(Term::Atom(atoms.put(name)?));
+            }
+            Ok(Value(Term::list_from(allocators)))
         }
         // `erl_bif_info.c:2780-2783` takes each tuple to `info_1_tuple`, and
         // `erl_bif_info.c:3633` rejects each other term that the chain does
@@ -6675,8 +6687,7 @@ pub(super) fn pre_loaded(scheduler: &mut Scheduler) -> Result<BifResult, BeamErr
 ///
 /// # Errors
 ///
-/// The key `exports` is the runtime error
-/// `erlang:get_module_info/2 key exports is not implemented`. A chunk term
+/// A chunk term
 /// that PBeam cannot hold gives the runtime error of
 /// `erlang:binary_to_term/2`.
 /// The key `nifs` of a module with a linked static or extension library is
@@ -6691,11 +6702,10 @@ pub(super) fn get_module_info(
     get_module_info_key(context, module, what, "get_module_info/2")
 }
 
-/// The pair list that `erlang:get_module_info/1` returns, in the order of
-/// the list (`erl_bif_info.c:5970-5984`): the `BUILD_INFO` calls run from
-/// `md5` to `module` and each prepends its pair, so the first pair of the
-/// list is `module`, and the second pair is the one below.
-const MODULE_INFO_MISSING_KEY: &str = "exports";
+/// The keys of the pair list that `erlang:get_module_info/1` returns, in
+/// the order in which `module_info_0` builds them (`erl_bif_info.c:5977-5981`).
+/// Each `BUILD_INFO` prepends its pair, so the list starts with `module`.
+const MODULE_INFO_KEYS: [&str; 5] = ["md5", "compile", "attributes", "exports", "module"];
 
 /// Run `erlang:get_module_info(Module)`, which `Module:module_info/0`
 /// calls, as ERTS `get_module_info_1` and `module_info_0`
@@ -6706,44 +6716,33 @@ const MODULE_INFO_MISSING_KEY: &str = "exports";
 /// caller needs a `code` capability that permits `inspect` for the module
 /// name, as for `erlang:get_module_info/2`.
 ///
-/// PBeam cannot give the key `exports`, which needs the order of the ERTS
-/// export table (row "Module information" of `docs/erts-differences.md`). Thus the call of a loaded
-/// module stops the run with the runtime error
-/// `erlang:get_module_info/1 key exports is not implemented`, as
-/// `erlang:get_module_info/2` stops at a key that it does not implement.
-/// The release `examples/plug_hello` imports this BIF for the
-/// `module_info/0` of each of its modules and calls it nowhere.
-///
 /// # Examples
 ///
 /// ```rust,ignore
-/// // The pair list [{module, lists}, {exports, [... ]}, ...] of ERTS.
+/// // [{module, lists}, {exports, [...]}, {attributes, [...]}, ...]
 /// let result = get_module_info_1(&mut context, &Term::static_atom("lists"))?;
 /// ```
 ///
 /// # Errors
 ///
-/// A key that `erlang:get_module_info/2` does not implement gives its
-/// runtime error. A new `capability_denied` atom in a full atom table gives
-/// the error of `AtomTable::put`.
+/// The errors of `erlang:get_module_info/2` for each key.
 pub(super) fn get_module_info_1(
     context: &mut BifContext<'_>,
     module: &Term,
 ) -> Result<BifResult, BeamError> {
-    // The first key of the list holds the checks that each key shares.
-    let key = Term::static_atom("module");
-    match get_module_info_key(context, module, &key, "get_module_info/1")? {
-        // The pair of the key `module` is the first pair of the list. The
-        // rest of the list needs the keys that PBeam cannot give.
-        BifResult::Value(_) => Err(error(format!(
-            "erlang:get_module_info/1 key {MODULE_INFO_MISSING_KEY} is not implemented"
-        ))),
-        other => Ok(other),
+    let mut list = Term::nil();
+    for name in MODULE_INFO_KEYS {
+        let key = Term::static_atom(name);
+        match get_module_info_key(context, module, &key, "get_module_info/1")? {
+            BifResult::Value(value) => list = Term::cons(Term::tuple(vec![key, value]), list),
+            other => return Ok(other),
+        }
     }
+    Ok(Value(list))
 }
 
-/// Run the key of `erlang:get_module_info/2` that `bif` names, for the
-/// runtime error of the key `exports`, which PBeam does not implement.
+/// Run the key `what` of `erlang:get_module_info/2` for the BIF `bif`,
+/// which names the BIF in a runtime error.
 fn get_module_info_key(
     context: &mut BifContext<'_>,
     module: &Term,
@@ -6833,9 +6832,17 @@ fn get_module_info_key(
         // `has_native` (`erl_bif_info.c:5807-5812`).
         Ok(Value(Term::static_atom("false")))
     } else if key.is_static("exports") {
-        Err(error(format!(
-            "erlang:{bif} key exports is not implemented"
-        )))
+        // `exported_from_module` (`erl_bif_info.c:5822-5862`) walks the
+        // export table and prepends each export of the module. The loader
+        // puts the exports into the table in `ExpT` order
+        // (`jit/asm_load.c:1180-1186`), so the list is the reverse of that
+        // order when no earlier import, apply, or fun made an entry of the
+        // module (row "Module information" of `docs/erts-differences.md`).
+        let pairs = code
+            .export_order
+            .iter()
+            .map(|&(function, arity)| (code.tables.name(function), arity));
+        function_pairs(context, pairs)
     } else {
         Ok(BifResult::badarg())
     }
