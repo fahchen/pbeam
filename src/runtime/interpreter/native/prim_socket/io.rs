@@ -546,13 +546,10 @@ pub(super) fn recv(
         nix::sys::socket::MsgFlags::from_bits_retain(flags),
     );
     let read = match received.map_err(io::Error::from) {
-        Ok(read) if read > 0 || !stream => read,
-        // Each other result ends the buffers of `rNum`
-        // (`recv_check_fail`, unix_socket_syncio.c:10153).
-        Ok(_) => {
-            state.recv_count_done = 0;
-            return Ok(end_of_stream(state));
-        }
+        Ok(0) if stream => return Ok(end_of_stream(state)),
+        Ok(read) => read,
+        // A failed read ends the buffers of `rNum` (`recv_check_fail`,
+        // unix_socket_syncio.c:10153).
         Err(failure) => {
             state.recv_count_done = 0;
             return recv_fail(scheduler, state, &failure, zero, key, caller, reference);
@@ -671,14 +668,18 @@ pub(super) fn recvfrom(
         recv_flagged(&state, &mut buffer, flags)
     };
     let stream = state.kind == libc::SOCK_STREAM;
-    // `essio_recvfrom` ends the buffers of `rNum` at each result
-    // (`unix_socket_syncio.c:3948`, `10153`).
-    state.recv_count_done = 0;
     let (read, from) = match received.map_err(io::Error::from) {
         Ok((0, _)) if stream => return Ok(end_of_stream(state)),
         Ok(received) => received,
-        Err(failure) => return recv_fail(scheduler, state, &failure, zero, key, caller, reference),
+        // A failed read ends the buffers of `rNum` (`recv_check_fail`,
+        // unix_socket_syncio.c:10153).
+        Err(failure) => {
+            state.recv_count_done = 0;
+            return recv_fail(scheduler, state, &failure, zero, key, caller, reference);
+        }
     };
+    // A read ends the buffers of `rNum` (unix_socket_syncio.c:3948).
+    state.recv_count_done = 0;
     buffer.truncate(read);
     let length = read as u64;
     let counters = &mut state.counters;
