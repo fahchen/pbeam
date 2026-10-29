@@ -557,7 +557,9 @@ impl PersistentTerms {
     /// ```
     fn lookup(&self, key: &Term) -> usize {
         let mask = self.buckets.len() - 1;
-        let mut slot = internal_hash(key) as usize & mask;
+        let mut slot = usize::try_from(internal_hash(key))
+            .expect("a u64 fits in usize on a 64-bit host")
+            & mask;
         while let Some((existing, _)) = &self.buckets[slot] {
             if existing == key {
                 break;

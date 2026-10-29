@@ -66,7 +66,10 @@ fn reports_the_memory_of_an_array() {
         arrays.create(Reference(id), Signedness::Signed, size);
         assert_eq!(at(&arrays, id).memory(), memory);
         // Each atomic takes 8 bytes after the header of the array.
-        assert_eq!(MEMORY_HEADER + ATOMIC_BYTES as i64 * size as i64, memory);
+        assert_eq!(
+            MEMORY_HEADER + i64::try_from(ATOMIC_BYTES).unwrap() * i64::try_from(size).unwrap(),
+            memory
+        );
     }
 }
 

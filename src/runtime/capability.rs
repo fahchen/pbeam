@@ -275,6 +275,10 @@ impl Operation {
     /// assert_eq!(Operation::Spawn.bit(), 1);
     /// assert_eq!(Operation::Link.bit(), 2);
     /// ```
+    #[expect(
+        clippy::as_conversions,
+        reason = "Operation is a fieldless enum with no conversion to an integer"
+    )]
     fn bit(self) -> u32 {
         1 << self as u32
     }

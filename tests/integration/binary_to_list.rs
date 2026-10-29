@@ -101,7 +101,7 @@ fn runs_binary_to_list_as_pinned_erts_with_one_scheduler() {
         text(&result.term, result.atoms())
     };
     let options = [program.host_term(Term::nil())];
-    let pretty: Vec<String> = PRETTY.chars().map(|c| (c as u32).to_string()).collect();
+    let pretty: Vec<String> = PRETTY.chars().map(|c| u32::from(c).to_string()).collect();
     let pretty = format!("<<{}>>", pretty.join(","));
     assert_eq!(run("results", &[]), RESULTS);
     assert_eq!(run("costs", &options), COSTS);

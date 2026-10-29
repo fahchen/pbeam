@@ -317,11 +317,13 @@ impl Code {
     /// assert!(compile(b"(a)", 0, None, None)?.names().is_empty());
     /// ```
     pub(super) fn names(&self) -> Vec<(u32, Vec<u8>)> {
-        let count = self.name_count() as usize;
+        let name_count = self.name_count();
+        let count = usize::try_from(name_count).expect("a u32 fits in usize");
         if count == 0 {
             return Vec::new();
         }
-        let entry_size = self.info(INFO_NAMEENTRYSIZE) as usize;
+        let entry_size_u32 = self.info(INFO_NAMEENTRYSIZE);
+        let entry_size = usize::try_from(entry_size_u32).expect("a u32 fits in usize");
         let mut table = vec![0u8; count * entry_size];
         let mut copied_count = 0u32;
         let mut copied_entry_size = 0u32;
@@ -340,7 +342,7 @@ impl Code {
         assert_eq!(result, 0, "PCRE2 name table copy failed");
         assert_eq!(
             (copied_count, copied_entry_size),
-            (count as u32, entry_size as u32)
+            (name_count, entry_size_u32)
         );
         table
             .chunks_exact(entry_size)
@@ -589,7 +591,7 @@ impl MatchData {
         unsafe { pcre2_set_restart_data_8(data.as_ptr(), &raw mut *restart) };
         Self {
             data,
-            pairs: pairs as usize,
+            pairs: usize::try_from(pairs).expect("a u32 fits in usize"),
             restart,
         }
     }

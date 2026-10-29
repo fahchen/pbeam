@@ -72,16 +72,24 @@ const ILENGTH: i64 = 32 * TIME_UNIT / (RESOLUTION * 1000);
 
 /// `drift_adj.intervals`: `ilength / short_isecs`, from 5 to 50
 /// (`erl_time_sup.c:1190-1199`). The value is 5 for the pinned host.
-const DRIFT_INTERVALS: usize = {
+const DRIFT_INTERVAL_COUNT: i64 = {
     let intervals = ILENGTH / SHORT_ISECS;
     if intervals > 50 {
         50
     } else if intervals < 5 {
         5
     } else {
-        intervals as usize
+        intervals
     }
 };
+
+/// [`DRIFT_INTERVAL_COUNT`] as the length of the array of intervals.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "the count is clamped to 5 to 50, and TryFrom is not const"
+)]
+const DRIFT_INTERVALS: usize = DRIFT_INTERVAL_COUNT as usize;
 
 /// `drift_adj.error`: the largest assumed error over a short interval,
 /// `32 * monotonic_time_unit / (resolution * short_isecs)`, 2133 nanoseconds
@@ -322,10 +330,10 @@ impl Correction {
             time_mon: old.time_mon,
             time_sys: old.time_sys,
         }; DRIFT_INTERVALS];
-        self.acc_sys = stime_diff * DRIFT_INTERVALS as i64;
-        self.acc_mon = mtime_diff * DRIFT_INTERVALS as i64;
+        self.acc_sys = stime_diff * DRIFT_INTERVAL_COUNT;
+        self.acc_mon = mtime_diff * DRIFT_INTERVAL_COUNT;
         self.ix = 0;
-        self.dirty_counter = DRIFT_INTERVALS as i64;
+        self.dirty_counter = DRIFT_INTERVAL_COUNT;
     }
 
     /// `check_time_correction` (`erl_time_sup.c:450-777`) for the
@@ -426,7 +434,7 @@ impl Correction {
             if dirty {
                 // A step of the OS system time: rotate the intervals out
                 // before the next drift adjustment.
-                self.dirty_counter = DRIFT_INTERVALS as i64;
+                self.dirty_counter = DRIFT_INTERVAL_COUNT;
                 begin_short = true;
             }
         }

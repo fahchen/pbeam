@@ -19,7 +19,7 @@ fn passes_a_module_whose_declared_library_functions_have_bindings() {
     // have a binding, and `extra/0` is not in the library.
     assert_eq!(
         gaps(include_bytes!("../../fixtures/nif_gate/ok/prim_tty.beam")),
-        [] as [std::string::String; 0]
+        <[std::string::String; 0]>::default()
     );
 }
 
@@ -92,7 +92,7 @@ fn passes_a_library_name_that_is_not_a_literal_string_of_a_module_with_a_library
         gaps(include_bytes!(
             "../../fixtures/nif_gate/registered_dynamic/prim_tty.beam"
         )),
-        [] as [std::string::String; 0]
+        <[std::string::String; 0]>::default()
     );
 }
 
@@ -104,6 +104,6 @@ fn passes_the_windows_only_library_load_of_pubkey_os_cacerts() {
         gaps(include_bytes!(
             "../../fixtures/nif_gate/windows_only/pubkey_os_cacerts.beam"
         )),
-        [] as [std::string::String; 0]
+        <[std::string::String; 0]>::default()
     );
 }

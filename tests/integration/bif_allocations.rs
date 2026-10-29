@@ -102,7 +102,7 @@ fn counted() -> usize {
 /// assert!(count > 0);
 /// ```
 fn allocations(program: &BeamProgram, function: &str, length: usize) -> usize {
-    let counter = Term::Integer(length as i64);
+    let counter = Term::Integer(i64::try_from(length).unwrap());
     let tuple = || Term::tuple(vec![Term::Integer(1), Term::Integer(2), Term::Integer(3)]);
     let terms: Vec<Term> = match function {
         "floor_loop" => vec![counter],

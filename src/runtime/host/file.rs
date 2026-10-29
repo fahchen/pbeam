@@ -15,7 +15,15 @@ use std::{
 
 use nix::sys::{stat::utimes, time::TimeVal};
 
-use super::errno::errno;
+use super::errno::{errno, errno_code};
+
+/// The low 32 bits of a `stat` field, as the C assignment of the field to the
+/// `Uint32` of `efile_fileinfo` keeps them. The field type differs by host:
+/// `st_dev` is `int` on macOS and `dev_t` on Linux.
+fn low_u32(field: impl Into<i128>) -> u32 {
+    let [b0, b1, b2, b3, ..] = field.into().to_le_bytes();
+    u32::from_le_bytes([b0, b1, b2, b3])
+}
 
 /// The type of a host file, as `efile_filetype_t`
 /// (`nifs/common/prim_file_nif.h:56-62`).
@@ -131,20 +139,20 @@ pub(crate) fn read_info(path: &CStr, links: LinkMode) -> Result<FileInfo, c_int>
         _ => FileType::Other,
     };
     Ok(FileInfo {
-        size: data.st_size as i64,
+        size: data.st_size,
         file_type,
         readable,
         writable,
-        atime: data.st_atime as i64,
-        mtime: data.st_mtime as i64,
-        ctime: data.st_ctime as i64,
-        mode: data.st_mode as u32,
-        links: data.st_nlink as u32,
-        major_device: data.st_dev as u32,
-        minor_device: data.st_rdev as u32,
-        inode: data.st_ino as u32,
-        uid: data.st_uid as u32,
-        gid: data.st_gid as u32,
+        atime: data.st_atime,
+        mtime: data.st_mtime,
+        ctime: data.st_ctime,
+        mode: low_u32(data.st_mode),
+        links: low_u32(data.st_nlink),
+        major_device: low_u32(data.st_dev),
+        minor_device: low_u32(data.st_rdev),
+        inode: low_u32(data.st_ino),
+        uid: data.st_uid,
+        gid: data.st_gid,
     })
 }
 
@@ -488,7 +496,7 @@ fn write_vectored(
 /// The `errno` of a failed `close`, for example `EIO` for a write that an
 /// NFS server rejects at the close.
 pub(crate) fn close(file: File) -> Result<(), c_int> {
-    nix::unistd::close(file).map_err(|errno| errno as c_int)
+    nix::unistd::close(file).map_err(errno_code)
 }
 
 /// Move the position of `file` to `offset` from `from`, and return the new
@@ -701,7 +709,12 @@ pub(crate) fn set_permissions(path: &CStr, permissions: u32) -> Result<(), c_int
 ///
 /// The `errno` of `chown`.
 pub(crate) fn set_owner(path: &CStr, uid: i32, gid: i32) -> Result<(), c_int> {
-    std::os::unix::fs::chown(host_path(path), Some(uid as u32), Some(gid as u32)).map_err(os_errno)
+    std::os::unix::fs::chown(
+        host_path(path),
+        Some(uid.cast_unsigned()),
+        Some(gid.cast_unsigned()),
+    )
+    .map_err(os_errno)
 }
 
 /// Set the access time `atime` and the modification time `mtime` of `path`,
@@ -718,9 +731,9 @@ pub(crate) fn set_owner(path: &CStr, uid: i32, gid: i32) -> Result<(), c_int> {
 ///
 /// The `errno` of `utime`.
 pub(crate) fn set_time(path: &CStr, atime: i64, mtime: i64) -> Result<(), c_int> {
-    let atime = TimeVal::new(atime as libc::time_t, 0);
-    let mtime = TimeVal::new(mtime as libc::time_t, 0);
-    utimes(host_path(path), &atime, &mtime).map_err(|errno| errno as c_int)
+    let atime = TimeVal::new(atime, 0);
+    let mtime = TimeVal::new(mtime, 0);
+    utimes(host_path(path), &atime, &mtime).map_err(errno_code)
 }
 
 /// Return the host path of the bytes of `path`.

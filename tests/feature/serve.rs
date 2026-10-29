@@ -281,7 +281,7 @@ fn reports_a_run_that_the_entry_cannot_start() {
     let mut bytes = fs::read(env!("CARGO_BIN_EXE_pbeam")).unwrap();
     bytes.extend_from_slice(&bundle);
     bytes.extend_from_slice(b"PBEAMEMB");
-    bytes.extend_from_slice(&(bundle.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(&u64::try_from(bundle.len()).unwrap().to_le_bytes());
     let path = directory.join("incomplete");
     fs::write(&path, &bytes).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
@@ -304,7 +304,7 @@ fn reports_a_bundle_that_cannot_start() {
     let mut bytes = fs::read(env!("CARGO_BIN_EXE_pbeam")).unwrap();
     bytes.extend_from_slice(&bundle);
     bytes.extend_from_slice(b"PBEAMEMB");
-    bytes.extend_from_slice(&(bundle.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(&u64::try_from(bundle.len()).unwrap().to_le_bytes());
     let path = directory.join("incomplete");
     fs::write(&path, &bytes).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();

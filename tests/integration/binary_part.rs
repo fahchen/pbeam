@@ -112,8 +112,8 @@ fn gives_a_part_that_shares_the_bytes_of_its_source() {
         (&b"hello"[..], &b"ell"[..])
     );
     let (source, part) = (
-        source.bytes().unwrap().as_ptr() as usize,
-        part.bytes().unwrap().as_ptr() as usize,
+        source.bytes().unwrap().as_ptr().addr(),
+        part.bytes().unwrap().as_ptr().addr(),
     );
     assert!(
         (source..source + 5).contains(&part),

@@ -16,6 +16,12 @@ use common::pinned_beam;
 const PORT_PROBE: &[u8] = include_bytes!("../../fixtures/port/port_probe.beam");
 
 /// The first fd that one `fd_set` cannot hold.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "libc::FD_SETSIZE is a small usize constant, and TryFrom is not const"
+)]
 const FD_SETSIZE: i32 = libc::FD_SETSIZE as i32;
 
 #[test]
@@ -35,11 +41,13 @@ fn runs_a_port_whose_pipes_are_at_or_above_fd_setsize() {
     // SAFETY: `getrlimit` and `setrlimit` read and write only `limit`.
     unsafe {
         assert_eq!(libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit), 0);
-        limit.rlim_cur = limit.rlim_max.min(2 * libc::FD_SETSIZE as libc::rlim_t);
+        limit.rlim_cur = limit
+            .rlim_max
+            .min(2 * libc::rlim_t::try_from(libc::FD_SETSIZE).unwrap());
         assert_eq!(libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit), 0);
     }
     assert!(
-        limit.rlim_cur > libc::FD_SETSIZE as libc::rlim_t + 16,
+        limit.rlim_cur > libc::rlim_t::try_from(libc::FD_SETSIZE).unwrap() + 16,
         "{limit:?}"
     );
     let mut fds = Vec::new();

@@ -39,7 +39,7 @@ fn reference_with(arguments: &[&str], function: &str) -> Vec<u8> {
         .output()
         .unwrap();
     assert!(output.status.success());
-    assert_eq!(output.stderr, [] as [u8; 0]);
+    assert_eq!(output.stderr, <[u8; 0]>::default());
     output.stdout
 }
 
@@ -340,7 +340,7 @@ fn reads_the_application_environment_from_ac_tab_as_pinned_erts() {
         .output()
         .unwrap();
     assert!(output.status.success());
-    assert_eq!(output.stderr, [] as [u8; 0]);
+    assert_eq!(output.stderr, <[u8; 0]>::default());
     assert_eq!(
         output.stdout,
         b"[[set,public,true,1,true],[default,true,value]]\n"

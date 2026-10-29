@@ -159,7 +159,10 @@ fn without_chunks(beam: &[u8], drop: &[&[u8; 4]]) -> Vec<u8> {
     let mut body = b"BEAM".to_vec();
     let mut pos = 12;
     while pos < beam.len() {
-        let size = u32::from_be_bytes(beam[pos + 4..pos + 8].try_into().unwrap()) as usize;
+        let size = usize::try_from(u32::from_be_bytes(
+            beam[pos + 4..pos + 8].try_into().unwrap(),
+        ))
+        .unwrap();
         let end = pos + 8 + size.next_multiple_of(4);
         if !drop.iter().any(|name| beam[pos..pos + 4] == name[..]) {
             body.extend_from_slice(&beam[pos..end]);
@@ -167,7 +170,7 @@ fn without_chunks(beam: &[u8], drop: &[&[u8; 4]]) -> Vec<u8> {
         pos = end;
     }
     let mut out = b"FOR1".to_vec();
-    out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    out.extend_from_slice(&u32::try_from(body.len()).unwrap().to_be_bytes());
     out.extend(body);
     out
 }
@@ -178,7 +181,7 @@ fn with_compile_info(beam: &[u8], data: [u8; 4]) -> Vec<u8> {
     let mut out = without_chunks(beam, &[b"CInf"]);
     out.extend_from_slice(b"CInf\0\0\0\x04");
     out.extend_from_slice(&data);
-    let size = (out.len() - 8) as u32;
+    let size = u32::try_from(out.len() - 8).unwrap();
     out[4..8].copy_from_slice(&size.to_be_bytes());
     out
 }

@@ -280,7 +280,7 @@ fn checks_the_select_val_results_against_erts() {
     let program = BeamProgram::load(&[SELECT_VAL_PROBE]).unwrap();
     let lines = run_erts();
 
-    let counter = program.host_term(Term::Integer(LENGTH as i64));
+    let counter = program.host_term(Term::Integer(i64::try_from(LENGTH).unwrap()));
     let zero = program.host_term(Term::Integer(0));
     for function in ["ordered_loop", "nibble_loop", "linear_loop"] {
         let args = [counter.clone(), zero.clone()];
@@ -324,10 +324,15 @@ fn checks_the_select_val_results_against_erts() {
 /// the pinned ERTS, and print the numbers as Markdown. The minimum of
 /// [`RUNS`] runs is the reported number.
 #[test]
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "timing probe: the nanosecond and length counts convert to f64 for a ratio"
+)]
 fn records_the_select_val_cost() {
     let program = BeamProgram::load(&[SELECT_VAL_PROBE]).unwrap();
     let lines = run_erts();
-    let counter = program.host_term(Term::Integer(LENGTH as i64));
+    let counter = program.host_term(Term::Integer(i64::try_from(LENGTH).unwrap()));
     let zero = program.host_term(Term::Integer(0));
     let args = [counter, zero];
 

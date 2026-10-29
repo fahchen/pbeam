@@ -854,7 +854,7 @@ impl ProcessState {
     /// assert_eq!(process.bif_reductions_unsigned(), u64::MAX - 2);
     /// ```
     pub(super) fn bif_reductions_unsigned(&self) -> u64 {
-        i64::from(self.fcalls) as u64
+        i64::from(self.fcalls).cast_unsigned()
     }
 
     /// Return the result of `erlang:process_info/2` for the item `item` of

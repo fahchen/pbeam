@@ -20,7 +20,10 @@ use std::{
     thread,
 };
 
-use super::{errno::errno, input, output};
+use super::{
+    errno::{errno, errno_code},
+    input, output,
+};
 
 /// The size of one read of the output pipe, as `ERTS_SYS_READ_BUF_SZ`
 /// (`sys_drivers.c:165`, `1336-1347`).
@@ -353,7 +356,7 @@ fn enter_error(dir: &[u8]) -> Option<c_int> {
         Ok(metadata) if !metadata.is_dir() => Some(libc::ENOTDIR),
         Ok(_) => nix::unistd::access(OsStr::from_bytes(dir), nix::unistd::AccessFlags::X_OK)
             .err()
-            .map(|error| error as c_int),
+            .map(errno_code),
     }
 }
 

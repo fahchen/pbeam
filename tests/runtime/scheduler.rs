@@ -98,7 +98,10 @@ fn keeps_the_current_process_in_the_table_and_out_of_the_run_queue() {
     scheduler.park_current();
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
     assert_eq!(current(&mut scheduler), ProcessId(1));
-    assert_eq!(scheduler.runnable.ids(), [] as [crate::term::ProcessId; 0]);
+    assert_eq!(
+        scheduler.runnable.ids(),
+        <[crate::term::ProcessId; 0]>::default()
+    );
     scheduler.deliver(ProcessId(0), atom("ping"));
     scheduler.deliver(ProcessId(1), atom("self"));
     scheduler.deliver(ProcessId(9), atom("lost"));
@@ -361,7 +364,7 @@ fn links_and_unlinks_processes_and_ignores_normal_exit_without_trap_exit() {
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Idle);
     let root = &scheduler.processes[&ProcessId(0)];
     assert!(root.links.is_empty());
-    assert_eq!(root.mailbox.messages(), [] as [crate::term::Term; 0]);
+    assert_eq!(root.mailbox.messages(), <[crate::term::Term; 0]>::default());
 }
 
 #[test]
@@ -445,7 +448,7 @@ fn sends_the_pending_monitor_signal_before_a_demonitor_signal() {
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
     assert_eq!(
         scheduler.current_process_mut().monitored_by,
-        [] as [crate::runtime::process::TargetMonitor; 0]
+        <[crate::runtime::process::TargetMonitor; 0]>::default()
     );
 }
 
@@ -840,7 +843,10 @@ fn runs_other_processes_while_a_dirty_write_waits_and_resumes_it_after() {
             .unwrap()
     );
     scheduler.complete_dirty_calls();
-    assert_eq!(scheduler.runnable.ids(), [] as [crate::term::ProcessId; 0]);
+    assert_eq!(
+        scheduler.runnable.ids(),
+        <[crate::term::ProcessId; 0]>::default()
+    );
     let reading = std::thread::spawn(move || {
         let mut bytes = Vec::new();
         (&reader).read_to_end(&mut bytes).unwrap();
@@ -974,7 +980,10 @@ fn handles_the_signals_of_a_dirty_writer_and_drops_its_late_completion() {
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Idle);
     // A message does not put the writer in the run queue.
     scheduler.deliver(ProcessId(1), atom("ping"));
-    assert_eq!(scheduler.runnable.ids(), [] as [crate::term::ProcessId; 0]);
+    assert_eq!(
+        scheduler.runnable.ids(),
+        <[crate::term::ProcessId; 0]>::default()
+    );
     // A signal does: the turn handles it, and the writer does not run.
     scheduler
         .send_signal(Some(ProcessId(0)), ProcessId(1), kill())
@@ -1001,7 +1010,10 @@ fn handles_the_signals_of_a_dirty_writer_and_drops_its_late_completion() {
     wait_all_completions(&mut scheduler);
     drop(writer);
     assert_eq!(reading.join().unwrap(), bytes);
-    assert_eq!(scheduler.runnable.ids(), [] as [crate::term::ProcessId; 0]);
+    assert_eq!(
+        scheduler.runnable.ids(),
+        <[crate::term::ProcessId; 0]>::default()
+    );
     assert!(!scheduler.processes.contains_key(ProcessId(1)));
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Idle);
 }
@@ -1280,7 +1292,9 @@ fn releases_the_terms_of_an_exiting_process_at_each_later_step() {
     // keeps stepping and the release completes. The X registers hold the 512
     // terms of the start arguments.
     let mut scheduler = test_scheduler();
-    let terms: Vec<Term> = (0..2 * RELEASE_BATCH as i64).map(Term::Integer).collect();
+    let terms: Vec<Term> = (0..2 * i64::try_from(RELEASE_BATCH).unwrap())
+        .map(Term::Integer)
+        .collect();
     scheduler.start(frame(), terms, allow_all());
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
     scheduler.finish_current(atom("normal"), None).unwrap();
@@ -1377,7 +1391,11 @@ fn moves_the_array_of_a_wide_tuple_in_batches() {
     // would leave no group.
     let mut scheduler = test_scheduler();
     let width = 4 * RELEASE_BATCH;
-    let wide = Term::tuple((0..width as i64).map(Term::Integer).collect());
+    let wide = Term::tuple(
+        (0..i64::try_from(width).unwrap())
+            .map(Term::Integer)
+            .collect(),
+    );
     scheduler.start(frame(), vec![wide], allow_all());
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
     scheduler.finish_current(atom("normal"), None).unwrap();
@@ -1412,7 +1430,9 @@ fn moves_the_free_variables_of_a_fun_in_batches() {
     let mut scheduler = test_scheduler();
     let module = Atom::from_static("lists").unwrap();
     let width = 4 * RELEASE_BATCH;
-    let free: Vec<Term> = (0..width as i64).map(Term::Integer).collect();
+    let free: Vec<Term> = (0..i64::try_from(width).unwrap())
+        .map(Term::Integer)
+        .collect();
     let fun = Term::Fun(Fun::new(Lambda::new(module, 0, 0, 7, 53, 1), free));
     scheduler.start(frame(), vec![fun], allow_all());
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
@@ -1469,7 +1489,7 @@ fn moves_the_slots_of_one_frame_in_batches() {
     {
         let process = scheduler.processes.get_mut(id).unwrap();
         process.frames[0].stack = (0..4 * RELEASE_BATCH)
-            .map(|number| StackSlot::Term(marker(number as i64)))
+            .map(|number| StackSlot::Term(marker(i64::try_from(number).unwrap())))
             .collect();
     }
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
@@ -1502,8 +1522,8 @@ fn moves_the_monitors_of_an_exiting_process_in_batches() {
                     monitor: Some(OriginMonitor {
                         kind: "process",
                         target: None,
-                        item: marker(reference as i64),
-                        tag: marker(reference as i64),
+                        item: marker(i64::try_from(reference).unwrap()),
+                        tag: marker(i64::try_from(reference).unwrap()),
                     }),
                     alias: None,
                 },
@@ -1531,7 +1551,8 @@ fn moves_the_terms_of_a_discarded_signal_to_the_release_work_list() {
     // drops, so an ignored signal that owns the last root of a large graph
     // does not release that graph in the exit step.
     let mut scheduler = test_scheduler();
-    let expected = Term::list_from((0..4 * RELEASE_BATCH as i64).map(Term::Integer));
+    let expected =
+        Term::list_from((0..4 * i64::try_from(RELEASE_BATCH).unwrap()).map(Term::Integer));
     scheduler.start(frame(), Vec::new(), allow_all());
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
     // The signal arrives after the process took its turn, so the exit sees it
@@ -1652,7 +1673,7 @@ fn counts_the_bytes_of_the_release_work_list() {
     let mut scheduler = test_scheduler();
     let id = ProcessId(0);
     let map = Map::from_pairs(
-        (0..4 * RELEASE_BATCH as i64)
+        (0..4 * i64::try_from(RELEASE_BATCH).unwrap())
             .map(|key| (Term::Integer(key), atom("v")))
             .collect(),
         &crate::term::test_atom_table(),
@@ -1668,7 +1689,7 @@ fn counts_the_bytes_of_the_release_work_list() {
         // The frame holds more Y slots than one batch, so the group of slots
         // waits on the list after one step.
         process.frames[0].stack = (0..4 * RELEASE_BATCH)
-            .map(|number| StackSlot::Term(marker(number as i64)))
+            .map(|number| StackSlot::Term(marker(i64::try_from(number).unwrap())))
             .collect();
         process.mailbox.push(marker(3));
         process.dictionary.put(Term::Integer(4), marker(5));
@@ -1756,7 +1777,7 @@ fn counts_the_arena_of_a_mailbox_across_the_drain_steps() {
     // of the step that took it from the run queue does not consume them.
     {
         let process = scheduler.processes.get_mut(ProcessId(0)).unwrap();
-        for number in 0..messages as i64 {
+        for number in 0..i64::try_from(messages).unwrap() {
             process.mailbox.push(marker(number));
         }
         process.mailbox.push_signal(Signal::Exit {
@@ -1799,7 +1820,11 @@ fn counts_the_storage_of_the_containers_across_the_drain_steps() {
     let mut scheduler = test_scheduler();
     let width = 4 * RELEASE_BATCH;
     let array = width * std::mem::size_of::<Term>();
-    let tuple = Term::tuple((0..width as i64).map(Term::Integer).collect());
+    let tuple = Term::tuple(
+        (0..i64::try_from(width).unwrap())
+            .map(Term::Integer)
+            .collect(),
+    );
     scheduler.start(frame(), vec![Term::Integer(0)], allow_all());
     scheduler.processes.get_mut(ProcessId(0)).unwrap().registers[0] = Some(tuple);
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
@@ -1832,13 +1857,15 @@ fn counts_the_terms_of_a_map_drain_that_is_the_only_item() {
     // number, and it must hold the whole graph of each value.
     let width = 4 * RELEASE_BATCH;
     let mut direct = crate::term::LiveBytes::new();
-    direct.term(&Term::list_from((0..width as i64).map(Term::Integer)));
+    direct.term(&Term::list_from(
+        (0..i64::try_from(width).unwrap()).map(Term::Integer),
+    ));
     let expected = direct.bytes();
     assert!(expected > 0, "a list of cells holds live bytes");
     let mut map = Map::from_pairs(
         vec![(
             Term::Integer(0),
-            Term::list_from((0..width as i64).map(Term::Integer)),
+            Term::list_from((0..i64::try_from(width).unwrap()).map(Term::Integer)),
         )],
         &crate::term::test_atom_table(),
     )
@@ -2080,7 +2107,10 @@ fn reads_a_break_key_after_a_failed_menu_wait() {
         Scheduler::menu_ready(Readiness::Invalid),
         vec![libc::STDIN_FILENO]
     );
-    assert_eq!(Scheduler::menu_ready(Readiness::Pending), [] as [i32; 0]);
+    assert_eq!(
+        Scheduler::menu_ready(Readiness::Pending),
+        <[i32; 0]>::default()
+    );
     assert_eq!(Scheduler::menu_ready(Readiness::Ready(vec![7])), vec![7]);
 }
 
@@ -2255,7 +2285,7 @@ fn a_remote_target_adds_and_removes_the_monitor_of_a_watcher() {
     owner
         .handle_signals(target, 100, 100, HandlingPoint::ScheduleIn)
         .unwrap();
-    assert_eq!(watchers(&owner), [] as [crate::term::ProcessId; 0]);
+    assert_eq!(watchers(&owner), <[crate::term::ProcessId; 0]>::default());
 }
 
 #[test]
@@ -2379,7 +2409,7 @@ fn a_delivery_to_an_exiting_process_changes_nothing() {
     let root = ProcessId(0);
     scheduler.processes.get_mut(root).unwrap().exiting = Some(atom("normal"));
     scheduler.deliver(root, atom("lost"));
-    assert_eq!(messages(&scheduler, 0), [] as [crate::term::Term; 0]);
+    assert_eq!(messages(&scheduler, 0), <[crate::term::Term; 0]>::default());
 }
 
 #[test]
@@ -2396,7 +2426,7 @@ fn a_signal_to_a_dead_process_drops_an_unlink_ack() {
     scheduler.start(frame(), vec![], allow_all());
     let root = ProcessId(0);
     scheduler.dead_target_signal(ProcessId(99), &Signal::UnlinkAck { from: root, id: 1 });
-    assert_eq!(messages(&scheduler, 0), [] as [crate::term::Term; 0]);
+    assert_eq!(messages(&scheduler, 0), <[crate::term::Term; 0]>::default());
 }
 
 #[test]
@@ -2600,7 +2630,7 @@ fn schedules_again_when_the_poll_thread_reported_an_fd_before_the_wait() {
     assert!(scheduler.wait_events(None).unwrap());
     assert_eq!(
         scheduler.node.poll.take_ready(index),
-        [] as [(i32, crate::runtime::scheduler::poll::Direction); 0]
+        <[(i32, crate::runtime::scheduler::poll::Direction); 0]>::default()
     );
 }
 
@@ -2716,7 +2746,10 @@ fn drops_the_io_event_of_a_port_that_another_scheduler_closed() {
         scheduler.tcp_accept_ready(port).unwrap();
         scheduler.node.ports().remove(port);
     }
-    assert_eq!(messages(&scheduler, id.0), [] as [crate::term::Term; 0]);
+    assert_eq!(
+        messages(&scheduler, id.0),
+        <[crate::term::Term; 0]>::default()
+    );
 }
 
 #[test]

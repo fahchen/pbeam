@@ -46,6 +46,11 @@ const SHARDS: usize = 64;
 /// processes of a burst of spawns go to more than one shard.
 const BLOCK: u64 = 1024;
 
+/// A list length as `u64`, which holds every `usize`.
+fn to_u64(length: usize) -> u64 {
+    u64::try_from(length).expect("a usize fits in u64")
+}
+
 #[cfg(test)]
 thread_local! {
     /// The entries of the deleted list and the read positions that the
@@ -190,7 +195,8 @@ impl Default for ProcessTable {
 impl ProcessTable {
     /// Lock the shard of the table index `ix`.
     fn shard(&self, ix: u64) -> MutexGuard<'_, Shard> {
-        self.shards[(ix / BLOCK) as usize % SHARDS]
+        self.shards
+            [usize::try_from(ix / BLOCK).expect("a u64 fits in usize on a 64-bit host") % SHARDS]
             .lock()
             .expect("the process table shard is not poisoned")
     }
@@ -388,7 +394,7 @@ impl ProcessTable {
             .write()
             .expect("the process list state is not poisoned");
         listing.interval += 1;
-        let pos = listing.deleted_base + listing.deleted.len() as u64;
+        let pos = listing.deleted_base + to_u64(listing.deleted.len());
         let start = Reader {
             start: listing.interval,
             tix: 0,
@@ -495,7 +501,10 @@ impl ProcessTable {
             .expect("the process list state is not poisoned");
         let read = &listing.readers[&reader];
         let pos = read.pos;
-        let entry = listing.deleted.get((pos - listing.deleted_base) as usize)?;
+        let entry = listing.deleted.get(
+            usize::try_from(pos - listing.deleted_base)
+                .expect("a u64 fits in usize on a 64-bit host"),
+        )?;
         let listed = read.lists(entry).then_some(entry.id);
         // The read is the oldest when it is alone at the first position.
         count_work(1);
@@ -527,7 +536,7 @@ impl ProcessTable {
             .listing
             .read()
             .expect("the process list state is not poisoned");
-        listing.readers[&reader].pos == listing.deleted_base + listing.deleted.len() as u64
+        listing.readers[&reader].pos == listing.deleted_base + to_u64(listing.deleted.len())
     }
 
     /// End the read of `reader`.
@@ -609,7 +618,7 @@ impl Listing {
     /// read stepped through, the oldest first. The oldest read steps
     /// through one entry in each step, so it drops the entry that it frees.
     fn prune_deleted(&mut self) {
-        let end = self.deleted_base + self.deleted.len() as u64;
+        let end = self.deleted_base + to_u64(self.deleted.len());
         let first = self
             .positions
             .first_key_value()

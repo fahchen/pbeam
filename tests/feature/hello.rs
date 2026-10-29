@@ -363,7 +363,7 @@ fn prints_help_and_exits_successfully() {
     );
     assert!(stdout.contains("--policy <MODULE>"));
     assert!(stdout.contains("-h, --help"));
-    assert_eq!(output.stderr, [] as [u8; 0]);
+    assert_eq!(output.stderr, <[u8; 0]>::default());
 }
 
 #[test]

@@ -79,6 +79,26 @@ pub(in crate::runtime) use stream::{Activation, Event, Output, Receiver};
 /// (`ERTS_INET_DRV_CONTROL_MAGIC_NUMBER`, `prim_inet.erl:2969`).
 const MAGIC: u32 = 0x03f1_a300;
 
+/// A byte count or position as `u64`, which holds every `usize`.
+fn to_u64(count: usize) -> u64 {
+    u64::try_from(count).expect("a usize fits in u64")
+}
+
+/// The low 32 bits of `value`, as the C conversion of a 64-bit counter to
+/// `Uint32` keeps them.
+fn low_u32(value: u64) -> u32 {
+    let [b0, b1, b2, b3, ..] = value.to_le_bytes();
+    u32::from_le_bytes([b0, b1, b2, b3])
+}
+
+/// The `size_t` of a C `int`, which keeps the sign bits as the C conversion
+/// does.
+fn sign_extended(value: i32) -> usize {
+    isize::try_from(value)
+        .expect("an isize holds an i32 on every supported target")
+        .cast_unsigned()
+}
+
 /// The largest reply of `GETOPTS` and `SUBSCRIBE` (`INET_MAX_OPT_BUFFER`,
 /// `inet_drv.c:1046`).
 const MAX_OPT_BUFFER: usize = 64 * 1024;
@@ -847,7 +867,8 @@ impl Inet {
                     true
                 }
                 20 => {
-                    self.stream.buffer = value.max(1) as usize;
+                    self.stream.buffer =
+                        usize::try_from(value.max(1)).expect("the buffer is at least 1");
                     self.buffer_set = true;
                     true
                 }
@@ -858,22 +879,26 @@ impl Inet {
                     socket.set_broadcast(value != 0)
                 }),
                 6 => self.set_socket(libc::SO_SNDBUF, SetErrors::Ignore, |socket| {
-                    socket.set_send_buffer_size(value as usize)
+                    socket.set_send_buffer_size(sign_extended(value))
                 }),
                 7 => {
                     if !self.buffer_set {
                         if value > MAX_UDP_BUFFER && self.socket_type == SocketType::Datagram {
-                            self.stream.buffer = MAX_UDP_BUFFER as usize;
-                        } else if i64::from(value) > self.stream.buffer as i64 {
-                            self.stream.buffer = value as usize;
+                            self.stream.buffer = usize::try_from(MAX_UDP_BUFFER)
+                                .expect("the UDP buffer limit is positive");
+                        } else if i64::from(value)
+                            > i64::try_from(self.stream.buffer).expect("a buffer size fits in i64")
+                        {
+                            self.stream.buffer = usize::try_from(value)
+                                .expect("a value above the buffer is positive");
                         }
                     }
                     self.set_socket(libc::SO_RCVBUF, SetErrors::Ignore, |socket| {
-                        socket.set_recv_buffer_size(value as usize)
+                        socket.set_recv_buffer_size(sign_extended(value))
                     })
                 }
                 12 => self.set_socket(libc::IP_MULTICAST_TTL, SetErrors::Ignore, |socket| {
-                    socket.set_multicast_ttl_v4(value as u32)
+                    socket.set_multicast_ttl_v4(value.cast_unsigned())
                 }),
                 13 => self.set_socket(libc::IP_MULTICAST_LOOP, SetErrors::Ignore, |socket| {
                     socket.set_multicast_loop_v4(value != 0)
@@ -881,14 +906,14 @@ impl Inet {
                 11 => match self.family {
                     AF_INET => {
                         self.set_socket(libc::IP_MULTICAST_IF, SetErrors::Ignore, |socket| {
-                            socket.set_multicast_if_v4(&Ipv4Addr::from(value as u32))
+                            socket.set_multicast_if_v4(&Ipv4Addr::from(value.cast_unsigned()))
                         })
                     }
                     // ERTS gives the index in network byte order
                     // (`sock_htonl`, inet_drv.c:7608).
                     AF_INET6 => {
                         self.set_socket(libc::IPV6_MULTICAST_IF, SetErrors::Ignore, |socket| {
-                            socket.set_multicast_if_v6((value as u32).to_be())
+                            socket.set_multicast_if_v6(value.cast_unsigned().to_be())
                         })
                     }
                     _ => false,
@@ -966,10 +991,10 @@ impl Inet {
                 }
                 8 => self.set_priority(value),
                 9 => self.set_socket(libc::IP_TOS, SetErrors::Propagate, |socket| {
-                    socket.set_tos_v4(value as u32)
+                    socket.set_tos_v4(value.cast_unsigned())
                 }),
                 46 => self.set_socket(libc::IP_TTL, SetErrors::Propagate, |socket| {
-                    socket.set_ttl_v4(value as u32)
+                    socket.set_ttl_v4(value.cast_unsigned())
                 }),
                 // A datagram receive reads no ancillary data, so it cannot
                 // give `{tos, TOS}` (inet_drv.c:15452-15466).
@@ -983,7 +1008,7 @@ impl Inet {
                     socket.set_only_v6(value != 0)
                 }),
                 41 => self.set_socket(libc::IPV6_TCLASS, SetErrors::Propagate, |socket| {
-                    socket.set_tclass_v6(value as u32)
+                    socket.set_tclass_v6(value.cast_unsigned())
                 }),
                 44 => self.set_socket(libc::IPV6_RECVTCLASS, SetErrors::Propagate, |socket| {
                     socket.set_recv_tclass_v6(value != 0)
@@ -1113,12 +1138,12 @@ impl Inet {
             let integer = |get: fn(&Socket) -> io::Result<u32>| {
                 socket
                     .and_then(|socket| get(socket).ok())
-                    .map(|value| value as i32)
+                    .map(u32::cast_signed)
             };
             let size = |get: fn(&Socket) -> io::Result<usize>| {
                 socket
                     .and_then(|socket| get(socket).ok())
-                    .map(|value| value as i32)
+                    .map(|value| low_u32(to_u64(value)).cast_signed())
             };
             let value = match option {
                 24 => Some(self.mode),
@@ -1134,7 +1159,7 @@ impl Inet {
                 }
                 22 => Some(self.active),
                 33 if self.socket_type == SocketType::Datagram => Some(self.read_packets),
-                20 => Some(self.stream.buffer as i32),
+                20 => Some(low_u32(to_u64(self.stream.buffer)).cast_signed()),
                 2 => socket
                     .and_then(|socket| getsockopt(socket, sockopt::DontRoute).ok())
                     .map(|on| i32::from(on) * getsockopt_scale(libc::SO_DONTROUTE)),
@@ -1189,7 +1214,7 @@ impl Inet {
                         let (on, seconds) = linger.map_or((0, 0), |time| (1, time.as_secs()));
                         reply.push(option);
                         reply.extend(i32::to_be_bytes(on));
-                        reply.extend((seconds as u32).to_be_bytes());
+                        reply.extend(low_u32(seconds).to_be_bytes());
                     }
                     continue;
                 }
@@ -1473,7 +1498,7 @@ fn priority(_socket: Option<&Socket>) -> Option<i32> {
 fn priority(socket: Option<&Socket>) -> Option<i32> {
     socket
         .and_then(|socket| socket.priority().ok())
-        .map(|value| value as i32)
+        .map(|value| value.cast_signed())
 }
 
 impl Inet {
@@ -1505,7 +1530,7 @@ impl Inet {
                 self.stream.subscribers.push(caller);
             }
             reply.push(code);
-            reply.extend((size as u32).to_be_bytes());
+            reply.extend(low_u32(to_u64(size)).to_be_bytes());
         }
         Control::Reply(reply)
     }
@@ -1527,7 +1552,7 @@ impl Inet {
     #[cfg(target_os = "linux")]
     fn set_priority(&self, value: i32) -> bool {
         self.set_socket(libc::SO_PRIORITY, SetErrors::Propagate, |socket| {
-            socket.set_priority(value as u32)
+            socket.set_priority(value.cast_unsigned())
         })
     }
 }

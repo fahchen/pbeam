@@ -37,7 +37,7 @@ fn reference(expression: &str) -> Vec<u8> {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert_eq!(reference.stderr, [] as [u8; 0]);
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     reference.stdout
 }
 

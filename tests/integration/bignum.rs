@@ -57,7 +57,7 @@ fn parse(text: &mut &str, program: &BeamProgram) -> Term {
     if let Some(rest) = text.strip_prefix("<<") {
         *text = rest;
         let bytes = elements(text, ">>").into_iter().map(|byte| match byte {
-            Term::Integer(byte) => byte as u8,
+            Term::Integer(byte) => u8::try_from(byte).unwrap(),
             other => panic!("not a byte: {other:?}"),
         });
         return Term::binary(bytes.collect());

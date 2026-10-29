@@ -895,10 +895,10 @@ fn call(atoms: &AtomTable, function: Guard, arguments: &[Term]) -> Option<Term> 
             let Term::Tuple(elements) = &arguments[1] else {
                 return None;
             };
-            if index < 1 || index as usize > elements.len() {
-                return None;
-            }
-            Some(elements[index as usize - 1].clone())
+            let position = usize::try_from(index)
+                .ok()
+                .filter(|position| (1..=elements.len()).contains(position))?;
+            Some(elements[position - 1].clone())
         }
         Guard::Hd => arguments[0].cons_cell().map(|(head, _)| head.clone()),
         Guard::Tl => arguments[0].cons_cell().map(|(_, tail)| tail.clone()),
@@ -906,7 +906,7 @@ fn call(atoms: &AtomTable, function: Guard, arguments: &[Term]) -> Option<Term> 
             i64::try_from(arguments[0].proper_list()?.count()).ok()?,
         )),
         Guard::MapSize => match &arguments[0] {
-            Term::Map(map) => Some(Term::Integer(map.iter().count() as i64)),
+            Term::Map(map) => Some(Term::Integer(i64::try_from(map.iter().count()).ok()?)),
             _ => None,
         },
         Guard::MapGet => match &arguments[1] {
@@ -920,22 +920,24 @@ fn call(atoms: &AtomTable, function: Guard, arguments: &[Term]) -> Option<Term> 
         // ERTS calls `size_1` (`erl_db_util.c:731-732`), which floors the bit
         // size of a bitstring with `BYTE_SIZE` (`erl_bif_guard.c:323-324`).
         Guard::Size => match &arguments[0] {
-            Term::Tuple(elements) => Some(Term::Integer(elements.len() as i64)),
-            Term::Binary(binary) => Some(Term::Integer((binary.bit_size() / 8) as i64)),
+            Term::Tuple(elements) => Some(Term::Integer(i64::try_from(elements.len()).ok()?)),
+            Term::Binary(binary) => Some(Term::Integer(i64::try_from(binary.bit_size() / 8).ok()?)),
             _ => None,
         },
         Guard::BitSize => match &arguments[0] {
-            Term::Binary(binary) => Some(Term::Integer(binary.bit_size() as i64)),
+            Term::Binary(binary) => Some(Term::Integer(i64::try_from(binary.bit_size()).ok()?)),
             _ => None,
         },
         // ERTS calls `byte_size_1` (`erl_db_util.c:761-762`), which rounds the
         // bit size up with `NBYTES` (`erl_bif_guard.c:385`, `erl_bits.h:27`).
         Guard::ByteSize => match &arguments[0] {
-            Term::Binary(binary) => Some(Term::Integer(binary.bit_size().div_ceil(8) as i64)),
+            Term::Binary(binary) => Some(Term::Integer(
+                i64::try_from(binary.bit_size().div_ceil(8)).ok()?,
+            )),
             _ => None,
         },
         Guard::TupleSize => match &arguments[0] {
-            Term::Tuple(elements) => Some(Term::Integer(elements.len() as i64)),
+            Term::Tuple(elements) => Some(Term::Integer(i64::try_from(elements.len()).ok()?)),
             _ => None,
         },
         Guard::Node0 => Some(Term::static_atom("nonode@nohost")),
@@ -1180,7 +1182,7 @@ fn shift(left: &Term, right: &Term, direction: ShiftDirection) -> Option<Term> {
             left_shift = !left_shift;
             count.unsigned_abs()
         }
-        Some(count) => count as u64,
+        Some(count) => count.cast_unsigned(),
         None => {
             // `N bsl NegativeBigNum` is `N bsr MAX_SMALL`, and
             // `N bsr NegativeBigNum` is `N bsl MAX_SMALL`
@@ -1199,7 +1201,9 @@ fn shift(left: &Term, right: &Term, direction: ShiftDirection) -> Option<Term> {
         if huge || count > u64::from(u32::MAX) {
             return Some(Term::Integer(if left.is_negative() { -1 } else { 0 }));
         }
-        return Some(integer_term(left >> count as usize));
+        return Some(integer_term(
+            left >> usize::try_from(count).expect("a count up to u32::MAX fits in usize"),
+        ));
     }
     if left == BigInt::from(0) {
         return Some(Term::Integer(0));
@@ -1209,11 +1213,13 @@ fn shift(left: &Term, right: &Term, direction: ShiftDirection) -> Option<Term> {
     }
     // The pre-check of `erts_shift` gives `system_limit` when the result
     // would exceed the bignum arity (`erl_arith.c:246-278`).
-    let bits = (left.magnitude().bits() as u128) + u128::from(count);
+    let bits = u128::from(left.magnitude().bits()) + u128::from(count);
     if bits.div_ceil(64) > BIG_ARITY_MAX {
         return None;
     }
-    Some(integer_term(left << count as usize))
+    Some(integer_term(
+        left << usize::try_from(count).expect("a count within the bignum arity fits in usize"),
+    ))
 }
 
 /// Return the value of unary `+`, which requires a number.
@@ -1252,6 +1258,11 @@ fn integer(term: &Term) -> Option<BigInt> {
 }
 
 /// Return the float of a numeric term.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "the C `(double)` conversion of a small integer rounds as `as` does"
+)]
 fn float(term: &Term) -> Option<f64> {
     match term {
         Term::Integer(value) => Some(*value as f64),

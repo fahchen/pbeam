@@ -262,15 +262,17 @@ fn build_binary(
 ) -> (Term, bool) {
     let latin1 = charset == CharEncoding::Latin1;
     let mut size = bytes.len();
+    let total = i64::try_from(size).expect("a binary length fits in i64");
+    let position = |left: i64| usize::try_from(left).expect("the budget of a walk is positive");
     if !latin1 {
-        while size as i64 > *left && bytes[*left as usize] & 0xC0 == 0x80 {
+        while total > *left && bytes[position(*left)] & 0xC0 == 0x80 {
             *left += 1;
         }
     }
     let mut rest = Term::nil();
-    if size as i64 > *left {
-        rest = Term::binary(bytes[*left as usize..].to_vec());
-        size = *left as usize;
+    if total > *left {
+        rest = Term::binary(bytes[position(*left)..].to_vec());
+        size = position(*left);
     }
     if latin1 {
         for &byte in &bytes[..size] {
@@ -283,7 +285,7 @@ fn build_binary(
     } else if let Err(position) = copy_utf8_bin(&bytes[..size], output) {
         return (Term::binary(bytes[position..].to_vec()), true);
     }
-    *left -= size as i64;
+    *left -= i64::try_from(size).expect("a binary length fits in i64");
     (rest, false)
 }
 

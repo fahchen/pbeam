@@ -49,6 +49,6 @@ fn runs_a_gen_statem_server_entered_with_enter_loop() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert_eq!(reference.stderr, [] as [u8; 0]);
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     assert_eq!(reference.stdout, b"{1,{1},normal}\n");
 }

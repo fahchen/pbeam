@@ -153,7 +153,9 @@ impl Array {
     /// assert_eq!(arrays.array(&Term::Reference(Reference(0))).unwrap().memory(), 64);
     /// ```
     pub(super) fn memory(&self) -> i64 {
-        MEMORY_HEADER + ATOMIC_BYTES as i64 * self.len() as i64
+        MEMORY_HEADER
+            + i64::try_from(ATOMIC_BYTES).expect("the atomic size fits in i64")
+                * i64::try_from(self.len()).expect("an array length fits in i64")
     }
 }
 

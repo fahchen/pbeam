@@ -67,7 +67,7 @@ fn sets_the_host_signal_disposition_with_os_set_signal() {
         .output()
         .unwrap();
     assert!(erts.status.success());
-    assert_eq!(erts.stdout, [] as [u8; 0]);
+    assert_eq!(erts.stdout, <[u8; 0]>::default());
     assert_eq!(
         String::from_utf8(erts.stderr).unwrap(),
         format!("[{}]\n", results.join(","))

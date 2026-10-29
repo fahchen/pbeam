@@ -439,7 +439,9 @@ fn converts_native_bytes_to_a_file_name_in_each_encoding() {
         assert!(convert(text.as_bytes(), FilenameEncoding::Utf8Mac).is_err());
     }
     for code_point in [767_i64, 773, 4024, 12443] {
-        let text = char::from_u32(code_point as u32).unwrap().to_string();
+        let text = char::from_u32(u32::try_from(code_point).unwrap())
+            .unwrap()
+            .to_string();
         assert_eq!(
             convert(text.as_bytes(), FilenameEncoding::Utf8Mac),
             Ok(list(&[code_point]))

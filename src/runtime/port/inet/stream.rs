@@ -34,7 +34,9 @@ use std::{
     os::fd::AsRawFd,
 };
 
-use super::{Control, Inet, MAX_OPT_BUFFER, OK, SocketType, State, errno_name, error_reply};
+use super::{
+    Control, Inet, MAX_OPT_BUFFER, OK, SocketType, State, errno_name, error_reply, low_u32, to_u64,
+};
 use crate::{
     error::BeamError,
     runtime::timer::PortTimer,
@@ -189,6 +191,11 @@ pub(super) struct Statistics {
 
 impl Statistics {
     /// Count a delivered packet of `length` bytes (`inet_input_count`).
+    #[expect(
+        clippy::as_conversions,
+        clippy::cast_precision_loss,
+        reason = "ERTS keeps the averages as C doubles and converts the length and the count with `(double)`, which rounds as `as` does"
+    )]
     pub(super) fn input(&mut self, length: u64) {
         let count = self.receive_count.wrapping_add(1).max(1);
         self.receive_bytes = self.receive_bytes.wrapping_add(length);
@@ -201,6 +208,11 @@ impl Statistics {
     }
 
     /// Count a send of `length` bytes (`inet_output_count`).
+    #[expect(
+        clippy::as_conversions,
+        clippy::cast_precision_loss,
+        reason = "ERTS keeps the average as a C double and converts the length and the count with `(double)`, which rounds as `as` does"
+    )]
     pub(super) fn output(&mut self, length: u64) {
         let count = self.send_count.wrapping_add(1).max(1);
         self.send_bytes = self.send_bytes.wrapping_add(length);
@@ -346,7 +358,7 @@ impl Inet {
             _ => {
                 return Ok(Control::Receive {
                     timeout: u32::from_be_bytes([t3, t2, t1, t0]),
-                    length: length as usize,
+                    length: usize::try_from(length).expect("a negative length returned above"),
                 });
             }
         };
@@ -457,7 +469,7 @@ impl Inet {
     /// bytes, and the bytes after them move to the start of the buffer.
     fn deliver(&mut self, length: usize) -> Vec<Event> {
         let stream = &mut self.stream;
-        stream.statistics.input(length as u64);
+        stream.statistics.input(to_u64(length));
         let data = if length == stream.filled {
             let mut data = std::mem::take(&mut stream.input);
             data.truncate(length);
@@ -635,7 +647,7 @@ impl Inet {
             }
             return reply(Err("enotconn".to_owned()));
         }
-        self.stream.statistics.output(data.len() as u64);
+        self.stream.statistics.output(to_u64(data.len()));
         if !self.stream.output.is_empty() {
             self.stream.output.extend(data);
             match self.send_timeout {
@@ -816,12 +828,12 @@ impl Inet {
             let value = match code {
                 1 => counts.receive_count,
                 2 => counts.receive_max,
-                3 => counts.receive_average as u64,
-                4 => counts.receive_deviation.abs() as u64,
+                3 => from_double(counts.receive_average),
+                4 => from_double(counts.receive_deviation.abs()),
                 5 => counts.send_count,
                 6 => counts.send_max,
-                7 => counts.send_average as u64,
-                8 => self.stream.output.len() as u64,
+                7 => from_double(counts.send_average),
+                8 => to_u64(self.stream.output.len()),
                 9 | 10 => {
                     let bytes = if code == 9 {
                         counts.receive_bytes
@@ -833,10 +845,22 @@ impl Inet {
                 }
                 _ => return Control::Badarg,
             };
-            reply.extend((value as u32).to_be_bytes());
+            reply.extend(low_u32(value).to_be_bytes());
         }
         Control::Reply(reply)
     }
+}
+
+/// Return the whole-number part of a statistics average, as the C conversion
+/// of the double to the unsigned counter does.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "an average length is a non-negative double far below 2^53, so the saturating cast of Rust keeps its whole part as the C cast does"
+)]
+fn from_double(value: f64) -> u64 {
+    value as u64
 }
 
 /// True for an error of a write that would block (`ERRNO_BLOCK`) or that a

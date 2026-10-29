@@ -228,13 +228,13 @@ fn gives_parts_that_share_the_bytes_of_their_source_and_copies_that_do_not() {
         panic!("the source is a binary");
     };
     assert_eq!(source.bytes().unwrap(), b"\x01\x02\x03\x04\x05");
-    let start = source.bytes().unwrap().as_ptr() as usize;
+    let start = source.bytes().unwrap().as_ptr().addr();
     let end = start + source.bytes().unwrap().len();
     for (index, term) in terms[1..].iter().enumerate() {
         let Term::Binary(part) = term else {
             panic!("a part or a copy is a binary: {term:?}");
         };
-        let pointer = part.bytes().unwrap().as_ptr() as usize;
+        let pointer = part.bytes().unwrap().as_ptr().addr();
         if index < 2 {
             assert_eq!(
                 part.bytes().unwrap(),

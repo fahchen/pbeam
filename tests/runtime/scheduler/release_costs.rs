@@ -143,7 +143,7 @@ struct Shape {
 /// assert!(list().list_head().is_some());
 /// ```
 fn list() -> Term {
-    Term::list_from((0..CELLS as i64).map(Term::Integer))
+    Term::list_from((0..i64::try_from(CELLS).unwrap()).map(Term::Integer))
 }
 
 /// Return a chain of [`CELLS`] nested one-element tuples around [`Term::Nil`].
@@ -186,7 +186,9 @@ fn skewed_chain() -> Term {
 /// assert!(matches!(tree(), Term::Tuple(_)));
 /// ```
 fn tree() -> Term {
-    let mut level: Vec<Term> = (0..TREE_LEAVES as i64).map(Term::Integer).collect();
+    let mut level: Vec<Term> = (0..i64::try_from(TREE_LEAVES).unwrap())
+        .map(Term::Integer)
+        .collect();
     while level.len() > 1 {
         level = level
             .chunks(2)
@@ -206,7 +208,11 @@ fn tree() -> Term {
 /// assert!(matches!(flat_tuple(), Term::Tuple(_)));
 /// ```
 fn flat_tuple() -> Term {
-    Term::tuple((0..CELLS as i64).map(Term::Integer).collect())
+    Term::tuple(
+        (0..i64::try_from(CELLS).unwrap())
+            .map(Term::Integer)
+            .collect(),
+    )
 }
 
 /// Return one map of [`MAP_KEYS`] integer keys. This shape is the worst case
@@ -221,7 +227,7 @@ fn flat_tuple() -> Term {
 fn map() -> Term {
     Term::Map(
         Map::from_pairs(
-            (0..MAP_KEYS as i64)
+            (0..i64::try_from(MAP_KEYS).unwrap())
                 .map(|key| (Term::Integer(key), Term::Integer(key)))
                 .collect(),
             &crate::term::test_atom_table(),
@@ -240,7 +246,7 @@ fn map() -> Term {
 /// ```
 fn dictionary_terms() -> Term {
     Term::tuple(
-        (0..(2 * DICTIONARY_ENTRIES) as i64)
+        (0..i64::try_from(2 * DICTIONARY_ENTRIES).unwrap())
             .map(Term::Integer)
             .collect(),
     )
@@ -255,7 +261,11 @@ fn dictionary_terms() -> Term {
 /// assert!(matches!(mailbox_terms(), Term::Tuple(_)));
 /// ```
 fn mailbox_terms() -> Term {
-    Term::tuple((0..MAILBOX_MESSAGES as i64).map(Term::Integer).collect())
+    Term::tuple(
+        (0..i64::try_from(MAILBOX_MESSAGES).unwrap())
+            .map(Term::Integer)
+            .collect(),
+    )
 }
 
 /// Put the term of `build` in the X registers of `process`.
@@ -282,7 +292,7 @@ fn install_registers(process: &mut ProcessState, build: fn() -> Term) {
 /// assert_eq!(process.dictionary.pairs().count(), DICTIONARY_ENTRIES);
 /// ```
 fn install_dictionary(process: &mut ProcessState, _build: fn() -> Term) {
-    for key in 0..DICTIONARY_ENTRIES as i64 {
+    for key in 0..i64::try_from(DICTIONARY_ENTRIES).unwrap() {
         process
             .dictionary
             .put(Term::Integer(key), Term::Integer(key));
@@ -349,7 +359,7 @@ fn queue_signal(scheduler: &mut Scheduler, id: ProcessId) {
 /// install_mailbox(&mut process, mailbox_terms);
 /// ```
 fn install_mailbox(process: &mut ProcessState, _build: fn() -> Term) {
-    for message in 0..MAILBOX_MESSAGES as i64 {
+    for message in 0..i64::try_from(MAILBOX_MESSAGES).unwrap() {
         process.mailbox.push(Term::Integer(message));
     }
 }
@@ -830,6 +840,11 @@ fn paths() -> Vec<Path> {
 /// and the maximum step pause, the total pause, the throughput, and the
 /// retained memory of each path.
 #[test]
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "timing probe: the node count converts to f64 for a rate"
+)]
 fn records_the_release_pause_of_a_large_graph() {
     println!(
         "RELEASE scheduler release of a large shared graph: one timed run of one path of one shape, in microsecond, with the load of the run."

@@ -41,7 +41,7 @@ fn reference_of(expression: &str) -> String {
         .output()
         .unwrap();
     assert!(output.status.success());
-    assert_eq!(output.stderr, [] as [u8; 0]);
+    assert_eq!(output.stderr, <[u8; 0]>::default());
     String::from_utf8(output.stdout).unwrap()
 }
 

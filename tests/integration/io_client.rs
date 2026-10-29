@@ -58,7 +58,7 @@ fn returns_badarg_from_erts_internal_group_leader_for_a_dead_target_or_a_non_pid
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert_eq!(reference.stderr, [] as [u8; 0]);
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     assert_eq!(reference.stdout, b"{badarg,badarg}\n");
 }
 
@@ -105,7 +105,7 @@ fn assert_probe_matches_erts(function: &str) {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert_eq!(reference.stderr, [] as [u8; 0]);
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     assert_eq!(
         String::from_utf8(reference.stdout).unwrap(),
         "{ok,{{put_chars,unicode,<<\"Hello, world!\\n\">>},same},\n    noise_ok,none,\n    {true,no_down}}\n"

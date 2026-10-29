@@ -764,7 +764,7 @@ fn run_in_terminal(mut command: Command, keys: &[u8]) -> (Vec<u8>, String) {
         // SAFETY: `tcgetpgrp` reads the foreground process group of the
         // terminal of `master` and changes no state.
         let group = unsafe { libc::tcgetpgrp(master.as_raw_fd()) };
-        if group == child.id() as libc::pid_t {
+        if group == libc::pid_t::try_from(child.id()).unwrap() {
             break;
         }
         assert!(

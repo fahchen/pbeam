@@ -13,7 +13,7 @@ fn reads_no_datagram_without_a_receive() {
     );
     assert_eq!(
         port.receive_datagram(),
-        [] as [crate::runtime::port::inet::stream::Event; 0]
+        <[crate::runtime::port::inet::stream::Event; 0]>::default()
     );
 }
 

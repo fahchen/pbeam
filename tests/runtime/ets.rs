@@ -584,20 +584,23 @@ fn keeps_the_objects_of_a_bag_key_in_insertion_order_across_deletes() {
     let object = |key, value| vec![Term::Integer(key), Term::Integer(value)];
     let mut insert = |object| table.insert_all(&atoms, vec![object])[0];
     for value in 1..=3 {
-        assert_eq!(insert(object(1, value)), value as usize - 1);
+        assert_eq!(
+            insert(object(1, value)),
+            usize::try_from(value).unwrap() - 1
+        );
     }
     assert_eq!(insert(object(2, 1)), 0);
     assert_eq!(insert(object(1, 2)), 1);
     table.delete(&atoms, &Term::Integer(1));
     assert_eq!(
         table.objects(&atoms, &Term::Integer(1)),
-        [] as [&[crate::term::Term]; 0]
+        <[&[crate::term::Term]; 0]>::default()
     );
     assert_eq!(table.slot_count(), 4);
     for value in [7, 8, 9] {
         assert_eq!(
             table.insert_all(&atoms, vec![object(1, value)]),
-            vec![value as usize - 7]
+            vec![usize::try_from(value).unwrap() - 7]
         );
     }
     assert_eq!(table.slot_count(), 4);
@@ -633,7 +636,10 @@ fn hashes_bag_objects_whose_changing_elements_cancelled_under_rotate_and_xor() {
     let atoms = AtomTable::new();
     let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Bag);
     let counts = table.insert_all(&atoms, objects);
-    assert_eq!(counts, (0..OBJECTS as usize).collect::<Vec<_>>());
+    assert_eq!(
+        counts,
+        (0..usize::try_from(OBJECTS).unwrap()).collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -750,7 +756,7 @@ fn keeps_the_erts_bucket_chains_through_splits_and_joins() {
     let mut model: Vec<Vec<Term>> = vec![Vec::new(); 256];
     let bucket = |buckets: usize, key: &Term| {
         let mask = buckets.next_power_of_two() - 1;
-        let slot = stored_hash(&atoms, key) as usize & mask;
+        let slot = usize::try_from(stored_hash(&atoms, key)).unwrap() & mask;
         if slot >= buckets {
             slot & (mask >> 1)
         } else {
@@ -768,7 +774,7 @@ fn keeps_the_erts_bucket_chains_through_splits_and_joins() {
             let from = to & (mask >> 1);
             let (high, low) = model[from]
                 .drain(..)
-                .partition(|key| stored_hash(&atoms, key) as usize & mask == to);
+                .partition(|key| usize::try_from(stored_hash(&atoms, key)).unwrap() & mask == to);
             model[from] = low;
             model.push(high);
         }
@@ -1243,7 +1249,7 @@ fn frees_a_clear_until_the_budget_is_negative() {
     table.unfix_all(ProcessId(0));
     let first = table.segment_free_cost(1);
     let second = table.segment_free_cost(0);
-    let (done, charge) = table.step_clear(&atoms, ProcessId(0), 300, first as i64);
+    let (done, charge) = table.step_clear(&atoms, ProcessId(0), 300, i64::try_from(first).unwrap());
     assert!(!done);
     assert_eq!(charge, first + second);
     let (done, charge) = table.step_clear(&atoms, ProcessId(0), 300, 0);
@@ -1670,7 +1676,7 @@ fn a_read_or_a_write_helps_the_list_insert_of_another_process() {
         let mut table = Table::new(ProcessId(1), Access::Public, 1, TableType::Set);
         let objects = vec![vec![Term::Integer(id)], vec![Term::Integer(id + 10)]];
         table.busy = Some(Busy::new(ProcessId(1), objects, InsertKind::Insert));
-        tables.create(Reference(id as u64), None, table);
+        tables.create(Reference(u64::try_from(id).unwrap()), None, table);
     }
     tables.reserve_result(ProcessId(1));
     // The helper runs the insert with its budget under the table lock and

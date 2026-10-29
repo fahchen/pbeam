@@ -532,7 +532,7 @@ impl Scheduler {
         let initial_call = Term::tuple(vec![
             Term::Atom(self.atoms.put(module)?),
             Term::Atom(self.atoms.put(function)?),
-            Term::Integer(*arity as i64),
+            Term::Integer(i64::try_from(*arity).expect("an arity fits in i64")),
         ]);
         let parent = parent.map_or_else(|| Term::static_atom("none"), Term::Pid);
         let pairs = vec![

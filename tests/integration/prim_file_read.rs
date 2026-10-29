@@ -211,7 +211,9 @@ fn make_files(directory: &Path) {
         fs::create_dir_all(directory.join(name)).unwrap();
     }
     fs::write(directory.join("file"), "hello").unwrap();
-    let big: Vec<u8> = (0..70_000).map(|index| (index % 251) as u8).collect();
+    let big: Vec<u8> = (0..70_000)
+        .map(|index| u8::try_from(index % 251).unwrap())
+        .collect();
     fs::write(directory.join("big"), big).unwrap();
     for name in ["a", "b"] {
         fs::write(directory.join("dir").join(name), name).unwrap();

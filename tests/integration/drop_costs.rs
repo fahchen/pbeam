@@ -112,7 +112,7 @@ fn one_tuple() -> Term {
 /// assert!(deep_list().list_head().is_some());
 /// ```
 fn deep_list() -> Term {
-    Term::list_from((0..LIST_CELLS as i64).map(Term::Integer))
+    Term::list_from((0..i64::try_from(LIST_CELLS).unwrap()).map(Term::Integer))
 }
 
 /// Return one population of `count` terms that each own their storage, and
@@ -342,6 +342,11 @@ fn shapes() -> Vec<Shape> {
 /// ```rust,ignore
 /// assert!(cost(&shapes()[0]) >= 0.0);
 /// ```
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "timing probe: the nanosecond and term counts convert to f64 for a ratio"
+)]
 fn cost(shape: &Shape) -> f64 {
     let mut best = Duration::MAX;
     for _ in 0..shape.runs {

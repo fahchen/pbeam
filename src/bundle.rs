@@ -446,7 +446,7 @@ fn add_blob<'a>(
     max_count: u32,
     kind: &str,
 ) -> Result<(), BeamError> {
-    if blobs.len() >= max_count as usize {
+    if blobs.len() >= usize::try_from(max_count).expect("a u32 fits in usize") {
         return Err(error(format!(
             "bundle {kind} table is full at {max_count} entries"
         )));
@@ -580,17 +580,25 @@ fn write_bundle(
 
 /// Write a length-prefixed text.
 fn write_text(out: &mut Vec<u8>, text: &str) {
-    out.extend_from_slice(&(text.len() as u16).to_le_bytes());
+    // The length keeps its low 16 bits.
+    let [b0, b1, ..] = text.len().to_le_bytes();
+    out.extend_from_slice(&[b0, b1]);
     out.extend_from_slice(text.as_bytes());
 }
 
 /// Write a table: its count, then one name, one length, and one payload for
 /// each entry.
 fn write_table(out: &mut Vec<u8>, blobs: &[Blob<'_>]) {
-    out.extend_from_slice(&(blobs.len() as u32).to_le_bytes());
+    // The count keeps its low 32 bits.
+    let [b0, b1, b2, b3, ..] = blobs.len().to_le_bytes();
+    out.extend_from_slice(&[b0, b1, b2, b3]);
     for blob in blobs {
         write_text(out, blob.name);
-        out.extend_from_slice(&(blob.bytes.len() as u64).to_le_bytes());
+        out.extend_from_slice(
+            &u64::try_from(blob.bytes.len())
+                .expect("a usize fits in u64")
+                .to_le_bytes(),
+        );
         out.extend_from_slice(blob.bytes);
     }
 }
@@ -644,15 +652,16 @@ impl<'a> Cursor<'a> {
     /// A `count` larger than the remaining bytes.
     fn take_u64(&mut self, count: u64, what: &str) -> Result<&'a [u8], BeamError> {
         let remaining = self.remaining();
-        if count > remaining as u64 {
+        if count > u64::try_from(remaining).expect("a usize fits in u64") {
             return Err(error(format!(
                 "bundle is truncated: {what} needs {count} bytes at offset {}, but {remaining} remain",
                 self.position
             )));
         }
-        // `count <= remaining`, and `remaining` is a `usize`, so the cast is
-        // exact on every target.
-        self.take(count as usize, what)
+        self.take(
+            usize::try_from(count).expect("count is at most the remaining usize"),
+            what,
+        )
     }
 
     /// Read a little-endian `u16`.

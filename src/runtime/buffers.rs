@@ -119,7 +119,7 @@ impl Buffer {
     /// assert_eq!(buffer.size(), 0);
     /// ```
     pub(super) fn size(&self) -> u64 {
-        (self.queue_bytes() + self.accumulated_bytes()) as u64
+        u64::try_from(self.queue_bytes() + self.accumulated_bytes()).expect("a usize fits in u64")
     }
 
     /// Write the iovec `iovec` at the back of the buffer, as `write_nif`
@@ -167,7 +167,7 @@ impl Buffer {
         if self.size() < size {
             return None;
         }
-        let size = size as usize;
+        let size = usize::try_from(size).expect("the buffer holds at least size bytes");
         let mut bytes = Vec::with_capacity(size);
         while bytes.len() < size {
             let head = self.queue.front().expect("the queue holds the bytes");
@@ -219,7 +219,7 @@ impl Buffer {
         if self.size() < size {
             return false;
         }
-        self.deq(size as usize);
+        self.deq(usize::try_from(size).expect("the buffer holds at least size bytes"));
         true
     }
 
@@ -240,7 +240,7 @@ impl Buffer {
         let mut offset = 0;
         for binary in &self.queue {
             if let Some(index) = held(binary).iter().position(|&byte| byte == needle) {
-                return Some((offset + index) as u64);
+                return Some(u64::try_from(offset + index).expect("a usize fits in u64"));
             }
             offset += held(binary).len();
         }

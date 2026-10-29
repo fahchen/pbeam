@@ -45,7 +45,7 @@ fn reference(function: &str) -> Vec<u8> {
         .output()
         .unwrap();
     assert!(output.status.success());
-    assert_eq!(output.stderr, [] as [u8; 0]);
+    assert_eq!(output.stderr, <[u8; 0]>::default());
     output.stdout
 }
 

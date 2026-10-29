@@ -108,7 +108,7 @@ fn gives_nothing_without_a_hungry_scheduler() {
     insert(&mut victim, &[1, 2]);
     victim.serve_steal();
     assert_eq!(victim.runnable.ids(), vec![ProcessId(1), ProcessId(2)]);
-    assert_eq!(inbox(&node, 1), [] as [(char, u64); 0]);
+    assert_eq!(inbox(&node, 1), <[(char, u64); 0]>::default());
 }
 
 /// A process that waits, exits, waits for a receive timer, used a
@@ -137,7 +137,7 @@ fn keeps_each_process_that_cannot_move() {
     });
     node.set_hungry(1);
     victim.serve_steal();
-    assert_eq!(inbox(&node, 1), [] as [(char, u64); 0]);
+    assert_eq!(inbox(&node, 1), <[(char, u64); 0]>::default());
     assert_eq!(victim.runnable.len(), 7);
     assert!(node.has_hungry(0), "a steal with no process keeps the mark");
 }
@@ -226,7 +226,7 @@ fn a_steal_takes_half_of_the_highest_queue() {
     let mut queue = RunQueue::default();
     assert_eq!(
         queue.steal(|_| true),
-        [] as [(crate::term::ProcessId, std::option::Option<u8>); 0]
+        <[(crate::term::ProcessId, std::option::Option<u8>); 0]>::default()
     );
     queue.push(ProcessId(1), Priority::Low);
     queue.push(ProcessId(2), Priority::Normal);

@@ -103,7 +103,7 @@ pub(crate) fn set_disposition(signal: c_int, disposition: Disposition) {
         Disposition::Default => libc::SIG_DFL,
         Disposition::Handle => {
             NOTIFY_PIPE.get_or_init(open_notify_pipe);
-            notify_signal as extern "C" fn(c_int) as libc::sighandler_t
+            notify_handler()
         }
     };
     // SAFETY: `sigaction` is a C struct of integers and a signal set, so
@@ -325,6 +325,16 @@ const SIGNALS: &[(&str, c_int)] = &[
     #[cfg(target_os = "macos")]
     ("siginfo", libc::SIGINFO),
 ];
+
+/// Return the address of [`notify_signal`] as the `sighandler_t` that
+/// `sigaction` takes.
+#[expect(
+    clippy::as_conversions,
+    reason = "a function pointer has no conversion to an integer, and sigaction takes the handler address as a sighandler_t"
+)]
+fn notify_handler() -> libc::sighandler_t {
+    notify_signal as extern "C" fn(c_int) as libc::sighandler_t
+}
 
 /// The handler of the `handle` disposition and of the start dispositions:
 /// write the signal number to the notify pipe, as `smp_sig_notify`

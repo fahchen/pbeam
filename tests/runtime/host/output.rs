@@ -16,8 +16,12 @@ fn writes_the_remaining_bytes_after_a_partial_write_and_eagain() {
             0
         );
     }
-    let first: Vec<u8> = (0..512 * 1024).map(|index| (index % 251) as u8).collect();
-    let second: Vec<u8> = (0..512 * 1024).map(|index| (index % 241) as u8).collect();
+    let first: Vec<u8> = (0..512 * 1024)
+        .map(|index| u8::try_from(index % 251).unwrap())
+        .collect();
+    let second: Vec<u8> = (0..512 * 1024)
+        .map(|index| u8::try_from(index % 241).unwrap())
+        .collect();
     let reading = thread::spawn(move || {
         thread::sleep(Duration::from_millis(20));
         let mut bytes = Vec::new();

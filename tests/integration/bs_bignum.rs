@@ -71,7 +71,7 @@ fn run_both(cases: &[(&str, Vec<Term>)]) -> (String, String) {
         .output()
         .unwrap();
     assert!(erts.status.success());
-    assert_eq!(erts.stderr, [] as [u8; 0]);
+    assert_eq!(erts.stderr, <[u8; 0]>::default());
     (
         format!("[{}]\n", results.join(",")),
         String::from_utf8(erts.stdout).unwrap(),

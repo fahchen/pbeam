@@ -2733,7 +2733,7 @@ impl Scheduler {
     /// assert_eq!(scheduler.scheduler_count(), 1);
     /// ```
     pub(super) fn scheduler_count(&self) -> i64 {
-        self.node.configured_count() as i64
+        i64::try_from(self.node.configured_count()).expect("a scheduler count fits in i64")
     }
 
     /// Return the registered name of the process `id` from the name table of
@@ -3476,7 +3476,9 @@ impl Scheduler {
             std::process::id().to_string().as_bytes(),
         ]
         .concat();
-        block_hash(&node, self.timers.now() as u32)
+        // The seed is the low 32 bits of the time, as the C conversion keeps them.
+        let [b0, b1, b2, b3, ..] = self.timers.now().to_le_bytes();
+        block_hash(&node, u32::from_le_bytes([b0, b1, b2, b3]))
     }
 
     /// Remove a monitor that the current process holds, as the ERTS

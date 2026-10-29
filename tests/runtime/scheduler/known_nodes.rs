@@ -22,7 +22,10 @@ fn keeps_the_first_send_order_and_deletes_an_entry_after_the_delay() {
     assert_eq!(known.names(DELETE_DELAY + 10), vec![a.clone(), c.clone()]);
     assert_eq!(known.names(DELETE_DELAY + 30), vec![a.clone()]);
     assert_eq!(known.names(2 * DELETE_DELAY - 1), vec![a.clone()]);
-    assert_eq!(known.names(2 * DELETE_DELAY), [] as [crate::term::Atom; 0]);
+    assert_eq!(
+        known.names(2 * DELETE_DELAY),
+        <[crate::term::Atom; 0]>::default()
+    );
 }
 
 #[test]

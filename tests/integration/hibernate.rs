@@ -82,7 +82,7 @@ fn runs_erlang_hibernate_as_the_pinned_erts_instruction() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert_eq!(reference.stderr, [] as [u8; 0]);
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     assert_eq!(
         reference.stdout,
         b"[{ok,true,[early]},{ok,true,[late]},{ok,ok,ok,[late,queued,fun_late]},{ok,[late]},{waiting,{down,normal}},{ok,[own,child]}]\n"
@@ -250,7 +250,7 @@ fn runs_erlang_hibernate_3_through_apply_funs_and_bifs_as_the_pinned_erts_bif() 
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert_eq!(reference.stderr, [] as [u8; 0]);
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     assert_eq!(
         reference.stdout,
         b"[{{queued,early,0},normal},{waiting,{message_queue_len,0},{later,wake,0},normal},{boom,none},{undef,[{hibernate3_probe,missing,[1,2],[]}]},{waiting,stop},[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,system_limit},{error,system_limit},{error,badarg}],{undef,256},[{boom,[]},{{nocatch,t},[]},x,{failed,[{hibernate3_probe,fail,[n]}]},{failed,[{hibernate3_probe,fail,[n]},{hibernate3_probe,nested,1}]}],{{apply,wake,0},normal,{'fun',wake,0},normal},{woke,normal,again,normal,stop,applied,normal},{{proc_lib,wake,0},normal},{{reply,true},{reply,true}},[2,1,1]]\n"

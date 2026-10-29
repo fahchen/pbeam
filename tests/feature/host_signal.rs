@@ -515,7 +515,7 @@ fn wait_until_full(fd: &OwnedFd) {
             revents: 0,
         };
         // SAFETY: `poll` reads and writes the one `pollfd` that it gets.
-        if unsafe { libc::poll(&mut poll, 1, 0) } == 0 {
+        if unsafe { libc::poll(&raw mut poll, 1, 0) } == 0 {
             return;
         }
         assert!(start.elapsed() < RUN_TIME_LIMIT, "the pipe does not fill");
@@ -931,7 +931,10 @@ fn set_raw(fd: &OwnedFd) {
         let mut mode = std::mem::zeroed();
         assert_eq!(libc::tcgetattr(fd.as_raw_fd(), &raw mut mode), 0);
         libc::cfmakeraw(&raw mut mode);
-        assert_eq!(libc::tcsetattr(fd.as_raw_fd(), libc::TCSANOW, &mode), 0);
+        assert_eq!(
+            libc::tcsetattr(fd.as_raw_fd(), libc::TCSANOW, &raw const mode),
+            0
+        );
     }
 }
 

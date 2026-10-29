@@ -24,6 +24,13 @@ use std::{
     thread,
 };
 
+/// The size of the name buffer of `getnameinfo` (`NI_MAXHOST`).
+#[expect(
+    clippy::as_conversions,
+    reason = "NI_MAXHOST is a small libc constant, and TryFrom is not const"
+)]
+const HOST_NAME_LEN: usize = libc::NI_MAXHOST as usize;
+
 /// `OP_GETHOSTBYNAME` (`inet_gethost.c:154`).
 const OP_GETHOSTBYNAME: u8 = 1;
 /// `OP_GETHOSTBYADDR` (`inet_gethost.c:155`).
@@ -237,7 +244,8 @@ fn atoi(text: &[u8]) -> i32 {
     let value = if negative { -magnitude } else { magnitude };
     // `strtol` clamps to `long`; the cast to `int` keeps the low 32 bits.
     let long = i64::try_from(value).unwrap_or(i64::MAX);
-    long as i32
+    let [b0, b1, b2, b3, ..] = long.to_le_bytes();
+    i32::from_le_bytes([b0, b1, b2, b3])
 }
 
 /// An event of the main loop.
@@ -260,7 +268,8 @@ fn read_request(input: &mut impl Read) -> Event {
         Some(4) => {}
         _ => return Event::Fatal,
     }
-    let mut request = vec![0; u32::from_be_bytes(size) as usize];
+    let mut request =
+        vec![0; usize::try_from(u32::from_be_bytes(size)).expect("a u32 fits in usize")];
     if read_exact(input, &mut request) != Some(request.len()) || request.len() < 5 {
         return Event::Fatal;
     }
@@ -701,7 +710,7 @@ fn name_info(address: [u8; 16]) -> Result<Vec<u8>, Code> {
     }
     socket.sin6_family = libc::sa_family_t::try_from(libc::AF_INET6).unwrap_or(0);
     socket.sin6_addr.s6_addr = address;
-    let mut name = [0 as c_char; libc::NI_MAXHOST as usize];
+    let mut name = [0; HOST_NAME_LEN];
     // SAFETY: `socket` is a `sockaddr_in6` of the given size, and the call
     // writes at most `name.len()` bytes to `name`.
     let result = unsafe {

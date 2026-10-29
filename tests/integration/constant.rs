@@ -69,7 +69,10 @@ fn beam_chunks(beam: &[u8]) -> Vec<([u8; 4], Vec<u8>)> {
     let mut cursor = 12;
     while cursor < beam.len() {
         let id: [u8; 4] = beam[cursor..cursor + 4].try_into().unwrap();
-        let length = u32::from_be_bytes(beam[cursor + 4..cursor + 8].try_into().unwrap()) as usize;
+        let length = usize::try_from(u32::from_be_bytes(
+            beam[cursor + 4..cursor + 8].try_into().unwrap(),
+        ))
+        .unwrap();
         let start = cursor + 8;
         chunks.push((id, beam[start..start + length].to_vec()));
         cursor = start + length + (4 - length % 4) % 4;
@@ -81,12 +84,12 @@ fn assemble_chunks(chunks: Vec<([u8; 4], Vec<u8>)>) -> Vec<u8> {
     let mut body = b"BEAM".to_vec();
     for (id, data) in chunks {
         body.extend(id);
-        body.extend((data.len() as u32).to_be_bytes());
+        body.extend(u32::try_from(data.len()).unwrap().to_be_bytes());
         body.extend(data.iter());
         body.resize(body.len() + (4 - data.len() % 4) % 4, 0);
     }
     let mut beam = b"FOR1".to_vec();
-    beam.extend((body.len() as u32).to_be_bytes());
+    beam.extend(u32::try_from(body.len()).unwrap().to_be_bytes());
     beam.extend(body);
     beam
 }
@@ -109,7 +112,7 @@ fn edit_chunk(beam: &[u8], name: [u8; 4], edit: impl FnOnce(&mut Vec<u8>)) -> Ve
 fn rejects_truncated_chunk_header_and_out_of_bounds_chunk() {
     let mut truncated = constant_fixture().to_vec();
     truncated.push(0);
-    let size = (truncated.len() - 8) as u32;
+    let size = u32::try_from(truncated.len() - 8).unwrap();
     truncated[4..8].copy_from_slice(&size.to_be_bytes());
     assert!(
         BeamModule::load(&truncated)

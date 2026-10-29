@@ -23,6 +23,27 @@ const NONE: u32 = u32::MAX;
 /// The width of the tag of an ERTS small integer word (`_TAG_IMMED1_SIZE`).
 const SMALL_INTEGER_TAG_BITS: u32 = 4;
 
+/// Return the index of a pair as the `u32` of a chain: a dictionary has fewer
+/// than `MAX_HASH` buckets and at most as many pairs as the chains hold.
+fn link_index(index: usize) -> u32 {
+    u32::try_from(index).expect("a pair index of a dictionary fits in u32")
+}
+
+/// Return the index of a pair from the `u32` of a chain.
+fn slot(index: u32) -> usize {
+    usize::try_from(index).expect("a u32 fits in usize")
+}
+
+/// Return a masked hash as a bucket index: the mask is below `MAX_HASH * 2`.
+fn word(value: u64) -> usize {
+    usize::try_from(value).expect("a u64 fits in usize on a 64-bit host")
+}
+
+/// Return the ERTS `sizeMask` of a bucket count.
+fn size_mask(mask: usize) -> u64 {
+    u64::try_from(mask).expect("a usize fits in u64")
+}
+
 /// The chain data of one pair: the `MAKE_HASH` value of its key and the index
 /// of the next pair of its bucket.
 #[derive(Clone, Copy, Debug)]
@@ -88,7 +109,7 @@ impl Dictionary {
     pub(in crate::runtime) fn put(&mut self, key: Term, value: Term) -> Option<Term> {
         if self.heads.is_empty() {
             self.heads = vec![NONE; INITIAL_SIZE];
-            self.size_mask = (INITIAL_SIZE * 2 - 1) as u64;
+            self.size_mask = size_mask(INITIAL_SIZE * 2 - 1);
             self.split_position = 0;
         }
         let hash = make_hash(&key);
@@ -102,14 +123,14 @@ impl Dictionary {
             }
             self.unlink(bucket, previous, index);
             self.links[index].next = self.heads[bucket];
-            self.heads[bucket] = index as u32;
+            self.heads[bucket] = link_index(index);
             Some(old)
         } else {
             self.links.push(Link {
                 hash,
                 next: self.heads[bucket],
             });
-            self.heads[bucket] = self.entries.len() as u32;
+            self.heads[bucket] = link_index(self.entries.len());
             self.entries.push((key, value));
             None
         };
@@ -246,8 +267,8 @@ impl Dictionary {
         for &head in &self.heads {
             let mut index = head;
             while index != NONE {
-                walk.push(index as usize);
-                index = self.links[index as usize].next;
+                walk.push(slot(index));
+                index = self.links[slot(index)].next;
             }
         }
         walk.reverse();
@@ -264,9 +285,9 @@ impl Dictionary {
     /// assert_eq!(dictionary.bucket(13), 5);
     /// ```
     fn bucket(&self, hash: u64) -> usize {
-        let high = (hash & self.size_mask) as usize;
+        let high = word(hash & self.size_mask);
         if high >= self.heads.len() {
-            (hash & (self.size_mask >> 1)) as usize
+            word(hash & (self.size_mask >> 1))
         } else {
             high
         }
@@ -283,7 +304,7 @@ impl Dictionary {
         let mut previous = None;
         let mut index = self.heads[bucket];
         while index != NONE {
-            let current = index as usize;
+            let current = slot(index);
             if self.entries[current].0 == *key {
                 return (previous, Some(current));
             }
@@ -324,13 +345,13 @@ impl Dictionary {
         if index != last {
             let bucket = self.bucket(self.links[last].hash);
             let mut current = self.heads[bucket];
-            if current == last as u32 {
-                self.heads[bucket] = index as u32;
+            if current == link_index(last) {
+                self.heads[bucket] = link_index(index);
             } else {
-                while self.links[current as usize].next != last as u32 {
-                    current = self.links[current as usize].next;
+                while self.links[slot(current)].next != link_index(last) {
+                    current = self.links[slot(current)].next;
                 }
-                self.links[current as usize].next = index as u32;
+                self.links[slot(current)].next = link_index(index);
             }
         }
         self.links.swap_remove(index);
@@ -357,7 +378,7 @@ impl Dictionary {
         for _ in 0..steps {
             if self.split_position == home {
                 home *= 2;
-                self.size_mask = (home * 2 - 1) as u64;
+                self.size_mask = size_mask(home * 2 - 1);
                 self.split_position = 0;
             }
             let position = self.split_position;
@@ -366,12 +387,12 @@ impl Dictionary {
             let (mut stay, mut moved) = (NONE, NONE);
             let mut index = self.heads[position];
             while index != NONE {
-                let Link { hash, next } = self.links[index as usize];
+                let Link { hash, next } = self.links[slot(index)];
                 if self.bucket(hash) == position {
-                    self.links[index as usize].next = stay;
+                    self.links[slot(index)].next = stay;
                     stay = index;
                 } else {
-                    self.links[index as usize].next = moved;
+                    self.links[slot(index)].next = moved;
                     moved = index;
                 }
                 index = next;
@@ -398,7 +419,7 @@ impl Dictionary {
         let steps = (range * 3 / 10).min(range - INITIAL_SIZE);
         for _ in 0..steps {
             if self.split_position == 0 {
-                self.size_mask = (self.heads.len() - 1) as u64;
+                self.size_mask = size_mask(self.heads.len() - 1);
                 self.split_position = self.heads.len() / 2;
             }
             self.split_position -= 1;
@@ -409,13 +430,13 @@ impl Dictionary {
             }
             if low == NONE {
                 self.heads[self.split_position] = high;
-            } else if self.links[low as usize].next == NONE {
-                self.links[low as usize].next = high;
+            } else if self.links[slot(low)].next == NONE {
+                self.links[slot(low)].next = high;
             } else {
                 let (mut front, mut index) = (low, high);
                 while index != NONE {
-                    let next = self.links[index as usize].next;
-                    self.links[index as usize].next = front;
+                    let next = self.links[slot(index)].next;
+                    self.links[slot(index)].next = front;
                     front = index;
                     index = next;
                 }
@@ -440,7 +461,7 @@ fn make_hash(key: &Term) -> u64 {
     match key {
         Term::Atom(atom) => u64::from(atom.index()),
         _ => match key.small_integer() {
-            Some(value) => value as u64 & (u64::MAX >> SMALL_INTEGER_TAG_BITS),
+            Some(value) => value.cast_unsigned() & (u64::MAX >> SMALL_INTEGER_TAG_BITS),
             None => internal_hash(key),
         },
     }

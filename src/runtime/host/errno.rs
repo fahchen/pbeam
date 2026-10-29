@@ -19,6 +19,16 @@ pub(crate) fn errno() -> c_int {
         .unwrap_or_default()
 }
 
+/// Return the `errno` value of `errno`. The `nix` type is a `repr(i32)` enum with
+/// no conversion to an integer.
+#[expect(
+    clippy::as_conversions,
+    reason = "nix::errno::Errno is a repr(i32) enum and has no From or TryFrom to i32"
+)]
+pub(crate) fn errno_code(errno: nix::errno::Errno) -> c_int {
+    errno as c_int
+}
+
 /// The cases of the ERTS `errno_name` switch (`erl_errno_str.c:986-1105`),
 /// in its order, each with the names of its `#if` guard. Some names have
 /// the same value on a host: `EWOULDBLOCK` is `EAGAIN` on macOS and Linux,

@@ -212,7 +212,7 @@ fn uses_one_reduction_for_each_1024_bytes_of_a_binary_segment() {
         assert_eq!(
             run(&program, "cost", Term::binary(vec![1; size])),
             Term::tuple(vec![
-                Term::Integer(1 + size as i64 / 1024),
+                Term::Integer(1 + i64::try_from(size).unwrap() / 1024),
                 Term::binary(expected)
             ])
         );
@@ -1140,7 +1140,7 @@ fn raises_the_erts_error_info_for_integer_and_utf8_segments() {
         let frame = Term::tuple(vec![
             atom("bs_create_bin_integer_probe"),
             atom(function),
-            Term::Integer(arity as i64),
+            Term::Integer(i64::try_from(arity).unwrap()),
             Term::list_from(vec![Term::tuple(vec![
                 atom("error_info"),
                 Term::Map(error_info),
@@ -1969,7 +1969,7 @@ fn raises_the_erts_error_info_for_utf16_and_utf32_segments() {
         let frame = Term::tuple(vec![
             atom("bs_create_bin_utf_probe"),
             atom(function),
-            Term::Integer(arity as i64),
+            Term::Integer(i64::try_from(arity).unwrap()),
             Term::list_from(vec![Term::tuple(vec![
                 atom("error_info"),
                 Term::Map(error_info),

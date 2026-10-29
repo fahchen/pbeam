@@ -36,7 +36,7 @@ fn image(bytes: &[u8]) -> Vec<u8> {
     let mut image = b"binary".to_vec();
     image.extend_from_slice(bytes);
     image.extend_from_slice(MAGIC);
-    image.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    image.extend_from_slice(&u64::try_from(bytes.len()).unwrap().to_le_bytes());
     image
 }
 

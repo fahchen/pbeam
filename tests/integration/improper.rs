@@ -31,7 +31,7 @@ fn erl_reference(function: &str) -> String {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert_eq!(reference.stderr, [] as [u8; 0]);
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     String::from_utf8(reference.stdout).unwrap()
 }
 

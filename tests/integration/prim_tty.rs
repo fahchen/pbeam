@@ -176,7 +176,7 @@ fn raises_badarg_from_the_write_nif_binding_for_a_term_that_is_not_a_tty() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert_eq!(reference.stderr, [] as [u8; 0]);
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     assert_eq!(
         reference.stdout,
         b"[{badarg,prim_tty,write_nif},{badarg,prim_tty,write_nif},{badarg,prim_tty,write_nif},{badarg,prim_tty,write_nif}]\n"
@@ -1775,7 +1775,7 @@ fn open_stream(
                 // SAFETY: `tcsetattr` reads one `termios` from the pointer.
                 // `quiet` is a live `termios` value that `mode` made, and
                 // `slave` owns an open terminal fd for the whole call.
-                unsafe { libc::tcsetattr(slave.as_raw_fd(), libc::TCSANOW, &quiet) },
+                unsafe { libc::tcsetattr(slave.as_raw_fd(), libc::TCSANOW, &raw const quiet) },
                 0
             );
             (master, slave)
@@ -1852,7 +1852,7 @@ fn open_terminal(columns: u16, rows: u16) -> (OwnedFd, OwnedFd) {
             &raw mut slave,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            &raw const size as *mut libc::winsize,
+            (&raw const size).cast_mut(),
         );
         assert_eq!(result, 0, "openpty failed");
         for fd in [master, slave] {

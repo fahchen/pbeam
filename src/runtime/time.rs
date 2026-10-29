@@ -210,7 +210,7 @@ pub(super) const FIRST_POSIX_YEAR: i64 = 1600;
 /// The last year that `univ_to_local`, `local_to_univ`, and
 /// `univ_to_seconds` accept, `INT_MAX - 1` (`erl_time_sup.c:1707`, `1744`,
 /// `1808`).
-const LAST_YEAR: i64 = i32::MAX as i64 - 1;
+const LAST_YEAR: i64 = 2_147_483_646;
 
 /// The days in each month of a year that is not a leap year, `mdays`
 /// (`erl_time_sup.c:1590-1591`). Index 0 is not a month.
@@ -283,7 +283,9 @@ pub(super) fn in_range(
 ) -> bool {
     (first_year..=LAST_YEAR).contains(&year)
         && (1..=12).contains(&month)
-        && (1..=MDAYS[month as usize] + i64::from(month == 2 && is_leap_year(year))).contains(&day)
+        && (1..=MDAYS[usize::try_from(month).expect("the range check above bounds the month")]
+            + i64::from(month == 2 && is_leap_year(year)))
+            .contains(&day)
         && (0..=23).contains(&hour)
         && (0..=59).contains(&minute)
         && (0..=59).contains(&second)
@@ -347,7 +349,9 @@ fn gregday(year: i64, month: i64, day: i64) -> i64 {
         let pyear = gyear - 1;
         ndays = pyear / 4 - pyear / 100 + pyear / 400 + pyear * 365 + 366;
     }
-    ndays += MDAYS[1..month as usize].iter().sum::<i64>();
+    ndays += MDAYS[1..usize::try_from(month).expect("a month is 1 to 12")]
+        .iter()
+        .sum::<i64>();
     if is_leap_year(year) && month > 2 {
         ndays += 1;
     }

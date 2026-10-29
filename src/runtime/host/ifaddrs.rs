@@ -57,7 +57,7 @@ pub(crate) fn getifaddrs() -> Result<Vec<Entry>, c_int> {
                     .as_ref()
                     .is_some_and(|address| c_int::from(address.sa_family) == libc::AF_INET)
             };
-            let point_to_point = interface.ifa_flags & libc::IFF_POINTOPOINT as u32 != 0;
+            let point_to_point = interface.ifa_flags & libc::IFF_POINTOPOINT.cast_unsigned() != 0;
             let as_inet = |inet: bool| {
                 if inet {
                     Unspecified::AsInet

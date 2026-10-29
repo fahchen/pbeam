@@ -293,7 +293,9 @@ impl Packets {
         if bytes.len() > limit {
             return None;
         }
-        let size = (bytes.len() as u32).to_be_bytes();
+        // The header keeps the low 32 bits of the length, as `put_int32` does.
+        let [b0, b1, b2, b3, ..] = bytes.len().to_le_bytes();
+        let size = [b3, b2, b1, b0];
         let mut framed = size[4 - self.header..].to_vec();
         framed.extend(bytes);
         Some(framed)
@@ -798,7 +800,10 @@ fn read_spawn(spawn: &mut Spawn, input: &mut u64) -> Option<PortEvent> {
         return Some(PortEvent::EndOfFile(spawn.end_of_file()));
     }
     let packets = spawn.packets.split(bytes);
-    *input += packets.iter().map(|bytes| bytes.len() as u64).sum::<u64>();
+    *input += packets
+        .iter()
+        .map(|bytes| u64::try_from(bytes.len()).expect("a usize fits in u64"))
+        .sum::<u64>();
     let messages = spawn.messages(packets);
     (!messages.is_empty()).then_some(PortEvent::Data(messages))
 }

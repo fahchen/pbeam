@@ -181,7 +181,8 @@ impl KeyOrder {
     /// (`src/term/order.rs`).
     pub(super) fn find(&self, atoms: &AtomTable, key: &Term) -> Result<Option<&Term>, BeamError> {
         let probe = Probe::new(|stored: &Term| key.compare(stored, atoms));
-        let found = self.keys.get(&probe as &dyn Locate).map(|key| &key.term);
+        let place: &dyn Locate = &probe;
+        let found = self.keys.get(place).map(|key| &key.term);
         probe.result(found)
     }
 
@@ -200,7 +201,7 @@ impl KeyOrder {
         direction: Direction,
     ) -> Result<Box<dyn Iterator<Item = &'a Term> + 'a>, BeamError> {
         let probe = Probe::new(|stored: &Term| key.compare(stored, atoms));
-        let place = &probe as &dyn Locate;
+        let place: &dyn Locate = &probe;
         let keys: Box<dyn Iterator<Item = &'a Term>> = if direction == Direction::Forward {
             let range = (Bound::Excluded(place), Bound::Unbounded);
             Box::new(self.keys.range::<dyn Locate, _>(range).map(|key| &key.term))
@@ -237,7 +238,7 @@ impl KeyOrder {
                 Ordering::Less
             })
         });
-        let place = &probe as &dyn Locate;
+        let place: &dyn Locate = &probe;
         let before = self
             .keys
             .range::<dyn Locate, _>((Bound::Unbounded, Bound::Excluded(place)))
@@ -258,7 +259,8 @@ impl KeyOrder {
     /// Remove the key `key`.
     pub(super) fn remove(&mut self, atoms: &AtomTable, key: &Term) {
         let probe = Probe::new(|stored: &Term| key.compare(stored, atoms));
-        self.keys.remove(&probe as &dyn Locate);
+        let place: &dyn Locate = &probe;
+        self.keys.remove(place);
     }
 }
 

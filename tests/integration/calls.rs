@@ -26,7 +26,7 @@ fn executes_local_and_startup_loaded_external_calls_like_erts() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert_eq!(reference.stderr, [] as [u8; 0]);
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     assert_eq!(reference.stdout, b"7\n");
 }
 

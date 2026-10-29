@@ -50,7 +50,7 @@ fn resolves_calls_into_each_pinned_otp_io_module() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert_eq!(reference.stdout, [] as [u8; 0]);
+    assert_eq!(reference.stdout, <[u8; 0]>::default());
     assert_eq!(reference.stderr, b"{error,enotsup}\n");
 
     // `group:whereis_shell/0` resolves inside the loaded `group` module,
@@ -96,7 +96,7 @@ fn resolves_calls_into_each_pinned_otp_io_module() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert_eq!(reference.stdout, [] as [u8; 0]);
+    assert_eq!(reference.stdout, <[u8; 0]>::default());
     assert_eq!(
         reference.stderr,
         b"[{error,badarg,[{erlang,process_info,[undefined,dictionary]},\

@@ -137,7 +137,7 @@ fn sets_the_first_check_timer_at_the_start_as_late_init_time_correction() {
     assert!(!timers.active());
     assert_eq!(
         timers.wait_time(1_000_000_000),
-        Duration::from_millis((timers.check.0 - 1000) as u64)
+        Duration::from_millis(u64::try_from(timers.check.0 - 1000).unwrap())
     );
 }
 

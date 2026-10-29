@@ -194,7 +194,7 @@ impl Fake {
     fn reply(&mut self) -> (u32, String) {
         let mut size = [0; 4];
         self.replies.read_exact(&mut size).expect("size");
-        let mut reply = vec![0; u32::from_be_bytes(size) as usize];
+        let mut reply = vec![0; usize::try_from(u32::from_be_bytes(size)).unwrap()];
         self.replies.read_exact(&mut reply).expect("reply");
         let serial = u32::from_be_bytes(reply[..4].try_into().expect("serial"));
         (

@@ -29,7 +29,7 @@ fn reads_a_large_tuple_literal_as_pinned_erts() {
     };
     assert_eq!(elements.len(), 300);
     for (index, element) in elements.iter().enumerate() {
-        assert_eq!(*element, Term::Integer((index + 1) as i64));
+        assert_eq!(*element, Term::Integer(i64::try_from(index + 1).unwrap()));
     }
 
     let reference = Command::new("erl")
@@ -43,7 +43,7 @@ fn reads_a_large_tuple_literal_as_pinned_erts() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert_eq!(reference.stderr, [] as [u8; 0]);
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     assert_eq!(reference.stdout, b"{300,1,300}\n");
 }
 
@@ -71,6 +71,6 @@ fn decodes_tuple_and_list_literals_and_builds_lists_on_the_empty_list() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert_eq!(reference.stderr, [] as [u8; 0]);
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     assert_eq!(reference.stdout, b"{[flush],{error,enotsup},same}\n");
 }

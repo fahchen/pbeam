@@ -23,7 +23,7 @@ const FIRST_SEGMENT_SLOTS: usize = 256;
 const SEGMENT_SLOTS: usize = 2048;
 /// The reductions of a segment that the exit of the owner frees, without its
 /// objects (`EXT_SEGSZ/64`, `erl_db_hash.c:3141`).
-const SEGMENT_REDUCTIONS: i32 = (SEGMENT_SLOTS / 64) as i32;
+const SEGMENT_REDUCTIONS: usize = SEGMENT_SLOTS / 64;
 /// The fewest slots with which a table can shrink: one more segment than two
 /// segments (`FIRST_SEGSZ + 2*EXT_SEGSZ`, `erl_db_hash.c:3382`).
 const SHRINK_SLOTS: usize = FIRST_SEGMENT_SLOTS + 2 * SEGMENT_SLOTS;
@@ -425,12 +425,16 @@ impl Busy {
     }
 }
 
+/// Return a key hash as a `usize`: `HashValue` is a `UWord`, so the hash fits.
+fn hash_word(hash: u64) -> usize {
+    usize::try_from(hash).expect("a u64 fits in usize on a 64-bit host")
+}
+
 /// Return the bucket of the stored key hash `hash` for a table of `buckets`
 /// buckets, as `hash_to_ix` gives it (`erl_db_hash.c:199-209`).
 fn stored_bucket(hash: u64, buckets: usize) -> usize {
     let mask = buckets.next_power_of_two() - 1;
-    // `HashValue` is a `UWord`, so the key hash fits.
-    let bucket = hash as usize & mask;
+    let bucket = hash_word(hash) & mask;
     if bucket >= buckets {
         bucket & (mask >> 1)
     } else {
@@ -1407,7 +1411,8 @@ impl Freeing {
         };
         let last = (FIRST_SEGMENT_SLOTS + self.segments * SEGMENT_SLOTS).min(self.table.buckets);
         let table = &mut self.table;
-        let mut reds = SEGMENT_REDUCTIONS;
+        let mut reds =
+            i32::try_from(SEGMENT_REDUCTIONS).expect("a segment reduction count fits in i32");
         for bucket in first..last {
             let mut key = std::mem::replace(&mut table.heads[bucket], EMPTY);
             while key != EMPTY {
@@ -1714,13 +1719,13 @@ impl Table {
     pub(super) fn size(&self) -> u64 {
         let structural = i128::try_from(self.object_count()).unwrap_or(i128::MAX);
         let size = structural + i128::from(self.size_adjust);
-        (size as u128 & u128::from(u64::MAX)) as u64
+        u64::try_from(size.cast_unsigned() & u128::from(u64::MAX)).expect("the mask keeps 64 bits")
     }
 
     /// Return the item counter as the signed `Sint` that growth and shrink
     /// compare (`NITEMS_ESTIMATE`, `erl_db_hash.c:1352`, `759`).
     fn item_count(&self) -> i64 {
-        self.size() as i64
+        self.size().cast_signed()
     }
 
     /// Return the item estimate of a key with the hash `hash`: 64 times the
@@ -1728,10 +1733,14 @@ impl Table {
     /// counter (`NITEMS_ESTIMATE`, `erl_db_hash.c:106-117`).
     fn estimate(&self, hash: u64) -> i64 {
         self.lock_items
-            .get(hash as usize % LOCK_COUNTERS)
+            .get(hash_word(hash) % LOCK_COUNTERS)
             .map_or_else(
                 || self.item_count(),
-                |items| items.wrapping_mul(LOCK_COUNTERS as i64),
+                |items| {
+                    items.wrapping_mul(
+                        i64::try_from(LOCK_COUNTERS).expect("the lock counter count fits in i64"),
+                    )
+                },
             )
     }
 
@@ -1739,8 +1748,8 @@ impl Table {
     /// counter of the lock of the key with the hash `hash` (`ADD_NITEMS`,
     /// `erl_db_hash.c:119-129`).
     fn count_lock(&mut self, hash: u64, before: u64) {
-        let change = self.size().wrapping_sub(before) as i64;
-        if let Some(items) = self.lock_items.get_mut(hash as usize % LOCK_COUNTERS) {
+        let change = self.size().wrapping_sub(before).cast_signed();
+        if let Some(items) = self.lock_items.get_mut(hash_word(hash) % LOCK_COUNTERS) {
             *items = items.wrapping_add(change);
         }
     }
@@ -1752,7 +1761,7 @@ impl Table {
     /// the shrink.
     fn try_shrink(&mut self, nitems: i64) {
         for _ in 0..RESIZE_STEPS {
-            if nitems as u64 >= u64::try_from(self.shrink_limit()).unwrap_or(u64::MAX) {
+            if nitems.cast_unsigned() >= u64::try_from(self.shrink_limit()).unwrap_or(u64::MAX) {
                 break;
             }
             self.join();
@@ -1780,8 +1789,7 @@ impl Table {
             // (`db_mark_all_deleted_hash`, `erl_db_hash.c:3034-3051`).
             return (self.buckets - 1).div_ceil(8);
         }
-        self.segment_slots().div_ceil(SEGMENT_SLOTS) * SEGMENT_REDUCTIONS as usize
-            + self.object_count()
+        self.segment_slots().div_ceil(SEGMENT_SLOTS) * SEGMENT_REDUCTIONS + self.object_count()
     }
 
     /// Return the memory of the table in 64-bit words, as
@@ -2543,7 +2551,7 @@ impl Table {
                 }
             }
         }
-        SEGMENT_REDUCTIONS as usize + objects
+        SEGMENT_REDUCTIONS + objects
     }
 
     /// Remove all objects of the table, as `db_delete_all_objects_hash`
@@ -3032,7 +3040,8 @@ impl Table {
                         break;
                     }
                 }
-                let key = &busy.objects[busy.walked][self.keypos as usize - 1];
+                let key = &busy.objects[busy.walked]
+                    [usize::try_from(self.keypos).expect("a stored object has a key position") - 1];
                 busy.looped = false;
                 if self.object(atoms, key).is_some() {
                     busy.found = true;
@@ -3101,7 +3110,7 @@ impl Table {
                 };
                 busy.looped = false;
                 busy.inserted += 1;
-                left -= 1 + compared as i64;
+                left -= 1 + i64::try_from(compared).expect("a compared count fits in i64");
             }
             // A turn that uses the last of the budget ends the insert in
             // its next turn, as the trapped YCF call uninstalls the state
@@ -3328,7 +3337,10 @@ impl Table {
         self.count_lock(hash, size);
         // ERTS compares the signed estimate with the unsigned bucket count,
         // so an estimate below 0 is a huge value (`erl_db_hash.c:1456-1460`).
-        while self.estimate(hash) as u64 > self.buckets as u64 && splits < RESIZE_STEPS {
+        while self.estimate(hash).cast_unsigned()
+            > u64::try_from(self.buckets).expect("a usize fits in u64")
+            && splits < RESIZE_STEPS
+        {
             self.split(atoms);
             splits += 1;
         }
@@ -3475,7 +3487,7 @@ impl Table {
         for slot in keys {
             self.next[slot] = EMPTY;
             let hash = stored_hash(atoms, self.key(self.object_of(slot)));
-            if hash as usize & mask == to {
+            if hash_word(hash) & mask == to {
                 self.link(to, high, slot);
                 high = slot;
             } else {
@@ -4156,7 +4168,7 @@ impl KeyIndex {
             return None;
         }
         let mask = self.slots.len() - 1;
-        let mut slot = hash as usize & mask;
+        let mut slot = hash_word(hash) & mask;
         loop {
             let object = self.slots[slot];
             if object == EMPTY {
@@ -4186,7 +4198,7 @@ impl KeyIndex {
             self.grow();
         }
         let mask = self.slots.len() - 1;
-        let mut slot = hash as usize & mask;
+        let mut slot = hash_word(hash) & mask;
         while self.slots[slot] != EMPTY {
             slot = (slot + 1) & mask;
         }
@@ -4222,7 +4234,7 @@ impl KeyIndex {
             if object == EMPTY {
                 continue;
             }
-            let mut slot = hash as usize & mask;
+            let mut slot = hash_word(hash) & mask;
             while self.slots[slot] != EMPTY {
                 slot = (slot + 1) & mask;
             }
@@ -4247,7 +4259,7 @@ impl KeyIndex {
     /// ```
     fn replace(&mut self, hash: u64, old: usize, new: usize) {
         let mask = self.slots.len() - 1;
-        let mut entry = hash as usize & mask;
+        let mut entry = hash_word(hash) & mask;
         while self.slots[entry] != old {
             entry = (entry + 1) & mask;
         }
@@ -4276,7 +4288,7 @@ impl KeyIndex {
     /// ```
     fn remove(&mut self, hash: u64, object: usize) {
         let mask = self.slots.len() - 1;
-        let mut entry = hash as usize & mask;
+        let mut entry = hash_word(hash) & mask;
         while self.slots[entry] != object {
             entry = (entry + 1) & mask;
         }
@@ -4287,7 +4299,7 @@ impl KeyIndex {
             if self.slots[next] == EMPTY {
                 break;
             }
-            let ideal = self.hashes[next] as usize & mask;
+            let ideal = hash_word(self.hashes[next]) & mask;
             let blocked = if hole <= next {
                 hole < ideal && ideal <= next
             } else {
