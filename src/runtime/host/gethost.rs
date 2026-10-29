@@ -382,12 +382,11 @@ impl Pool {
     /// Handle the reply of the busy worker at `index`, as `handle_io_busy`
     /// does (`inet_gethost.c:552-585`).
     fn replied(&mut self, index: usize) {
-        match self.busy[index].queue.pop_front() {
-            Some(job) => self.send(index, job),
-            None => {
-                let worker = self.busy.swap_remove(index);
-                self.free.push(worker);
-            }
+        if let Some(job) = self.busy[index].queue.pop_front() {
+            self.send(index, job);
+        } else {
+            let worker = self.busy.swap_remove(index);
+            self.free.push(worker);
         }
     }
 
@@ -584,7 +583,9 @@ fn h_errno_value() -> c_int {
 /// Run `gethostbyname(name)`, as the worker does for `PROTO_IPV4`
 /// (`inet_gethost.c:1837-1847`).
 fn host_by_name(name: &CStr) -> Result<Vec<u8>, Code> {
-    let _lock = NETDB.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = NETDB
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // SAFETY: `name` is a NUL-terminated string. The caller holds `NETDB`.
     let host = unsafe { gethostbyname(name.as_ptr()) };
     hostent_reply(host)
@@ -593,7 +594,9 @@ fn host_by_name(name: &CStr) -> Result<Vec<u8>, Code> {
 /// Run `gethostbyaddr(address, 4, AF_INET)`, as the worker does for
 /// `PROTO_IPV4` (`inet_gethost.c:1929-1941`).
 fn host_by_address(address: [u8; 4]) -> Result<Vec<u8>, Code> {
-    let _lock = NETDB.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = NETDB
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // SAFETY: `address` holds the 4 bytes that the call reads. The caller
     // holds `NETDB`.
     let host = unsafe { gethostbyaddr(address.as_ptr().cast(), 4, libc::AF_INET) };

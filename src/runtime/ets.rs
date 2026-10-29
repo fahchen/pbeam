@@ -3212,9 +3212,10 @@ impl Table {
             }
         }
         let walks = walks.entry(hash).or_default();
-        let index = match (walks.iter()).position(|walk| walk.key == *self.key(&object)) {
-            Some(index) => index,
-            None => {
+        let index =
+            if let Some(index) = (walks.iter()).position(|walk| walk.key == *self.key(&object)) {
+                index
+            } else {
                 let key = self.key(&object).clone();
                 // ERTS compares the new object with the first object of
                 // the key's list first, and that object stays the chain
@@ -3222,42 +3223,38 @@ impl Table {
                 let cursor = self.chain_node(hash, &key).unwrap_or(EMPTY);
                 walks.push(BagWalk::new(key, cursor));
                 walks.len() - 1
-            }
-        };
+            };
         let walk = &mut walks[index];
         let object_hash = object_hash(&object);
-        match walk.find(self, object_hash, &object) {
-            Some(count) => {
-                if let Some(slot) = walk.seen.get(&object_hash).and_then(|pairs| {
-                    pairs
-                        .iter()
-                        .find(|(_, slot)| self.object_of(*slot).as_slice() == object)
-                        .map(|(_, slot)| *slot)
-                }) && !new
-                    && self.is_deleted(slot)
-                {
-                    self.restore_object(slot, hash, &walk.key);
-                    // The restored object is the first object of the key,
-                    // so the next object of the run compares from it
-                    // (`erl_db_hash.c:1431-1435`).
-                    walk.cursor = slot;
-                    walk.walked = 0;
-                    walk.added = 0;
-                    walk.seen.clear();
-                }
-                count
+        if let Some(count) = walk.find(self, object_hash, &object) {
+            if let Some(slot) = walk.seen.get(&object_hash).and_then(|pairs| {
+                pairs
+                    .iter()
+                    .find(|(_, slot)| self.object_of(*slot).as_slice() == object)
+                    .map(|(_, slot)| *slot)
+            }) && !new
+                && self.is_deleted(slot)
+            {
+                self.restore_object(slot, hash, &walk.key);
+                // The restored object is the first object of the key,
+                // so the next object of the run compares from it
+                // (`erl_db_hash.c:1431-1435`).
+                walk.cursor = slot;
+                walk.walked = 0;
+                walk.added = 0;
+                walk.seen.clear();
             }
-            None => {
-                let count = walk.added + walk.walked;
-                let node = self.chain_node(hash, &walk.key).unwrap_or(EMPTY);
-                let slot = self.add(atoms, hash, object, node);
-                walk.seen
-                    .entry(object_hash)
-                    .or_default()
-                    .push((Place::Added(walk.added), slot));
-                walk.added += 1;
-                count
-            }
+            count
+        } else {
+            let count = walk.added + walk.walked;
+            let node = self.chain_node(hash, &walk.key).unwrap_or(EMPTY);
+            let slot = self.add(atoms, hash, object, node);
+            walk.seen
+                .entry(object_hash)
+                .or_default()
+                .push((Place::Added(walk.added), slot));
+            walk.added += 1;
+            count
         }
     }
 
@@ -3780,21 +3777,18 @@ impl Table {
     /// assert_eq!(table.allocate(), 1);
     /// ```
     fn allocate(&mut self) -> usize {
-        match self.free.pop() {
-            Some(slot) => {
-                // A freed slot can hold the flag of a pseudo-deleted object
-                // that a take freed (`db_take_hash`, `erl_db_hash.c:2949-2995`).
-                if let Some(deleted) = self.deleted.get_mut(slot) {
-                    *deleted = false;
-                }
-                slot
+        if let Some(slot) = self.free.pop() {
+            // A freed slot can hold the flag of a pseudo-deleted object
+            // that a take freed (`db_take_hash`, `erl_db_hash.c:2949-2995`).
+            if let Some(deleted) = self.deleted.get_mut(slot) {
+                *deleted = false;
             }
-            None => {
-                self.objects.push(None);
-                self.older.push(EMPTY);
-                self.next.push(EMPTY);
-                self.objects.len() - 1
-            }
+            slot
+        } else {
+            self.objects.push(None);
+            self.older.push(EMPTY);
+            self.next.push(EMPTY);
+            self.objects.len() - 1
         }
     }
 

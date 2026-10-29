@@ -738,15 +738,9 @@ fn guard(name: &str, arity: usize) -> Option<Guard> {
 fn known_guard(name: &str, arity: usize) -> bool {
     matches!(
         (name, arity),
-        ("is_record", 3)
-            | ("is_integer", 3)
+        ("is_record" | "is_integer" | "binary_part", 3)
             | ("binary_part", 2)
-            | ("binary_part", 3)
-            | ("round", 1)
-            | ("trunc", 1)
-            | ("float", 1)
-            | ("ceil", 1)
-            | ("floor", 1)
+            | ("round" | "trunc" | "float" | "ceil" | "floor", 1)
     )
 }
 
@@ -938,16 +932,54 @@ fn call(atoms: &AtomTable, function: Guard, arguments: &[Term]) -> Option<Term> 
         Guard::Bnot => bitwise_not(&arguments[0]),
         Guard::Bsl => shift(&arguments[0], &arguments[1], false),
         Guard::Bsr => shift(&arguments[0], &arguments[1], true),
-        Guard::Gt => compare(atoms, &arguments[0], &arguments[1], |order| order.is_gt()),
-        Guard::Ge => compare(atoms, &arguments[0], &arguments[1], |order| order.is_ge()),
-        Guard::Lt => compare(atoms, &arguments[0], &arguments[1], |order| order.is_lt()),
-        Guard::Le => compare(atoms, &arguments[0], &arguments[1], |order| order.is_le()),
-        Guard::Eq => compare(atoms, &arguments[0], &arguments[1], |order| order.is_eq()),
-        Guard::EqExact => compare_exact(atoms, &arguments[0], &arguments[1], |order| order.is_eq()),
-        Guard::Neq => compare(atoms, &arguments[0], &arguments[1], |order| order.is_ne()),
-        Guard::NeqExact => {
-            compare_exact(atoms, &arguments[0], &arguments[1], |order| order.is_ne())
-        }
+        Guard::Gt => compare(
+            atoms,
+            &arguments[0],
+            &arguments[1],
+            std::cmp::Ordering::is_gt,
+        ),
+        Guard::Ge => compare(
+            atoms,
+            &arguments[0],
+            &arguments[1],
+            std::cmp::Ordering::is_ge,
+        ),
+        Guard::Lt => compare(
+            atoms,
+            &arguments[0],
+            &arguments[1],
+            std::cmp::Ordering::is_lt,
+        ),
+        Guard::Le => compare(
+            atoms,
+            &arguments[0],
+            &arguments[1],
+            std::cmp::Ordering::is_le,
+        ),
+        Guard::Eq => compare(
+            atoms,
+            &arguments[0],
+            &arguments[1],
+            std::cmp::Ordering::is_eq,
+        ),
+        Guard::EqExact => compare_exact(
+            atoms,
+            &arguments[0],
+            &arguments[1],
+            std::cmp::Ordering::is_eq,
+        ),
+        Guard::Neq => compare(
+            atoms,
+            &arguments[0],
+            &arguments[1],
+            std::cmp::Ordering::is_ne,
+        ),
+        Guard::NeqExact => compare_exact(
+            atoms,
+            &arguments[0],
+            &arguments[1],
+            std::cmp::Ordering::is_ne,
+        ),
         Guard::Not => match &arguments[0] {
             Term::Atom(atom) if atom.is_static("true") => truth(false),
             Term::Atom(atom) if atom.is_static("false") => truth(true),

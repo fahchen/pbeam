@@ -585,7 +585,10 @@ fn keeps_the_objects_of_a_bag_key_in_insertion_order_across_deletes() {
     assert_eq!(insert(object(2, 1)), 0);
     assert_eq!(insert(object(1, 2)), 1);
     table.delete(&atoms, &Term::Integer(1));
-    assert!(table.objects(&atoms, &Term::Integer(1)).is_empty());
+    assert_eq!(
+        table.objects(&atoms, &Term::Integer(1)),
+        [] as [&[crate::term::Term]; 0]
+    );
     assert_eq!(table.slot_count(), 4);
     for value in [7, 8, 9] {
         assert_eq!(
@@ -891,27 +894,27 @@ fn compares_the_keys_of_an_ordered_set_by_the_arithmetic_order() {
     assert!(table.update_elements(&atoms, &float, &[(2, b.clone())]));
     assert_eq!(
         table.object(&atoms, &integer),
-        Some(&[integer.clone(), b.clone()][..])
+        Some(&[integer.clone(), b][..])
     );
     // A replacement moves the stored hash of the key to the hash of the new
     // key, so a delete removes the index entry of the object.
     table.insert(&atoms, vec![float.clone(), c.clone()]);
     assert_eq!(
         table.object(&atoms, &integer),
-        Some(&[float.clone(), c.clone()][..])
+        Some(&[float.clone(), c][..])
     );
     assert_eq!(table.object_count(), 1);
     // A tuple and a list compare element by element.
     let tuple = Term::tuple(vec![integer.clone(), t.clone()]);
     table.insert(&atoms, vec![tuple.clone(), v.clone()]);
     assert_eq!(
-        table.object(&atoms, &Term::tuple(vec![float.clone(), t.clone()])),
-        Some(&[tuple.clone(), v.clone()][..])
+        table.object(&atoms, &Term::tuple(vec![float.clone(), t])),
+        Some(&[tuple, v.clone()][..])
     );
     let list = Term::list_from([integer.clone(), l.clone()]);
     table.insert(&atoms, vec![list.clone(), v.clone()]);
     assert_eq!(
-        table.object(&atoms, &Term::list_from([float.clone(), l.clone()])),
+        table.object(&atoms, &Term::list_from([float.clone(), l])),
         Some(&[list, v.clone()][..])
     );
     // A map key compares its keys exactly and its values arithmetically.
@@ -920,7 +923,7 @@ fn compares_the_keys_of_an_ordered_set_by_the_arithmetic_order() {
     table.insert(&atoms, vec![map(integer.clone()), v.clone()]);
     assert_eq!(
         table.object(&atoms, &map(float.clone())),
-        Some(&[map(integer.clone()), v.clone()][..])
+        Some(&[map(integer.clone()), v][..])
     );
     assert_eq!(table.object_count(), 4);
     table.delete(&atoms, &float);
@@ -1608,7 +1611,7 @@ fn counts_the_bag_comparisons_after_a_restore() {
             &atoms,
             vec![
                 vec![key.clone(), Term::Integer(1)],
-                vec![key.clone(), Term::Integer(1)],
+                vec![key, Term::Integer(1)],
             ],
         ),
         vec![2, 0]

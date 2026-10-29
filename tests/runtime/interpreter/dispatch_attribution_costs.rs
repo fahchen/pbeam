@@ -413,7 +413,7 @@ fn prints_the_cost_of_every_instruction_part() {
         cost(|| {
             let values =
                 read_bif_arguments(black_box(&process), black_box(&arguments)).expect("x0 is set");
-            values.with(|terms| terms.len()) as u64
+            values.with(<[&crate::term::Term]>::len) as u64
         }),
     );
     let program = BeamProgram {

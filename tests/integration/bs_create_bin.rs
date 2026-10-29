@@ -1087,7 +1087,7 @@ fn raises_the_erts_error_info_for_integer_and_utf8_segments() {
             1,
             "integer",
             "size",
-            one.clone(),
+            one,
         ),
         (
             "sized_code",
@@ -1105,7 +1105,7 @@ fn raises_the_erts_error_info_for_integer_and_utf8_segments() {
             1,
             "integer",
             "type",
-            other.clone(),
+            other,
         ),
     ];
     let caught = |function: &str, arity: usize, reason: &str, cause: Term| {
@@ -1297,12 +1297,7 @@ fn appends_with_private_append_segments_as_pinned_erts() {
         ),
         (
             "floats",
-            vec![list(vec![
-                Term::Float(1.5),
-                int(2),
-                Term::Float(-0.0),
-                big.clone(),
-            ])],
+            vec![list(vec![Term::Float(1.5), int(2), Term::Float(-0.0), big])],
             binary(&float_bytes),
         ),
         (
@@ -1500,8 +1495,8 @@ fn builds_16_bit_float_segments_as_pinned_erts() {
         Term::Float(1.0e-10),
         Term::Float(3.0e-8),
         Term::Float(2.0f64.powi(-25)),
-        Term::Float(1.00146484375),
-        Term::Float(1.00048828125),
+        Term::Float(1.001_464_843_75),
+        Term::Float(1.000_488_281_25),
         Term::Float(2047.9),
         Term::Float(1.0e-20),
         Term::Float(5.0e-324),
@@ -1777,7 +1772,7 @@ fn builds_utf16_and_utf32_segments_as_pinned_erts() {
             "append_utf16",
             &[
                 vec![Term::binary(vec![97]), Term::Integer(65)],
-                vec![Term::binary(Vec::new()), face.clone()],
+                vec![Term::binary(Vec::new()), face],
             ]
         ),
         [binary(&[97, 0, 65]), binary(&[216, 61, 222, 0])]
@@ -1869,14 +1864,7 @@ fn raises_the_erts_error_info_for_utf16_and_utf32_segments() {
             "type",
             other.clone(),
         ),
-        (
-            "utf32",
-            vec![bignum.clone()],
-            1,
-            "utf32",
-            "type",
-            bignum.clone(),
-        ),
+        ("utf32", vec![bignum.clone()], 1, "utf32", "type", bignum),
         (
             "utf32_little",
             vec![int(0x11_0000)],
@@ -1925,7 +1913,7 @@ fn raises_the_erts_error_info_for_utf16_and_utf32_segments() {
             1,
             "utf16",
             "type",
-            other.clone(),
+            other,
         ),
     ];
     let caught = |function: &str, arity: usize, cause: Term| {

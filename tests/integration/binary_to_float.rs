@@ -62,13 +62,13 @@ fn reads_floats_from_binaries_as_pinned_erts() {
     let mut expected = vec![
         ok(1.0),
         ok(17.0),
-        ok(22.017764),
+        ok(22.017_764),
         ok(1.5),
         ok(-0.0),
         ok(0.1),
         ok(0.0),
         ok(5.0e-324),
-        ok(2.225073858507201e-308),
+        ok(2.225_073_858_507_201e-308),
     ];
     expected.extend([
         failed(binary(b"1.0e309")),

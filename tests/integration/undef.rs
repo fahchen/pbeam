@@ -86,7 +86,7 @@ fn raises_undef_for_a_function_that_a_loaded_module_does_not_export() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, [] as [u8; 0]);
     assert_eq!(
         String::from_utf8(reference.stdout).unwrap(),
         "[{error,undef,{undef_target,missing,[a],[]}},{error,undef,{undef_target,missing,[b],[]}},{error,undef,{undef_target,missing,[c],[]}},{error,undef,{undef_target,missing,[d],[]}},{error,undef,{undef_target,missing,[e],[]}},{error,undef,{undef_target,missing,[f],[]}},{error,undef,{undef_target,missing,[g],[]}},{error,undef,{undef_target,missing,[h],[]}},{error,undef,{undef_target,missing,[i],[]}},{error,undef,{undef_target,missing,[j,k],[]}},{error,undef,{undef_target,missing,[],[]}},{'EXIT',undef,{undef_target,missing,[l],[]}},{handled,missing,[m]},{handled,other,[n,o]}]\n"
@@ -153,7 +153,7 @@ fn returns_the_value_of_a_handler_that_a_tail_call_runs() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, [] as [u8; 0]);
     assert_eq!(
         String::from_utf8(reference.stdout).unwrap(),
         "{handled,missing,[a]}\n"
@@ -227,7 +227,7 @@ fn starts_a_spawned_process_at_a_function_that_its_module_does_not_export() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, [] as [u8; 0]);
     assert_eq!(
         String::from_utf8(reference.stdout).unwrap(),
         "[{undef,[{undef_target,missing,[a,b],[]}]},{handled,stop,[a,b]}]\n"
@@ -324,7 +324,7 @@ fn raises_system_limit_for_a_spawn_with_more_than_1023_arguments() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, [] as [u8; 0]);
     assert_eq!(
         String::from_utf8(reference.stdout).unwrap(),
         "[true,system_limit,system_limit]\n"

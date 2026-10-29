@@ -34,18 +34,21 @@ fn match_context() -> Term {
 
 #[test]
 fn hashes_small_integers_as_erts() {
-    assert_eq!(map_hash(&Term::Integer(1)), Some(7938660269479274665));
-    assert_eq!(map_hash(&Term::Integer(-1)), Some(7256831767414464289));
+    assert_eq!(map_hash(&Term::Integer(1)), Some(7_938_660_269_479_274_665));
+    assert_eq!(
+        map_hash(&Term::Integer(-1)),
+        Some(7_256_831_767_414_464_289)
+    );
     assert!(map_hash(&Term::Integer((1 << 59) - 1)).is_some());
     assert!(map_hash(&Term::Integer(-(1 << 59))).is_some());
     // A bignum key hashes with the bignum path of the internal hash.
     assert_eq!(
         map_hash(&Term::Integer(1 << 59)),
-        Some(10054563828903259082)
+        Some(10_054_563_828_903_259_082)
     );
     assert_eq!(
         map_hash(&Term::Integer(-(1 << 59) - 1)),
-        Some(12317164193119007090)
+        Some(12_317_164_193_119_007_090)
     );
 }
 
@@ -54,12 +57,12 @@ fn hashes_atoms_by_their_index_as_erts() {
     // true has index 1: its ERTS word is (1 << 6) | 0xB = 0x4B.
     assert_eq!(
         map_hash(&Term::static_atom("true")),
-        Some(14558535449716669319)
+        Some(14_558_535_449_716_669_319)
     );
     // abs_path has index 26. ERTS 29.1.1: its internal hash.
     assert_eq!(
         map_hash(&Term::static_atom("abs_path")),
-        Some(17379220480677090226)
+        Some(17_379_220_480_677_090_226)
     );
 }
 
@@ -169,7 +172,10 @@ fn hashes_tuple_keys_with_the_internal_hash() {
     for key in keys {
         assert_eq!(map_hash(&key), Some(internal_hash(&key)));
     }
-    assert_eq!(map_hash(&Term::tuple(vec![])), Some(4510301282025278020));
+    assert_eq!(
+        map_hash(&Term::tuple(vec![])),
+        Some(4_510_301_282_025_278_020)
+    );
 }
 
 #[test]
@@ -363,11 +369,11 @@ fn becomes_a_hashmap_with_the_erts_order_above_32_keys() {
     // The first three keys have hashes with the same low 60 bits, and so do the next two.
     // Each group splits only at level 15. ERTS 29.1.1: maps:keys of this map.
     let deep = [
-        413866500823436792,
-        -101714049538469044,
-        -74925715755171563,
-        329898321527737274,
-        446694106686689078,
+        413_866_500_823_436_792,
+        -101_714_049_538_469_044,
+        -74_925_715_755_171_563,
+        329_898_321_527_737_274,
+        446_694_106_686_689_078,
     ];
     assert_eq!(
         map_hash(&Term::Integer(deep[0])),
@@ -501,15 +507,15 @@ fn copies_a_shared_form_before_a_change() {
             vec![(Insert::Set, Term::Integer(1), atom("w"))],
             &test_atom_table(),
         )
-        .unwrap()
+        .unwrap();
     });
     change(|map| {
         map.insert(Term::Integer(2), atom("w"), &test_atom_table())
-            .unwrap()
+            .unwrap();
     });
     change(|map| {
         map.insert(Term::Integer(-1), atom("w"), &test_atom_table())
-            .unwrap()
+            .unwrap();
     });
 
     // A copy of a flatmap of 32 keys that gets the 33rd key is a hashmap. The other copy stays
@@ -566,14 +572,14 @@ fn copies_only_the_hashmap_nodes_on_the_path_of_a_change() {
         assert_eq!(copy.get(&Term::Integer(key)), Some(&atom("w")));
     };
     change(500, 28, |map, key| {
-        map.insert(key, atom("w"), &test_atom_table()).unwrap()
+        map.insert(key, atom("w"), &test_atom_table()).unwrap();
     });
     change(2000, 29, |map, key| {
-        map.insert(key, atom("w"), &test_atom_table()).unwrap()
+        map.insert(key, atom("w"), &test_atom_table()).unwrap();
     });
     change(500, 28, |map, key| {
         map.update(vec![(Insert::Set, key, atom("w"))], &test_atom_table())
-            .unwrap()
+            .unwrap();
     });
 }
 
@@ -584,7 +590,7 @@ fn drains_the_pairs_of_a_map_only_from_the_last_copy() {
         let mut map = integers(1..=size);
         let mut copy = map.clone();
         map.drain_into(&mut pending);
-        assert!(pending.is_empty());
+        assert_eq!(pending, [] as [crate::term::Term; 0]);
         assert_eq!(copy.len(), size as usize);
         // `Term::drop` drops the map after `drain_into`.
         drop(map);
@@ -888,11 +894,11 @@ fn fails_for_a_path_that_erts_returns_as_a_bignum_not_in_normal_form() {
     // groups (see becomes_a_hashmap_with_the_erts_order_above_32_keys),
     // so each group is in a node at level 15.
     let deep = [
-        329898321527737274,
-        446694106686689078,
-        413866500823436792,
-        -101714049538469044,
-        -74925715755171563,
+        329_898_321_527_737_274,
+        446_694_106_686_689_078,
+        413_866_500_823_436_792,
+        -101_714_049_538_469_044,
+        -74_925_715_755_171_563,
     ];
     let before = [
         319, 169, 371, 359, 160, 388, 136, 324, 348, 287, 296, 357, 239, 179, 289, 263, 313, 235,

@@ -39,7 +39,7 @@ fn delivers_link_exit_before_monitor_down_and_normal_exit_to_trapping_process() 
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, [] as [u8; 0]);
     assert_eq!(
         reference.stdout,
         b"{{{'EXIT',boom},{'DOWN',boom}},{'EXIT',normal}}\n"
@@ -92,7 +92,7 @@ fn sends_exit_signals_with_exit_2_as_erts_does() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, [] as [u8; 0]);
     assert_eq!(
         reference.stdout,
         b"[normal,boom,killed,{returned,true,true},{returned,true,true},killed,{alive,none},boom,killed,{alive,{normal,true}},killed,badarg,badarg,true,true,true,{linked,boom}]\n"
@@ -143,7 +143,7 @@ fn sends_exit_signals_with_exit_3_as_erts_does() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, [] as [u8; 0]);
     assert_eq!(
         String::from_utf8(reference.stdout).unwrap(),
         format!("{expected}\n")

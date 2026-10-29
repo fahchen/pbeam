@@ -315,13 +315,12 @@ impl<'a> Cursor<'a> {
             for _ in 0..count {
                 let start = self.pos;
                 let extra = self.extra;
-                match self.declaration() {
-                    Some(declaration) => declarations.push(declaration),
-                    None => {
-                        self.pos = start;
-                        self.extra = extra;
-                        self.skip_term()?;
-                    }
+                if let Some(declaration) = self.declaration() {
+                    declarations.push(declaration);
+                } else {
+                    self.pos = start;
+                    self.extra = extra;
+                    self.skip_term()?;
                 }
             }
             // The declaration list can also continue through more than one

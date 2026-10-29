@@ -22,7 +22,7 @@ fn keeps_persistent_terms_for_all_processes_as_pinned_erts() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, [] as [u8; 0]);
     assert_eq!(
         reference.stdout,
         b"{default,ok,1,ok,ok,{value,[a,<<\"b\">>]},undefined}\n"
@@ -76,7 +76,7 @@ fn returns_all_persistent_terms_in_the_erts_table_order() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, [] as [u8; 0]);
     assert_eq!(
         String::from_utf8(reference.stdout).unwrap(),
         "{[],[{true,1},{7,4},{ok,3},{39,2}],[{39,2},{1152921504606846976,8},{{ok},5},{true,1},\
@@ -176,7 +176,7 @@ fn erases_persistent_terms_as_pinned_erts() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, [] as [u8; 0]);
     assert_eq!(reference.stdout, b"{false,true,default,false,true}\n");
 
     let program = BeamProgram::load(&[PERSISTENT_TERM_PROBE]).unwrap();
@@ -220,7 +220,7 @@ fn keeps_the_erts_table_order_after_an_erase() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, [] as [u8; 0]);
     assert_eq!(reference.stdout, b"[{39,2},{ok,3}]\n");
 
     let program = BeamProgram::load(&[PERSISTENT_TERM_PROBE]).unwrap();
@@ -252,7 +252,7 @@ fn puts_new_persistent_terms_as_pinned_erts() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, [] as [u8; 0]);
     assert_eq!(
         reference.stdout,
         b"{ok,ok,{badarg,{persistent_term,put_new,[{persistent_term_probe,put_new},2]}},\
@@ -311,7 +311,7 @@ fn gives_the_persistent_term_info_of_the_pinned_erts() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, [] as [u8; 0]);
     let infos = [
         (0, 160),
         (1, 200),

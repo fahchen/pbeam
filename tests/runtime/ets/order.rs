@@ -83,7 +83,7 @@ fn compares_keys_and_probes_with_equality_and_partial_order() {
         atoms: Arc::clone(&atoms),
     };
     let (one, float) = (key(Term::Integer(1)), key(Term::Float(1.0)));
-    assert!(one == float);
+    assert_eq!(one, float);
     assert_eq!(one.partial_cmp(&float), Some(Ordering::Equal));
     let (left, right): (&dyn Locate, &dyn Locate) = (&one, &float);
     assert!(left == right);

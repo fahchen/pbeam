@@ -905,7 +905,7 @@ fn write_nif(scheduler: &mut Scheduler, tty: &Term, iovec: &Term) -> Result<BifR
             match element {
                 Term::Binary(bytes) if bytes.bit_size() == 0 => {}
                 Term::Binary(bytes) if let Some(bytes) = bytes.bytes() => {
-                    buffers.push(bytes.to_vec())
+                    buffers.push(bytes.to_vec());
                 }
                 _ => return Ok(BifResult::Dirty(Work::Write(write))),
             }

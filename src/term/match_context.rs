@@ -588,19 +588,18 @@ pub(crate) fn segment_integer(bits: &[u8], size: usize, little: bool, signed: bo
     // leaves the 64-bit range does not come back: the steps after it use a
     // bignum.
     for (index, &(part, width)) in rest.iter().enumerate() {
-        match value
+        if let Some(next) = value
             .checked_mul(1 << width)
             .and_then(|value| value.checked_add(i64::from(part)))
         {
-            Some(next) => value = next,
-            None => {
-                let big = rest[index..]
-                    .iter()
-                    .fold(BigInt::from(value), |big, &(part, width)| {
-                        (big << width) + part
-                    });
-                return Term::from_bigint(big);
-            }
+            value = next;
+        } else {
+            let big = rest[index..]
+                .iter()
+                .fold(BigInt::from(value), |big, &(part, width)| {
+                    (big << width) + part
+                });
+            return Term::from_bigint(big);
         }
     }
     Term::Integer(value)

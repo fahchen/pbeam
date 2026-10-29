@@ -89,7 +89,7 @@ fn run(program: &BeamProgram) -> (HostTerm, LiveBytes) {
     let mut report = LiveBytes::default();
     let result = program
         .execute_sampled("term_live_bytes_probe", "scene", &[], &mut |live| {
-            report.observe(live)
+            report.observe(live);
         })
         .expect("the scene runs");
     (result, report)

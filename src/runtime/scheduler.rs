@@ -204,7 +204,7 @@ impl ReleaseStack {
     /// ```
     fn pop(&mut self) -> Option<Release> {
         let item = self.chunks.last_mut()?.pop()?;
-        if self.chunks.last().is_some_and(|chunk| chunk.is_empty()) {
+        if self.chunks.last().is_some_and(std::vec::Vec::is_empty) {
             self.chunks.pop();
         }
         Some(item)
@@ -230,7 +230,7 @@ impl ReleaseStack {
     /// ```
     #[cfg(test)]
     fn len(&self) -> usize {
-        self.chunks.iter().map(|chunk| chunk.len()).sum()
+        self.chunks.iter().map(std::vec::Vec::len).sum()
     }
 
     /// Iterate over the items of the stack, oldest first. The live-byte walk
@@ -1335,7 +1335,7 @@ impl Scheduler {
         if self.check_io()? {
             return Ok(true);
         }
-        let wake = self.wake.as_ref().map(|wake| wake.as_raw_fd());
+        let wake = self.wake.as_ref().map(std::os::fd::AsRawFd::as_raw_fd);
         // Another thread sends into the inbox of the scheduler: another
         // scheduler, or a thread of a NIF library. Else only the poll thread
         // writes the wake socket, for the fds that it serves.
@@ -3815,41 +3815,40 @@ impl Scheduler {
             )));
         }
         let process = self.current_process_mut();
-        let mut next = match process.continue_exit.take() {
-            Some(next) => next,
-            None => {
-                // A root process stands for the `-eval` process of `erl`,
-                // whose exception `init:start_it/1` catches
-                // (init.erl:1552-1567), so it sends no report.
-                if std::mem::take(&mut process.log_exit) && process.root.is_none() {
-                    self.send_exit_report(id, &reason)?;
-                }
-                let process = self.current_process_mut();
-                process.bump_reductions(EXIT_REDUCTIONS);
-                self.set_exiting(id);
-                self.release_persistent_terms(id);
-                let process = self.current_process_mut();
-                if let ReceiveTimer::Set { key, .. } = process.receive_timer {
-                    self.timers.cancel(key);
-                }
-                // A root records its result when its exit starts, and the
-                // run ends only after the exit completes (see
-                // [`Self::exit_links`]).
-                if let Some(slot) = self.current_process().root {
-                    let normal = reason == Term::static_atom("normal");
-                    let result = match result {
-                        Some(result) if normal => Ok(result),
-                        _ => Err(reason.clone()),
-                    };
-                    self.node.root_result(slot, result);
-                }
-                // The exit takes the timer tree from the node after the
-                // process is exiting, so no timer joins it later.
-                let tree = self.node.take_receiver_timers(id);
-                let process = self.current_process_mut();
-                process.bif_timers = tree;
-                process.bif_timers.post_order().position()
+        let mut next = if let Some(next) = process.continue_exit.take() {
+            next
+        } else {
+            // A root process stands for the `-eval` process of `erl`,
+            // whose exception `init:start_it/1` catches
+            // (init.erl:1552-1567), so it sends no report.
+            if std::mem::take(&mut process.log_exit) && process.root.is_none() {
+                self.send_exit_report(id, &reason)?;
             }
+            let process = self.current_process_mut();
+            process.bump_reductions(EXIT_REDUCTIONS);
+            self.set_exiting(id);
+            self.release_persistent_terms(id);
+            let process = self.current_process_mut();
+            if let ReceiveTimer::Set { key, .. } = process.receive_timer {
+                self.timers.cancel(key);
+            }
+            // A root records its result when its exit starts, and the
+            // run ends only after the exit completes (see
+            // [`Self::exit_links`]).
+            if let Some(slot) = self.current_process().root {
+                let normal = reason == Term::static_atom("normal");
+                let result = match result {
+                    Some(result) if normal => Ok(result),
+                    _ => Err(reason.clone()),
+                };
+                self.node.root_result(slot, result);
+            }
+            // The exit takes the timer tree from the node after the
+            // process is exiting, so no timer joins it later.
+            let tree = self.node.take_receiver_timers(id);
+            let process = self.current_process_mut();
+            process.bif_timers = tree;
+            process.bif_timers.post_order().position()
         };
         let process = self.current_process_mut();
         let mut reds = process.fcalls;

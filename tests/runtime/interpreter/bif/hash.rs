@@ -89,7 +89,7 @@ fn reads_no_byte_of_an_iodata_that_has_no_budget() {
         .unwrap()
         .is_some()
     );
-    assert!(bytes.is_empty());
+    assert_eq!(bytes, [] as [u8; 0]);
     let mut budget = 0;
     assert!(
         read(&Term::nil(), &mut budget, &mut |_| {})
@@ -109,7 +109,7 @@ fn stops_a_walk_at_the_budget_before_the_next_element() {
     let mut budget = 2;
     let mut bytes = Vec::new();
     let rest = read(&list, &mut budget, &mut |part| {
-        bytes.extend_from_slice(part)
+        bytes.extend_from_slice(part);
     })
     .unwrap()
     .expect("the walk does not read the last element");

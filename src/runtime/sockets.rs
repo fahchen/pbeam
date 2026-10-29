@@ -83,7 +83,9 @@ impl Sockets {
             .by_reference
             .get(&reference)
             .expect("a socket monitor refers to a kept socket");
-        let mut socket = socket.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut socket = socket
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // The connector and the current acceptor: clear the state and keep
         // the select, as `essio_down` and `essio_down_acceptor` do
         // (`unix_socket_syncio.c:9762-9780`, `10583-10608`).

@@ -529,7 +529,7 @@ impl Subtract {
     fn find(&self, value: &Term, atoms: &AtomTable) -> Result<Result<usize, usize>, BeamError> {
         let (mut low, mut high) = (0, self.set.len());
         while low < high {
-            let middle = (low + high) / 2;
+            let middle = usize::midpoint(low, high);
             match self.set[middle].0.compare_exact(value, atoms)? {
                 Ordering::Less => low = middle + 1,
                 Ordering::Greater => high = middle,

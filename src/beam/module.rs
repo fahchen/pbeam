@@ -444,7 +444,7 @@ fn resolve(
         | Instruction::LoopReceiveEnd(target)
         | Instruction::Wait(target) => resolve_branch(target, jump_targets)?,
         Instruction::Catch { label, .. } | Instruction::WaitTimeout { label, .. } => {
-            resolve_branch(label, jump_targets)?
+            resolve_branch(label, jump_targets)?;
         }
         Instruction::Bif { fail_label, .. }
         | Instruction::Test { fail_label, .. }

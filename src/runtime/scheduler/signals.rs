@@ -393,7 +393,7 @@ impl Scheduler {
         match held {
             Held::Message { from, term } => {
                 self.node
-                    .send_message(index, Some(from), term, target, pending)
+                    .send_message(index, Some(from), term, target, pending);
             }
             Held::Signal { sender, signal } => self
                 .node
@@ -1087,14 +1087,14 @@ impl Scheduler {
                     reference,
                     ..
                 } => {
-                    self.send_message(id, requester, reply(reference, Term::static_atom("badarg")))
+                    self.send_message(id, requester, reply(reference, Term::static_atom("badarg")));
                 }
                 Signal::IsAlive {
                     requester,
                     reference,
                 } => self.send_message(id, requester, reply(reference, Term::static_atom("false"))),
                 Signal::CheckProcessCode { requester, tag, .. } => {
-                    self.send_message(id, requester, check_process_code_reply(tag, false))
+                    self.send_message(id, requester, check_process_code_reply(tag, false));
                 }
                 Signal::ProcessInfo {
                     requester,

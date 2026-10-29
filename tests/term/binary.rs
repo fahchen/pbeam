@@ -161,9 +161,9 @@ fn gives_no_byte_for_a_binary_of_no_bits() {
     // A binary of 0 bits at the end of its array has no byte, as an ERTS
     // bitstring of 0 bits is empty.
     let source = Binary::from(&[1, 2]);
-    assert!(source.bits(16, 16).bit_bytes().is_empty());
+    assert_eq!(source.bits(16, 16).bit_bytes(), []);
     assert_eq!(source.bits(16, 16).bit_bytes(), &[]);
-    assert!(Binary::from(Vec::new()).bits(0, 0).bit_bytes().is_empty());
+    assert_eq!(Binary::from(Vec::new()).bits(0, 0).bit_bytes(), []);
 }
 
 #[test]
@@ -231,7 +231,7 @@ fn takes_the_bytes_of_the_last_holder_with_no_copy() {
     assert_eq!(binary.take_bytes(), b"ab".to_vec());
     assert_eq!(copy, Binary::from(b"ab".to_vec()));
     // An empty binary is the value of the state after the take.
-    assert!(Binary::default().bit_bytes().is_empty());
+    assert_eq!(Binary::default().bit_bytes(), []);
     assert_eq!(Binary::default(), Binary::from(Vec::new()));
     // A sub-binary that owns the array of its source gives only its own
     // bytes.
@@ -506,7 +506,7 @@ fn reads_a_byte_range_of_an_appended_binary_from_the_chunks_of_the_range() {
     assert_eq!(chunk_span(ends, 3995, 4000), 998..1000);
     assert_eq!(chunk_span(ends, 4, 8), 1..2);
     assert_eq!(chunk_span(ends, 7, 7), 0..0);
-    assert!(binary.byte_runs(7, 7).is_empty());
+    assert_eq!(binary.byte_runs(7, 7), [] as [&[u8]; 0]);
 }
 
 /// Return the bitstring of the first `size` bits of `bytes`, at offset 0.

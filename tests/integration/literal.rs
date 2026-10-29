@@ -41,7 +41,7 @@ fn reads_a_large_tuple_literal_as_pinned_erts() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, [] as [u8; 0]);
     assert_eq!(reference.stdout, b"{300,1,300}\n");
 }
 
@@ -69,6 +69,6 @@ fn decodes_tuple_and_list_literals_and_builds_lists_on_the_empty_list() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, [] as [u8; 0]);
     assert_eq!(reference.stdout, b"{[flush],{error,enotsup},same}\n");
 }

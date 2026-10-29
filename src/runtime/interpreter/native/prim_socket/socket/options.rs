@@ -296,9 +296,9 @@ fn set_form(name: (&str, &str)) -> Option<Form> {
     match name {
         (
             "socket",
-            "broadcast" | "keepalive" | "reuseaddr" | "reuseport" | "oobinline" | "dontroute",
+            "broadcast" | "keepalive" | "reuseaddr" | "reuseport" | "oobinline" | "dontroute"
+            | "timestamp" | "acceptconn",
         )
-        | ("socket", "timestamp" | "acceptconn")
         | ("tcp", "nodelay")
         | ("ip", "multicast_loop" | "recvtos" | "hdrincl")
         | ("ipv6", "v6only" | "recvtclass" | "multicast_loop") => Some(Form::Bool),
@@ -352,8 +352,10 @@ fn raw_form(name: (&str, &str)) -> Option<Form> {
         | ("udp", "cork") => Some(Form::Bool),
         ("socket", "bindtodevice") => Some(Form::Str),
         ("ip" | "ipv6", "mtu_discover") => Some(Form::Pmtu),
-        ("ip", "add_source_membership" | "drop_source_membership")
-        | ("ip", "block_source" | "unblock_source") => Some(Form::Source),
+        (
+            "ip",
+            "add_source_membership" | "drop_source_membership" | "block_source" | "unblock_source",
+        ) => Some(Form::Source),
         ("ipv6", "addrform") => Some(Form::Addrform),
         _ => None,
     }

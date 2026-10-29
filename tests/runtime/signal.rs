@@ -55,7 +55,7 @@ fn visits_the_terms_of_a_signal() {
     };
     assert_eq!(terms(&check), vec![Term::Integer(5)]);
     // A signal with no term gives no term.
-    assert!(terms(&Signal::Flush).is_empty());
+    assert_eq!(terms(&Signal::Flush), [] as [crate::term::Term; 0]);
 }
 
 #[test]

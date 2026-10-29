@@ -804,11 +804,11 @@ fn set_controller_nif(
         return Ok(BifResult::badarg());
     };
     let mut stream = lock(&stream);
-    let native = if stream.controller != current {
-        Native::Raise("not_on_controlling_process")
-    } else {
+    let native = if stream.controller == current {
         stream.controller = *pid;
         Native::Atom("ok")
+    } else {
+        Native::Raise("not_on_controlling_process")
     };
     result(scheduler, native)
 }
@@ -1480,13 +1480,13 @@ fn get_stash_nif(scheduler: &mut Scheduler, stream: &Term) -> Result<BifResult, 
         return Ok(BifResult::badarg());
     };
     let stream = lock(&stream);
-    let native = if stream.controller != current {
-        Native::Raise("not_on_controlling_process")
-    } else {
+    let native = if stream.controller == current {
         match &stream.stash {
             Some(term) => Native::Stash(term.clone()),
             None => Native::Atom("empty"),
         }
+    } else {
+        Native::Raise("not_on_controlling_process")
     };
     result(scheduler, native)
 }

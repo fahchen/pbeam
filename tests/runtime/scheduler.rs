@@ -95,7 +95,7 @@ fn keeps_the_current_process_in_the_table_and_out_of_the_run_queue() {
     scheduler.park_current();
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
     assert_eq!(current(&mut scheduler), ProcessId(1));
-    assert!(scheduler.runnable.ids().is_empty());
+    assert_eq!(scheduler.runnable.ids(), [] as [crate::term::ProcessId; 0]);
     scheduler.deliver(ProcessId(0), atom("ping"));
     scheduler.deliver(ProcessId(1), atom("self"));
     scheduler.deliver(ProcessId(9), atom("lost"));
@@ -358,7 +358,7 @@ fn links_and_unlinks_processes_and_ignores_normal_exit_without_trap_exit() {
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Idle);
     let root = &scheduler.processes[&ProcessId(0)];
     assert!(root.links.is_empty());
-    assert!(root.mailbox.messages().is_empty());
+    assert_eq!(root.mailbox.messages(), [] as [crate::term::Term; 0]);
 }
 
 #[test]
@@ -440,7 +440,10 @@ fn sends_the_pending_monitor_signal_before_a_demonitor_signal() {
     scheduler.park_current();
 
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
-    assert!(scheduler.current_process_mut().monitored_by.is_empty());
+    assert_eq!(
+        scheduler.current_process_mut().monitored_by,
+        [] as [crate::runtime::process::TargetMonitor; 0]
+    );
 }
 
 #[test]
@@ -652,7 +655,7 @@ fn continues_the_exit_timer_walk_at_its_next_timer() {
     }
     // The tree of the node has the shape of the mirror, which has the same
     // inserts.
-    let order: Vec<TimerReference> = mirror.post_order().map(|(&t, _)| t).collect();
+    let order: Vec<TimerReference> = mirror.post_order().map(|(&t, ())| t).collect();
     let process = scheduler.current_process_mut();
     // Check that the exit cancelled the first `done` timers in post-order,
     // and keeps the position of the next timer.
@@ -834,7 +837,7 @@ fn runs_other_processes_while_a_dirty_write_waits_and_resumes_it_after() {
             .unwrap()
     );
     scheduler.complete_dirty_calls();
-    assert!(scheduler.runnable.ids().is_empty());
+    assert_eq!(scheduler.runnable.ids(), [] as [crate::term::ProcessId; 0]);
     let reading = std::thread::spawn(move || {
         let mut bytes = Vec::new();
         (&reader).read_to_end(&mut bytes).unwrap();
@@ -968,7 +971,7 @@ fn handles_the_signals_of_a_dirty_writer_and_drops_its_late_completion() {
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Idle);
     // A message does not put the writer in the run queue.
     scheduler.deliver(ProcessId(1), atom("ping"));
-    assert!(scheduler.runnable.ids().is_empty());
+    assert_eq!(scheduler.runnable.ids(), [] as [crate::term::ProcessId; 0]);
     // A signal does: the turn handles it, and the writer does not run.
     scheduler
         .send_signal(Some(ProcessId(0)), ProcessId(1), kill())
@@ -995,7 +998,7 @@ fn handles_the_signals_of_a_dirty_writer_and_drops_its_late_completion() {
     wait_all_completions(&mut scheduler);
     drop(writer);
     assert_eq!(reading.join().unwrap(), bytes);
-    assert!(scheduler.runnable.ids().is_empty());
+    assert_eq!(scheduler.runnable.ids(), [] as [crate::term::ProcessId; 0]);
     assert!(!scheduler.processes.contains_key(&ProcessId(1)));
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Idle);
 }
@@ -2086,7 +2089,7 @@ fn reads_a_break_key_after_a_failed_menu_wait() {
         Scheduler::menu_ready(Readiness::Invalid),
         vec![libc::STDIN_FILENO]
     );
-    assert!(Scheduler::menu_ready(Readiness::Pending).is_empty());
+    assert_eq!(Scheduler::menu_ready(Readiness::Pending), [] as [i32; 0]);
     assert_eq!(Scheduler::menu_ready(Readiness::Ready(vec![7])), vec![7]);
 }
 
@@ -2265,7 +2268,7 @@ fn a_remote_target_adds_and_removes_the_monitor_of_a_watcher() {
     owner
         .handle_signals(target, 100, 100, HandlingPoint::ScheduleIn)
         .unwrap();
-    assert!(watchers(&owner).is_empty());
+    assert_eq!(watchers(&owner), [] as [crate::term::ProcessId; 0]);
 }
 
 #[test]
@@ -2389,7 +2392,7 @@ fn a_delivery_to_an_exiting_process_changes_nothing() {
     let root = ProcessId(0);
     scheduler.processes.get_mut(&root).unwrap().exiting = Some(atom("normal"));
     scheduler.deliver(root, atom("lost"));
-    assert!(messages(&scheduler, 0).is_empty());
+    assert_eq!(messages(&scheduler, 0), [] as [crate::term::Term; 0]);
 }
 
 #[test]
@@ -2406,7 +2409,7 @@ fn a_signal_to_a_dead_process_drops_an_unlink_ack() {
     scheduler.start(frame(), vec![], allow_all()).unwrap();
     let root = ProcessId(0);
     scheduler.dead_target_signal(ProcessId(99), Signal::UnlinkAck { from: root, id: 1 });
-    assert!(messages(&scheduler, 0).is_empty());
+    assert_eq!(messages(&scheduler, 0), [] as [crate::term::Term; 0]);
 }
 
 #[test]
@@ -2608,7 +2611,10 @@ fn schedules_again_when_the_poll_thread_reported_an_fd_before_the_wait() {
         .poll
         .report(index, (i32::MAX, poll::Direction::Write));
     assert!(scheduler.wait_events(None).unwrap());
-    assert!(scheduler.node.poll.take_ready(index).is_empty());
+    assert_eq!(
+        scheduler.node.poll.take_ready(index),
+        [] as [(i32, crate::runtime::scheduler::poll::Direction); 0]
+    );
 }
 
 #[test]
@@ -2723,7 +2729,7 @@ fn drops_the_io_event_of_a_port_that_another_scheduler_closed() {
         scheduler.tcp_accept_ready(port).unwrap();
         scheduler.node.ports().remove(port);
     }
-    assert!(messages(&scheduler, id.0).is_empty());
+    assert_eq!(messages(&scheduler, id.0), [] as [crate::term::Term; 0]);
 }
 
 #[test]

@@ -35,6 +35,6 @@ fn runs_a_compiled_process_probe_with_reference_matching_and_cleanup() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, [] as [u8; 0]);
     assert_eq!(reference.stdout, b"{io_ok,down_ok,exit_ok,noise_ok}\n");
 }

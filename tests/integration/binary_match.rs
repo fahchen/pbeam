@@ -30,7 +30,7 @@ fn reference(expression: &str) -> Vec<u8> {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, [] as [u8; 0]);
     reference.stdout
 }
 
@@ -882,7 +882,7 @@ fn runs_bs_get_float2_of_each_size_and_endianness_as_pinned_erts() {
             short.clone(),
             short.clone(),
             short.clone(),
-            float_rest(5.960464477539063e-8, &[]),
+            float_rest(5.960_464_477_539_063e-8, &[]),
             float_rest(65504.0, &[]),
             float_rest(-0.0, &[]),
             short.clone(),
@@ -914,7 +914,7 @@ short,short,short,short,short,short,short,short,{5.960464477539063e-8,<<>>},{655
         float_rest(1.5, &[]),
         float_rest(1.0, &[]),
         float_rest(std::f64::consts::PI, &[]),
-        short.clone(),
+        short,
     ];
     assert_eq!(bs_float_each("little", &float_calls(&little)), expected);
     assert_eq!(bs_float_each("native", &float_calls(&little)), expected);
@@ -1099,7 +1099,7 @@ fn runs_the_utf16_and_utf32_match_instructions_as_pinned_erts() {
     .map(<[u8]>::to_vec)
     .to_vec();
     let little16 = little_units(&big16, 2);
-    let values16 = [65, 0x1F600, 0x10000, 0x10FFFF, 0xD7FF, 0xE000, 0xFFFF];
+    let values16 = [65, 0x1F600, 0x10000, 0x0010_FFFF, 0xD7FF, 0xE000, 0xFFFF];
     let mut big_results: Vec<_> = values16
         .iter()
         .zip([&[1][..], &[7], &[], &[], &[], &[], &[]])
@@ -1139,7 +1139,7 @@ fn runs_the_utf16_and_utf32_match_instructions_as_pinned_erts() {
     .map(<[u8]>::to_vec)
     .to_vec();
     let little32 = little_units(&big32, 4);
-    let values32 = [65, 0x1F600, 0x10FFFF, 0xD7FF, 0xE000];
+    let values32 = [65, 0x1F600, 0x0010_FFFF, 0xD7FF, 0xE000];
     let mut big_results = vec![pair(65, &[1])];
     big_results.extend(
         values32[1..]
@@ -1166,7 +1166,7 @@ fn runs_the_utf16_and_utf32_match_instructions_as_pinned_erts() {
     // integer after `bs_get_utf32` fails.
     let mut retracted = big_results[..5].to_vec();
     retracted.extend(
-        [0x110000, 0xD800, 0xDFFF, 0xFFFF_FFFF]
+        [0x0011_0000, 0xD800, 0xDFFF, 0xFFFF_FFFF]
             .map(|value: i64| Term::tuple(vec![int.clone(), Term::Integer(value), rest(&[])])),
     );
     retracted.extend([short.clone(), short.clone()]);
@@ -1181,7 +1181,7 @@ fn runs_the_utf16_and_utf32_match_instructions_as_pinned_erts() {
         vec![
             Term::tuple(vec![int.clone(), Term::Integer(56320), rest(&[])]),
             Term::tuple(vec![int.clone(), Term::Integer(55357), rest(&[0, 65])]),
-            Term::tuple(vec![int.clone(), Term::Integer(55357), rest(&[])]),
+            Term::tuple(vec![int, Term::Integer(55357), rest(&[])]),
         ]
     );
 
@@ -1319,7 +1319,7 @@ fn runs_bs_match_string_at_a_bit_offset_as_pinned_erts() {
         22, 150, 55, 38, 247, 54, 246, 103, 66, 230, 150, 54, 246, 228,
     ]);
     let calls = [
-        vec![shifted.clone()],
+        vec![shifted],
         vec![binary(&[
             22, 150, 55, 38, 247, 54, 246, 103, 66, 230, 150, 54, 22, 228,
         ])],
@@ -1452,7 +1452,7 @@ fn runs_bs_get_integer2_as_pinned_erts() {
                 Term::binary(vec![0x34, 0x56])
             ])),
             Ok(Term::tuple(vec![
-                Term::Integer(0x123456),
+                Term::Integer(0x0012_3456),
                 Term::binary(Vec::new())
             ])),
             false_(),

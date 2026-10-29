@@ -191,7 +191,7 @@ fn calls_each_binding_of_the_library_through_the_registry() {
         ("clearStash_nif", vec![stream.clone()]),
         ("setStash_nif", vec![stream.clone(), integer.clone()]),
         ("enqueue_nif", vec![stream.clone(), Term::nil()]),
-        ("set_controller_nif", vec![stream.clone(), integer.clone()]),
+        ("set_controller_nif", vec![stream, integer]),
     ];
     for (name, arguments) in calls {
         assert!(
@@ -366,7 +366,7 @@ fn learns_the_window_size_of_a_header_split_across_calls() {
     )
     .unwrap();
     assert_eq!(tag(&scheduler, &result), "finished");
-    assert!(output_bytes(&result).is_empty());
+    assert_eq!(output_bytes(&result), [] as [u8; 0]);
     enqueue(&mut scheduler, &stream, rest);
     let result = inflate_nif(
         &mut scheduler,
@@ -1053,7 +1053,7 @@ fn gives_need_dictionary_for_a_stream_with_a_dictionary() {
 fn gives_each_end_of_stream_behavior() {
     let first = compress(b"first");
     let second = compress(b"second");
-    let mut both = first.clone();
+    let mut both = first;
     both.extend_from_slice(&second);
     // `reset` continues with the second stream.
     let mut first_scheduler = scheduler();
@@ -1114,7 +1114,7 @@ fn gives_each_end_of_stream_behavior() {
     )
     .unwrap();
     assert_eq!(tag(&second_scheduler, &result), "finished");
-    assert!(output_bytes(&result).is_empty());
+    assert_eq!(output_bytes(&result), [] as [u8; 0]);
     let result = inflate_end_nif(&mut second_scheduler, &second_stream).unwrap();
     assert_eq!(atom_name(&second_scheduler, result), "ok");
     // `error` raises a data error.

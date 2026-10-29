@@ -181,11 +181,7 @@ fn appends_a_string_and_an_integer_segment_to_a_large_binary() {
         &[&[b'a'; 5000][..], b"tail"].concat()[..]
     );
 
-    let with_integer = execute(
-        &program,
-        "append_integer",
-        &[prefix.clone(), Term::Integer(7)],
-    );
+    let with_integer = execute(&program, "append_integer", &[prefix, Term::Integer(7)]);
     let Term::Binary(bytes) = &with_integer else {
         panic!("not a binary: {with_integer:?}");
     };

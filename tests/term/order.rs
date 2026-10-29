@@ -84,11 +84,7 @@ fn orders_atoms_by_name_and_not_by_index() {
         .unwrap(),
     );
     let second = Term::Map(
-        Map::from_pairs(
-            vec![(z.clone(), Term::Integer(2)), (a.clone(), Term::Integer(1))],
-            &table,
-        )
-        .unwrap(),
+        Map::from_pairs(vec![(z, Term::Integer(2)), (a, Term::Integer(1))], &table).unwrap(),
     );
     assert_eq!(first.compare(&second, &table).unwrap(), Greater);
 }

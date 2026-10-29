@@ -702,13 +702,13 @@ fn port_settings(atoms: &AtomTable, settings: &Term) -> Result<Option<PortSettin
                 } else if option.is_static("line") {
                     result.line = Some(512);
                 } else if option.is_static("exit_status") {
-                    result.exit_status = true
+                    result.exit_status = true;
                 } else if option.is_static("in") {
                     result.read_write.read = true;
                 } else if option.is_static("out") {
                     result.read_write.write = true;
                 } else if option.is_static("eof") {
-                    result.eof = true
+                    result.eof = true;
                 } else if option.is_static("overlapped_io") {
                     // Only a Windows port uses it (`erl_sys_driver.h:56`).
                 } else if option.is_static("hide") {
@@ -1089,7 +1089,7 @@ fn output(
     let written = spawn.packets.frame(bytes).ok_or(libc::EINVAL);
     let written = written.and_then(|framed| spawn.program.write_input(&framed));
     Ok(match written {
-        Ok(_) => {
+        Ok(()) => {
             port_state.output += size;
             Written::Done
         }

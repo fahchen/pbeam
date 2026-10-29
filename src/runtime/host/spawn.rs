@@ -402,7 +402,7 @@ impl Child {
     /// assert!(child.output_fd() >= FIRST_PIPE_FD);
     /// ```
     pub(crate) fn output_fd(&self) -> Option<RawFd> {
-        self.output.as_ref().map(|fd| fd.as_raw_fd())
+        self.output.as_ref().map(std::os::fd::AsRawFd::as_raw_fd)
     }
 
     /// Return the fd that has input when the child exits, for the `select`

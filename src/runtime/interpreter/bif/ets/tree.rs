@@ -522,30 +522,27 @@ fn range_turn(
         last: None,
         counting,
     };
-    let after = match resume {
-        Some((last, end)) => {
-            walk.end = (!end.is_nil()).then(|| end.clone());
-            Some(last.clone())
-        }
-        None => {
-            let keypos = usize::try_from(table.keypos())
-                .ok()
-                .filter(|&keypos| keypos > 0)
-                .unwrap_or(usize::MAX);
-            let range = key_range(atoms, spec, keypos)?;
-            match &range {
-                KeyRange::Impossible => return Ok((0, (Term::nil(), None, None))),
-                KeyRange::Bound(key) => {
-                    if let Some(object) = table.ordered_get(atoms, key)? {
-                        walk.visit(object, false)?;
-                    }
-                    return Ok((walk.got, (walk.accum, None, None)));
+    let after = if let Some((last, end)) = resume {
+        walk.end = (!end.is_nil()).then(|| end.clone());
+        Some(last.clone())
+    } else {
+        let keypos = usize::try_from(table.keypos())
+            .ok()
+            .filter(|&keypos| keypos > 0)
+            .unwrap_or(usize::MAX);
+        let range = key_range(atoms, spec, keypos)?;
+        match &range {
+            KeyRange::Impossible => return Ok((0, (Term::nil(), None, None))),
+            KeyRange::Bound(key) => {
+                if let Some(object) = table.ordered_get(atoms, key)? {
+                    walk.visit(object, false)?;
                 }
-                KeyRange::Partial { .. } | KeyRange::Unbound => {
-                    let (after, end) = bounds(atoms, table, &range, false)?;
-                    walk.end = end;
-                    after
-                }
+                return Ok((walk.got, (walk.accum, None, None)));
+            }
+            KeyRange::Partial { .. } | KeyRange::Unbound => {
+                let (after, end) = bounds(atoms, table, &range, false)?;
+                walk.end = end;
+                after
             }
         }
     };
@@ -660,13 +657,12 @@ pub(super) fn delete_finish(
         DeleteTurn::Done(count) => return Ok(Value(Term::Integer(count))),
         DeleteTurn::Trap(last, least, count) => (last, least, count),
     };
-    let program = match program {
-        Some(program) => program,
-        None => {
-            let program = context.scheduler.make_magic_ref()?;
-            (context.scheduler.ets.exclusive()).remember_program(program, spec.clone());
-            program
-        }
+    let program = if let Some(program) = program {
+        program
+    } else {
+        let program = context.scheduler.make_magic_ref()?;
+        (context.scheduler.ets.exclusive()).remember_program(program, spec.clone());
+        program
     };
     Ok(BifResult::TrapBif {
         module: "ets",

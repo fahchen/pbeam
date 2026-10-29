@@ -79,7 +79,7 @@ fn keeps_the_stack_trace_frames_of_error_1_and_raise_3_as_pinned_erts() {
     );
     let all = vec![
         f(1),
-        located.clone(),
+        located,
         tuple(vec![atom("fun"), list(vec![atom("x")]), nil()]),
         tuple(vec![
             atom("fun"),

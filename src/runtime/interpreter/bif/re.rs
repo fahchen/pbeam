@@ -1128,9 +1128,10 @@ pub(super) fn run(
                 // The pattern becomes a compiled pattern, and the call
                 // continues in `re:grun/3` (`erl_bif_re.c:1557-1572`).
                 let precompiled = compile_result(context, code, unicode.into())?;
-                let clean = match parsed.flags & FLAG_UNIQUE_COMPILE_OPT != 0 {
-                    true => "true",
-                    false => "false",
+                let clean = if parsed.flags & FLAG_UNIQUE_COMPILE_OPT != 0 {
+                    "true"
+                } else {
+                    "false"
                 };
                 return Ok(BifResult::Trap {
                     module: "re",
@@ -1184,15 +1185,14 @@ pub(super) fn run(
     // the match. A precompiled pattern gives a borrow of the resources of
     // the node, which ends before the reductions below change the process.
     let (capture, mut rc) = {
-        let (code, atoms) = match &own_code {
-            Some(code) => (code, &context.scheduler.atoms),
-            None => {
-                let (code, atoms) = context
-                    .scheduler
-                    .regex_code(stored_code.expect("a precompiled pattern"))
-                    .expect("the reference holds a compiled expression");
-                (&*code, atoms)
-            }
+        let (code, atoms) = if let Some(code) = &own_code {
+            (code, &context.scheduler.atoms)
+        } else {
+            let (code, atoms) = context
+                .scheduler
+                .regex_code(stored_code.expect("a precompiled pattern"))
+                .expect("the reference holds a compiled expression");
+            (&*code, atoms)
         };
         let Some(capture) = build_capture(atoms, code, parsed.capture()) else {
             return Ok(BifResult::badarg());

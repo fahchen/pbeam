@@ -51,49 +51,51 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
     let result = match command.to_str() {
-        Some("bundle") => match rest {
-            [directory, output, module, function, start] => build_bundle(
-                Path::new(directory),
-                Path::new(output),
-                &module.to_string_lossy(),
-                &function.to_string_lossy(),
-                Path::new(start),
-            ),
-            _ => {
+        Some("bundle") => {
+            if let [directory, output, module, function, start] = rest {
+                build_bundle(
+                    Path::new(directory),
+                    Path::new(output),
+                    &module.to_string_lossy(),
+                    &function.to_string_lossy(),
+                    Path::new(start),
+                )
+            } else {
                 eprintln!("{USAGE}");
                 return ExitCode::FAILURE;
             }
-        },
-        Some("fixture") => match rest {
-            [output, module, function, start, beams, consolidated] => build_fixture(
-                Path::new(output),
-                &module.to_string_lossy(),
-                &function.to_string_lossy(),
-                Path::new(start),
-                Path::new(beams),
-                Path::new(consolidated),
-            ),
-            _ => {
+        }
+        Some("fixture") => {
+            if let [output, module, function, start, beams, consolidated] = rest {
+                build_fixture(
+                    Path::new(output),
+                    &module.to_string_lossy(),
+                    &function.to_string_lossy(),
+                    Path::new(start),
+                    Path::new(beams),
+                    Path::new(consolidated),
+                )
+            } else {
                 eprintln!("{USAGE}");
                 return ExitCode::FAILURE;
             }
-        },
-        Some("executable") => match rest {
-            [runtime, bundle, output] => {
+        }
+        Some("executable") => {
+            if let [runtime, bundle, output] = rest {
                 build_executable(Path::new(runtime), Path::new(bundle), Path::new(output))
-            }
-            _ => {
+            } else {
                 eprintln!("{USAGE}");
                 return ExitCode::FAILURE;
             }
-        },
-        Some("check-nifs") => match rest {
-            [directory] => check_nifs(Path::new(directory)),
-            _ => {
+        }
+        Some("check-nifs") => {
+            if let [directory] = rest {
+                check_nifs(Path::new(directory))
+            } else {
                 eprintln!("{USAGE}");
                 return ExitCode::FAILURE;
             }
-        },
+        }
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::FAILURE;
@@ -243,32 +245,29 @@ fn add_fixture_beam(
 ) -> Result<(), String> {
     let canonical = fs::canonicalize(path)
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-    let name = match resource_name(&canonical) {
-        Ok(name) => {
-            let ebin = canonical
-                .parent()
-                .expect("a BEAM file of a lib directory has a parent");
-            let prefix = name.rsplit_once('/').map_or("", |(prefix, _)| prefix);
-            ebins.insert(ebin.to_path_buf(), prefix.to_owned());
-            return Ok(());
-        }
-        Err(_) => {
-            let file = canonical
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            if canonical.parent() == Some(example) {
-                format!("pbeam/{file}")
-            } else if canonical.parent() == Some(consolidated) {
-                format!("releases/{FIXTURE_VERSION}/consolidated/{file}")
-            } else {
-                return Err(format!(
-                    "{} is not in an OTP lib directory, the example directory {}, or the consolidated directory {}",
-                    path.display(),
-                    example.display(),
-                    consolidated.display()
-                ));
-            }
+    let name = if let Ok(name) = resource_name(&canonical) {
+        let ebin = canonical
+            .parent()
+            .expect("a BEAM file of a lib directory has a parent");
+        let prefix = name.rsplit_once('/').map_or("", |(prefix, _)| prefix);
+        ebins.insert(ebin.to_path_buf(), prefix.to_owned());
+        return Ok(());
+    } else {
+        let file = canonical
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if canonical.parent() == Some(example) {
+            format!("pbeam/{file}")
+        } else if canonical.parent() == Some(consolidated) {
+            format!("releases/{FIXTURE_VERSION}/consolidated/{file}")
+        } else {
+            return Err(format!(
+                "{} is not in an OTP lib directory, the example directory {}, or the consolidated directory {}",
+                path.display(),
+                example.display(),
+                consolidated.display()
+            ));
         }
     };
     let bytes =

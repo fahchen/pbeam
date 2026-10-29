@@ -381,12 +381,11 @@ impl State {
     /// assert_eq!(stack.len(), 1);
     /// ```
     fn push_term<'a>(&mut self, stack: &mut Vec<Item<'a>>, term: &'a Term) {
-        match shape(term) {
-            Shape::Immediate(word) => self.mix_immediate(word),
-            _ => {
-                self.mix_alpha(TYPE_ARRAY_ELEMENT);
-                stack.push(Item::Term(term));
-            }
+        if let Shape::Immediate(word) = shape(term) {
+            self.mix_immediate(word);
+        } else {
+            self.mix_alpha(TYPE_ARRAY_ELEMENT);
+            stack.push(Item::Term(term));
         }
     }
 
@@ -692,23 +691,20 @@ impl State {
             Ok(split) => split,
             Err(tail) => return Some(Item::Term(tail)),
         };
-        match shape(head) {
-            Shape::Immediate(word) => {
-                self.mix_alpha(pair(TYPE_IMMEDIATE, TYPE_CAR));
-                self.mix_beta(word);
-                if cells.is_empty() {
-                    self.mix_alpha(TYPE_CDR);
-                }
-                Some(Item::Cells(cells))
+        if let Shape::Immediate(word) = shape(head) {
+            self.mix_alpha(pair(TYPE_IMMEDIATE, TYPE_CAR));
+            self.mix_beta(word);
+            if cells.is_empty() {
+                self.mix_alpha(TYPE_CDR);
             }
-            _ => {
-                stack.push(Item::Cells(cells));
-                if cells.is_empty() {
-                    stack.push(Item::CdrMarker);
-                }
-                self.mix_alpha(TYPE_CAR);
-                Some(Item::Term(head))
+            Some(Item::Cells(cells))
+        } else {
+            stack.push(Item::Cells(cells));
+            if cells.is_empty() {
+                stack.push(Item::CdrMarker);
             }
+            self.mix_alpha(TYPE_CAR);
+            Some(Item::Term(head))
         }
     }
 
@@ -1094,7 +1090,7 @@ fn binary_hash(hash: u32, bytes: &Binary) -> u32 {
     let tail = bit_size % 8;
     let mut hash = hash;
     let bits = bytes.bit_bytes();
-    for byte in bits[..whole].iter() {
+    for byte in &bits[..whole] {
         hash = hash.wrapping_mul(FUNNY_1).wrapping_add(u32::from(*byte));
     }
     if tail > 0 {
@@ -1398,9 +1394,10 @@ fn small_hash2(hash: u32, small: i64) -> u32 {
         };
         return hash2_with(hash, magnitude as u32, (magnitude >> 32) as u32, constant);
     }
-    let hash = match small < 0 {
-        true => hash_with(hash, small.unsigned_abs() as u32, HCONST),
-        false => hash,
+    let hash = if small < 0 {
+        hash_with(hash, small.unsigned_abs() as u32, HCONST)
+    } else {
+        hash
     };
     hash_with(hash, small as i32 as u32, HCONST)
 }
@@ -1548,14 +1545,15 @@ pub(crate) fn make_hash2(atoms: &AtomTable, term: &Term) -> (u32, u64) {
                     hash_with(hash, value, HCONST_3)
                 };
             }
-            Term::Integer(value) => match term.small_integer() {
-                Some(small) => hash = small_hash2(hash, small),
-                None => {
+            Term::Integer(value) => {
+                if let Some(small) = term.small_integer() {
+                    hash = small_hash2(hash, small);
+                } else {
                     let (value, count) = bignum_hash2(hash, *value < 0, &[value.unsigned_abs()]);
                     hash = value;
                     iterations += count;
                 }
-            },
+            }
             Term::BigInt(value) => {
                 let digits = value.magnitude().to_u64_digits();
                 let (value, count) = bignum_hash2(hash, value.sign() == Sign::Minus, &digits);

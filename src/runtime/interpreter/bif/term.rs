@@ -302,9 +302,10 @@ pub(super) fn term_to_iovec_2(
     let mut offset = 0;
     let elements: Vec<Term> = pieces
         .into_iter()
-        .map(|(range, source)| match source {
-            Some(source) => Term::Binary(source.off_heap()),
-            None => {
+        .map(|(range, source)| {
+            if let Some(source) = source {
+                Term::Binary(source.off_heap())
+            } else {
                 offset += range.len();
                 Term::Binary(
                     common

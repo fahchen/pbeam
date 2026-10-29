@@ -17,7 +17,7 @@ fn reference(function: &str) -> Vec<u8> {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, [] as [u8; 0]);
     reference.stdout
 }
 
@@ -35,7 +35,7 @@ fn compares_terms_exactly_as_pinned_erts() {
         Term::list_from(exact.iter().map(|&equal| {
             Term::Atom(
                 program
-                    .atom(if equal != negate { "true" } else { "false" })
+                    .atom(if equal == negate { "false" } else { "true" })
                     .unwrap(),
             )
         }))

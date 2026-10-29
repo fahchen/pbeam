@@ -396,16 +396,15 @@ impl Correction {
                     self.dirty_counter -= 1;
                 }
                 let drift_adj = average_drift(self.acc_sys, self.acc_mon);
-                if !(-DRIFT_MAX_ADJ_DIFF..=DRIFT_MAX_ADJ_DIFF)
-                    .contains(&(avg_drift_adj - drift_adj))
+                if (-DRIFT_MAX_ADJ_DIFF..=DRIFT_MAX_ADJ_DIFF).contains(&(avg_drift_adj - drift_adj))
                 {
-                    true
-                } else {
                     let diff =
                         (drift_adj - new.drift).clamp(-DRIFT_MAX_ADJ_DIFF, DRIFT_MAX_ADJ_DIFF);
                     new.drift += diff;
                     set_new |= diff.abs() > DRIFT_MIN_ADJ_DIFF;
                     false
+                } else {
+                    true
                 }
             };
             if dirty {

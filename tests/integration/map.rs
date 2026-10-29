@@ -146,7 +146,7 @@ fn erl_reference(expression: &str) -> Vec<u8> {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, [] as [u8; 0]);
     reference.stdout
 }
 
@@ -206,7 +206,7 @@ fn uses_a_flatmap_up_to_32_keys_and_a_hashmap_above_like_erts() {
             atom("v"),
             atom("missing"),
             Term::list_from(vec![Term::Integer(1), Term::Integer(2), atom("a")]),
-            integers(&[-101714049538469044, -1, 5]),
+            integers(&[-101_714_049_538_469_044, -1, 5]),
         ])
     );
 
@@ -355,7 +355,7 @@ fn orders_a_hashmap_of_all_static_atoms_like_erts() {
     let Some(keys) = result
         .term
         .proper_list()
-        .map(|keys| keys.collect::<Vec<_>>())
+        .map(std::iter::Iterator::collect::<Vec<_>>)
     else {
         panic!("maps:keys/1 returns a list");
     };
@@ -1005,10 +1005,10 @@ fn keeps_a_same_register_update_with_its_aliases_like_erts() {
         "aliases",
         Term::list_from(vec![
             int_map(&[(1, Term::Integer(9)), (2, Term::Integer(2))]),
-            source.clone(),
+            source,
             Term::Integer(7),
             Term::Integer(9),
-            alias.clone(),
+            alias,
             int_map(&[
                 (1, Term::Integer(1)),
                 (2, Term::Integer(2)),
@@ -1681,7 +1681,7 @@ fn runs_maps_get_and_is_key_through_a_fun_and_apply_as_pinned_erts() {
             ]),
         ])
     };
-    let badkey = error("badkey", atom("b"), "get", vec![atom("b"), map.clone()]);
+    let badkey = error("badkey", atom("b"), "get", vec![atom("b"), map]);
     assert_eq!(
         program.execute("maps_fun_probe", "main", &[]).unwrap().term,
         Term::list_from(vec![

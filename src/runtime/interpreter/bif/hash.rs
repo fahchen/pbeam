@@ -455,17 +455,14 @@ pub(super) fn read(
         }
         // The current term is read: continue with the tail of the list above
         // it, or end the walk.
-        match tails.pop() {
-            Some(tail) => {
-                // ERTS reads each flat list level with its own update call,
-                // so the run ends with the level (`erl_bif_chksum.c:120-160`).
-                flush(&mut run, sum);
-                current = tail;
-            }
-            None => {
-                flush(&mut run, sum);
-                return Ok(None);
-            }
+        if let Some(tail) = tails.pop() {
+            // ERTS reads each flat list level with its own update call,
+            // so the run ends with the level (`erl_bif_chksum.c:120-160`).
+            flush(&mut run, sum);
+            current = tail;
+        } else {
+            flush(&mut run, sum);
+            return Ok(None);
         }
     }
 }

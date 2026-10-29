@@ -59,7 +59,7 @@ fn reads_the_persisted_declarations_of_a_compiled_module() {
     assert_eq!(declarations[0], ("sha256".to_owned(), 1));
 
     let caller = BeamModule::load(NATIVE_DECL_CALLER).unwrap();
-    assert!(caller.native_declarations().is_empty());
+    assert_eq!(caller.native_declarations(), []);
 }
 
 /// A registered native runs at the `nif_start` entry of the declared stub

@@ -1562,16 +1562,14 @@ pub(crate) fn item_reductions(
         Term::Atom(_) if item == &Term::static_atom("links") => value
             .tuple_elements()
             .and_then(|elements| elements.get(1))
-            .and_then(|links| links.proper_list())
-            .map(|links| links.count())
-            .unwrap_or(0),
+            .and_then(crate::term::Term::proper_list)
+            .map_or(0, std::iter::Iterator::count),
         Term::Atom(_) if item == &Term::static_atom("messages") => messages,
         Term::Atom(_) if item == &Term::static_atom("dictionary") => value
             .tuple_elements()
             .and_then(|elements| elements.get(1))
-            .and_then(|dictionary| dictionary.proper_list())
-            .map(|dictionary| dictionary.count())
-            .unwrap_or(0),
+            .and_then(crate::term::Term::proper_list)
+            .map_or(0, std::iter::Iterator::count),
         Term::Atom(_) if item == &Term::static_atom("memory") => messages,
         Term::Atom(_)
             if item == &Term::static_atom("total_heap_size") && !off_heap_message_queue =>

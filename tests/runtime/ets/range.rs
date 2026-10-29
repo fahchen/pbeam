@@ -43,7 +43,7 @@ fn finds_the_key_range_as_analyze_pattern() {
     assert_eq!(range(vec![tuple(vec![var.clone()])]), KeyRange::Unbound);
     let map = Term::Map(Map::from_pairs(vec![(Term::Integer(1), var.clone())], &atoms).unwrap());
     assert_eq!(
-        range(vec![tuple(vec![tuple(vec![map, var.clone()])])]),
+        range(vec![tuple(vec![tuple(vec![map, var])])]),
         KeyRange::Unbound
     );
     let a = atom(&atoms, "a");
@@ -68,21 +68,18 @@ fn finds_the_key_range_as_analyze_pattern() {
         ]),
         KeyRange::Partial {
             least: a.clone(),
-            most: b.clone()
+            most: b
         }
     );
     let partial = tuple(vec![Term::Integer(1), any.clone()]);
     assert_eq!(
         range(vec![tuple(vec![partial.clone()]), tuple(vec![a.clone()])]),
         KeyRange::Partial {
-            least: a.clone(),
+            least: a,
             most: partial.clone()
         }
     );
-    assert_eq!(
-        range(vec![tuple(vec![partial.clone()]), any]),
-        KeyRange::Unbound
-    );
+    assert_eq!(range(vec![tuple(vec![partial]), any]), KeyRange::Unbound);
 }
 
 #[test]
@@ -96,7 +93,7 @@ fn compares_a_partially_bound_key_as_cmp_partly_bound() {
     assert_eq!(cmp(&any, &a), Ordering::Equal);
     assert_eq!(cmp(&a, &a), Ordering::Equal);
     assert_eq!(cmp(&Term::Integer(1), &a), Ordering::Less);
-    let one_any = tuple(vec![Term::Integer(1), any.clone(), Term::Integer(9)]);
+    let one_any = tuple(vec![Term::Integer(1), any, Term::Integer(9)]);
     assert_eq!(
         cmp(
             &one_any,
@@ -132,7 +129,7 @@ fn compares_a_partially_bound_key_as_cmp_partly_bound() {
     assert_eq!(cmp(&one, &one), Ordering::Equal);
     // Two tails that are the same word are equal before the variable check
     // (erl_db_tree.c:3880-3881), so the next element decides.
-    let tail = Term::cons(Term::Integer(1), var.clone());
+    let tail = Term::cons(Term::Integer(1), var);
     let pair = tuple(vec![tail.clone(), Term::Integer(5)]);
     assert_eq!(
         cmp(&pair, &tuple(vec![tail, Term::Integer(6)])),
@@ -173,14 +170,11 @@ fn orders_the_partially_bound_keys_as_partly_bound_can_match() {
     assert!(!lesser(&long, &short));
     assert!(greater(&long, &short));
     assert!(!greater(&short, &long));
-    assert!(lesser(&tuple(vec![any.clone()]), &tuple(vec![a.clone()])));
+    assert!(lesser(&tuple(vec![any]), &tuple(vec![a.clone()])));
     assert!(!lesser(&tuple(vec![a.clone()]), &tuple(vec![a.clone()])));
     let list = Term::list_from(vec![Term::Integer(1), var.clone()]);
-    assert!(lesser(
-        &list,
-        &Term::list_from(vec![Term::Integer(1), a.clone()])
-    ));
-    let tail = Term::cons(Term::Integer(1), var.clone());
+    assert!(lesser(&list, &Term::list_from(vec![Term::Integer(1), a])));
+    let tail = Term::cons(Term::Integer(1), var);
     assert!(!greater(&tail, &tail));
     // An alias reference compares by its three reference numbers
     // (`src/term/order.rs`), so the alias 1 is less than the alias 2.

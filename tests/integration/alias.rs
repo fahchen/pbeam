@@ -29,7 +29,7 @@ fn erl_reference(call: &str) -> String {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, [] as [u8; 0]);
     String::from_utf8(reference.stdout).unwrap()
 }
 

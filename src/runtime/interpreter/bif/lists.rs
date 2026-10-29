@@ -220,9 +220,10 @@ pub(super) fn member(
         });
     }
     process.bump_reductions(cost(compared));
-    Ok(match rest.is_nil() {
-        true => Value(Term::static_atom("false")),
-        false => BifResult::badarg(),
+    Ok(if rest.is_nil() {
+        Value(Term::static_atom("false"))
+    } else {
+        BifResult::badarg()
     })
 }
 
@@ -286,8 +287,9 @@ pub(super) fn reverse(
             arguments: vec![rest.clone(), reversed],
         });
     }
-    Ok(match rest.is_nil() {
-        true => Value(reversed),
-        false => BifResult::badarg(),
+    Ok(if rest.is_nil() {
+        Value(reversed)
+    } else {
+        BifResult::badarg()
     })
 }

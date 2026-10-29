@@ -578,9 +578,10 @@ fn aead(scheduler: &Scheduler, arguments: &[Term]) -> Result<Option<Term>, Ciphe
         };
         set.map_err(|_| ("badarg", 286, 5, "Can't set tag"))?;
     }
-    let (line, message) = match ccm {
-        true => (288, "Can't set key or iv"),
-        false => (296, "Can't set key and iv"),
+    let (line, message) = if ccm {
+        (288, "Can't set key or iv")
+    } else {
+        (296, "Can't set key and iv")
     };
     cipher_init(&mut context, direction, None, Some(&key), Some(&iv))
         .map_err(|_| ("error", line, -1, message))?;

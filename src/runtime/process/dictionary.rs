@@ -94,27 +94,24 @@ impl Dictionary {
         let hash = make_hash(&key);
         let bucket = self.bucket(hash);
         let (previous, found) = self.find(bucket, &key);
-        let old = match found {
-            Some(index) => {
-                let single = previous.is_none() && self.links[index].next == NONE;
-                let old = std::mem::replace(&mut self.entries[index].1, value);
-                if single || is_immediate(&self.entries[index].1) {
-                    return Some(old);
-                }
-                self.unlink(bucket, previous, index);
-                self.links[index].next = self.heads[bucket];
-                self.heads[bucket] = index as u32;
-                Some(old)
+        let old = if let Some(index) = found {
+            let single = previous.is_none() && self.links[index].next == NONE;
+            let old = std::mem::replace(&mut self.entries[index].1, value);
+            if single || is_immediate(&self.entries[index].1) {
+                return Some(old);
             }
-            None => {
-                self.links.push(Link {
-                    hash,
-                    next: self.heads[bucket],
-                });
-                self.heads[bucket] = self.entries.len() as u32;
-                self.entries.push((key, value));
-                None
-            }
+            self.unlink(bucket, previous, index);
+            self.links[index].next = self.heads[bucket];
+            self.heads[bucket] = index as u32;
+            Some(old)
+        } else {
+            self.links.push(Link {
+                hash,
+                next: self.heads[bucket],
+            });
+            self.heads[bucket] = self.entries.len() as u32;
+            self.entries.push((key, value));
+            None
         };
         if self.heads.len() <= self.entries.len() {
             self.grow();

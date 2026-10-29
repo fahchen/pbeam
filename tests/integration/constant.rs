@@ -145,7 +145,7 @@ fn rejects_duplicate_and_missing_required_chunks() {
 fn rejects_bad_atom_table_count_encoding_and_names() {
     assert!(
         BeamModule::load(&edit_chunk(constant_fixture(), b"AtU8", |data| {
-            data[0..4].copy_from_slice(&(-100i32).to_be_bytes())
+            data[0..4].copy_from_slice(&(-100i32).to_be_bytes());
         }))
         .is_err()
     );

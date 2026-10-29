@@ -167,7 +167,7 @@ fn hash_64_to_32_shift(key: u64) -> u32 {
 /// assert_eq!((fit_in_bits(1), fit_in_bits(15), fit_in_bits(16)), (1, 4, 5));
 /// ```
 fn fit_in_bits(size: usize) -> u32 {
-    usize::BITS - size.leading_zeros()
+    size.bit_width()
 }
 
 /// Sort `nodes`, which start at node `offset` of the array, as `erts_qsort`

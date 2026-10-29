@@ -142,7 +142,7 @@ pub(super) fn ng_crypto_init_nif(
             let message = "Expected cipher name atom";
             c_error(scheduler, "badarg", "api_ng.c", 707, 0, message)
         }
-        Some(Ok(_)) => Ok(BifResult::Value(arguments[0].clone())),
+        Some(Ok(())) => Ok(BifResult::Value(arguments[0].clone())),
         Some(Err(failure)) => cipher_result(scheduler, Err(failure)),
     }
 }
@@ -381,13 +381,12 @@ fn aead_run(state: &mut AeadContext, arguments: &[Term]) -> Result<Option<Vec<u8
     let text = iodata_bytes(&arguments[2]).ok_or(("badarg", 251, 2, "non-binary text"))?;
     let aad = iodata_bytes(&arguments[3]).ok_or(("badarg", 256, 3, "non-binary AAD"))?;
     let tag_length = state.tag_length;
-    let (text, tag) = match state.encrypt {
-        true => (&text[..], None),
-        false => {
-            let length = text.len().checked_sub(tag_length);
-            let length = length.ok_or(("error", 270, -1, "Bad in data"))?;
-            (&text[..length], Some(&text[length..]))
-        }
+    let (text, tag) = if state.encrypt {
+        (&text[..], None)
+    } else {
+        let length = text.len().checked_sub(tag_length);
+        let length = length.ok_or(("error", 270, -1, "Bad in data"))?;
+        (&text[..length], Some(&text[length..]))
     };
     let context = &mut state.context;
     context
@@ -400,9 +399,10 @@ fn aead_run(state: &mut AeadContext, arguments: &[Term]) -> Result<Option<Vec<u8
         };
         set.map_err(|_| ("badarg", 286, 5, "Can't set tag"))?;
     }
-    let (line, message) = match state.ccm {
-        true => (288, "Can't set key or iv"),
-        false => (296, "Can't set key and iv"),
+    let (line, message) = if state.ccm {
+        (288, "Can't set key or iv")
+    } else {
+        (296, "Can't set key and iv")
     };
     cipher_init(context, state.encrypt, None, Some(&state.key), Some(&iv))
         .map_err(|_| ("error", line, -1, message))?;

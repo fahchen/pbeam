@@ -848,7 +848,7 @@ fn encodes_the_large_and_unsupported_forms() {
         minor: 1,
         ..Options::default()
     };
-    let bytes = encode(&Term::Atom(atom.clone()), &atoms, &latin1).unwrap();
+    let bytes = encode(&Term::Atom(atom), &atoms, &latin1).unwrap();
     assert_eq!(&bytes[..3], [100, 1, 0]);
     // A bignum of more than 255 magnitude bytes takes `LARGE_BIG_EXT`.
     let large = Term::BigInt(Arc::new(BigInt::from(1) << (256 * 8)));

@@ -95,7 +95,7 @@ fn sign_extends_large_integer_operands_as_erts() {
     // {integer,-101714049538469044}: size code 6 gives eight bytes.
     assert_eq!(
         integer(&[0xD9, 0xFE, 0x96, 0xA3, 0x9C, 0x60, 0x97, 0xD3, 0x4C]),
-        Term::Integer(-101714049538469044)
+        Term::Integer(-101_714_049_538_469_044)
     );
     // A leading zero byte keeps a large payload positive.
     assert_eq!(integer(&[0x39, 0x00, 0xFF, 0xFF]), Term::Integer(65535));

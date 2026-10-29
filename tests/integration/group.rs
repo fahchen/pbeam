@@ -34,7 +34,7 @@ fn takes_the_fail_labels_of_guard_bifs_and_is_ge_as_pinned_erts() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, [] as [u8; 0]);
     assert_eq!(reference.stdout, b"[output,other,other]\n");
 }
 
@@ -70,7 +70,7 @@ fn registers_a_process_name_as_pinned_erts() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, [] as [u8; 0]);
     assert_eq!(
         reference.stdout,
         b"{badarg,true,badarg,badarg,{registered_name,pbeam_probe_reg}}\n"
@@ -125,7 +125,7 @@ fn executes_the_pinned_group_server_for_one_put_chars_request() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, [] as [u8; 0]);
     assert_eq!(
         reference.stdout,
         b"{ok,{unicode,<<\"Hello, world!\\n\">>},noise_ok}\n\

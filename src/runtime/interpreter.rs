@@ -1674,7 +1674,7 @@ impl BeamProgram {
                         BifResult::Raise { .. } | BifResult::ErrorWithCause { .. }
                             if *fail_label != 0 =>
                         {
-                            cursor.position = label_position(*fail_label)?
+                            cursor.position = label_position(*fail_label)?;
                         }
                         raised @ (BifResult::Raise { .. } | BifResult::ErrorWithCause { .. }) => {
                             // The BIF wrote no destination, so the operands
@@ -2040,7 +2040,7 @@ impl BeamProgram {
                             }
                         }
                         Update::Reason(_) if *fail_label != 0 => {
-                            cursor.position = label_position(*fail_label)?
+                            cursor.position = label_position(*fail_label)?;
                         }
                         Update::Reason(reason) => {
                             if let Some(outcome) = raise(process, ExceptionClass::Error, reason) {
@@ -3128,17 +3128,14 @@ impl BeamProgram {
                     }
                     _ => None,
                 };
-                match frame {
-                    Some(frame) => {
-                        enter_frame(scheduler.current_process_mut(), frame, false);
-                        Ok(None)
-                    }
-                    None => {
-                        let arguments = vec![module];
-                        let badarg = BifResult::badarg();
-                        let result = bif_error(scheduler, "erlang", name, arguments, badarg, 0)?;
-                        self.finish_bif(scheduler, result, false)
-                    }
+                if let Some(frame) = frame {
+                    enter_frame(scheduler.current_process_mut(), frame, false);
+                    Ok(None)
+                } else {
+                    let arguments = vec![module];
+                    let badarg = BifResult::badarg();
+                    let result = bif_error(scheduler, "erlang", name, arguments, badarg, 0)?;
+                    self.finish_bif(scheduler, result, false)
                 }
             }
             ImportKind::Bif { bif, heavy } => {
@@ -3224,18 +3221,17 @@ impl BeamProgram {
                 let process = scheduler.current_process_mut();
                 call_arguments(&process.registers, arity)?
             };
-            let result = match resolved {
-                Some(id) => self.bif_slice(scheduler, id, &arguments)?,
-                None => {
-                    let (module_name, name) = {
-                        let atoms = &scheduler.atoms;
-                        (
-                            atoms.name_of(module).to_owned(),
-                            atoms.name_of(name).to_owned(),
-                        )
-                    };
-                    self.named_bif(scheduler, &module_name, &name, &arguments)?
-                }
+            let result = if let Some(id) = resolved {
+                self.bif_slice(scheduler, id, &arguments)?
+            } else {
+                let (module_name, name) = {
+                    let atoms = &scheduler.atoms;
+                    (
+                        atoms.name_of(module).to_owned(),
+                        atoms.name_of(name).to_owned(),
+                    )
+                };
+                self.named_bif(scheduler, &module_name, &name, &arguments)?
             };
             // A tail apply or a tail fun call removed the frame of the
             // caller in ERTS, so its return address is in the function
@@ -3892,32 +3888,29 @@ impl BeamProgram {
                 let frame = scheduler
                     .synced_code()
                     .export_frame(module, function, arity)?;
-                match frame {
-                    Some(frame) => {
-                        let process = scheduler.current_process_mut();
-                        enter_frame(process, frame, tail);
-                        // A BIF trap always switches out the process
-                        // (`context_switch_simplified` in
-                        // `jit/arm/instr_bif.cpp:525-536`, `676-701`). The
-                        // process enters the target when it runs again, so
-                        // the entry costs one reduction of the next turn.
-                        Ok(Some(Outcome::Yield))
-                    }
-                    None => {
-                        // ERTS switches out at the trap, and the export
-                        // stub of the target runs in the next turn
-                        // (`context_switch_simplified` in
-                        // `jit/arm/instr_bif.cpp:525-536`, `676-701`). Keep
-                        // the call for `run`, so the switch out happens
-                        // before the error handler.
-                        scheduler.current_process_mut().pending_trap = Some(PendingTrap {
-                            module,
-                            function,
-                            arity,
-                            tail,
-                        });
-                        Ok(Some(Outcome::Yield))
-                    }
+                if let Some(frame) = frame {
+                    let process = scheduler.current_process_mut();
+                    enter_frame(process, frame, tail);
+                    // A BIF trap always switches out the process
+                    // (`context_switch_simplified` in
+                    // `jit/arm/instr_bif.cpp:525-536`, `676-701`). The
+                    // process enters the target when it runs again, so
+                    // the entry costs one reduction of the next turn.
+                    Ok(Some(Outcome::Yield))
+                } else {
+                    // ERTS switches out at the trap, and the export
+                    // stub of the target runs in the next turn
+                    // (`context_switch_simplified` in
+                    // `jit/arm/instr_bif.cpp:525-536`, `676-701`). Keep
+                    // the call for `run`, so the switch out happens
+                    // before the error handler.
+                    scheduler.current_process_mut().pending_trap = Some(PendingTrap {
+                        module,
+                        function,
+                        arity,
+                        tail,
+                    });
+                    Ok(Some(Outcome::Yield))
                 }
             }
             BifResult::TrapBif {
@@ -4504,7 +4497,7 @@ fn update_owned(
     // The operand is not a map. ERTS raises `{badmap, Map}` and writes no
     // register, so the destination register keeps its value. A take only
     // gives a map (see `take_owned`), so no term goes back here.
-    Ok(Update::Missing(term.clone()))
+    Ok(Update::Missing(term))
 }
 
 /// The result of [`update_owned`].
@@ -6714,15 +6707,7 @@ fn private_append(
         )));
     };
     write(process, source, Term::Nil)?;
-    if !binary.bit_size().is_multiple_of(8) {
-        // The bits of the old bitstring do not end on a byte boundary, so
-        // the writer copies them, and then the new bits.
-        let mut writer = BitWriter::default();
-        writer.push_binary(binary, binary.bit_size());
-        writer.push_binary(&bitstring(bytes, bits), bits as usize);
-        let (bytes, bits) = writer.into_bytes();
-        *binary = bitstring(bytes, bits);
-    } else {
+    if binary.bit_size().is_multiple_of(8) {
         let size = binary.bit_size() + bits as usize;
         if !binary.append_in_place(&bytes) {
             *binary = Binary::concat(binary, &bytes);
@@ -6730,6 +6715,14 @@ fn private_append(
         if !bits.is_multiple_of(8) {
             *binary = binary.bits(0, size);
         }
+    } else {
+        // The bits of the old bitstring do not end on a byte boundary, so
+        // the writer copies them, and then the new bits.
+        let mut writer = BitWriter::default();
+        writer.push_binary(binary, binary.bit_size());
+        writer.push_binary(&bitstring(bytes, bits), bits as usize);
+        let (bytes, bits) = writer.into_bytes();
+        *binary = bitstring(bytes, bits);
     }
     write(process, source, value.clone())?;
     Ok(Ok(value))

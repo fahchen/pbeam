@@ -49,8 +49,8 @@ fn converts_binaries_code_points_and_nested_lists_as_erts() {
     for (code_point, expected) in [
         (233, &[195, 169][..]),
         (8364, &[226, 130, 172]),
-        (128512, &[240, 159, 152, 128]),
-        (1114111, &[244, 143, 191, 191]),
+        (128_512, &[240, 159, 152, 128]),
+        (1_114_111, &[244, 143, 191, 191]),
     ] {
         assert_eq!(
             valid(Term::list_from(vec![Term::Integer(code_point)])),
@@ -106,7 +106,7 @@ fn converts_deeply_nested_lists_without_recursion() {
 #[test]
 fn stops_at_chardata_that_erts_does_not_convert() {
     // ERTS 29.1.1 returns {error, <<>>, [Value]} for these code points.
-    for code_point in [-1, 55296, 1114112, 1 << 60] {
+    for code_point in [-1, 55296, 1_114_112, 1 << 60] {
         let chardata = Term::list_from(vec![Term::Integer(code_point)]);
         assert_eq!(
             convert(&chardata),
@@ -298,10 +298,10 @@ fn accepts_the_file_names_that_erts_accepts_in_each_encoding() {
     }
     // A character above 255 is valid only in UTF-8, up to 0x10FFFF and
     // not from 0xD800 to 0xDFFF.
-    for character in [256, 0xD7FF, 0xE000, 0x10FFFF] {
+    for character in [256, 0xD7FF, 0xE000, 0x0010_FFFF] {
         assert_eq!(check(&list(&[character])), [false, true], "{character}");
     }
-    for character in [0, -1, 0xD800, 0xDFFF, 0x110000] {
+    for character in [0, -1, 0xD800, 0xDFFF, 0x0011_0000] {
         assert_eq!(check(&list(&[character])), [false, false], "{character}");
     }
     // A bignum, a binary, an atom, or a tuple in a list, and each term
@@ -365,7 +365,7 @@ fn writes_the_native_bytes_of_a_file_name_in_each_encoding() {
         ]
     );
     assert_eq!(
-        bytes(&list(&[1046, 0x10FFFF])),
+        bytes(&list(&[1046, 0x0010_FFFF])),
         [
             None,
             some(&[208, 150, 244, 143, 191, 191]),

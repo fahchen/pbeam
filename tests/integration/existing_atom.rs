@@ -86,7 +86,7 @@ fn reads_atoms_that_exist_as_pinned_erts() {
             vec![Term::Integer(111), Term::Integer(107)],
             atom("bad"),
         )),
-        failed_list(list(&[111, 0x110000])),
+        failed_list(list(&[111, 0x0011_0000])),
         failed_list(list(&[111, 0xD800])),
         failed_list(Term::list_from(vec![Term::Integer(111), Term::Float(1.0)])),
         failed_list(list(&[111, -1])),

@@ -843,15 +843,12 @@ impl Mailbox {
             prev: self.last,
             next: None,
         };
-        let node = match self.free.pop() {
-            Some(node) => {
-                self.nodes[node] = entry;
-                node
-            }
-            None => {
-                self.nodes.push(entry);
-                self.nodes.len() - 1
-            }
+        let node = if let Some(node) = self.free.pop() {
+            self.nodes[node] = entry;
+            node
+        } else {
+            self.nodes.push(entry);
+            self.nodes.len() - 1
         };
         self.set_target(self.last, Some(node));
         self.last = Link::After(node);

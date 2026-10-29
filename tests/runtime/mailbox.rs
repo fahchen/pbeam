@@ -385,7 +385,7 @@ fn takes_no_term_of_a_signal_node_that_the_handling_emptied() {
     let mut pending = Vec::new();
     assert_eq!(mailbox.take_terms_bounded(&mut pending, 256), 1);
     assert!(mailbox.is_empty());
-    assert!(pending.is_empty());
+    assert_eq!(pending, [] as [crate::term::Term; 0]);
 }
 
 #[test]

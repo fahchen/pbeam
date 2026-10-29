@@ -306,11 +306,7 @@ impl Drain {
                 Child::Collision(pairs) => self.collision = pairs,
             }
         }
-        while self
-            .nodes
-            .last()
-            .is_some_and(|children| children.is_empty())
-        {
+        while self.nodes.last().is_some_and(std::vec::Vec::is_empty) {
             self.nodes.pop();
         }
         moved
@@ -326,7 +322,7 @@ impl Drain {
     /// assert!(!drain.is_empty());
     /// ```
     pub(crate) fn is_empty(&self) -> bool {
-        self.collision.is_empty() && self.nodes.iter().all(|children| children.is_empty())
+        self.collision.is_empty() && self.nodes.iter().all(std::vec::Vec::is_empty)
     }
 
     /// Account the nodes, the collision pairs, and the terms that this drain
@@ -838,7 +834,7 @@ impl Map {
                 match child {
                     Child::Leaf(key, value) => pending.extend([key, value]),
                     Child::Node(node) => {
-                        nodes.extend(Arc::into_inner(node).map(|node| node.children))
+                        nodes.extend(Arc::into_inner(node).map(|node| node.children));
                     }
                     Child::Collision(pairs) => {
                         pending.extend(pairs.into_iter().flat_map(|(key, value)| [key, value]));

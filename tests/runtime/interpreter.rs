@@ -2679,7 +2679,7 @@ fn rejects_unresolved_exports_and_function_labels() {
             .contains("unresolved external MFA missing:run/0")
     );
     assert!(
-        CodeTable::new(program.modules.clone())
+        CodeTable::new(program.modules)
             .mfa_frame("external", "missing", 0)
             .unwrap_err()
             .to_string()
@@ -3233,7 +3233,7 @@ fn reads_bif_arguments_into_a_fixed_buffer_and_reports_invalid_operands() {
     let arguments =
         read_bif_arguments(&process, &operands).expect("two set operands are valid arguments");
     assert_eq!(
-        arguments.with(|terms| terms.to_vec()),
+        arguments.with(<[&crate::term::Term]>::to_vec),
         vec![&Term::Integer(7), &Term::Integer(9)]
     );
     assert!(read_bif_arguments(&process, &[Operand::X(1)]).is_err());
@@ -3247,7 +3247,7 @@ fn reads_bif_arguments_into_a_fixed_buffer_and_reports_invalid_operands() {
     let owned = read_owned_bif_arguments(&process, &operands)
         .expect("two set operands are valid arguments");
     assert_eq!(
-        owned.with(|terms| terms.to_vec()),
+        owned.with(<[crate::term::Term]>::to_vec),
         vec![Term::Integer(7), Term::Integer(9)]
     );
     assert!(read_owned_bif_arguments(&process, &[Operand::X(1)]).is_err());
@@ -6160,7 +6160,7 @@ fn gives_the_owner_as_the_heir_of_a_table() {
         Term::tuple(vec![heir.clone(), Term::Pid(owner)]),
     ]);
     let table = program
-        .bif(&mut scheduler, "ets", "new", vec![name.clone(), options])
+        .bif(&mut scheduler, "ets", "new", vec![name, options])
         .unwrap();
     let BifResult::Value(table) = table else {
         panic!("ets:new/2 did not make a table");

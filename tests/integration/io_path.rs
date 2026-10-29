@@ -97,7 +97,7 @@ fn executes_the_pinned_otp_io_request_path_to_the_writer_nif() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, [] as [u8; 0]);
     assert_eq!(
         without_writer_report(&String::from_utf8(reference.stdout).unwrap()),
         "{{error,badarg},noise_ok,normal,normal,{badarg,prim_tty,write_nif}}\n"

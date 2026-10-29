@@ -267,7 +267,7 @@ fn runs_no_call_of_a_dropped_claim_and_ends_the_threads_after_the_run() {
     for (reader, _) in &pipes {
         let mut written = vec![0; bytes.len()];
         (&*reader).read_exact(&mut written).unwrap();
-        assert!(written == bytes);
+        assert_eq!(written, bytes);
     }
     // Each thread writes to the wake socket after each call. The end of
     // file comes when each call dropped its copy of the write end.

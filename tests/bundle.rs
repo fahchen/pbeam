@@ -120,8 +120,8 @@ fn accepts_an_empty_module_table_and_an_empty_resource_table() {
     push_table(&mut out, &[]);
     push_table(&mut out, &[]);
     let bundle = Bundle::parse(&out).unwrap();
-    assert!(bundle.modules().is_empty());
-    assert!(bundle.resources().is_empty());
+    assert_eq!(bundle.modules(), []);
+    assert_eq!(bundle.resources(), []);
 }
 
 #[test]

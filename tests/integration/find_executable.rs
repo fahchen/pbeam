@@ -270,7 +270,7 @@ fn make_files(directory: &Path) {
     // Times outside 1902-01-01 to 9999-12-31, which `build_file_info`
     // limits (`prim_file_nif.h:97-105`). A file system can limit them first.
     for (name, time) in [
-        ("old", UNIX_EPOCH - Duration::from_secs(3_000_000_000)),
+        ("old", UNIX_EPOCH - Duration::from_mins(50_000_000)),
         ("future", UNIX_EPOCH + Duration::from_secs(260_000_000_000)),
     ] {
         let times = FileTimes::new().set_accessed(time).set_modified(time);

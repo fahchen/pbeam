@@ -58,15 +58,12 @@ impl ProcessSlots {
     /// ```
     pub(super) fn insert(&mut self, process: ProcessState) {
         let id = process.id;
-        let slot = match self.free.pop() {
-            Some(slot) => {
-                self.slots[slot] = Some(process);
-                slot
-            }
-            None => {
-                self.slots.push(Some(process));
-                self.slots.len() - 1
-            }
+        let slot = if let Some(slot) = self.free.pop() {
+            self.slots[slot] = Some(process);
+            slot
+        } else {
+            self.slots.push(Some(process));
+            self.slots.len() - 1
         };
         let old = self.index.insert(id, slot);
         assert!(old.is_none(), "each process has a new pid");

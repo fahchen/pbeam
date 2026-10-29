@@ -11,7 +11,10 @@ fn reads_no_datagram_without_a_receive() {
         port.control(0x03f1_a301, &[1, 2, 2], caller).unwrap(),
         Control::Reply(vec![1])
     );
-    assert!(port.receive_datagram().is_empty());
+    assert_eq!(
+        port.receive_datagram(),
+        [] as [crate::runtime::port::inet::stream::Event; 0]
+    );
 }
 
 #[test]

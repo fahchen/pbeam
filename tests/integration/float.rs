@@ -86,7 +86,7 @@ fn loads_float_literals_as_pinned_erts() {
         1.0e300,
         5.0e-324,
         -2.5e-10,
-        123456789.0,
+        123_456_789.0,
     ]
     .map(Term::Float);
     let mut expected: Vec<Term> = floats.into();

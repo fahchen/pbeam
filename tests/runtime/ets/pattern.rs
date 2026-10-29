@@ -56,7 +56,7 @@ fn matches_lists_maps_and_ground_tuples() {
     let pattern = Pattern::compile(&atoms, &map).unwrap();
     assert!(pattern.matches_nothing(1));
     assert_eq!(pattern.run(std::slice::from_ref(&one)), None);
-    let twice = Term::tuple(vec![variable.clone(), variable.clone()]);
+    let twice = Term::tuple(vec![variable.clone(), variable]);
     let pattern = Pattern::compile(&atoms, &twice).unwrap();
     assert_eq!(pattern.run(&[one.clone(), Term::Integer(2)]), None);
     assert_eq!(
@@ -164,7 +164,7 @@ fn runs_each_guard_function_of_the_match_specification() {
         (call(&atoms, "is_function", vec![var1.clone()]), fun.clone()),
         (
             call(&atoms, "is_function", vec![var1.clone(), Term::Integer(1)]),
-            fun.clone(),
+            fun,
         ),
         (
             call(&atoms, "is_map_key", vec![key_a.clone(), var1.clone()]),
@@ -217,8 +217,8 @@ fn runs_each_guard_function_of_the_match_specification() {
             Term::Integer(1),
         ),
         (
-            call(&atoms, "map_get", vec![key_a.clone(), var1.clone()]),
-            map.clone(),
+            call(&atoms, "map_get", vec![key_a, var1.clone()]),
+            map,
             Term::Integer(1),
         ),
         (
@@ -238,7 +238,7 @@ fn runs_each_guard_function_of_the_match_specification() {
         ),
         (
             call(&atoms, "byte_size", vec![var1.clone()]),
-            binary.clone(),
+            binary,
             Term::Integer(2),
         ),
         (
@@ -250,7 +250,7 @@ fn runs_each_guard_function_of_the_match_specification() {
         (
             call(&atoms, "node", vec![var1.clone()]),
             Term::Pid(ProcessId(0)),
-            node.clone(),
+            node,
         ),
         (
             call(&atoms, "+", vec![var1.clone()]),
@@ -413,7 +413,7 @@ fn runs_each_guard_function_of_the_match_specification() {
     ]);
     let orelse = Term::tuple(vec![
         atom(&atoms, "orelse"),
-        call(&atoms, "is_atom", vec![var1.clone()]),
+        call(&atoms, "is_atom", vec![var1]),
         Term::static_atom("true"),
     ]);
     assert_eq!(
@@ -539,7 +539,7 @@ fn builds_match_specification_terms_and_rejects_bad_ones() {
     );
     // A large arithmetic result becomes a bignum, and division by zero fails.
     let big = Term::Integer(1 << 40);
-    let body = Term::list_from(vec![call(&atoms, "*", vec![big.clone(), big.clone()])]);
+    let body = Term::list_from(vec![call(&atoms, "*", vec![big.clone(), big])]);
     let spec = Term::list_from(vec![Term::tuple(vec![head.clone(), Term::nil(), body])]);
     assert!(matches!(
         MatchSpec::compile(&atoms, &spec)
@@ -666,7 +666,7 @@ fn builds_match_specification_terms_and_rejects_bad_ones() {
     ]);
     assert_eq!(
         MatchSpec::compile(&atoms, &one).unwrap().bound_key(1),
-        Some(&key_k.clone())
+        Some(&key_k)
     );
     assert!(!MatchSpec::compile(&atoms, &one).unwrap().matches_nothing(1));
     assert_eq!(MatchSpec::compile(&atoms, &two).unwrap().bound_key(1), None);
@@ -713,7 +713,7 @@ fn fails_each_guard_and_expression_like_the_match_program() {
     let atoms = test_atom_table();
     let var1 = atom(&atoms, "$1");
     let var2 = atom(&atoms, "$2");
-    let head = Term::tuple(vec![var1.clone(), var2.clone()]);
+    let head = Term::tuple(vec![var1.clone(), var2]);
     let ok = Term::static_atom("true");
     let key_a = atom(&atoms, "a");
     let object = |value: Term| vec![value, Term::Integer(2)];
@@ -745,7 +745,7 @@ fn fails_each_guard_and_expression_like_the_match_program() {
         call(&atoms, "bit_size", vec![var1.clone()]),
         call(&atoms, "byte_size", vec![var1.clone()]),
         call(&atoms, "tuple_size", vec![var1.clone()]),
-        call(&atoms, "node", vec![var1.clone()]),
+        call(&atoms, "node", vec![var1]),
         call(&atoms, "not", vec![Term::Integer(1)]),
         call(
             &atoms,
@@ -841,7 +841,7 @@ fn fails_each_guard_and_expression_like_the_match_program() {
         call(&atoms, "+", vec![big, Term::Float(1.0)]),
         Term::tuple(vec![
             atom(&atoms, "const"),
-            Term::Float(1.2676506002282294e30),
+            Term::Float(1.267_650_600_228_229_4e30),
         ]),
     ]);
     assert_eq!(

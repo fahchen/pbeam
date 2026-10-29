@@ -35,6 +35,6 @@ fn surfaces_a_writer_process_exit_as_an_io_protocol_error() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, [] as [u8; 0]);
     assert_eq!(reference.stdout, b"{{error,write_failed},noise_ok}\n");
 }

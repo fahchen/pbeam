@@ -55,7 +55,7 @@ fn compares_terms_in_is_ge_and_erlang_ge_as_pinned_erts() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, [] as [u8; 0]);
     assert_eq!(
         String::from_utf8(reference.stdout).unwrap(),
         format!(

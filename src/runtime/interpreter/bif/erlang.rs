@@ -201,19 +201,19 @@ fn nodes_monitor_key(options: &Term) -> Option<u8> {
         let boolean = on || value.is_static("false");
         let node_type = option.is_static("node_type");
         key = match () {
-            _ if option.is_static("list") && on => key & !NODES_MONITOR_INFO_MAP,
-            _ if option.is_static("connection_id") && boolean => {
+            () if option.is_static("list") && on => key & !NODES_MONITOR_INFO_MAP,
+            () if option.is_static("connection_id") && boolean => {
                 key | if on { NODES_MONITOR_CONNECTION_ID } else { 0 }
             }
-            _ if option.is_static("nodedown_reason") && boolean => {
+            () if option.is_static("nodedown_reason") && boolean => {
                 key | if on { NODES_MONITOR_DOWN_REASON } else { 0 }
             }
-            _ if node_type && value.is_static("visible") => key | NODES_MONITOR_VISIBLE,
-            _ if node_type && value.is_static("hidden") => key | NODES_MONITOR_HIDDEN,
-            _ if node_type && value.is_static("all") => {
+            () if node_type && value.is_static("visible") => key | NODES_MONITOR_VISIBLE,
+            () if node_type && value.is_static("hidden") => key | NODES_MONITOR_HIDDEN,
+            () if node_type && value.is_static("all") => {
                 key | NODES_MONITOR_VISIBLE | NODES_MONITOR_HIDDEN
             }
-            _ => return None,
+            () => return None,
         };
     }
     Some(key)
@@ -4697,8 +4697,12 @@ pub(super) fn is_integer_3(term: &Term, low: &Term, high: &Term) -> BifResult {
     if !low.is_integer() || !high.is_integer() {
         return BifResult::badarg();
     }
-    let within = term.integer_order(low).is_some_and(|order| order.is_ge())
-        && term.integer_order(high).is_some_and(|order| order.is_le());
+    let within = term
+        .integer_order(low)
+        .is_some_and(std::cmp::Ordering::is_ge)
+        && term
+            .integer_order(high)
+            .is_some_and(std::cmp::Ordering::is_le);
     Value(Term::static_atom(if within { "true" } else { "false" }))
 }
 

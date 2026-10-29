@@ -326,7 +326,7 @@ fn builds_the_one_file_executable_with_the_mix_task_and_runs_it_clean() {
     // is an empty directory, and `PBEAM_OTP_ROOT` is unset.
     let _serialized = ONE_FILE_RUN
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let directory = test_directory("mix-build");
     let example = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/plug_hello");
     let release = directory.join("release");
@@ -435,7 +435,7 @@ fn gives_the_command_line_arguments_of_the_executable_to_the_release() {
     // becomes a script file.
     let _serialized = ONE_FILE_RUN
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let directory = test_directory("arguments");
     let clean = directory.join("clean");
     let temporary = directory.join("tmp");
@@ -550,7 +550,7 @@ fn erts_release_response(release: &std::path::Path) -> (String, String, String) 
 fn serve_one_file() -> (String, String, String) {
     let _serialized = ONE_FILE_RUN
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let directory = test_directory("one-file");
     let clean = directory.join("clean");
     let temporary = directory.join("tmp");
@@ -726,7 +726,7 @@ fn serve(arguments: &[&str], pbeam: Option<&str>) -> (Response<String>, Response
     // script. The lock covers the build and the run.
     let _serialized = ONE_FILE_RUN
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let port = free_port();
     let mut command = Command::new("bash");
     command
@@ -798,7 +798,9 @@ fn collect(
 /// the binary cannot pick one port.
 fn free_port() -> u16 {
     static USED: Mutex<Option<std::collections::HashSet<u16>>> = Mutex::new(None);
-    let mut used = USED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut used = USED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let used = used.get_or_insert_with(std::collections::HashSet::new);
     loop {
         let port = TcpListener::bind("127.0.0.1:0")

@@ -38,7 +38,7 @@ fn reference(function: &str) -> Vec<u8> {
         .output()
         .unwrap();
     assert!(output.status.success());
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, [] as [u8; 0]);
     output.stdout
 }
 
@@ -204,7 +204,7 @@ fn runs_the_counters_calls_of_the_elixir_logger_start_as_pinned_erts() {
         ),
         expected.pair(
             "index_not_an_integer",
-            counter("get", vec![array.clone(), Term::Float(1.5)], error_info()),
+            counter("get", vec![array, Term::Float(1.5)], error_info()),
         ),
         expected.pair(
             "put_above_signed_range",

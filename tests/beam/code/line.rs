@@ -80,7 +80,7 @@ fn gives_no_location_without_a_line_table() {
     let mut table = LineTable::parse(&chunk(1, 1, 1, 0, &[0x51], &[]), "probe").unwrap();
     table.line(0, 9).unwrap();
     table.function(1, None).unwrap();
-    assert!(table.entries.is_empty());
+    assert_eq!(table.entries, [] as [(usize, usize); 0]);
     assert_eq!(table.location(0, Term::nil()), Term::nil());
 }
 

@@ -319,17 +319,14 @@ fn div_rem_reductions(left: &Term, right: &Term) -> i32 {
 
 /// Compare the magnitudes of two integers, as `big_ucomp` does.
 fn magnitude_order(left: &Term, right: &Term) -> Ordering {
-    match (left, right) {
-        (Term::Integer(left), Term::Integer(right)) => {
-            left.unsigned_abs().cmp(&right.unsigned_abs())
-        }
-        _ => {
-            let (left, right) = (left.bigint(), right.bigint());
-            let magnitude = |value: Option<std::borrow::Cow<'_, BigInt>>| {
-                value.map(|value| value.magnitude().clone())
-            };
-            magnitude(left).cmp(&magnitude(right))
-        }
+    if let (Term::Integer(left), Term::Integer(right)) = (left, right) {
+        left.unsigned_abs().cmp(&right.unsigned_abs())
+    } else {
+        let (left, right) = (left.bigint(), right.bigint());
+        let magnitude = |value: Option<std::borrow::Cow<'_, BigInt>>| {
+            value.map(|value| value.magnitude().clone())
+        };
+        magnitude(left).cmp(&magnitude(right))
     }
 }
 

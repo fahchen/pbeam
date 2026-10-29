@@ -74,6 +74,6 @@ fn releases_a_large_graph_on_each_path_as_pinned_erts_does() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, [] as [u8; 0]);
     assert_eq!(reference.stdout, b"{ok,100000,ok}\n");
 }

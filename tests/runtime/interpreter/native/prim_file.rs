@@ -315,12 +315,12 @@ fn reads_writes_seeks_and_closes_a_file_resource_as_erts() {
     );
     for (mark, offset, expected) in [
         (
-            eof.clone(),
+            eof,
             Term::Integer(0),
             "Value(Tuple([Atom(\"ok\"), Integer(68)]))",
         ),
         (
-            cur.clone(),
+            cur,
             Term::Integer(-1),
             "Value(Tuple([Atom(\"ok\"), Integer(67)]))",
         ),
@@ -333,7 +333,7 @@ fn reads_writes_seeks_and_closes_a_file_resource_as_erts() {
         (Term::Integer(1), Term::Integer(0), BADARG),
         (Term::static_atom("ok"), Term::Integer(0), BADARG),
         (
-            bof.clone(),
+            bof,
             Term::Integer(1),
             "Value(Tuple([Atom(\"ok\"), Integer(1)]))",
         ),
@@ -608,7 +608,7 @@ fn advises_a_file_and_gives_its_host_handle_as_erts() {
     for offset in [
         Term::Integer(-1),
         Term::Float(0.0),
-        Term::BigInt(std::sync::Arc::new(9223372036854775808u64.into())),
+        Term::BigInt(std::sync::Arc::new(9_223_372_036_854_775_808_u64.into())),
     ] {
         assert_eq!(
             text(&mut scheduler, |s| advise_nif(

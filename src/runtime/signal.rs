@@ -350,7 +350,7 @@ impl Signal {
                 item,
             } => pending.push(std::mem::replace(item, Term::Nil)),
             Signal::AliasMessage { alias: _, message } => {
-                pending.push(std::mem::replace(message, Term::Nil))
+                pending.push(std::mem::replace(message, Term::Nil));
             }
             Signal::Link { from: _ }
             | Signal::Unlink { from: _, id: _ }

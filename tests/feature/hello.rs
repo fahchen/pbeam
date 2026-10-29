@@ -356,7 +356,7 @@ fn prints_help_and_exits_successfully() {
     );
     assert!(stdout.contains("--policy <MODULE>"));
     assert!(stdout.contains("-h, --help"));
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, [] as [u8; 0]);
 }
 
 #[test]

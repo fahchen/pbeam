@@ -59,7 +59,7 @@ fn raises_badarg_for_each_status_and_option_that_halt_rejects() {
     let Some(results) = pbeam
         .term
         .proper_list()
-        .map(|results| results.collect::<Vec<_>>())
+        .map(std::iter::Iterator::collect::<Vec<_>>)
     else {
         panic!("{pbeam:?}");
     };

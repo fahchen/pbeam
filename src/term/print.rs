@@ -116,7 +116,7 @@ fn print_term_counted(term: &Term, atoms: &AtomTable, dcount: &mut i64) -> Vec<u
             // `PRINT_DOUBLE(res, fn, arg, 'e', 6, 0, ff.fd)`
             // (`erl_printf_term.c:596-600`): six digits after the point.
             Term::Float(value) => {
-                text.extend_from_slice(&crate::term::float_text::scientific(*value, 6))
+                text.extend_from_slice(&crate::term::float_text::scientific(*value, 6));
             }
             Term::Nil => text.extend_from_slice(b"[]"),
             Term::Cons(_)

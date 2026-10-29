@@ -32,7 +32,7 @@ fn reference_with(arguments: &[&str], function: &str) -> Vec<u8> {
         .output()
         .unwrap();
     assert!(output.status.success());
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, [] as [u8; 0]);
     output.stdout
 }
 
@@ -333,7 +333,7 @@ fn reads_the_application_environment_from_ac_tab_as_pinned_erts() {
         .output()
         .unwrap();
     assert!(output.status.success());
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, [] as [u8; 0]);
     assert_eq!(
         output.stdout,
         b"[[set,public,true,1,true],[default,true,value]]\n"
@@ -1077,7 +1077,7 @@ fn helps_a_fixed_clear_from_another_process_as_pinned_erts() {
             .execute("ets_probe", "fixtable_clear_help", &[])
             .unwrap()
             .term,
-        Term::list_from(vec![Term::Integer(100000), Term::Integer(0)])
+        Term::list_from(vec![Term::Integer(100_000), Term::Integer(0)])
     );
     assert_eq!(reference("fixtable_clear_help"), b"[100000,0]\n");
 }

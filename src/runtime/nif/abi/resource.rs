@@ -136,7 +136,7 @@ impl Drop for Resource {
                 dtor(
                     &raw mut env,
                     std::ptr::with_exposed_provenance_mut(self.data),
-                )
+                );
             };
         }
         lock().remove(&self.data);

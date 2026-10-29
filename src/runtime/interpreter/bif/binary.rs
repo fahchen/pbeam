@@ -630,23 +630,22 @@ pub(super) fn compile_pattern(
 /// needle is a bitstring with at least one byte and a whole number of bytes,
 /// and the argument is one needle or a proper list of needles.
 fn compile_source(pattern: &Term) -> Option<CompiledPattern> {
-    match pattern {
-        Term::Binary(binary) => Some(CompiledPattern::Bm(compile_needle(binary)?)),
-        _ => {
-            let mut needles = Vec::new();
-            for needle in pattern.proper_list()? {
-                let Term::Binary(binary) = needle else {
-                    return None;
-                };
-                needles.push(compile_needle(binary)?);
-            }
-            match needles.len() {
-                0 => None,
-                1 => Some(CompiledPattern::Bm(
-                    needles.pop().expect("the list has one needle"),
-                )),
-                _ => Some(CompiledPattern::Ac(needles)),
-            }
+    if let Term::Binary(binary) = pattern {
+        Some(CompiledPattern::Bm(compile_needle(binary)?))
+    } else {
+        let mut needles = Vec::new();
+        for needle in pattern.proper_list()? {
+            let Term::Binary(binary) = needle else {
+                return None;
+            };
+            needles.push(compile_needle(binary)?);
+        }
+        match needles.len() {
+            0 => None,
+            1 => Some(CompiledPattern::Bm(
+                needles.pop().expect("the list has one needle"),
+            )),
+            _ => Some(CompiledPattern::Ac(needles)),
         }
     }
 }
@@ -1221,13 +1220,14 @@ fn find_first_turn(
         matches: Vec::new(),
         build: None,
     };
-    Ok(match find_turn(process, &compiled, &mut find, bytes)? {
-        Some(parts) => Value(parts),
-        None => {
+    Ok(
+        if let Some(parts) = find_turn(process, &compiled, &mut find, bytes)? {
+            Value(parts)
+        } else {
             process.bump_all_reductions();
             find_trap_result(subject, &find, pattern)
-        }
-    })
+        },
+    )
 }
 
 /// Continue `binary:match/2` or `binary:split/2,3` in the export `erlang:binary_find_trap/3`, as

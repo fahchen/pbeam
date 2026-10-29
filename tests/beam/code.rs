@@ -41,7 +41,10 @@ fn rejects_invalid_atom_tables_and_indices() {
     malformed_atoms.extend([0x30, b'a', b'b', b'c', 0xa0]);
     assert!(parse_atoms(&malformed_atoms, &table).is_err());
     assert!(parse_atoms(&[0xff, 0xff, 0xff, 0xff, 0x10, 0xff], &table).is_err());
-    assert!(parse_atoms(&0i32.to_be_bytes(), &table).unwrap().is_empty());
+    assert_eq!(
+        parse_atoms(&0i32.to_be_bytes(), &table).unwrap(),
+        [] as [crate::term::Atom; 0]
+    );
 }
 
 #[test]

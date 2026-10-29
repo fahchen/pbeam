@@ -3414,7 +3414,7 @@ pub(super) fn select_count_trap(
             read(bucket, &mut iterations);
             match found.next_bucket(bucket) {
                 Some(next) if iterations <= 0 => {
-                    trap = Some((Term::Integer(next as i64), Term::Nil))
+                    trap = Some((Term::Integer(next as i64), Term::Nil));
                 }
                 next => walk = next,
             }
@@ -3582,7 +3582,7 @@ pub(super) fn select_replace_trap(
             read(table, bucket, &mut iterations);
             match table.next_bucket(bucket) {
                 Some(next) if iterations <= 0 => {
-                    trap = Some((Term::Integer(next as i64), Term::Nil))
+                    trap = Some((Term::Integer(next as i64), Term::Nil));
                 }
                 next => walk = next,
             }

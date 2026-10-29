@@ -34,7 +34,7 @@ fn raises_badarg_that_catch_and_try_catch_as_pinned_erts() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, [] as [u8; 0]);
     assert_eq!(
         reference.stdout,
         b"{badarg,badarg,badarg,badarg,badarg,badarg,badarg,badarg,badarg,badarg,badarg,{error,badarg},{error,badarg}}\n"

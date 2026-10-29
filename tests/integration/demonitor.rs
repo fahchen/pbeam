@@ -59,7 +59,7 @@ fn matches_erts_demonitor_options_and_argument_errors() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, [] as [u8; 0]);
     assert_eq!(
         reference.stdout,
         b"{{badarg,badarg,badarg,badarg,badarg},{value,false},[true,true,true,true,true,true],true,[true,true,false,false,false,false],[true,true,false,false,false,false],[{true,down},{true,none},{false,down},{false,none},{false,down},{false,none}]}\n"
@@ -89,6 +89,6 @@ fn creates_no_monitor_when_a_process_monitors_itself() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, [] as [u8; 0]);
     assert_eq!(reference.stdout, b"false\n");
 }

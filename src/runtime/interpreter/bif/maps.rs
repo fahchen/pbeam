@@ -493,10 +493,10 @@ fn ordered_next(
     let Some(pairs) = pairs.collect::<Option<Vec<_>>>() else {
         return Ok(BifResult::badarg());
     };
-    if !rest.is_nonempty_list() {
-        process.bump_reductions((ORDERED_ITER_FACTOR * taken.len()) as i32);
-    } else {
+    if rest.is_nonempty_list() {
         process.bump_all_reductions();
+    } else {
+        process.bump_reductions((ORDERED_ITER_FACTOR * taken.len()) as i32);
     }
     Ok(Value(iterator_pairs(pairs.into_iter(), next)))
 }
