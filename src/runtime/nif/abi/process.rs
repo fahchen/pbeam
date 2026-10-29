@@ -144,10 +144,18 @@ pub(super) fn record_unsupported(name: &str) {
 }
 
 /// Return true when the local process `pid` exists and does not exit, as
+/// Return the node of the NIF call that runs on the thread, or else the
+/// node of the loaded NIF libraries ([`RUN`]), as ERTS finds its process
+/// table from each thread.
+fn node() -> Option<Arc<Node>> {
+    with_context(|context| Arc::clone(&context.node))
+        .or_else(|| with_run(|run| Arc::clone(&run.node)))
+}
+
 /// `erts_proc_lookup` and `erts_pid2proc_opt` find it
-/// (`erl_nif.c:2323-2338`). A thread that runs no NIF call finds no process.
+/// (`erl_nif.c:2323-2338`, `877-901`).
 fn alive(pid: ProcessId) -> bool {
-    with_context(|context| context.node.live_owner(pid).is_some()).unwrap_or(false)
+    node().is_some_and(|node| node.live_owner(pid).is_some())
 }
 
 /// `ErlNifEnv* enif_alloc_env(void)`: return a new process-independent env
@@ -268,19 +276,19 @@ pub unsafe extern "C" fn enif_send(
     }
     // The message term of a call comes from the env of the call when the
     // NIF gives no message env, as ERTS reads it
-    // (`erl_nif.c:1100-1106`). A thread of a library gives the env of
-    // `enif_alloc_env` and no env of a call.
+    // (`erl_nif.c:1100-1106`). A thread of a library that gives no message
+    // env sends an atom, whose handle is the same in each env.
     let in_call = with_context(|context| context.env);
-    let source = if !msg_env.is_null() {
-        msg_env
+    let term = if !msg_env.is_null() {
+        // SAFETY: the C API gives an env of `enif_alloc_env`.
+        unsafe { super::env::env(msg_env) }.get(msg)
     } else if let Some(env) = in_call {
-        std::ptr::with_exposed_provenance_mut(env)
+        // SAFETY: the env of the running call is alive until it returns.
+        unsafe { super::env::env(std::ptr::with_exposed_provenance_mut(env)) }.get(msg)
     } else {
-        return 0;
+        with_run(|run| Env::new(&run.atoms, None, &[]).get(msg)).flatten()
     };
-    // SAFETY: `source` is an env of `enif_alloc_env` or the env of the
-    // running call, which is alive until the call returns.
-    let Some(term) = (unsafe { super::env::env(source) }).get(msg) else {
+    let Some(term) = term else {
         with_context(|context| {
             context.unsupported.get_or_insert_with(|| {
                 format!("enif_send sent the term {msg:#x}, which its env does not have")
@@ -290,14 +298,16 @@ pub unsafe extern "C" fn enif_send(
     };
     // A call queues its messages for the caller's scheduler to send when
     // the call returns. A thread of a library, which runs no call, sends
-    // through the node at once, as ERTS sends through the global process
-    // registry from each thread (`erl_nif.c:2296-2338`). The sender of the
-    // message is `None`, as a thread of a library is no process.
+    // through the inbox of the scheduler of the receiver at once, as ERTS
+    // queues the message from each thread (`erl_nif.c:877-901`, `996`).
+    // The sender is `None`: a thread of a library is no process, and ERTS
+    // gives the message the sender `am_undefined`.
     match with_context(|context| context.sends.push((target, term.clone()))) {
         Some(()) => 1,
-        None => {
-            with_run(|run| run.node.send_message(0, None, term, target, None)).map_or(0, |()| 1)
-        }
+        None => node().map_or(0, |node| {
+            node.send_message(0, None, term, target, None);
+            1
+        }),
     }
 }
 

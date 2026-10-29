@@ -185,11 +185,15 @@ pub(in crate::runtime) struct Node {
     aliases: Mutex<Aliases>,
     /// The active BIF timers of the node.
     timers: Mutex<BifTimers>,
-    /// The inbox of each scheduler.
+    /// The inbox of each scheduler. A node of one scheduler has one inbox
+    /// too: a thread of a NIF library sends into it (`enif_send`), and the
+    /// poll thread writes its wake socket.
     inboxes: Vec<Inbox>,
-    /// The write end of the wake socket of the scheduler of a node of one
-    /// scheduler, which has no inbox. The poll thread writes it.
-    single_wake: Option<UnixStream>,
+    /// True after a NIF library loaded in the node. A thread of the library
+    /// can then send a message at any time (`enif_send`, `erl_nif.c:877-901`),
+    /// so a scheduler waits for its wake socket and does not decide that no
+    /// message can arrive.
+    nif_library: AtomicBool,
     /// The next process identifier.
     next_pid: AtomicU64,
     /// The next ordinary reference.
@@ -316,7 +320,7 @@ impl Node {
                 aliases: Mutex::new(Aliases::default()),
                 timers: Mutex::new(BifTimers::default()),
                 inboxes,
-                single_wake: None,
+                nif_library: AtomicBool::new(false),
                 next_pid: AtomicU64::new(0),
                 next_reference: AtomicU64::new(0),
                 unique: AtomicU64::new(0),
@@ -375,8 +379,8 @@ impl Node {
     }
 
     /// Return the node of one scheduler that has no other scheduler, and
-    /// the read end of the wake socket of its scheduler. It has no inbox,
-    /// so only the poll thread wakes the scheduler, and one root slot.
+    /// the read end of the wake socket of its scheduler. It has one inbox,
+    /// which only a thread of a NIF library sends into, and one root slot.
     ///
     /// # Examples
     ///
@@ -399,8 +403,11 @@ impl Node {
             persistent_progress: AtomicBool::new(false),
             aliases: Mutex::new(Aliases::default()),
             timers: Mutex::new(BifTimers::default()),
-            inboxes: Vec::new(),
-            single_wake: Some(writer),
+            inboxes: vec![Inbox {
+                queue: Mutex::new(VecDeque::new()),
+                wake: writer,
+            }],
+            nif_library: AtomicBool::new(false),
             // A run with one scheduler creates its root as `ProcessId(0)`
             // before it starts a process, so the first other pid is 1.
             next_pid: AtomicU64::new(1),
@@ -867,11 +874,19 @@ impl Node {
     /// Wake the scheduler `index` from its wait, so that it waits again for
     /// the fds of its ports after another scheduler changed them.
     pub(in crate::runtime) fn wake_scheduler(&self, index: usize) {
-        if let Some(inbox) = self.inboxes.get(index) {
-            wake(&inbox.wake);
-        } else if let Some(writer) = &self.single_wake {
-            wake(writer);
-        }
+        wake(&self.inboxes[index].wake);
+    }
+
+    /// Record that a NIF library loaded in the node (see
+    /// [`Self::has_nif_library`]).
+    pub(in crate::runtime) fn load_nif_library(&self) {
+        self.nif_library.store(true, Ordering::Release);
+    }
+
+    /// Return true after a NIF library loaded in the node: a thread of the
+    /// library can send a message at any time.
+    pub(in crate::runtime) fn has_nif_library(&self) -> bool {
+        self.nif_library.load(Ordering::Acquire)
     }
 
     /// Record the process `owner` as the owner of the alias `reference`.

@@ -216,6 +216,7 @@ impl Library {
     /// ```
     pub(crate) fn load(&self, caller: Caller<'_>, info: &Term) -> i32 {
         process::enter_run(caller.atoms, caller.node);
+        caller.node.load_nif_library();
         self.load.map_or(0, |load| {
             let mut env = Env::load(caller.atoms, caller.process, info, &self.handle);
             // PBeam has no `enif_priv_data` yet, so no call reads the
