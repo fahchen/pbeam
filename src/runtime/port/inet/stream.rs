@@ -721,8 +721,9 @@ impl Inet {
         }
         if self.stream.pending_shutdown.is_some() {
             // `tcp_inet_commandv` gives the error of `tcp_shutdown_error` to
-            // a send after a shutdown that waits for the queue. No send
-            // waits here: a busy port stops the send above.
+            // a send after a shutdown that waits for the queue
+            // (inet_drv.c:12695-12696). A send that waited reaches this
+            // branch when the shutdown arrived while the port was busy.
             return Ok(self.send_failed(Some(sender)));
         }
         let reply = |result| Ok(vec![Event::Replied { sender, result }]);

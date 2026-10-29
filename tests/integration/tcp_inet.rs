@@ -1189,7 +1189,7 @@ fn runs_a_send_that_waits_when_the_busy_port_drains_as_pinned_erts() {
         .into_iter()
         .zip(transfer_runs("busy_drain"))
     {
-        assert_eq!(text, "[ok,ok,[['EXIT',port,killed]]]", "{name}");
+        assert_eq!(text, "[8388612,ok,ok,[['EXIT',port,killed]]]", "{name}");
         assert_eq!(
             reads.iter().map(Vec::len).collect::<Vec<_>>(),
             [(16 << 19) + 4],

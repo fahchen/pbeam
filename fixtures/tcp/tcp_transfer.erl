@@ -140,13 +140,16 @@ busy_drain(Path) ->
     queue(S),
     ok = prim_inet:setopts(S, [{send_timeout, 1000}]),
     [Busy, Waiter] = waiting_sends(S, [<<"tail">>, double(<<"0123456789abcdef">>, 19)]),
+    %% `send_oct` counts the bytes of a send when its command runs
+    %% (`inet_output_count`, inet_drv.c:13763), so not the waiting send yet.
+    {ok, [{send_oct, Counted}]} = prim_inet:getstat(S, [send_oct]),
     step(Path, 2, ["read ", integer_to_list(16 bsl 19 + 4)]),
     Sent = receive {Busy, Result} -> Result after 5000 -> missing end,
     Waited = receive {Waiter, ok} -> ok; {Waiter, {error, timeout}} -> ok after 5000 -> missing end,
     %% The exit `kill` ends the port without a flush of its queue, so the
     %% halt does not wait for the queue.
     exit(S, kill),
-    [Sent, Waited, flush()].
+    [Counted, Sent, Waited, flush()].
 
 %% The send timer of an active socket with `send_timeout_close` ends the
 %% port (inet_drv.c:12484-12505), so the send that waits behind the busy
