@@ -221,13 +221,21 @@ pub(super) fn down_of(data: usize) -> Option<DownFn> {
 /// ERTS runs the down callback only while a reference keeps the object
 /// (`erl_nif.c:3091-3115`), and the destructor removes the monitors of
 /// the object (`erl_nif.c:2974-3030`).
-static MONITORS: Mutex<BTreeMap<u64, (Weak<Resource>, DownFn)>> = Mutex::new(BTreeMap::new());
+static MONITORS: Mutex<BTreeMap<u64, Monitored>> = Mutex::new(BTreeMap::new());
+
+/// A monitor of [`MONITORS`]: the object, the address of its data, and the
+/// down callback of its type.
+struct Monitored {
+    object: Weak<Resource>,
+    data: usize,
+    down: DownFn,
+}
 
 /// The number of the next monitor reference.
 static NEXT_MONITOR: AtomicU64 = AtomicU64::new(1);
 
 /// Lock the monitor table, also after a panic of another thread.
-fn monitors() -> std::sync::MutexGuard<'static, BTreeMap<u64, (Weak<Resource>, DownFn)>> {
+fn monitors() -> std::sync::MutexGuard<'static, BTreeMap<u64, Monitored>> {
     MONITORS.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
@@ -239,7 +247,7 @@ pub(super) fn add_monitor(data: usize, down: DownFn) -> Reference {
         .map(|entry| entry.object.clone())
         .unwrap_or_default();
     let reference = Reference(NEXT_MONITOR.fetch_add(1, Ordering::Relaxed));
-    monitors().insert(reference.0, (object, down));
+    monitors().insert(reference.0, Monitored { object, data, down });
     reference
 }
 
@@ -247,11 +255,12 @@ pub(super) fn add_monitor(data: usize, down: DownFn) -> Reference {
 /// or return false when the object has no such monitor, as
 /// `enif_demonitor_process` finds it (`erl_nif.c:4014-4023`).
 pub(super) fn demonitor(data: usize, monitor: Reference) -> bool {
+    // The entry compares the address and does not take the object, so no
+    // drop of the object runs its destructor while the table is locked.
     let mut monitors = monitors();
     let owned = monitors
         .get(&monitor.0)
-        .and_then(|(object, _)| object.upgrade())
-        .is_some_and(|object| object.data == data);
+        .is_some_and(|entry| entry.data == data);
     owned && monitors.remove(&monitor.0).is_some()
 }
 
@@ -262,7 +271,7 @@ pub(super) fn demonitor(data: usize, monitor: Reference) -> bool {
 /// has no process (`pre_nif_noproc`, `erl_nif.c:3110`).
 pub(crate) fn monitor_down(monitor: Reference, pid: ProcessId) {
     let entry = monitors().remove(&monitor.0);
-    let Some((object, down)) = entry.and_then(|(object, down)| Some((object.upgrade()?, down)))
+    let Some((object, down)) = entry.and_then(|entry| Some((entry.object.upgrade()?, entry.down)))
     else {
         return;
     };
