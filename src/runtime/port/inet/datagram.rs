@@ -85,11 +85,13 @@ impl Inet {
     /// (inet_drv.c:14981-14991): a port without a socket gives
     /// `exbadport`, an active socket and a request that is not 8 bytes give
     /// `einval`, and a receive that waits gives `ealready`. The length is
-    /// not used, as a datagram is one message (inet_drv.c:14987-14988).
-    pub(super) fn datagram_receive_request(&self, request: &[u8]) -> Control {
+    /// not used, as a datagram is one message (inet_drv.c:14987-14988). A
+    /// receive turns the read select on (inet_drv.c:15491-15497).
+    pub(super) fn datagram_receive_request(&mut self, request: &[u8]) -> Control {
         let reply = match (self.state, self.active, request) {
             (State::Closed, ..) => error_reply("exbadport"),
             (_, 0, &[t3, t2, t1, t0, _, _, _, _]) if self.stream.receiver.is_none() => {
+                self.read_off = false;
                 return Control::Receive {
                     timeout: u32::from_be_bytes([t3, t2, t1, t0]),
                     length: 0,
@@ -129,9 +131,11 @@ impl Inet {
     /// datagram gives `{udp, S, Address, Port, Data}`, and then `once`
     /// becomes passive, and the last datagram of `{active, N}` makes the
     /// socket passive and gives `{udp_passive, S}`
-    /// (`packet_reply_binary_data`, inet_drv.c:4335-4355). A passive
-    /// socket reads no more. A read error gives `{udp_error, S, Reason}`
-    /// and ends the step; no datagram ends it too.
+    /// (`packet_reply_binary_data`, inet_drv.c:4335-4355). A socket that
+    /// becomes passive turns its read select off and stops the timer of a
+    /// receive that waits, which then waits until the close of the port
+    /// (inet_drv.c:15570-15573). A read error gives `{udp_error, S,
+    /// Reason}` and ends the step; no datagram ends it too.
     pub(in crate::runtime) fn receive_active_datagrams(&mut self) -> Vec<Event> {
         let mut events = Vec::new();
         for _ in 0..self.read_packets {
@@ -155,6 +159,10 @@ impl Inet {
                 _ => {}
             }
             if self.active == 0 {
+                self.read_off = true;
+                if let Some(receiver) = &mut self.stream.receiver {
+                    receiver.timer = None;
+                }
                 break;
             }
         }
