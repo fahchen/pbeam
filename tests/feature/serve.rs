@@ -62,9 +62,10 @@ type Response<Body> = (String, String, Body);
 /// take it again.
 static ONE_FILE_RUN: Mutex<()> = Mutex::new(());
 
-/// The variables that `pbeam erl` rejects when they are set and not empty,
-/// as the flags of `erlexec` that PBeam does not read. Each run removes
-/// them, so that a shell setting does not change the runs.
+/// The variables of `erlexec`: the flag variables, whose flags `pbeam erl`
+/// adds to the arguments as `erlexec` does, and `ERL_EPMD_PORT`, which it
+/// rejects. Each run removes them, so that a shell setting does not change
+/// the runs.
 const ERL_FLAG_VARIABLES: [&str; 5] = [
     "ERL_OTP29_FLAGS",
     "ERL_AFLAGS",
@@ -455,6 +456,10 @@ fn gives_the_command_line_arguments_of_the_executable_to_the_release() {
         .env("PATH", path)
         .env("TMPDIR", &temporary)
         .env("PORT", port.to_string())
+        // The re-exec of `pbeam erl` reads the flag variables as `erlexec`
+        // does, so the `-extra` word of `ERL_ZFLAGS` follows the arguments
+        // of the command line (`erlexec.c:2195-2201`, `2255-2260`).
+        .env("ERL_ZFLAGS", "-extra z")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -502,7 +507,7 @@ fn gives_the_command_line_arguments_of_the_executable_to_the_release() {
     });
     assert_eq!(
         body,
-        "[\"a\", \"erl\", \"--c\"]",
+        "[\"a\", \"erl\", \"--c\", \"z\"]",
         "stdout: {}\nstderr: {}",
         text(&stdout),
         text(&stderr)
