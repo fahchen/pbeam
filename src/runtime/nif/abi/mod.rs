@@ -202,7 +202,13 @@ impl Library {
 
     /// Run the load callback with `info` for the process `caller`, and
     /// return its veto, or 0 when the library has no load callback
-    /// (`erl_nif.c:4980-4987`). The callback runs in no thread-local
+    /// (`erl_nif.c:4980-4987`). After the veto 0 the library stays open
+    /// until the OS process exits: ERTS closes a loaded library only when
+    /// it purges its module (`erl_nif.c:2602-2613`,
+    /// `beam_bif_load.c:2254-2258`), and it purges no module when it
+    /// halts, so a thread of the library can run its code after the end
+    /// of the run. Another veto closes the library when the caller drops
+    /// it, as ERTS closes it (`erl_nif.c:5030-5032`). The callback runs in no thread-local
     /// context of [`process`], but the run of `caller` is the run that a
     /// thread of the library finds from then on, so `enif_alloc_env` and
     /// `enif_send` work in it, as ERTS finds its global tables from each
@@ -217,7 +223,7 @@ impl Library {
     pub(crate) fn load(&self, caller: Caller<'_>, info: &Term) -> i32 {
         process::enter_run(caller.atoms, caller.node);
         caller.node.load_nif_library();
-        self.load.map_or(0, |load| {
+        let veto = self.load.map_or(0, |load| {
             let mut env = Env::load(
                 caller.atoms,
                 caller.process,
@@ -235,7 +241,13 @@ impl Library {
             // unique for the call, `info` is the handle of the load info,
             // and `private` is a writable `void*`, as the C API gives them.
             unsafe { load(&raw mut env, &raw mut private, info) }
-        })
+        });
+        if veto == 0 {
+            // A loaded library is never closed: the handle keeps one
+            // count that no drop releases.
+            std::mem::forget(Arc::clone(&self.handle));
+        }
+        veto
     }
 }
 
@@ -249,8 +261,9 @@ impl Drop for Handle {
     fn drop(&mut self) {
         let handle = std::ptr::with_exposed_provenance_mut::<c_void>(self.0);
         // SAFETY: the handle is the result of one successful `dlopen`, and
-        // this drop is its only `dlclose`. No function of the library runs
-        // after the drop, because each `Function` lives in its `Library`.
+        // this drop is its only `dlclose`. The drop runs only for a library
+        // that did not load (`Library::load` keeps a loaded library open),
+        // so no function and no thread of the library runs after it.
         unsafe { libc::dlclose(handle) };
     }
 }
