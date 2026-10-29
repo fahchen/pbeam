@@ -1,6 +1,6 @@
 -module(port_probe).
 -export([exit_status/0, output/0, command/0, close/0, owner_exit/0, epipe/0, errors/0,
-         nul_name/0, spawn/0, options/0, directions/0, cd_status/0, sigchld_ignored/0, packet/0, packet_errors/0, eof/0, lines/0, monitor/0, fd/3, fd_steal/2, unsupported/1, terminal/0, high_fd/0, fd_closed/0, costs/1, measure/2, signals/0, names/0]).
+         nul_name/0, spawn/0, options/0, directions/0, cd_status/0, sigchld_ignored/0, packet/0, packet_errors/0, eof/0, lines/0, monitor/0, fd/3, fd_steal/2, unsupported/1, terminal/0, high_fd/0, fd_closed/0, costs/1, measure/2, signals/0, busy/0, names/0]).
 
 %% Each result replaces a port with the atom port, because the port numbers
 %% of ERTS and PBeam differ.
@@ -579,14 +579,12 @@ cd_status() ->
 %% Each call stops the PBeam run with a runtime error.
 unsupported(line) ->
     open_port({spawn_executable, sh()}, [binary, {line, 1 bsl 31}]);
-unsupported(busy_limits) ->
-    open_port({spawn_executable, sh()}, [binary, {busy_limits_port, {4096, 8192}}]);
 unsupported(empty_line) ->
     open_port({spawn_executable, sh()}, [binary, {line, 1 bsl 32}]);
+unsupported(tcp_options) ->
+    erlang:port_command(open_port({spawn_driver, "tcp_inet"}, [binary]), <<"x">>, [nosuspend]);
 unsupported(fd_list) ->
-    open_port({fd, 200, 200}, []);
-unsupported(force) ->
-    port_command(cat(), <<"x">>, [force]).
+    open_port({fd, 200, 200}, []).
 
 %% A monitor of a port: the DOWN message at port_close/1, noproc for a
 %% port that closed, the exit reason of the owner, and no DOWN message
@@ -614,6 +612,110 @@ monitor() ->
     true = port_close(Q),
     Demonitored = down(R3, Q),
     [Closed, Noproc, Owner, Demonitored, flush()].
+
+%% The queue of a spawn port and its busy state (sys_drivers.c:1058-1135,
+%% 1455-1493): a program that reads nothing takes 64 KiB in its pipe, the
+%% queue makes the port busy at the high limit, nosuspend gives false, and
+%% a busy port suspends the sender while other processes run.
+busy() ->
+    process_flag(trap_exit, true),
+    B = <<0:8192>>,
+    P = open_port({spawn, "sleep 5"}, [binary]),
+    Full = saturate(P, B),
+    %% The pipe size depends on the kernel, so the probe checks that the
+    %% queue reached the high limit and holds less than one more write.
+    Queue = queue_between(P, 8192, 8192 + 1024),
+    %% A sender on the busy port waits; the exit of the port resumes it,
+    %% and its command finds no port (io.c:3895).
+    Parent = self(),
+    Waiter = spawn(fun() -> Parent ! {waiter, error_of(fun() -> erlang:port_command(P, B) end)} end),
+    timer_sleep(100),
+    WaiterStatus = erlang:process_info(Waiter, status),
+    Force = error_of(fun() -> erlang:port_command(P, B, [force]) end),
+    BadOpt = error_of(fun() -> erlang:port_command(P, B, [foo]) end),
+    %% The data is checked after force and after the busy state.
+    Checks = [error_of(fun() -> erlang:port_command(P, foo, [force]) end),
+              erlang:port_command(P, foo, [nosuspend]), erlang:port_command(P, [1 | 2], [nosuspend])],
+    Low = open_port({spawn, "sleep 5"}, [binary, {busy_limits_port, {100, 200}}]),
+    LowFull = saturate(Low, B),
+    LowQueue = queue_between(Low, 200, 200 + 1024),
+    Off = open_port({spawn, "sleep 5"}, [binary, {busy_limits_port, disabled}]),
+    OffFull = fill(Off, B, 0, 100),
+    Swapped = is_port(open_port({spawn, "true"}, [{busy_limits_port, {300, 200}}, {busy_limits_msgq, {1 bsl 63, 1 bsl 63}}])),
+    Bad = [error_of(fun() -> open_port({spawn, "true"}, [{busy_limits_port, L}]) end)
+           || L <- [{0, 10}, {10, 1 bsl 64}, foo, {1, 2, 3}, {a, 2}]],
+    BadMsgq = error_of(fun() -> open_port({spawn, "true"}, [{busy_limits_msgq, {0, 1}}]) end),
+    %% The exit of a busy port resumes its suspended sender, whose
+    %% command then finds no port (io.c:3895).
+    [exit(Q, kill) || Q <- [P, Low, Off]],
+    WaiterDown = receive {waiter, WaiterResult} -> WaiterResult after 2000 -> missing end,
+    Slow = open_port({spawn_executable, sh()}, [binary, {args, ["-c", "sleep 1; cat >/dev/null"]}]),
+    Self = self(),
+    Ticker = spawn(fun() -> tick(Self, 0) end),
+    Sent = lists_all([port_command(Slow, B) || _ <- lists_seq(100)]),
+    Ticker ! stop,
+    Ticked = receive {ticks, N} -> N > 0 after 2000 -> missing end,
+    %% The program counts its input after the port wrote the queue and
+    %% terminated, which closes the pipe; a second program reads the count.
+    F = "/tmp/port_probe_busy_" ++ os:getpid(),
+    Closing = open_port({spawn_executable, sh()},
+                        [binary, {busy_limits_port, disabled}, {args, ["-c", "sleep 1; wc -c | tr -d ' ' > " ++ F]}]),
+    Queued = fill(Closing, B, 0, 70),
+    Closed = port_close(Closing),
+    Exit = receive {'EXIT', Closing, Reason} -> Reason after 3000 -> missing end,
+    Wait = "i=0; while [ ! -s " ++ F ++ " ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i+1)); done; cat " ++ F ++ "; rm -f " ++ F,
+    Flushed = read_count(open_port({spawn_executable, sh()}, [binary, {args, ["-c", Wait]}]), <<>>),
+    %% A queue whose reader exits fails the port with epipe.
+    Gone = open_port({spawn_executable, sh()}, [binary, out, {busy_limits_port, disabled}, {args, ["-c", "sleep 0.3"]}]),
+    GoneQueued = fill(Gone, B, 0, 70),
+    GoneExit = receive {'EXIT', Gone, GoneReason} -> GoneReason after 3000 -> missing end,
+    GoneInfo = erlang:port_info(Gone),
+    [Full, Queue, Force, BadOpt, LowFull, LowQueue, OffFull, Swapped, Bad, BadMsgq, Sent, Ticked,
+     Queued, Closed, Exit, Flushed, GoneQueued, GoneExit, GoneInfo, WaiterStatus, WaiterDown, Checks].
+
+%% Fill the queue until the port is busy and stays busy: a macOS pipe grows
+%% while it is written, and the growth can take the queue.
+saturate(P, B) ->
+    {_, false} = fill(P, B, 0, 2000),
+    timer_sleep(100),
+    case erlang:port_command(P, B, [nosuspend]) of
+        false -> false;
+        true -> saturate(P, B)
+    end.
+
+timer_sleep(T) ->
+    receive after T -> ok end.
+
+queue_between(P, Min, Max) ->
+    {queue_size, Size} = erlang:port_info(P, queue_size),
+    Size >= Min andalso Size < Max.
+
+fill(P, B, N, Max) ->
+    case erlang:port_command(P, B, [nosuspend]) of
+        true when N + 1 < Max -> fill(P, B, N + 1, Max);
+        Result -> {N + 1, Result}
+    end.
+
+error_of(F) ->
+    try F() of _ -> ok catch Class:Reason -> {Class, Reason} end.
+
+tick(Parent, N) ->
+    receive stop -> Parent ! {ticks, N} after 10 -> tick(Parent, N + 1) end.
+
+%% The output of the program of `P` until its exit, as one binary.
+read_count(P, Count) ->
+    receive
+        {P, {data, More}} -> read_count(P, <<Count/binary, More/binary>>);
+        {'EXIT', P, normal} -> Count
+    after 8000 -> missing
+    end.
+
+lists_seq(0) -> [];
+lists_seq(N) -> [N | lists_seq(N - 1)].
+
+lists_all([true | T]) -> lists_all(T);
+lists_all([]) -> true;
+lists_all(_) -> false.
 
 %% A registered port (register.c:175-253): its name in whereis/1,
 %% registered/0, port_info/1,2, each send form, and the port BIFs, and the
