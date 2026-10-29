@@ -200,16 +200,34 @@ fn write_entry(
     name: &str,
     caller: ProcessId,
 ) -> Result<Option<BifResult>, BeamError> {
-    if state.write & (CLOSING | CLOSED) != 0 {
-        return Ok(Some(closed()));
-    }
-    if state.connector.is_some() {
-        return invalid_state(scheduler).map(Some);
+    if let Some(result) = write_open(scheduler, state)? {
+        return Ok(Some(result));
     }
     if state.writer.as_ref().is_some_and(|(pid, _)| *pid != caller) {
         return Err(error(format!(
             "prim_socket:{name}: a second writer process is not supported"
         )));
+    }
+    Ok(None)
+}
+
+/// Check that a write can start, as `essio_send` and
+/// `essio_sendfile_cont` do (`unix_socket_syncio.c:3005-3013`,
+/// `3713-3720`): `{error, closed}`, and `{error, {invalid, state}}` during
+/// a connect.
+///
+/// # Errors
+///
+/// A new atom in a full atom table gives the error of `AtomTable::put`.
+fn write_open(
+    scheduler: &mut Scheduler,
+    state: &SocketState,
+) -> Result<Option<BifResult>, BeamError> {
+    if state.write & (CLOSING | CLOSED) != 0 {
+        return Ok(Some(closed()));
+    }
+    if state.connector.is_some() {
+        return invalid_state(scheduler).map(Some);
     }
     Ok(None)
 }

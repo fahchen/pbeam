@@ -537,11 +537,12 @@ socket_sendfile() ->
                   Other4 -> Other4
               end,
     [_ = socket:close(S) || S <- [C, A, C3, A3, C4, A4]],
+    Shut = [socket:sendfile(C, F), prim_socket:sendfile(Ref, 0, 0, make_ref())],
     ok = file:close(F),
     ok = file:close(G),
     ok = file:delete(Small),
     ok = file:delete(Big),
-    erlang:display({socket_sendfile, Plain, Args, Gone, lists:sort(maps:to_list(Counters)), Waits, Whole3, Timeout}),
+    erlang:display({socket_sendfile, Plain, Args, Gone, lists:sort(maps:to_list(Counters)), Waits, Whole3, Timeout, Shut}),
     init:stop().
 
 read_all(S, Got, Size) when Got < Size ->

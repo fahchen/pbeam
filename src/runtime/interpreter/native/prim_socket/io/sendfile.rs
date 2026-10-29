@@ -261,11 +261,8 @@ fn cont(
     request: (Reference, ProcessId, &Term),
 ) -> Result<BifResult, BeamError> {
     let (_, caller, reference) = request;
-    if state.write & (CLOSING | CLOSED) != 0 {
-        return Ok(closed());
-    }
-    if state.connector.is_some() {
-        return invalid_state(scheduler);
+    if let Some(result) = write_open(scheduler, &state)? {
+        return Ok(result);
     }
     let writer = state.writer.as_ref().map(|(pid, _)| *pid);
     if writer != Some(caller) || state.sendfile.is_none() {
