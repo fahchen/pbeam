@@ -581,6 +581,8 @@ unsupported(line) ->
     open_port({spawn_executable, sh()}, [binary, {line, 1 bsl 31}]);
 unsupported(empty_line) ->
     open_port({spawn_executable, sh()}, [binary, {line, 1 bsl 32}]);
+unsupported(tcp_options) ->
+    erlang:port_command(open_port({spawn_driver, "tcp_inet"}, [binary]), <<"x">>, [nosuspend]);
 unsupported(fd_list) ->
     open_port({fd, 200, 200}, []);
 unsupported(register) ->
@@ -622,12 +624,14 @@ busy() ->
     B = <<0:8192>>,
     P = open_port({spawn, "sleep 5"}, [binary]),
     Full = fill(P, B, 0, 2000),
-    Queue = erlang:port_info(P, queue_size),
+    %% The pipe size depends on the kernel, so the probe checks that the
+    %% queue reached the high limit and holds less than one more write.
+    Queue = queue_between(P, 8192, 8192 + 1024),
     Force = error_of(fun() -> erlang:port_command(P, B, [force]) end),
     BadOpt = error_of(fun() -> erlang:port_command(P, B, [foo]) end),
     Low = open_port({spawn, "sleep 5"}, [binary, {busy_limits_port, {100, 200}}]),
     LowFull = fill(Low, B, 0, 2000),
-    LowQueue = erlang:port_info(Low, queue_size),
+    LowQueue = queue_between(Low, 200, 200 + 1024),
     Off = open_port({spawn, "sleep 5"}, [binary, {busy_limits_port, disabled}]),
     OffFull = fill(Off, B, 0, 100),
     Swapped = is_port(open_port({spawn, "true"}, [{busy_limits_port, {300, 200}}, {busy_limits_msgq, {1 bsl 63, 1 bsl 63}}])),
@@ -635,18 +639,27 @@ busy() ->
            || L <- [{0, 10}, {10, 1 bsl 64}, foo, {1, 2, 3}]],
     BadMsgq = error_of(fun() -> open_port({spawn, "true"}, [{busy_limits_msgq, {0, 1}}]) end),
     [exit(Q, kill) || Q <- [P, Low, Off]],
-    Slow = open_port({spawn, "sleep 1; cat >/dev/null; :"}, [binary]),
+    Slow = open_port({spawn_executable, sh()}, [binary, {args, ["-c", "sleep 1; cat >/dev/null"]}]),
     Self = self(),
     Ticker = spawn(fun() -> tick(Self, 0) end),
     Sent = lists_all([port_command(Slow, B) || _ <- lists_seq(100)]),
     Ticker ! stop,
     Ticked = receive {ticks, N} -> N > 0 after 2000 -> missing end,
-    Closing = open_port({spawn, "sleep 1; cat >/dev/null; :"}, [binary]),
+    Closing = open_port({spawn_executable, sh()},
+                        [binary, {busy_limits_port, disabled}, {args, ["-c", "sleep 1; cat >/dev/null"]}]),
     Queued = fill(Closing, B, 0, 70),
     Closed = port_close(Closing),
     Exit = receive {'EXIT', Closing, Reason} -> Reason after 3000 -> missing end,
-    [Full, Queue, Force, BadOpt, LowFull, LowQueue, OffFull, Swapped, Bad, BadMsgq, Sent, Ticked,
-     Queued, Closed, Exit].
+    %% A queue whose reader exits fails the port with epipe.
+    Gone = open_port({spawn_executable, sh()}, [binary, out, {busy_limits_port, disabled}, {args, ["-c", "sleep 0.3"]}]),
+    GoneQueued = fill(Gone, B, 0, 70),
+    GoneExit = receive {'EXIT', Gone, GoneReason} -> GoneReason after 3000 -> missing end,
+    [element(2, Full), Queue, Force, BadOpt, element(2, LowFull), LowQueue, OffFull, Swapped, Bad, BadMsgq, Sent, Ticked,
+     Queued, Closed, Exit, GoneQueued, GoneExit].
+
+queue_between(P, Min, Max) ->
+    {queue_size, Size} = erlang:port_info(P, queue_size),
+    Size >= Min andalso Size < Max.
 
 fill(P, B, N, Max) ->
     case erlang:port_command(P, B, [nosuspend]) of

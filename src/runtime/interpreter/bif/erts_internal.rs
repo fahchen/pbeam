@@ -202,9 +202,6 @@ pub(super) fn is_process_alive(
 /// `4906`).
 const PORT_REDUCTIONS: i32 = 40;
 
-/// The tuple options of `open_port/2` that ERTS accepts and PBeam does not
-/// support (`erl_bif_port.c:849-976`).
-
 /// The options of `open_port/2` that PBeam supports, as the fields of the
 /// ERTS `SysDriverOpts` and the port flags that `open_port` sets
 /// (`erl_bif_port.c:812-834`).
@@ -1039,9 +1036,16 @@ pub(super) fn port_command(
         drop(slot);
         return Ok(signals_return(scheduler, port, Term::static_atom("badarg")));
     };
+    // A busy `tcp_inet` port queues each send as a waiter (see
+    // `Inet::send`), so `force` and `nosuspend` on it are not implemented.
+    if (force || nosuspend) && matches!(port_state.driver, Driver::Inet(_)) {
+        return Err(error(
+            "unsupported erlang:port_command/3 options of a tcp_inet port: see \"tcp_inet ports\" in docs/erts-differences.md",
+        ));
+    }
     // The spawn driver has no `ERL_DRV_FLAG_SOFT_BUSY`, so `force` gives
     // `notsup` (`erl_bif_port.c:195-198`).
-    if force && matches!(port_state.driver, Driver::Spawn(_)) {
+    if force {
         drop(slot);
         return Ok(Value(Term::static_atom("notsup")));
     }

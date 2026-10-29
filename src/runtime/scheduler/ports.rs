@@ -238,14 +238,16 @@ impl Scheduler {
     fn spawn_writable(&mut self, id: PortId) -> Result<(), BeamError> {
         let cell = self.node.port(id);
         let mut slot = cell.as_ref().map(port::lock);
-        let Some(Driver::Spawn(spawn)) = slot
+        // The port was found with its queue under the table lock, and only
+        // this scheduler writes the queue.
+        let mut flushed = Ok(Vec::new());
+        if let Some(Driver::Spawn(spawn)) = slot
             .as_mut()
             .and_then(|slot| slot.as_mut())
             .map(|port| &mut port.driver)
-        else {
-            return Ok(());
-        };
-        let flushed = spawn.flush();
+        {
+            flushed = spawn.flush();
+        }
         drop(slot);
         match flushed {
             Ok(resumed) => {

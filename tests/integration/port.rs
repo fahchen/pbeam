@@ -384,6 +384,19 @@ fn monitors_a_port_as_pinned_erts() {
 }
 
 #[test]
+fn queues_the_output_of_a_busy_port_as_pinned_erts() {
+    // The pipe takes what it holds and the queue keeps the rest; the port
+    // is busy between its limits, `nosuspend` gives `false`, `force` gives
+    // `notsup`, a busy port suspends the sender while another process runs,
+    // and a close writes the queue first (sys_drivers.c:1058-1135,
+    // 1455-1493; erl_bif_port.c:175-230, 824-825, 920-975).
+    assert_runs(
+        "busy()",
+        "[false,true,{error,notsup},{error,badarg},false,true,{100,true},true,[{error,badarg},{error,badarg},{error,badarg},{error,badarg}],{error,badarg},true,true,{70,true},true,normal,{70,true},epipe]",
+    );
+}
+
+#[test]
 fn opens_a_port_on_an_fd_that_is_not_open_as_pinned_erts() {
     // `fd_start` checks only `sys_max_files()` (sys_drivers.c:822-824): the
     // port opens, and its write fails with `ebadf` (sys_drivers.c:1180-1184).
@@ -404,6 +417,10 @@ fn stops_the_run_for_each_port_part_that_is_not_implemented() {
         (
             "empty_line",
             "unsupported open_port/2 option {line, L} whose low 32 bits are not positive",
+        ),
+        (
+            "tcp_options",
+            "unsupported erlang:port_command/3 options of a tcp_inet port",
         ),
         (
             "fd_list",

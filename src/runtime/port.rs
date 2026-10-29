@@ -227,6 +227,16 @@ impl Program {
         }
     }
 
+    /// Write `bytes` to the fd that the port writes and return the count:
+    /// an fd port writes all bytes with a blocking write, and a child takes
+    /// what its non-blocking input pipe holds (see [`Child::write_some`]).
+    fn write_some(&self, bytes: &[u8]) -> Result<usize, c_int> {
+        match self {
+            Program::Child(child) => child.write_some(bytes),
+            Program::Fds(fds) => fds.write(bytes).map(|()| bytes.len()),
+        }
+    }
+
     /// Read the fd of [`Program::output_fd`] with one `read` of at most
     /// 64 KiB, as `ready_input` does (`sys_drivers.c:1336-1347`).
     pub(super) fn read_output(&self) -> Result<Vec<u8>, c_int> {
@@ -354,12 +364,8 @@ impl Spawn {
     /// takes what its input pipe holds when the queue is empty, and the
     /// queue keeps the rest.
     pub(super) fn write(&mut self, bytes: &[u8]) -> Result<(), c_int> {
-        let child = match &self.program {
-            Program::Fds(fds) => return fds.write(bytes),
-            Program::Child(child) => child,
-        };
         let written = if self.queue.bytes.is_empty() {
-            child.write_some(bytes)?
+            self.program.write_some(bytes)?
         } else {
             0
         };
@@ -372,10 +378,9 @@ impl Spawn {
     /// processes to resume: each suspended process when the queue goes
     /// below the low limit.
     pub(super) fn flush(&mut self) -> Result<Vec<ProcessId>, c_int> {
-        let Program::Child(child) = &self.program else {
-            return Ok(Vec::new());
-        };
-        let written = child.write_some(self.queue.bytes.make_contiguous())?;
+        let written = self
+            .program
+            .write_some(self.queue.bytes.make_contiguous())?;
         self.queue.bytes.drain(..written);
         if self.queue.busy && self.queue.size() < self.queue.low {
             self.queue.busy = false;
