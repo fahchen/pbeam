@@ -1051,7 +1051,7 @@ impl Scheduler {
                 }
                 Signal::NifMonitor { monitor } => {
                     count += 4;
-                    crate::runtime::nif::abi::monitor_down(monitor, id);
+                    crate::runtime::nif::abi::monitor_down(monitor, id, self.node());
                 }
                 Signal::SocketMonitor { socket } => {
                     count += 4;
