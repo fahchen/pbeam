@@ -103,3 +103,15 @@ fn stops_the_run_for_a_message_that_no_env_has() {
         "{failure}"
     );
 }
+
+#[test]
+fn keeps_the_library_open_for_a_thread_of_the_library_after_the_run() {
+    // ERTS closes a loaded library only when it purges its module
+    // (erl_nif.c:2602-2613, beam_bif_load.c:2254-2258), and it purges no
+    // module when it halts. The thread of probe 12 returns into the code
+    // of the library 20 ms after the run ends.
+    let path = build("thread_after_run");
+    let result = execute("call", &path, vec![Term::Integer(12), Term::Integer(0)]).unwrap();
+    assert_eq!(result.term, Term::Atom(result.atom("ok").unwrap()));
+    std::thread::sleep(std::time::Duration::from_millis(100));
+}

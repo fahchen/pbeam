@@ -1,5 +1,6 @@
 -module(tcp_transfer).
--export([main/1, reset/1, busy_close/1, unsupported/2]).
+-export([main/1, reset/1, busy_close/1, busy_timeout/1, busy_drain/1, busy_end/1,
+         busy_kill/1, busy_reset/1, unsupported/2]).
 
 %% Receives and sends on an accepted socket in passive mode, as
 %% gen_tcp:recv/3 and gen_tcp:send/2 call prim_inet:recv/3 and
@@ -114,15 +115,104 @@ unsupported(Path, Case) ->
         length -> erlang:port_control(S, 42 + ?MAGIC, [0, 0, 0, 0, 255, 255, 255, 255]);
         header -> erlang:port_command(S, <<0, 1, 0>>);
         delay_send -> ok = prim_inet:setopts(S, [{delay_send, true}]), prim_inet:send(S, "x");
-        send_timeout -> ok = prim_inet:setopts(S, [{send_timeout, 1000}]), queue(S),
-                        prim_inet:send(S, "x");
-        busy -> queue(S),
-                Parent = self(),
-                spawn(fun() -> Parent ! sent, prim_inet:send(S, "x") end),
-                receive sent -> ok end,
-                prim_inet:send(S, "y");
         term -> term_to_binary(S, [local])
     end.
+
+%% The send timer of a port whose queue no longer drains ends the send that
+%% waits with {error, timeout}, and `send_timeout_close` closes the socket:
+%% without a message in passive mode, so the next send gives enotconn
+%% (inet_drv.c:12458-12534).
+busy_timeout(Path) ->
+    {S, Busy} = busy_send(Path),
+    Sent = receive {Busy, Result} -> Result after 3000 -> missing end,
+    [Sent, prim_inet:send(S, "x"), flush()].
+
+%% A send that arrives while the port is busy runs only when the port
+%% unbusies, and its queue check then counts the queue and its own bytes
+%% (inet_drv.c:13771-13792): the client reads the queue and the busy send,
+%% so the busy send gives ok at the low watermark (14350-14359). The
+%% waiting send of 8 MiB then gives ok on an empty queue (13795-13846), or
+%% makes the port busy again until its timer ends, after the bytes that
+%% the socket took before the read stopped.
+busy_drain(Path) ->
+    process_flag(trap_exit, true),
+    {_, S} = connection(Path),
+    queue(S),
+    ok = prim_inet:setopts(S, [{send_timeout, 1000}]),
+    [Busy, Waiter] = waiting_sends(S, [<<"tail">>, double(<<"0123456789abcdef">>, 19)]),
+    %% `send_oct` counts the bytes of a send when its command runs
+    %% (`inet_output_count`, inet_drv.c:13763), so not the waiting send yet.
+    {ok, [{send_oct, Counted}]} = prim_inet:getstat(S, [send_oct]),
+    step(Path, 2, ["read ", integer_to_list(16 bsl 19 + 4)]),
+    Sent = receive {Busy, Result} -> Result after 5000 -> missing end,
+    Waited = receive {Waiter, ok} -> ok; {Waiter, {error, timeout}} -> ok after 5000 -> missing end,
+    %% The exit `kill` ends the port without a flush of its queue, so the
+    %% halt does not wait for the queue.
+    exit(S, kill),
+    [Counted, Sent, Waited, flush()].
+
+%% The send timer of an active socket with `send_timeout_close` ends the
+%% port (inet_drv.c:12484-12505), so the send that waits behind the busy
+%% send gets `{error, einval}` from `erlang:port_command/3` (prim_inet.erl:625-628).
+busy_end(Path) ->
+    process_flag(trap_exit, true),
+    {_, S} = connection(Path),
+    queue(S),
+    ok = prim_inet:setopts(S, [{active, true}, {send_timeout, 500}, {send_timeout_close, true}]),
+    Sends = waiting_sends(S, [<<"tail">>, <<"more">>]),
+    Results = results(Sends),
+    Results ++ [flush()].
+
+%% The exit `kill` ends the port: the busy send gets the 'DOWN' of its
+%% port monitor, and the send that waits behind it gets `{error, einval}`
+%% (prim_inet.erl:619-628).
+busy_kill(Path) ->
+    process_flag(trap_exit, true),
+    {_, S} = connection(Path),
+    queue(S),
+    Sends = waiting_sends(S, [<<"tail">>, <<"more">>]),
+    exit(S, kill),
+    Results = results(Sends),
+    Results ++ [flush()].
+
+%% A failed write of a passive socket ends the busy send with
+%% `{error, closed}` and closes the socket (inet_drv.c:13613-13670), so the
+%% send that waits runs on a closed socket and gets `{error, enotconn}`
+%% (12681-12693).
+busy_reset(Path) ->
+    process_flag(trap_exit, true),
+    {_, S} = connection(Path),
+    queue(S),
+    Sends = waiting_sends(S, [<<"tail">>, <<"more">>]),
+    step(Path, 2, "reset"),
+    Results = results(Sends),
+    Next = prim_inet:send(S, "x"),
+    Results ++ [Next, flush()].
+
+%% Return the result of the send of each process of Sends, in order.
+results(Sends) -> [receive {P, Result} -> Result after 3000 -> missing end || P <- Sends].
+
+%% Start a send of each binary of Data from a new process, in order, and
+%% let each run until it waits for the queue.
+waiting_sends(S, Data) ->
+    Parent = self(),
+    [begin
+         P = spawn(fun() -> Parent ! {self(), prim_inet:send(S, D)} end),
+         receive after 50 -> ok end,
+         P
+     end || D <- Data].
+
+%% Fill the queue of the socket of a new connection and start a send from
+%% another process, which waits for the queue.
+busy_send(Path) ->
+    process_flag(trap_exit, true),
+    {_, S} = connection(Path),
+    queue(S),
+    ok = prim_inet:setopts(S, [{send_timeout, 500}, {send_timeout_close, true}]),
+    Parent = self(),
+    Busy = spawn(fun() -> Parent ! {self(), prim_inet:send(S, <<"tail">>)} end),
+    receive after 50 -> ok end,
+    {S, Busy}.
 
 queue(S) -> ok = prim_inet:send(S, double(<<"0123456789abcdef">>, 19)).
 

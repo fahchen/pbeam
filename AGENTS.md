@@ -87,14 +87,9 @@ Whenever direction or a solution changes, update the affected task bodies, accep
   - `mise run fixture-beam [--write] [fixtures/<dir>/<name>.erl]...`: compile the Erlang fixtures and compare them with the committed `.beam` files, except `CInf` and `Dbgi`.
   - `mise run otp-src <path> <start> <end>`: print numbered lines of an OTP source file at the pinned `erlang` tag, from the git repository in `$PBEAM_OTP_SRC` (default `~/.cache/pbeam/otp`).
   - `mise run issue <number> [section]...`: print the title, state, labels, milestone, the text before the first section, and each `#` or `##` section whose heading starts with a given name. With no name, print the headings. The output omits blank lines and other sections, so never use it as the body of `gh issue edit`.
-- Prefer `fd` and `rg`; use `ast-grep` for structural searches when appropriate.
-- Use the Serena MCP server for code navigation. `.serena/project.yml` configures the `rust` and `elixir` language servers, and each worktree finds it through `--project-from-cwd`.
-  - Prefer Serena (`find_symbol`, `get_symbols_overview`, `find_referencing_symbols`) for symbol discovery, definitions, references, and semantic navigation.
-  - Use `rg` and `fd` for plain text searches and for locating files.
-  - Do not read a whole file when symbol-level retrieval is enough. Read only the symbol bodies that the task needs.
-  - Use the smallest context that the task needs.
-  - Do not use Serena where one simple shell command is faster, such as listing files, counting matches, or reading a short file.
-  - Fall back to `rg`, `ast-grep`, and file reads when Serena cannot resolve a symbol or does not support the language.
+- Prefer `fd` and `rg` for plain text searches and file discovery; use `ast-grep` for structural searches when appropriate.
+- Do not read a whole file when a targeted search is enough. Read only the parts that the task needs.
+- Use the smallest context that the task needs.
 - Use fish for shell work and `gh` for GitHub operations. Prefer command help before external documentation. Use Context7 for library/API documentation and setup/code-generation guidance when available.
 - Follow the directory's JavaScript lockfile: `bun.lock` means bun; `pnpm-lock.yaml` means pnpm.
 - Delegate complex research, multi-step investigations, and library documentation lookups to subagents. Give editing agents explicit file ownership and preserve others' changes.
