@@ -210,7 +210,9 @@ fn builds_and_runs_the_executable_of_a_project_outside_the_repository() {
     // A Mix project in a temporary directory has `pbeam` as a path
     // dependency. `mix pbeam.build` runs from that dependency, so it finds
     // the PBeam source without the directory of the command line. The test
-    // gives the built binaries, so Cargo does not build them a second time.
+    // gives the built binaries, so Cargo does not build them a second
+    // time. The task runs `mix release` itself, so the test runs no
+    // separate release build.
     let directory = directory("outside");
     let project = directory.join("outside");
     fs::create_dir_all(project.join("lib")).unwrap();
@@ -232,13 +234,6 @@ fn builds_and_runs_the_executable_of_a_project_outside_the_repository() {
          IO.puts(\"outside runs on pbeam\")\n    System.halt(0)\n  end\nend\n",
     )
     .unwrap();
-    let mut mix_release = Command::new("mix");
-    mix_release
-        .args(["release", "--overwrite"])
-        .current_dir(&project)
-        .env("MIX_ENV", "prod");
-    let (status, mix_output) = run(&mut mix_release);
-    assert_eq!(status, Some(0), "{mix_output}");
     let mut build = Command::new("mix");
     build
         .args([
@@ -252,6 +247,8 @@ fn builds_and_runs_the_executable_of_a_project_outside_the_repository() {
         .env("MIX_ENV", "prod");
     let (status, stderr) = run(&mut build);
     assert_eq!(status, Some(0), "{stderr}");
+    // The task built the release of the project config before the bundle.
+    assert!(project.join("rel/releases/start_erl.data").is_file());
     // The default output is `<app>.bundle` next to the release directory.
     // The run starts in another directory. It removes the `erlexec` flag
     // variables that `pbeam erl` rejects, so that a shell setting does not
