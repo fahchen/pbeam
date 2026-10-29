@@ -4096,7 +4096,7 @@ impl Scheduler {
                                 lock(&self.node().resources.kind::<Files>()).monitor_down(file);
                             }
                             TargetMonitor::Nif(monitor) => {
-                                crate::runtime::nif::abi::monitor_down(monitor, id);
+                                crate::runtime::nif::abi::monitor_down(monitor, id, self.node());
                             }
                             TargetMonitor::Socket(socket) => {
                                 self.socket_owner_down(id, socket);

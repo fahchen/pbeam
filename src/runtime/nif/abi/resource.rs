@@ -265,12 +265,14 @@ pub(super) fn down_of(data: usize) -> Option<DownFn> {
 
 /// The monitors of `enif_monitor_process` that wait for the exit of their
 /// process: the object and the down callback of each monitor, by the
-/// number of its reference. ERTS keeps them in the monitor tree of the
+/// number of its reference and the address of its node. Each node counts
+/// its references from 0, so the address tells the runs of one OS process
+/// apart. ERTS keeps them in the monitor tree of the
 /// object (`erl_nif.c:3959-3966`). A monitor does not keep its object:
 /// ERTS runs the down callback only while a reference keeps the object
 /// (`erl_nif.c:3091-3115`), and the destructor removes the monitors of
 /// the object (`erl_nif.c:2974-3030`).
-static MONITORS: Mutex<BTreeMap<u64, Monitored>> = Mutex::new(BTreeMap::new());
+static MONITORS: Mutex<BTreeMap<(u64, usize), Monitored>> = Mutex::new(BTreeMap::new());
 
 /// A monitor of [`MONITORS`]: the object, the address of its data, and the
 /// down callback of its type.
@@ -281,18 +283,19 @@ struct Monitored {
 }
 
 /// Lock the monitor table, also after a panic of another thread.
-fn monitors() -> std::sync::MutexGuard<'static, BTreeMap<u64, Monitored>> {
+fn monitors() -> std::sync::MutexGuard<'static, BTreeMap<(u64, usize), Monitored>> {
     MONITORS.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Add the monitor `reference` of the object at `data` with the down
-/// callback `down`.
-pub(super) fn add_monitor(data: usize, down: DownFn, reference: Reference) {
+/// Add the monitor `reference` of the node `node` to the object at `data`
+/// with the down callback `down`.
+pub(super) fn add_monitor(data: usize, down: DownFn, reference: Reference, node: &Node) {
     let object = lock()
         .get(&data)
         .map(|entry| entry.object.clone())
         .unwrap_or_default();
-    monitors().insert(reference.0, Monitored { object, data, down });
+    let key = (reference.0, std::ptr::from_ref(node).addr());
+    monitors().insert(key, Monitored { object, data, down });
 }
 
 /// Remove the monitor `monitor` of the object at `data` and return true,
@@ -301,20 +304,26 @@ pub(super) fn add_monitor(data: usize, down: DownFn, reference: Reference) {
 pub(super) fn demonitor(data: usize, monitor: Reference) -> bool {
     // The entry compares the address and does not take the object, so no
     // drop of the object runs its destructor while the table is locked.
+    // An object in its destructor has no monitors (`erl_nif.c:2974-3030`),
+    // and no node has the address 0, so its key finds no monitor.
+    let node = lock()
+        .get(&data)
+        .and_then(|entry| entry.object.upgrade())
+        .map_or(0, |object| object.kind.loading.node.as_ptr().addr());
+    let key = (monitor.0, node);
     let mut monitors = monitors();
-    let owned = monitors
-        .get(&monitor.0)
-        .is_some_and(|entry| entry.data == data);
-    owned && monitors.remove(&monitor.0).is_some()
+    let owned = monitors.get(&key).is_some_and(|entry| entry.data == data);
+    owned && monitors.remove(&key).is_some()
 }
 
 /// Run the down callback of the monitor `monitor` for the exit of the
 /// process `pid`, as `erts_fire_nif_monitor` does
 /// (`erl_nif.c:3059-3119`): once, only while the monitor is in the table,
 /// and only while a reference keeps the object. The env of the callback
-/// has no process (`pre_nif_noproc`, `erl_nif.c:3110`).
-pub(crate) fn monitor_down(monitor: Reference, pid: ProcessId) {
-    let entry = monitors().remove(&monitor.0);
+/// has no process (`pre_nif_noproc`, `erl_nif.c:3110`). `node` is the
+/// node of the process.
+pub(crate) fn monitor_down(monitor: Reference, pid: ProcessId, node: &Node) {
+    let entry = monitors().remove(&(monitor.0, std::ptr::from_ref(node).addr()));
     let Some((object, down)) = entry.and_then(|entry| Some((entry.object.upgrade()?, entry.down)))
     else {
         return;
