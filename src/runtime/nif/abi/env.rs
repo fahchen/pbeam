@@ -394,15 +394,22 @@ impl Env {
             return self.raise(Term::static_atom("badarg"));
         }
         let name: String = name.iter().copied().map(char::from).collect();
-        match self.atoms.put(&name) {
-            Ok(atom) => self.make(Term::Atom(atom)),
-            // ERTS stops the node when the atom table is full
-            // (`index.c:86-91`); PBeam gives a runtime error.
-            Err(failure) => {
-                self.unsupported.get_or_insert(failure.to_string());
-                NON_VALUE
-            }
+        match self.put_atom(&name) {
+            Some(atom) => self.make(Term::Atom(atom)),
+            None => NON_VALUE,
         }
+    }
+
+    /// Return the atom `name`, or record the runtime error of a full atom
+    /// table and return `None`. ERTS stops the node when the atom table is
+    /// full (`index.c:86-91`); PBeam gives a runtime error.
+    fn put_atom(&mut self, name: &str) -> Option<Atom> {
+        self.atoms
+            .put(name)
+            .map_err(|failure| {
+                self.unsupported.get_or_insert(failure.to_string());
+            })
+            .ok()
     }
 
     /// Raise `error:Reason` when the NIF returns and return
@@ -1473,14 +1480,13 @@ pub unsafe extern "C" fn enif_make_new_atom_len(
     if name.chars().count() > MAX_ATOM_CHARACTERS {
         return 0;
     }
-    let Ok(made) = env.atoms.put(&name) else {
-        return 0;
-    };
-    let handle = env.make(Term::Atom(made));
-    // SAFETY: the C API requires that `atom` points to a writable
-    // `ERL_NIF_TERM`.
-    unsafe { atom.write(handle) };
-    1
+    env.put_atom(&name).map_or(0, |made| {
+        let handle = env.make(Term::Atom(made));
+        // SAFETY: the C API requires that `atom` points to a writable
+        // `ERL_NIF_TERM`.
+        unsafe { atom.write(handle) };
+        1
+    })
 }
 
 /// `ERL_NIF_TERM enif_make_tuple_from_array(ErlNifEnv*, const
