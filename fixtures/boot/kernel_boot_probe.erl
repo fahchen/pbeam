@@ -4,7 +4,7 @@
 -behaviour(supervisor).
 -export([main/0, main/1, lookup/0, gethost/0, supports/0, socket/0, sockopt/0, socket_select/0, socket_io/0,
          socket_dgram/0,         socket_acceptors/0, socket_connect_invalid/0, socket_recvfrom_flags/0, socket_recvfrom_local_flags/0,
-         socket_recvfrom_errqueue/0, socket_sendv/0, socket_backend_tcp/0, socket_backend_udp/0, sockopt_otp/0, sockopt_host/0, sockopt_raw/0, sockopt_pkt/0, start/2, stop/1, init/1]).
+         socket_recvfrom_errqueue/0, socket_sendv/0, socket_backend_tcp/0, socket_backend_udp/0, sockopt_otp/0, sockopt_select_read/0, sockopt_host/0, sockopt_raw/0, sockopt_pkt/0, start/2, stop/1, init/1]).
 
 %% `erl -noshell -boot start_clean -pa fixtures/boot -s kernel_boot_probe
 %% main -kernel logger_level warning` runs main/0 in the boot process of init after the boot script
@@ -946,6 +946,55 @@ sockopt_otp() ->
                                                         {rcvbuf, 1}, {rcvctrlbuf, 1}, {sndctrlbuf, 1},
                                                         {controlling_process, Self}]],
     erlang:display(unmap({sockopt_otp, Flags, Sizes, Linger, Priority, Raise, Inherit, Recv, Owner, Down, Closed})),
+    init:stop().
+
+%% `-s kernel_boot_probe sockopt_select_read` runs {otp, select_read} true
+%% and {otp, rcvbuf} {N, Size}: the values, the inheritance of an accepted
+%% socket, {more, Bin} until N buffers came, {select_read, Bin} of
+%% nif_recv/4 and nif_recvfrom/4 with a reference, and the select message.
+sockopt_select_read() ->
+    {ok, L} = socket:open(inet, stream, tcp),
+    Values = [socket:setopt(L, {otp, select_read}, true), socket:getopt(L, {otp, select_read}),
+              socket:setopt(L, {otp, rcvbuf}, {1 bsl 31, 8}), socket:getopt(L, {otp, rcvbuf}),
+              socket:setopt(L, {otp, rcvbuf}, {0, 8}), socket:setopt(L, {otp, rcvbuf}, {1 bsl 32, 8}),
+              socket:setopt(L, {otp, rcvbuf}, {2, foo}), socket:setopt(L, {otp, rcvbuf}, {2, 4}),
+              socket:getopt(L, {otp, rcvbuf})],
+    ok = socket:bind(L, #{family => inet, addr => loopback, port => 0}),
+    ok = socket:listen(L),
+    {ok, #{port := Port}} = socket:sockname(L),
+    {ok, C} = socket:open(inet, stream, tcp),
+    ok = socket:connect(C, #{family => inet, addr => loopback, port => Port}),
+    {ok, A} = socket:accept(L, 1000),
+    Inherit = [socket:getopt(A, {otp, select_read}), socket:getopt(A, {otp, rcvbuf})],
+    ok = socket:send(C, <<"0123456789abcdef">>),
+    timer:sleep(100),
+    More = [prim_socket:recv(element(2, A), 0, [], zero), prim_socket:recv(element(2, A), 0, [], zero),
+            socket:recv(A, 0, 0)],
+    ok = socket:setopt(A, {otp, select_read}, true),
+    ok = socket:setopt(A, {otp, rcvbuf}, 64),
+    ok = socket:send(C, <<"xyz">>),
+    timer:sleep(100),
+    Ref = make_ref(),
+    Select = prim_socket:recv(element(2, A), 0, [], Ref),
+    ok = socket:send(C, <<"w">>),
+    Message = receive {'$socket', A, select, Ref} -> select after 1000 -> missing end,
+    Zero = prim_socket:recv(element(2, A), 0, [], zero),
+    {ok, U1} = socket:open(inet, dgram, udp),
+    {ok, U2} = socket:open(inet, dgram, udp),
+    ok = socket:bind(U2, #{family => inet, addr => loopback, port => 0}),
+    {ok, Addr} = socket:sockname(U2),
+    ok = socket:setopt(U2, {otp, select_read}, true),
+    ok = socket:sendto(U1, <<"dgram">>, Addr),
+    timer:sleep(100),
+    Ref2 = make_ref(),
+    From = case prim_socket:recvfrom(element(2, U2), 0, [], Ref2) of
+               {select_read, {#{family := inet}, Bin}} -> {select_read, Bin};
+               Other -> Other
+           end,
+    ok = socket:sendto(U1, <<"again">>, Addr),
+    Message2 = receive {'$socket', U2, select, Ref2} -> select after 1000 -> missing end,
+    [ok = socket:close(S) || S <- [A, C, L, U1, U2]],
+    erlang:display({sockopt_select_read, Values, Inherit, More, Select, Message, Zero, From, Message2}),
     init:stop().
 
 %% unmap/1 replaces each map with its sorted list of pairs.

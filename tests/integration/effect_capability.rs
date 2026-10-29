@@ -1376,14 +1376,9 @@ fn stops_the_run_for_a_socket_bind_to_a_native_family() {
 
 #[test]
 fn stops_the_run_for_a_socket_option_form_without_a_handler() {
-    // `{otp, debug}` and `{otp, select_read}` with `true`, and
-    // `{otp, rcvbuf}` with a buffer count, stop the run (row "NIF stubs" of
+    // `{otp, debug}` with `true` stops the run (row "NIF stubs" of
     // docs/erts-differences.md).
-    let expected = [
-        "unsupported prim_socket option value {otp, 1001} true",
-        "unsupported prim_socket option value {otp, 1011} true",
-        "unsupported prim_socket option value {otp, rcvbuf} {N, Size}",
-    ];
+    let expected = ["unsupported prim_socket option value {otp, debug} true"];
     for (case, expected) in (1..).zip(expected) {
         let error = program()
             .execute("effect_probe", &format!("socket_option_{case}"), &[])
