@@ -7,7 +7,7 @@
 pub(super) mod inet;
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     ffi::c_int,
     sync::{Arc, Mutex, MutexGuard},
 };
@@ -141,6 +141,73 @@ pub(super) struct Spawn {
     pub(super) program: Program,
     /// The state of the output pipe of the child.
     pub(super) input: Input,
+    /// The output that the input pipe of the child did not take.
+    pub(super) queue: OutputQueue,
+}
+
+/// The driver queue of a spawn port and its busy state (`driver_sizeq` and
+/// `dd->busy`, `sys_drivers.c:1087-1127`, `1455-1493`): the bytes that the
+/// input pipe of the child did not take, in order. The port is busy from
+/// the write that makes the queue reach the high limit until a write from
+/// the queue leaves it below the low limit.
+#[derive(Debug)]
+pub(super) struct OutputQueue {
+    /// The queued bytes.
+    bytes: VecDeque<u8>,
+    /// True while the port is busy (`set_busy_port`, `io.c:5203`).
+    busy: bool,
+    /// The low limit of `busy_limits_port`.
+    low: u64,
+    /// The high limit of `busy_limits_port`.
+    high: u64,
+    /// The processes that `erlang:port_command/2,3` suspended on the busy
+    /// port, in order (`erts_save_suspend_process_on_port`, `io.c:519`).
+    waiters: Vec<ProcessId>,
+}
+
+impl OutputQueue {
+    /// Return an empty queue with the busy limits `low` and `high`.
+    pub(super) fn new(low: u64, high: u64) -> Self {
+        Self {
+            bytes: VecDeque::new(),
+            busy: false,
+            low,
+            high,
+            waiters: Vec::new(),
+        }
+    }
+
+    /// Return the number of queued bytes, as `port_info/2` gives
+    /// `queue_size` (`erl_bif_info.c:3855-3862`).
+    pub(super) fn size(&self) -> u64 {
+        u64::try_from(self.bytes.len()).expect("a usize fits in u64")
+    }
+
+    /// Return true while the port is busy.
+    pub(super) fn busy(&self) -> bool {
+        self.busy
+    }
+
+    /// End the busy state and return the processes that waited for the
+    /// port.
+    pub(super) fn unbusy(&mut self) -> Vec<ProcessId> {
+        self.busy = false;
+        std::mem::take(&mut self.waiters)
+    }
+
+    /// Add the process `id` to the processes that wait for the port.
+    pub(super) fn suspend(&mut self, id: ProcessId) {
+        self.waiters.push(id);
+    }
+
+    /// Queue `bytes` and make the port busy when the queue reaches the
+    /// high limit (`sys_drivers.c:1095-1098`, `1116-1119`).
+    fn push(&mut self, bytes: &[u8]) {
+        self.bytes.extend(bytes);
+        if !self.busy && self.size() >= self.high {
+            self.busy = true;
+        }
+    }
 }
 
 /// What a port of the spawn driver or of the fd driver reads and writes.
@@ -171,20 +238,22 @@ impl Program {
         }
     }
 
+    /// Write `bytes` to the fd that the port writes and return the count:
+    /// an fd port writes all bytes with a blocking write, and a child takes
+    /// what its non-blocking input pipe holds (see [`Child::write_some`]).
+    fn write_some(&self, bytes: &[u8]) -> Result<usize, c_int> {
+        match self {
+            Program::Child(child) => child.write_some(bytes),
+            Program::Fds(fds) => fds.write(bytes).map(|()| bytes.len()),
+        }
+    }
+
     /// Read the fd of [`Program::output_fd`] with one `read` of at most
     /// 64 KiB, as `ready_input` does (`sys_drivers.c:1336-1347`).
     pub(super) fn read_output(&self) -> Result<Vec<u8>, c_int> {
         match self {
             Program::Child(child) => child.read_output(),
             Program::Fds(fds) => fds.read(),
-        }
-    }
-
-    /// Write all bytes of `bytes` to the fd that the port writes.
-    pub(super) fn write_input(&self, bytes: &[u8]) -> Result<(), c_int> {
-        match self {
-            Program::Child(child) => child.write_input(bytes),
-            Program::Fds(fds) => fds.write(bytes),
         }
     }
 }
@@ -303,6 +372,44 @@ impl Packets {
 }
 
 impl Spawn {
+    /// Write `bytes` to the program, as `outputv` does
+    /// (`sys_drivers.c:1058-1135`). An fd port writes all bytes. A child
+    /// takes what its input pipe holds when the queue is empty, and the
+    /// queue keeps the rest.
+    pub(super) fn write(&mut self, bytes: &[u8]) -> Result<(), c_int> {
+        let written = if self.queue.bytes.is_empty() {
+            self.program.write_some(bytes)?
+        } else {
+            0
+        };
+        self.queue.push(&bytes[written..]);
+        Ok(())
+    }
+
+    /// Write the queue to the input pipe that the poll found ready, as
+    /// `ready_output` does (`sys_drivers.c:1455-1493`), and return the
+    /// processes to resume: each suspended process when the queue goes
+    /// below the low limit.
+    pub(super) fn flush(&mut self) -> Result<Vec<ProcessId>, c_int> {
+        let written = self
+            .program
+            .write_some(self.queue.bytes.make_contiguous())?;
+        self.queue.bytes.drain(..written);
+        if self.queue.busy && self.queue.size() < self.queue.low {
+            return Ok(self.queue.unbusy());
+        }
+        Ok(Vec::new())
+    }
+
+    /// Return the input pipe while the queue holds bytes, which the poll
+    /// waits on for write (`driver_select`, `sys_drivers.c:1120`, `1459`).
+    pub(super) fn queued_fd(&self) -> Option<c_int> {
+        match &self.program {
+            Program::Child(child) if !self.queue.bytes.is_empty() => child.input_fd(),
+            _ => None,
+        }
+    }
+
     /// Return the data term of a message with the bytes `bytes`: a binary
     /// with `binary`, else a list of bytes, in `{eol, Data}` or
     /// `{noeol, Data}` in line mode (`io.c:3399-3427`).
@@ -522,7 +629,7 @@ impl Port {
     fn write_fd(&self) -> Option<c_int> {
         match &self.driver {
             Driver::Inet(inet) => inet.send_fd(),
-            Driver::Spawn(_) => None,
+            Driver::Spawn(spawn) => spawn.queued_fd(),
         }
     }
 
@@ -724,6 +831,15 @@ pub(super) fn inet_port(
 ) -> Option<PortId> {
     served(handles).find_map(|(id, slot)| match &slot.as_ref()?.driver {
         Driver::Inet(inet) if select(inet) == Some(fd) => Some(id),
+        _ => None,
+    })
+}
+
+/// Return the spawn port of `handles` whose queue waits for its input pipe
+/// `fd`, or `None`.
+pub(super) fn spawn_port(handles: &[(PortId, PortCell)], fd: c_int) -> Option<PortId> {
+    served(handles).find_map(|(id, slot)| match &slot.as_ref()?.driver {
+        Driver::Spawn(spawn) if spawn.queued_fd() == Some(fd) => Some(id),
         _ => None,
     })
 }

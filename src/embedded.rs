@@ -54,7 +54,9 @@ enum Trailer<'a> {
 /// assert!(run([]).is_none());
 /// ```
 pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Option<ExitCode> {
-    let executable = env::current_exe().ok()?;
+    // The canonical path is absolute also when the run starts through `PATH`
+    // or a relative path, and the release reads it as `PBEAM_EXECUTABLE`.
+    let executable = env::current_exe().and_then(fs::canonicalize).ok()?;
     let bytes = fs::read(&executable).ok()?;
     run_bundle(
         &executable,
@@ -281,7 +283,8 @@ fn release_boot(directory: &Path) -> Option<(String, String)> {
 /// the value of the variable. So
 /// `ELIXIR_ERL_OPTIONS="+S 4"` starts 4 schedulers. The
 /// run gets `RELEASE_ROOT` and `RELEASE_SYS_CONFIG`, which the release
-/// boot reads. The preloaded modules come from `lib/erts-<Vsn>/ebin`,
+/// boot reads, and `PBEAM_EXECUTABLE`, the path of the executable, so the
+/// release can start a copy of itself. The preloaded modules come from `lib/erts-<Vsn>/ebin`,
 /// where the bundle tool writes the start set. Return the error of a
 /// command that the host does not start.
 fn boot_release(
@@ -333,6 +336,7 @@ fn boot_release(
     }
     command.env("RELEASE_ROOT", directory);
     command.env("RELEASE_SYS_CONFIG", release.join("sys"));
+    command.env("PBEAM_EXECUTABLE", executable);
     // The script takes the file name of `$0`, which names a symbolic link
     // and not its target.
     let program = env::args_os()

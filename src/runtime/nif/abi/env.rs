@@ -39,6 +39,7 @@ use crate::Term;
 use crate::error::error;
 use crate::runtime::NativeResult;
 use crate::runtime::interpreter::bif::iodata_bytes;
+use crate::runtime::scheduler::node::Node;
 use crate::term::Map;
 use crate::term::{MAX_ATOM_CHARACTERS, ProcessId};
 use crate::{Atom, AtomTable};
@@ -243,7 +244,7 @@ pub(crate) struct Env {
     taken: Vec<usize>,
     /// The library of a load callback, or `None` in another env. Only the
     /// env of a load callback opens a resource type (`erl_nif.c:2708`).
-    library: Option<Arc<Handle>>,
+    library: Option<resource::Loading>,
 }
 
 impl Drop for Env {
@@ -287,15 +288,20 @@ impl Env {
     }
 
     /// Return the env of the load callback of the library `library` in the
-    /// process `process`, with the load info `info` in the slot 1.
+    /// process `process` of the node `node`, with the load info `info` in
+    /// the slot 1.
     pub(super) fn load(
         atoms: &Arc<AtomTable>,
         process: ProcessId,
         info: &Term,
         library: &Arc<Handle>,
+        node: &Arc<Node>,
     ) -> Self {
         let mut env = Self::new(atoms, Some(process), std::slice::from_ref(info));
-        env.library = Some(Arc::clone(library));
+        env.library = Some(resource::Loading {
+            _library: Arc::clone(library),
+            node: Arc::downgrade(node),
+        });
         env
     }
 
@@ -1246,7 +1252,7 @@ pub(super) unsafe extern "C" fn enif_open_resource_type(
     let env = unsafe { env(env_pointer) };
     let (kind, op) = match &env.library {
         Some(library) if flags & resource::CREATE != 0 => {
-            let kind = ResourceType::new(dtor, Arc::clone(&env.atoms), Arc::clone(library));
+            let kind = ResourceType::new(dtor, Arc::clone(&env.atoms), library.clone());
             (Arc::into_raw(Arc::new(kind)), resource::CREATE)
         }
         _ => (std::ptr::null(), flags),
@@ -1639,7 +1645,7 @@ pub(super) unsafe extern "C" fn enif_init_resource_type(
             Arc::into_raw(Arc::new(ResourceType::with_init(
                 init,
                 Arc::clone(&env.atoms),
-                Arc::clone(library),
+                library.clone(),
             ))),
             resource::CREATE,
         ),

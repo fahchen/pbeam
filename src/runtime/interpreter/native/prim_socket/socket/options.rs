@@ -655,7 +655,7 @@ fn named_value(table: &[(i32, &str)], name: Option<&str>) -> Option<i32> {
 /// Return the `int` of `decode_ip_tos` (`prim_socket_nif.c:16087-16219`):
 /// an integer, a TOS atom shifted by 1, a DSCP atom shifted by 2, or the
 /// map of `decode_iptos_tos_value`.
-fn decode_tos(scheduler: &Scheduler, value: &Term) -> Option<i32> {
+pub(super) fn decode_tos(scheduler: &Scheduler, value: &Term) -> Option<i32> {
     if matches!(value, Term::Integer(_) | Term::BigInt(_) | Term::Float(_)) {
         return int(value);
     }
@@ -686,7 +686,7 @@ fn decode_tos_map(scheduler: &Scheduler, value: &Term) -> Option<i32> {
 /// `#{native => Value, tos => #{precedence => Prec, tos => Tos}, dscp =>
 /// Dscp}`, with an atom for each known value and an integer for each other
 /// value.
-fn tos_term(scheduler: &mut Scheduler, value: i32) -> Result<Term, BeamError> {
+pub(super) fn tos_term(scheduler: &mut Scheduler, value: i32) -> Result<Term, BeamError> {
     let mut name = |table: &[(i32, &str)], native: i32| -> Result<Term, BeamError> {
         match table.iter().find(|(entry, _)| *entry == native) {
             Some((_, name)) => atom(scheduler, name),
@@ -1414,13 +1414,12 @@ fn setopt_otp(
             let Some(flag) = decode_bool(scheduler, value) else {
                 return invalid_value(scheduler);
             };
-            if opt == OTP_IOW {
-                socket.options.iow = flag;
-            } else if flag {
-                // `dbg` turns on the debug output of `SSDBG`, and
-                // `selectRead` makes a read select after each receive
-                // (`unix_socket_syncio.c:3967-3970`).
-                return Err(unsupported(&format!("option value {{otp, {opt}}} true")));
+            match opt {
+                OTP_IOW => socket.options.iow = flag,
+                OTP_SELECT_READ => socket.select_read = flag,
+                // `dbg` turns on the debug output of `SSDBG`.
+                _ if flag => return Err(unsupported("option value {otp, debug} true")),
+                _ => {}
             }
             ok
         }
@@ -1443,19 +1442,23 @@ fn setopt_otp(
         }
         OTP_RCVBUF => {
             let default = OtpOptions::default().recv_buffer;
-            let Some(size) = decode_bufsz(scheduler, value, default) else {
-                // `{N, Size}` sets the buffer count `rNum`
-                // (`prim_socket_nif.c:8198-8212`), which PBeam does not have.
-                let count = value
+            // A size sets the buffer count `rNum` to 0, and `{N, Size}` with
+            // an `unsigned int` N above 0 sets it to N
+            // (`prim_socket_nif.c:8193-8212`, `8220-8222`).
+            let parsed = match decode_bufsz(scheduler, value, default) {
+                Some(size) => Some((0, size)),
+                None => value
                     .tuple_elements()
                     .filter(|elements| elements.len() == 2)
-                    .filter(|elements| uint(&elements[0]).is_some_and(|count| count != 0))
-                    .filter(|elements| decode_bufsz(scheduler, &elements[1], default).is_some());
-                return match count {
-                    Some(_) => Err(unsupported("option value {otp, rcvbuf} {N, Size}")),
-                    None => invalid_value(scheduler),
-                };
+                    .and_then(|elements| {
+                        let count = uint(&elements[0]).filter(|count| *count != 0)?;
+                        Some((count, decode_bufsz(scheduler, &elements[1], default)?))
+                    }),
             };
+            let Some((count, size)) = parsed else {
+                return invalid_value(scheduler);
+            };
+            socket.options.recv_count = count;
             // The `ssize_t` check of `esock_setopt_otp_rcvbuf` converts the
             // size and back, so it refuses no size
             // (`prim_socket_nif.c:8215-8218`).
@@ -1525,10 +1528,17 @@ fn getopt_otp(
     let options = socket.options;
     let value = match opt {
         OTP_USE_REGISTRY => Term::from(socket.registered),
-        // PBeam sets neither `dbg` nor `selectRead` (see `setopt_otp`).
-        OTP_DEBUG | OTP_SELECT_READ => Term::static_atom("false"),
+        // PBeam does not set `dbg` (see `setopt_otp`).
+        OTP_DEBUG => Term::static_atom("false"),
+        OTP_SELECT_READ => Term::from(socket.select_read),
         OTP_IOW => Term::from(options.iow),
         OTP_CTRL_PROC => Term::Pid(socket.owner.expect("an open socket has an owner")),
+        // `{N, Size}` while `rNum` is set, with `MKI` of the `unsigned int`
+        // N, which wraps to an `int` (`prim_socket_nif.c:11838-11844`).
+        OTP_RCVBUF if options.recv_count != 0 => Term::tuple(vec![
+            Term::Integer((options.recv_count.cast_signed()).into()),
+            size_term(options.recv_buffer),
+        ]),
         OTP_RCVBUF => size_term(options.recv_buffer),
         OTP_RCVCTRLBUF => size_term(options.recv_ctrl),
         OTP_SNDCTRLBUF => size_term(options.send_ctrl),

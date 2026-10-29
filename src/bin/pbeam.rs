@@ -4,7 +4,7 @@
 use std::{
     ffi::{OsStr, OsString},
     fs,
-    os::unix::ffi::OsStrExt,
+    os::unix::ffi::{OsStrExt, OsStringExt},
     path::PathBuf,
     process::ExitCode,
 };
@@ -167,20 +167,15 @@ const ERLEXEC_OPTIONS: [&str; 27] = [
     "-version",
 ];
 
-/// The environment variables of the flags that `erlexec` adds before and
-/// after the arguments of the command line, and whose `-extra` arguments it
-/// moves to the end (`erts/etc/common/erlexec.c:2177-2260`). `ERL_OTP29_FLAGS`
-/// is the variable of the OTP release 29 (`"ERL_OTP" OTP_SYSTEM_VERSION
-/// "_FLAGS"`). For `ERL_EPMD_PORT`, `erlexec` gives `-epmd_port Port` to the
-/// emulator (`erlexec.c:633`, `1754-1760`), which only the distribution
-/// reads.
-const ERLEXEC_VARIABLES: [&str; 5] = [
-    "ERL_OTP29_FLAGS",
-    "ERL_AFLAGS",
-    "ERL_FLAGS",
-    "ERL_ZFLAGS",
-    "ERL_EPMD_PORT",
-];
+/// The environment variables of the flags that `erlexec` adds before the
+/// arguments of the command line, in this order (`erlexec.c:2177-2185`).
+/// `ERL_OTP29_FLAGS` is the variable of the OTP release 29 (`"ERL_OTP"
+/// OTP_SYSTEM_VERSION "_FLAGS"`).
+const BEFORE_FLAG_VARIABLES: [&str; 2] = ["ERL_OTP29_FLAGS", "ERL_AFLAGS"];
+
+/// The environment variables of the flags that `erlexec` adds after the
+/// arguments of the command line, in this order (`erlexec.c:2195-2201`).
+const AFTER_FLAG_VARIABLES: [&str; 2] = ["ERL_FLAGS", "ERL_ZFLAGS"];
 
 /// Run the command line and exit with one of these statuses:
 ///
@@ -377,7 +372,8 @@ fn run_end(result: Result<HostTerm, BeamError>) -> Result<(), Exit> {
 /// (see [`BeamProgram::load_preloaded`]), and run [`BeamProgram::boot`]
 /// with the arguments that `erlexec` gives the emulator for these `erl`
 /// arguments: `-root Root -bindir Bindir -progname erl -- -home Home --`
-/// and then the `erl` arguments unchanged
+/// and then the `erl` arguments with the flags of the flag variables (see
+/// [`erlexec_arguments`]), without the `+S` flags
 /// (`erts/etc/common/erlexec.c:625-640`, `1151-1161`). Without the
 /// variable `HOME`, the arguments have no `-home`, as in `erlexec`.
 ///
@@ -391,26 +387,25 @@ fn run_end(result: Result<HostTerm, BeamError>) -> Result<(), Exit> {
 /// # Errors
 ///
 /// An `erl` option of [`ERLEXEC_OPTIONS`] or an emulator flag (an
-/// argument that starts with `+`) before `-extra`, a variable of
-/// [`ERLEXEC_VARIABLES`] that is set and not empty, `ERL_EPMD_PORT` also
-/// when it is empty, the errors of
+/// argument that starts with `+`) before `-extra`, also one that a flag
+/// variable gives (see [`erlexec_arguments`]), the variable
+/// `ERL_EPMD_PORT`, the errors of
 /// [`BeamProgram::load_preloaded`], and the errors of
 /// [`BeamProgram::boot`]. A halt of the run gives [`Exit::Halt`].
 fn boot_erl(arguments: &ErlCli) -> Result<(), Exit> {
-    // An empty flag variable gives no flag (`erlexec.c:1762-1768`), but
     // `erlexec` gives `-epmd_port` for each value of `ERL_EPMD_PORT`, also
-    // an empty one (`erlexec.c:1754-1760`).
-    if let Some(variable) = ERLEXEC_VARIABLES.iter().find(|variable| {
-        std::env::var_os(variable)
-            .is_some_and(|value| !value.is_empty() || **variable == "ERL_EPMD_PORT")
-    }) {
-        return Err(format!(
-            "the environment variable {variable} of erl is not supported: \
+    // an empty one (`erlexec.c:633`, `1754-1760`), which only the
+    // distribution reads.
+    if std::env::var_os("ERL_EPMD_PORT").is_some() {
+        return Err(
+            "the environment variable ERL_EPMD_PORT of erl is not supported: \
              see \"Release boot\" in docs/erts-differences.md"
-        )
-        .into());
+                .to_owned()
+                .into(),
+        );
     }
-    let (schedulers, erl_arguments) = scheduler_flags(&arguments.arguments)?;
+    let erl_arguments = erlexec_arguments(&arguments.arguments);
+    let (schedulers, erl_arguments) = scheduler_flags(&erl_arguments)?;
     install_start_dispositions();
     // `erlexec` puts `bindir` and `rootdir/bin` first in `PATH` before it
     // starts the emulator (`erlexec.c:556-620`).
@@ -433,6 +428,92 @@ fn boot_erl(arguments: &ErlCli) -> Result<(), Exit> {
     boot.push(b"--");
     boot.extend(erl_arguments);
     run_end(Err(program.boot(&boot, schedulers)))
+}
+
+/// Return the `erl` arguments of `command_line` with the flags of the
+/// variables of [`BEFORE_FLAG_VARIABLES`] before them and those of
+/// [`AFTER_FLAG_VARIABLES`] after them, as `initial_argv_massage` of
+/// `erlexec` makes them (`erlexec.c:2177-2260`). The words of a variable end with `--`, unless one of them
+/// is `-extra` (`erlexec.c:1919-1928`), and a command line that is not empty
+/// ends with `--` (`erlexec.c:2187-2193`), so the flags of one part do not
+/// change the flags of the next part. In each part, the words after the
+/// first `-extra` go to the end after one `-extra`, and `--` takes the place
+/// of the rest of the part (`erlexec.c:2216-2221`, `2255-2260`). The
+/// function does not read `-args_file` and `-S` (`erlexec.c:2210-2213`,
+/// `2222-2239`): they stay in their place, and [`scheduler_flags`] rejects
+/// them before `-extra`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // ERL_AFLAGS="-a 1" ERL_FLAGS="-extra x"
+/// let words = erlexec_arguments(&["-b".into(), "-extra".into(), "y".into()]);
+/// // -a 1 -- -b -- -- -- -extra y x
+/// ```
+fn erlexec_arguments(command_line: &[OsString]) -> Vec<OsString> {
+    let flags = |name: &str| {
+        let mut words =
+            std::env::var_os(name).map_or_else(Vec::new, |value| erlexec_words(value.as_bytes()));
+        if !words.is_empty() && !words.iter().any(|word| word == "-extra") {
+            words.push("--".into());
+        }
+        words
+    };
+    let mut parts: Vec<Vec<OsString>> = BEFORE_FLAG_VARIABLES.map(flags).into();
+    if !command_line.is_empty() {
+        parts.push(command_line.to_vec());
+        parts.push(vec!["--".into()]);
+    }
+    parts.extend(AFTER_FLAG_VARIABLES.map(flags));
+    let (mut arguments, mut extra) = (Vec::new(), Vec::new());
+    for part in parts {
+        let mut words = part.into_iter();
+        while let Some(word) = words.next() {
+            if word == "-extra" {
+                extra.extend(&mut words);
+                arguments.push("--".into());
+            } else {
+                arguments.push(word);
+            }
+        }
+    }
+    if !extra.is_empty() {
+        arguments.push("-extra".into());
+        arguments.extend(extra);
+    }
+    arguments
+}
+
+/// Return the words of the value of a flag variable as
+/// `build_args_from_string` of `erlexec` splits it without comments
+/// (`erlexec.c:1770-1931`): white space (space, `\t`, `\n`, `\v`, `\f`, and
+/// `\r`) separates the words, a single or a double quote keeps the bytes up
+/// to the next same quote or the end, and a backslash keeps the next byte.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(erlexec_words(br#" a "b c"'d' e\ f"#), ["a", "b cd", "e f"]);
+/// ```
+fn erlexec_words(value: &[u8]) -> Vec<OsString> {
+    let space = |byte: &u8| matches!(byte, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r');
+    let mut words = Vec::new();
+    let mut bytes = value.iter().copied().peekable();
+    loop {
+        while bytes.next_if(space).is_some() {}
+        if bytes.peek().is_none() {
+            return words;
+        }
+        let mut word = Vec::new();
+        while let Some(byte) = bytes.next_if(|byte| !space(byte)) {
+            match byte {
+                b'"' | b'\'' => word.extend(bytes.by_ref().take_while(|next| *next != byte)),
+                b'\\' => word.extend(bytes.next()),
+                _ => word.push(byte),
+            }
+        }
+        words.push(OsString::from_vec(word));
+    }
 }
 
 /// Take the `+S` flags out of the `erl` arguments `arguments` before

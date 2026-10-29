@@ -135,6 +135,59 @@ impl Scheduler {
         .expect("a timeout makes no new atom");
     }
 
+    /// Start the timer of the send that waits for the queue of the port
+    /// `port` while its descriptor holds no timer, for a `send_timeout`
+    /// other than `infinity` and 0 (`add_multi_timer`, inet_drv.c:13785-13792).
+    /// A send that a promotion made busy without a timer gets it here. The
+    /// caller holds the port lock of the descriptor.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.tcp_send_timer(port, tcp);
+    /// ```
+    pub(in crate::runtime) fn tcp_send_timer(&mut self, port: PortId, tcp: &mut Inet) {
+        // `send_timeout` is -1 (`INET_INFINITY`) or 0 without a timer
+        // (inet_drv.c:13776-13792).
+        if tcp.send_timeout() == -1 || tcp.send_timeout() == 0 {
+            return;
+        }
+        // `inet_set_opts` stores `send_timeout` unvalidated, and
+        // `add_multi_timer` takes its 32 bits as milliseconds
+        // (inet_drv.c:7099-7108, 13785-13792).
+        let timeout = tcp.send_timeout().cast_unsigned();
+        if let Some(sender) = tcp
+            .stream
+            .busy
+            .as_mut()
+            .filter(|sender| sender.timer.is_none())
+        {
+            let timer = self.start_port_timer(timeout, |key| Timer::SocketSend { port, key });
+            sender.timer = Some(timer);
+        }
+    }
+
+    /// End the send that waits for the queue of the port `port` with
+    /// `{error, timeout}` (see [`Inet::send_timeout_expired`]). A port that
+    /// terminated and a send that does not hold the timer change nothing.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.tcp_send_timeout(port, timer);
+    /// ```
+    pub(super) fn tcp_send_timeout(&mut self, port: PortId, timer: PortTimer) {
+        // A timer that a port task of another scheduler canceled first
+        // finds no send that holds it (`erl_hl_timer.c:708-720`).
+        self.tcp_step(port, |tcp| {
+            tcp.stream
+                .busy
+                .is_some_and(|sender| sender.timer == Some(timer))
+                .then(|| tcp.send_timeout_expired())
+        })
+        .expect("a timeout makes no new atom");
+    }
+
     /// Read for the receive that waits on the port `port`, which the IO
     /// poll found ready for read (`tcp_inet_input`, inet_drv.c:13597-13600).
     /// A port that another scheduler closed after the poll drops the event.
@@ -197,6 +250,12 @@ impl Scheduler {
             return Ok(());
         };
         let item = slot.as_mut().expect("the step ran on the port");
+        // A step that leaves a send busy without a timer, as a send that
+        // made the port busy or a waiter that took its place, starts it
+        // (`add_multi_timer`, inet_drv.c:13785-13792).
+        if let Some(tcp) = item.inet_mut() {
+            self.tcp_send_timer(port, tcp);
+        }
         let exit = self.send_events(port, item, events)?;
         drop(slot);
         self.end_step(port, exit);
@@ -288,6 +347,9 @@ impl Scheduler {
                     )]
                 }
                 Event::Replied { sender, result } => {
+                    if let Some(timer) = sender.timer {
+                        self.cancel_port_timer(timer);
+                    }
                     let status = self.unit_status(result)?;
                     let message = Term::tuple(vec![
                         Term::Atom(Atom::INET_REPLY),
@@ -408,7 +470,11 @@ impl Scheduler {
             .as_mut()
             .filter(|slot| {
                 slot.as_ref().is_some_and(|item| {
-                    item.closing && matches!(&item.driver, Driver::Inet(tcp) if !tcp.has_output())
+                    item.closing
+                        && match &item.driver {
+                            Driver::Inet(tcp) => !tcp.has_output(),
+                            Driver::Spawn(spawn) => spawn.queued_fd().is_none(),
+                        }
                 })
             })
             .and_then(|slot| slot.take());

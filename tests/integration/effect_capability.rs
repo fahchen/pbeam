@@ -473,7 +473,7 @@ const AMBIENT: &[&str] = &[
 /// `effect_probe:ambient/0` also calls each entry once. `null_read/0` and
 /// `buffer/0` call the `prim_buffer` entries, and `buffer/0` calls
 /// `peek_head/1` and `copying_read/2` through `prim_buffer:read/2`.
-const LATER: [&str; 53] = [
+const LATER: [&str; 60] = [
     "prim_buffer:copying_read/2",
     "prim_buffer:find_byte_index/2",
     "prim_buffer:new/0",
@@ -521,7 +521,14 @@ const LATER: [&str; 53] = [
     "prim_socket:nif_peername/1",
     "prim_socket:nif_recv/4",
     "prim_socket:nif_recvfrom/4",
+    "prim_socket:nif_recvmmsg/6",
+    "prim_socket:nif_recvmsg/5",
     "prim_socket:nif_send/4",
+    "prim_socket:nif_sendfile/1",
+    "prim_socket:nif_sendfile/4",
+    "prim_socket:nif_sendfile/5",
+    "prim_socket:nif_sendmmsg/4",
+    "prim_socket:nif_sendmsg/5",
     "prim_socket:nif_sendto/5",
     "prim_socket:nif_sendv/3",
     "prim_socket:nif_setopt/5",
@@ -1389,14 +1396,9 @@ fn stops_the_run_for_a_socket_bind_to_a_native_family() {
 
 #[test]
 fn stops_the_run_for_a_socket_option_form_without_a_handler() {
-    // `{otp, debug}` and `{otp, select_read}` with `true`, and
-    // `{otp, rcvbuf}` with a buffer count, stop the run (row "NIF stubs" of
+    // `{otp, debug}` with `true` stops the run (row "NIF stubs" of
     // docs/erts-differences.md).
-    let expected = [
-        "unsupported prim_socket option value {otp, 1001} true",
-        "unsupported prim_socket option value {otp, 1011} true",
-        "unsupported prim_socket option value {otp, rcvbuf} {N, Size}",
-    ];
+    let expected = ["unsupported prim_socket option value {otp, debug} true"];
     for (case, expected) in (1..).zip(expected) {
         let error = program()
             .execute("effect_probe", &format!("socket_option_{case}"), &[])
