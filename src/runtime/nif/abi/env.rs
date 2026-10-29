@@ -6,7 +6,9 @@
 //! which `enif_make_badarg` returns. The arguments of the call are the
 //! handles `1..=argc`, and each `enif_make_*` call adds a term. A handle is
 //! valid only in the call of its env, as an ERTS process-bound term is
-//! valid only until the NIF returns (`erl_nif.h`, "ERL_NIF_TERM").
+//! valid only until the NIF returns (`erl_nif.h`, "ERL_NIF_TERM"). The
+//! handle of an atom is the exception: no env owns it, as no env owns an
+//! ERTS atom (`erl_term.h`, `make_atom`).
 //!
 //! The env of a dirty NIF is the same: the dirty thread makes it for the
 //! call, and its terms go back to the process with the result, as the
@@ -30,11 +32,17 @@ use crate::Term;
 use crate::error::error;
 use crate::runtime::NativeResult;
 use crate::runtime::interpreter::bif::iodata_bytes;
+use crate::term::Atom;
 use crate::term::Map;
 use crate::term::{MAX_ATOM_CHARACTERS, ProcessId};
 
 /// `THE_NON_VALUE`: the handle that no term has.
 const NON_VALUE: NifTerm = 0;
+
+/// The bit of the handle of an atom, which every env reads. The rest of the
+/// handle is the atom-table index. A slot handle never sets the bit, so the
+/// two handle spaces do not meet.
+const ATOM_HANDLE: NifTerm = 1 << (usize::BITS - 1);
 
 /// `ERL_NIF_LATIN1` of `ErlNifCharEncoding` (`erl_nif.h:195-198`).
 const LATIN1: c_int = 1;
@@ -303,9 +311,15 @@ impl Env {
     }
 
     /// Return the term of `handle`, or `None` for `THE_NON_VALUE` and for a
-    /// handle that no term of the env has. The term of a binary of
+    /// handle that no term of the env has. A handle of an atom is
+    /// env-independent: see [`Env::make`]. The term of a binary of
     /// `enif_make_new_binary` has the bytes that the NIF wrote so far.
     pub(super) fn get(&self, handle: NifTerm) -> Option<Term> {
+        if handle & ATOM_HANDLE != 0 {
+            return Some(Term::Atom(Atom::from_index(
+                u32::try_from(handle & !ATOM_HANDLE).expect("the atom index fits u32"),
+            )));
+        }
         self.slot(handle).map(|slot| match slot {
             Slot::Term(term) => term.clone(),
             Slot::Buffer(bytes) => Term::binary(bytes.clone()),
@@ -340,7 +354,17 @@ impl Env {
     }
 
     /// Add the term `term` and return its handle.
+    /// Return the handle of `term` in the env. A term of an atom takes no
+    /// slot: its handle is the atom-table index with [`ATOM_HANDLE`], which
+    /// every env reads, as ERTS makes an atom an immediate term that no
+    /// env owns (`erl_term.h`, `make_atom`), and a library of NIFs caches
+    /// the terms of its atoms across envs (rustler 0.38.0,
+    /// `src/types/atom.rs:21-23`, "atoms are not associated with any
+    /// environment").
     fn make(&mut self, term: Term) -> NifTerm {
+        if let Term::Atom(atom) = &term {
+            return ATOM_HANDLE | atom.index() as usize;
+        }
         self.put(Slot::Term(term))
     }
 
