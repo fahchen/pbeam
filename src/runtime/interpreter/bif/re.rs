@@ -3,7 +3,7 @@
 use std::ffi::c_int;
 
 use super::BifResult::{Trap, Value};
-use super::*;
+use super::{AtomTable, BeamError, BifContext, BifResult, ExceptionClass, Term, iolist};
 use crate::runtime::pcre2;
 use crate::runtime::scheduler::CONTEXT_REDS;
 

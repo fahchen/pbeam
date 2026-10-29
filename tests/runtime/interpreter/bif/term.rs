@@ -1020,7 +1020,14 @@ fn term_to_binary_checks_the_options_and_the_local_path() {
     // The `[local]` path of `erlang.rs` keeps its error for each other
     // term (`erlang.rs:5395-5420`).
     let local = Term::list_from(vec![Term::static_atom("local")]);
-    assert!(super::erlang::term_to_binary_2(&mut context, &Term::Integer(1), &local).is_err());
+    assert!(
+        crate::runtime::interpreter::bif::erlang::term_to_binary_2(
+            &mut context,
+            &Term::Integer(1),
+            &local
+        )
+        .is_err()
+    );
 }
 
 #[test]

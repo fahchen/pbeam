@@ -11,7 +11,7 @@
 //! stops the run for it (see "NIF stubs" in `docs/erts-differences.md`).
 
 use super::bif::iodata_bytes;
-use super::*;
+use super::{BeamError, BifResult, Binding, Job, Scheduler, Term, error};
 use std::cmp::Ordering;
 
 /// The functions of the `asn1rt_nif` NIF library, as `(name, arity)` in
@@ -374,7 +374,7 @@ fn ceil(x: i32, y: i32) -> i32 {
 
 /// Read a length of `wide` bytes, big endian, as the cases of
 /// `per_complete` do.
-fn read_length(per: &mut Per, wide: bool) -> i32 {
+fn read_length(per: &mut Per<'_>, wide: bool) -> i32 {
     let high = per.next();
     if wide { (high << 8) | per.next() } else { high }
 }

@@ -1,7 +1,7 @@
 //! Bodies of the `os` BIFs that do not fit on one table line.
 
 use super::BifResult::Value;
-use super::*;
+use super::{BeamError, BifResult, Scheduler, Term, denial};
 use crate::runtime::capability::{CapabilityKind, Operation};
 use crate::runtime::host::signal::{self, Disposition};
 use crate::runtime::host::{clock, environment, filename_encoding};

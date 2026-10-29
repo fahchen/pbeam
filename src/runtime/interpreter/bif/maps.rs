@@ -2,7 +2,7 @@
 
 use super::BifResult::Value;
 use super::ycf::{YcfTurn, run_units};
-use super::*;
+use super::{BeamError, BifResult, ExceptionClass, Insert, Map, ProcessState, Term, error};
 use crate::term::{AtomTable, Direction, debug_term, from_list_units};
 
 /// Run `maps:keys/1`: return the keys of a map in map order, as ERTS

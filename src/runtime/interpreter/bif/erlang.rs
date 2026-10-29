@@ -3,7 +3,12 @@
 mod snifs;
 
 use super::BifResult::{Raise, Trap, Value};
-use super::*;
+use super::{
+    Arc, BeamError, BifContext, BifResult, Binary, CapabilityKind, ExceptionClass, Operation,
+    Scheduler, SpawnOptions, Target, Term, boot_denial, create_process, current_frame,
+    current_function, denial, error, erts_internal, io_service, is_bif, mfa_stacktrace,
+    other_process_denial,
+};
 use crate::beam::code::Instruction;
 use crate::runtime::capability;
 use crate::runtime::dirty::DIRTY_IO_THREADS;

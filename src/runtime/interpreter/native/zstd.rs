@@ -29,7 +29,7 @@ use ::zstd::zstd_safe::{
     find_decompressed_size, get_error_name, zstd_sys::ZSTD_EndDirective,
 };
 
-use super::*;
+use super::{BeamError, BifResult, Binding, ExceptionClass, Job, Scheduler, Term, error};
 use crate::runtime::resources::lock;
 use crate::term::{ProcessId, Reference};
 

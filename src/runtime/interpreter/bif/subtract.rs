@@ -2,7 +2,7 @@
 //! can each trap (`erl_bif_lists.c:340-1083`).
 
 use super::BifResult::Value;
-use super::*;
+use super::{AtomTable, BeamError, BifResult, ProcessState, Term};
 use std::cmp::Ordering;
 
 /// The most elements of a list that a naive scan keeps in its array

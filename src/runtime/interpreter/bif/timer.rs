@@ -3,7 +3,7 @@
 //! `erlang:read_timer/1`.
 
 use super::BifResult::Value;
-use super::*;
+use super::{BeamError, BifContext, BifResult, Scheduler, Term, boot_denial, denial};
 use crate::runtime::capability::{CapabilityKind, Operation};
 use crate::runtime::timer::{Receiver, Timer, Timers};
 

@@ -14,7 +14,7 @@ use super::socket::{
     closed, errno_error, invalid, send_registry, sockaddr, socket_argument, socket_message,
 };
 use super::supports::atom;
-use super::*;
+use super::{Arc, BeamError, BifResult, ExceptionClass, Scheduler, Term, error};
 use crate::runtime::resources::lock;
 use crate::runtime::scheduler::poll::{Direction, NodePoll};
 use crate::runtime::signal::Signal;

@@ -6,6 +6,7 @@
 use super::*;
 use crate::runtime::capability::{AllowAll, Policy};
 use crate::runtime::process::tests::frame;
+use crate::term::AtomTable;
 use crate::term::Binary;
 
 /// Return a scheduler whose current process is a new root process.

@@ -3,7 +3,7 @@
 //! not wrap them. PBeam gives the ERTS result of each call that needs no
 //! loaded engine, and a runtime error for each call that would load one.
 
-use super::*;
+use super::{BeamError, BifResult, Scheduler, Term, error};
 
 /// The engine method atoms of `engine_get_all_methods_nif/0`
 /// (`engine.c:868-913`): the `ENGINE_METHOD_*` macros that OpenSSL 3

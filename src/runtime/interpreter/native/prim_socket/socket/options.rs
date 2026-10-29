@@ -15,7 +15,12 @@ use nix::sys::socket::{getsockopt, setsockopt, sockopt};
 use std::os::fd::AsRawFd;
 use std::ptr;
 
-use super::*;
+use super::{
+    Arc, BeamError, BifResult, CLOSED, CLOSING, ExceptionClass, Ipv4Addr, Mutex, OtpOptions,
+    Reference, Scheduler, Signal, Socket, SocketState, Sockets, Term, atom, atom_name, boolean,
+    closed, decode_domain, domain_term, errno_error, error, field, in_addr, int, invalid, io, lock,
+    map, named, pairs, send_registry, socket_argument, type_term, uint,
+};
 use crate::runtime::interpreter::native::prim_socket::supports::option_name;
 
 /// The number `ESOCK_OPT_OTP_DEBUG` (`prim_socket_nif.c:920`).

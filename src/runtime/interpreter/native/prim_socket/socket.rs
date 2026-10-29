@@ -20,7 +20,7 @@ use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 mod options;
 
 use super::supports::atom;
-use super::*;
+use super::{BeamError, BifResult, ExceptionClass, Map, Scheduler, Term, error};
 use crate::runtime::port::inet::errno_name;
 use crate::runtime::resources::lock;
 use crate::runtime::signal::Signal;

@@ -4,7 +4,7 @@
 //! (`erl_iolist.c:113-649`) that they share.
 
 use super::BifResult::Value;
-use super::*;
+use super::{BeamError, BifResult, Binary, ProcessState, Scheduler, Term};
 use crate::runtime::interpreter::bits::BitWriter;
 use crate::runtime::interpreter::bitstring;
 

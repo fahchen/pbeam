@@ -8,7 +8,10 @@ use super::cipher::{
     CipherFailure, FIRST_AEAD, Padding, cipher_index, cipher_init, cipher_options, fetch_cipher,
     final_output, init_context,
 };
-use super::*;
+use super::{
+    BeamError, BifResult, CIPHERS, HashMap, Map, Reference, Scheduler, Term, atom_name, c_error,
+    c_error_text, iodata_bytes, lock,
+};
 use openssl::cipher_ctx::CipherCtx;
 
 /// The cipher contexts of the node, as the `evp_cipher_ctx` resources of

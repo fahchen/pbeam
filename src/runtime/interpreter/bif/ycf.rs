@@ -1,7 +1,7 @@
 //! The reduction counter of the BIFs that ERTS runs as Yielding C Fun
 //! (YCF) code, as `erts_ycf_trap_driver` drives them (`utils.c:3733-3819`).
 
-use super::*;
+use super::{BeamError, ProcessState};
 
 /// The end of one call of a YCF BIF.
 #[derive(Debug, PartialEq)]

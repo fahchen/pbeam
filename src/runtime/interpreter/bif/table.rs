@@ -13,7 +13,11 @@
 //! error.
 
 use super::BifResult::{Raise, Value};
-use super::*;
+use super::{
+    Arc, BeamError, BifContext, BifResult, ExceptionClass, Term, atomics, binary, chksum, erlang,
+    erts_internal, ets, file, float, hash, integer, iolist, lists, maps, math, native, os, packet,
+    persistent_term, re, records, subtract, term, timer, unicode, unresolved_mfa, unsupported_port,
+};
 use crate::runtime::host::filename_encoding;
 use crate::runtime::time;
 use integer::{Arith, Bitwise};

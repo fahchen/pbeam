@@ -8,7 +8,7 @@ use num_bigint::{BigInt, Sign};
 use num_traits::ToPrimitive;
 
 use super::BifResult::Value;
-use super::*;
+use super::{BeamError, BifResult, ExceptionClass, Scheduler, Term};
 use crate::runtime::atomics::{ATOMIC_BYTES, Array};
 use crate::term::Map;
 use std::sync::Arc;

@@ -12,7 +12,7 @@
 //! dirty IO pool, and makes its result on the scheduler thread again (row
 //! "Dirty NIFs" of `docs/erts-differences.md`).
 
-use super::*;
+use super::{Atom, AtomTable, BeamError, BifResult, Binary, Binding, Job, Scheduler, Term, Work};
 use crate::runtime::resources::lock;
 use crate::runtime::{
     dirty::{FinishFn, Host},

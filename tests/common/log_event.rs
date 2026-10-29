@@ -32,7 +32,7 @@ use std::ops::RangeInclusive;
 ///     .args(&events)
 ///     .arg(boot_beam());
 /// ```
-pub const LOG_EVENT_MODULES: [&str; 9] = [
+pub(crate) const LOG_EVENT_MODULES: [&str; 9] = [
     "logger_backend",
     "logger_filters",
     "error_logger",
@@ -72,7 +72,7 @@ const MONTHS: [&str; 12] = [
 ///     "=ERROR REPORT==== 6-Oct-2026::11:24:49 ===\n"
 /// );
 /// ```
-pub fn mask_time(text: &str) -> String {
+pub(crate) fn mask_time(text: &str) -> String {
     const START: &str = "==== ";
     let mut masked = String::new();
     let mut rest = text;

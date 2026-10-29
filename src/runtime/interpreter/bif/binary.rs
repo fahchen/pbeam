@@ -5,7 +5,9 @@
 //! `binary:copy/1,2`.
 
 use super::BifResult::Value;
-use super::*;
+use super::{
+    BeamError, BifContext, BifResult, ExceptionClass, ProcessState, Scheduler, Term, erlang,
+};
 use crate::runtime::binary_pattern::CompiledPattern;
 use crate::term::Binary;
 

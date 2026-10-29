@@ -19,7 +19,7 @@ use std::ffi::{CString, OsString, c_int};
 use std::os::unix::ffi::OsStrExt;
 
 use super::prim_file::dirty;
-use super::*;
+use super::{AtomTable, BeamError, BifResult, Binding, ExceptionClass, Job, Map, Term, error};
 use crate::runtime::host::{errno::errno_id, netdb};
 
 mod ifaddrs;

@@ -1030,7 +1030,7 @@ impl BeamProgram {
         module: &str,
         function: &str,
         arguments: &[HostTerm],
-        issuer: Issuer,
+        issuer: Issuer<'_>,
         sample: &mut Option<&mut dyn FnMut(usize)>,
     ) -> Result<HostTerm, BeamError> {
         let initial_mode = InitialMode::read();
@@ -1115,7 +1115,7 @@ impl BeamProgram {
         module: &str,
         function: &str,
         arguments: &[Term],
-        issuer: Issuer,
+        issuer: Issuer<'_>,
         sample: &mut Option<&mut dyn FnMut(usize)>,
     ) -> Result<(), BeamError> {
         // The root starts as `erl_create_process` starts a process: a
@@ -6122,7 +6122,7 @@ fn shared_append_arrays(parts: &[BinaryPart<'_>]) -> Option<Vec<(Arc<Vec<u8>>, u
     Some(arrays)
 }
 
-fn integer_type_failure(parts: &[BinaryPart], first: usize) -> BinarySegmentFailure {
+fn integer_type_failure(parts: &[BinaryPart<'_>], first: usize) -> BinarySegmentFailure {
     let mut group = 0..0;
     let mut group_little = false;
     let mut group_bits = 0;

@@ -6,7 +6,7 @@
 //! error.
 
 use super::BifResult::Value;
-use super::*;
+use super::{BeamError, BifContext, BifResult, Term, error};
 use crate::term::{AtomTable, Binary};
 
 /// The HTTP methods that `packet_parse_http` returns as atoms, in the order

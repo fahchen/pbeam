@@ -2,7 +2,9 @@
 //! walks the tree in key order. A continuation holds the last key of the
 //! walk, as in ERTS, so it does not depend on the layout of the table.
 
-use super::*;
+use super::{
+    AtomTable, BeamError, BifContext, BifResult, MatchSpec, Reference, Table, Term, Value,
+};
 use crate::runtime::ets::range::{KeyRange, cmp_partly_bound, key_range};
 use std::cmp::Ordering;
 

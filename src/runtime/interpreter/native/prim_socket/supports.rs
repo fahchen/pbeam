@@ -23,7 +23,7 @@
 
 use std::{fs, iter, str};
 
-use super::*;
+use super::{BeamError, BifResult, Scheduler, Term};
 
 /// The column of the host OS in the tables of this file.
 #[cfg(target_os = "macos")]

@@ -15,7 +15,7 @@
 //! crc32 sum uses the `crc32fast` crate, which gives the zlib values.
 
 use super::BifResult::{TrapBif, Value};
-use super::*;
+use super::{BeamError, BifResult, Scheduler, Term, hash};
 use crate::runtime::scheduler::CONTEXT_REDS;
 
 /// `BYTES_PER_REDUCTION` (`erl_bif_chksum.c:286`).

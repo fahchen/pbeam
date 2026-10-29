@@ -19,7 +19,7 @@ use nix::sys::socket::{MsgFlags, SockaddrStorage};
 use super::select::{fd, monitor, select};
 use super::socket::{closed, errno_error, invalid, sockaddr, socket_argument, source_term};
 use super::supports::atom;
-use super::*;
+use super::{BeamError, BifResult, Scheduler, Term, error};
 use crate::runtime::resources::lock;
 use crate::runtime::scheduler::poll::Direction;
 use crate::runtime::sockets::{CLOSED, CLOSING, SELECTED, SocketState};

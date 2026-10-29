@@ -4,7 +4,11 @@ use std::cmp::Ordering;
 
 use super::BifResult::Value;
 use super::erlang::signals_return;
-use super::*;
+use super::{
+    AtomTable, BeamError, BifContext, BifResult, ExceptionClass, ProcessId, Scheduler,
+    SpawnOptions, Target, Term, boot_denial, code, create_process, denial, error, iolist, maps,
+    other_process_denial, print_term, resolve,
+};
 use crate::beam::code::PrepareError;
 use crate::runtime::process::LinkId;
 use crate::runtime::scheduler::{Accept, PTAB_SIZE, check_process_code_reply};

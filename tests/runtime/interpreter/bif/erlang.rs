@@ -5,6 +5,7 @@
 //! term, because a port needs `erlang:open_port/2` of `erlang.beam`.
 
 use super::*;
+use crate::runtime::interpreter::bif::item_reductions;
 use crate::term::Binary;
 use crate::{PortId, ProcessId};
 

@@ -2,6 +2,7 @@ use super::*;
 use crate::runtime::capability::{AllowAll, Policy};
 use crate::runtime::interpreter::native::{call, tests::instance};
 use crate::runtime::process::tests::frame;
+use crate::term::AtomTable;
 use crate::term::Reference;
 use num_bigint::BigInt;
 use std::sync::Arc;

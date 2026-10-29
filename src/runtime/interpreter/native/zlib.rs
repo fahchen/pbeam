@@ -29,7 +29,7 @@ use zlib_rs::{
     Method, Status, Strategy,
 };
 
-use super::*;
+use super::{BeamError, BifResult, Binding, ExceptionClass, Job, Scheduler, Term};
 use crate::runtime::resources::lock;
 use crate::term::{Binary, ProcessId, Reference};
 

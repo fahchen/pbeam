@@ -167,7 +167,7 @@ fn alive(pid: ProcessId) -> bool {
 /// thread of a run with no loaded library has no atom table for the env
 /// and gets NULL.
 #[unsafe(no_mangle)]
-pub extern "C" fn enif_alloc_env() -> *mut Env {
+pub(super) extern "C" fn enif_alloc_env() -> *mut Env {
     with_context(|context| Box::into_raw(Box::new(Env::new(&context.atoms, None, &[]))))
         .or_else(|| with_run(|run| Box::into_raw(Box::new(Env::new(&run.atoms, None, &[])))))
         .unwrap_or(std::ptr::null_mut())
@@ -181,7 +181,7 @@ pub extern "C" fn enif_alloc_env() -> *mut Env {
 /// `env` is an env of `enif_alloc_env` that no call freed, as the C API
 /// requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_free_env(env: *mut Env) {
+pub(super) unsafe extern "C" fn enif_free_env(env: *mut Env) {
     // SAFETY: `enif_alloc_env` made the env from a box, and the C API gives
     // it back once.
     drop(unsafe { Box::from_raw(env) });
@@ -196,7 +196,10 @@ pub unsafe extern "C" fn enif_free_env(env: *mut Env) {
 /// `env` is the env of the current call or an env of `enif_alloc_env`, and
 /// `pid` points to a writable `ErlNifPid`, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_self(env_pointer: *mut Env, pid: *mut ErlNifPid) -> *mut ErlNifPid {
+pub(super) unsafe extern "C" fn enif_self(
+    env_pointer: *mut Env,
+    pid: *mut ErlNifPid,
+) -> *mut ErlNifPid {
     // SAFETY: the C API gives a valid env.
     let env = unsafe { super::env::env(env_pointer) };
     let Some(process) = env.process() else {
@@ -217,7 +220,7 @@ pub unsafe extern "C" fn enif_self(env_pointer: *mut Env, pid: *mut ErlNifPid) -
 /// `env` is a valid env, and `pid` points to a writable `ErlNifPid`, as the
 /// C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_get_local_pid(
+pub(super) unsafe extern "C" fn enif_get_local_pid(
     env_pointer: *mut Env,
     term: NifTerm,
     pid: *mut ErlNifPid,
@@ -241,7 +244,10 @@ pub unsafe extern "C" fn enif_get_local_pid(
 /// `pid` points to an `ErlNifPid` that `enif_self` or `enif_get_local_pid`
 /// wrote, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_is_process_alive(_env: *mut Env, pid: *const ErlNifPid) -> c_int {
+pub(super) unsafe extern "C" fn enif_is_process_alive(
+    _env: *mut Env,
+    pid: *const ErlNifPid,
+) -> c_int {
     // SAFETY: the C API gives a valid `ErlNifPid`.
     let pid = unsafe { pid.read() };
     c_int::from(alive(pid.process()))
@@ -266,7 +272,7 @@ pub unsafe extern "C" fn enif_is_process_alive(_env: *mut Env, pid: *const ErlNi
 /// `enif_alloc_env` or NULL, and `to_pid` points to a valid `ErlNifPid`, as
 /// the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_send(
+pub(super) unsafe extern "C" fn enif_send(
     env: *mut Env,
     to_pid: *const ErlNifPid,
     msg_env: *mut Env,
@@ -336,7 +342,7 @@ pub unsafe extern "C" fn enif_send(
 /// `ErlNifPid`, and `monitor` is NULL or points to a writable
 /// `ErlNifMonitor`, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_monitor_process(
+pub(super) unsafe extern "C" fn enif_monitor_process(
     _env: *mut Env,
     obj: *mut c_void,
     to_pid: *const ErlNifPid,
@@ -383,7 +389,7 @@ pub unsafe extern "C" fn enif_monitor_process(
 /// `obj` is the data of a live resource object and `monitor` points to a
 /// valid `ErlNifMonitor`, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_demonitor_process(
+pub(super) unsafe extern "C" fn enif_demonitor_process(
     _env: *mut Env,
     obj: *mut c_void,
     monitor: *const ErlNifMonitor,
@@ -406,7 +412,7 @@ pub unsafe extern "C" fn enif_demonitor_process(
 /// `monitor1` and `monitor2` point to valid `ErlNifMonitor`s, as the C
 /// API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_compare_monitors(
+pub(super) unsafe extern "C" fn enif_compare_monitors(
     monitor1: *const ErlNifMonitor,
     monitor2: *const ErlNifMonitor,
 ) -> c_int {

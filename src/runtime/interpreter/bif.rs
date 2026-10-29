@@ -8,7 +8,11 @@
 //! in `bif.tab`. The `io_service` module holds the IO service entry of the
 //! runtime to boot gate.
 
-use super::*;
+use super::{
+    Arc, Atom, AtomTable, BeamError, BeamProgram, Binary, BitWriter, ExceptionClass, ImportKind,
+    Insert, Map, ProcessState, Scheduler, SpawnOptions, Target, Term, code, create_process,
+    current_frame, current_function, error, mfa_stacktrace, native, print_term,
+};
 use crate::runtime::{
     capability::{CapabilityKind, Operation},
     dirty::Work,

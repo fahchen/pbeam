@@ -19,7 +19,7 @@
 //! ([`Scheduler::persistent_term_progress`]).
 
 use super::BifResult::Value;
-use super::*;
+use super::{BeamError, BifContext, BifResult, Map, Scheduler, Term, denial};
 use crate::runtime::capability::{CapabilityKind, Operation};
 use crate::runtime::persistent_term::Change;
 use std::sync::{Arc, atomic::Ordering};

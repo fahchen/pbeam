@@ -9,7 +9,7 @@
 //! continues with no cost in the next turn.
 
 use super::BifResult::{Trap, TrapBif, Value};
-use super::*;
+use super::{BeamError, BifResult, ProcessState, Term, error};
 use crate::runtime::scheduler::CONTEXT_REDS;
 use crate::runtime::unicode::{
     Utf8Output, Utf8State, analyze_utf8, build_utf8, code_points, is_incomplete, utf8_need,

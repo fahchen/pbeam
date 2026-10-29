@@ -21,7 +21,7 @@ use num_bigint::{BigInt, Sign};
 use num_traits::ToPrimitive;
 
 use super::BifResult::Value;
-use super::*;
+use super::{BeamError, BifContext, BifResult, Binary, Term, error, integer, records};
 use crate::runtime::interpreter::code_table::CodeTable;
 use crate::term::{
     AtomTable, Fun, Lambda, MAX_ATOM_CHARACTERS, MAX_TUPLE_SIZE, ProcessId, Record, RecordDef,

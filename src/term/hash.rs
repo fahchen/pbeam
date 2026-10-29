@@ -903,7 +903,7 @@ enum HashStep<'a> {
 /// ```
 pub(crate) fn make_hash(atoms: &AtomTable, term: &Term) -> u32 {
     let mut hash: u32 = 0;
-    let mut stack: Vec<HashStep> = Vec::new();
+    let mut stack: Vec<HashStep<'_>> = Vec::new();
     let mut next = Some(HashStep::Term(term));
     while let Some(step) = next.take().or_else(|| stack.pop()) {
         match step {
@@ -1487,7 +1487,7 @@ pub(crate) fn make_hash2(atoms: &AtomTable, term: &Term) -> (u32, u64) {
     let mut hash: u32 = 0;
     let mut xor: u32 = 0;
     let mut iterations: u64 = 0;
-    let mut stack: Vec<Hash2Item> = Vec::new();
+    let mut stack: Vec<Hash2Item<'_>> = Vec::new();
     let mut next: Option<&Term> = Some(term);
     loop {
         let term = match next.take() {

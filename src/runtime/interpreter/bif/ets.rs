@@ -1,7 +1,7 @@
 //! Bodies of the `ets` BIFs that do not fit on one table line.
 
 use super::BifResult::Value;
-use super::*;
+use super::{AtomTable, BeamError, BifContext, BifResult, ProcessId, Term, error};
 use crate::runtime::ets::pattern::{MatchSpec, SpecError};
 use crate::runtime::ets::{
     Access, Busy, EtsTables, ITERATIONS_PER_RED, Lacking, Table, TableType, Transfer,

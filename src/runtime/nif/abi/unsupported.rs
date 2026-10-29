@@ -40,7 +40,7 @@ macro_rules! unsupported_functions {
     ($($name:ident($($argument:tt)*) $(-> $result:ty)? = $default:expr;)*) => {
         $(
             #[unsafe(no_mangle)]
-            pub unsafe extern "C" fn $name($($argument)*) $(-> $result)? {
+            pub(super) unsafe extern "C" fn $name($($argument)*) $(-> $result)? {
                 super::process::record_unsupported(stringify!($name));
                 $default
             }

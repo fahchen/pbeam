@@ -8,7 +8,7 @@
 //! give a runtime error (row "NIF stubs" of `docs/erts-differences.md`).
 
 use super::pkey::{Failure, PKEY_TYPES, badarg, ec_group, failed, finish_in, pkey_type_id};
-use super::*;
+use super::{BeamError, BifResult, Id, PKey, Scheduler, Term, atom_name};
 use openssl::bn::{BigNum, BigNumContext};
 use openssl::ec::{EcKey, EcPoint, PointConversionForm};
 use openssl::pkey_ctx::PkeyCtx;

@@ -1788,7 +1788,7 @@ pub(crate) enum TestKind {
 
 /// The source of a `put_record` instruction (`ops.tab:1641-1647`).
 #[derive(Debug, Clone)]
-pub enum PutRecord {
+pub(crate) enum PutRecord {
     /// Create a record of the module from its definition
     /// (`create_local_record`, `generators.tab:255-300`).
     Local(Arc<RecordDef>),
@@ -1802,7 +1802,7 @@ pub enum PutRecord {
 
 /// The record name of a `get_record_field` instruction (`ops.tab:1669-1678`).
 #[derive(Debug, Clone)]
-pub enum RecordId {
+pub(crate) enum RecordId {
     /// A record name of any module, or `'_'` for any record
     /// (`erl_get_local_record_field`, `erl_record.c:470-510`).
     Local(Atom),

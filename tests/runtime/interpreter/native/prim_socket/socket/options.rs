@@ -1,4 +1,5 @@
 use super::*;
+use crate::runtime::sockets::IoCounters;
 use crate::term::AtomTable;
 
 #[test]

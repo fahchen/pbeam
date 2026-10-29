@@ -10,7 +10,10 @@
 // Each reader runs on one host; the unit tests run them on each host.
 #![allow(dead_code)]
 
-use super::*;
+use super::{
+    AtomTable, BeamError, BifResult, Map, Term, c_int, encode_sockaddr, errno_id, error, failure,
+    header, latin1,
+};
 
 /// A socket address of an entry: the bytes of a full `inet` or `inet6`
 /// socket address for [`encode_sockaddr`], the fields of a `sockaddr_ll`

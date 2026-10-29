@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use super::BifResult::Value;
-use super::*;
+use super::{Atom, BifContext, BifResult, ExceptionClass, Map, Term};
 use crate::runtime::interpreter::code_table::CodeTable;
 use crate::runtime::interpreter::record::{badrecord, field_reason};
 use crate::term::{AtomTable, Record, RecordDef, flatmap_order};

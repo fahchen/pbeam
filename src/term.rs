@@ -21,9 +21,9 @@ pub use atom::HostTerm;
 pub(crate) use atom::{MAX_ATOM_CHARACTERS, MAX_ATOM_SZ_LIMIT};
 #[cfg(test)]
 pub(crate) use atom::{test_atom, test_atom_table};
-pub use binary::Binary;
+pub(crate) use binary::Binary;
 pub(crate) use flat_size::flat_size;
-pub use fun::Fun;
+pub(crate) use fun::Fun;
 pub(crate) use fun::{Lambda, Target, debug_target};
 pub(crate) use hash::{atom_hash, internal_hash, make_hash, make_hash2};
 pub(crate) use integer::{MAX_BIG_DIGITS, fits_big_arity};
@@ -31,10 +31,10 @@ use list::{Cons, ConsRef};
 pub(crate) use live_bytes::LiveBytes;
 pub use map::Map;
 pub(crate) use map::{Direction, Drain as MapDrain, Insert, flatmap_order, from_list_units};
-pub use match_context::MatchState;
+pub(crate) use match_context::MatchState;
 pub(crate) use match_context::{segment_equals, segment_integer};
 pub(crate) use print::{print_term, print_term_limited};
-pub use record::Record;
+pub(crate) use record::Record;
 pub(crate) use record::RecordDef;
 use tuple::Tuple;
 

@@ -1,7 +1,7 @@
 //! Native bindings of the `prim_tty` NIFs (`erts/emulator/nifs/common/prim_tty_nif.c`).
 
 use super::bif::{denial, iodata_bytes};
-use super::*;
+use super::{Atom, AtomTable, BeamError, BifResult, Binding, Job, Scheduler, Term, Work};
 use crate::runtime::{
     capability::{CapabilityKind, Operation},
     host::{

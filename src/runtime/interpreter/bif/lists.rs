@@ -1,7 +1,7 @@
 //! Bodies of the `lists` BIFs that do not fit on one table line.
 
 use super::BifResult::Value;
-use super::*;
+use super::{BeamError, BifResult, ProcessState, Term};
 use crate::runtime::scheduler::CONTEXT_REDS;
 
 /// Run `lists:keyfind/3`: return the first tuple in `list` whose element at

@@ -35,7 +35,10 @@ mod pkey;
 mod rand;
 
 use super::bif::iodata_bytes;
-use super::*;
+use super::{
+    AtomTable, BeamError, BifResult, Binding, ExceptionClass, Job, Map, Scheduler, Term, error,
+    print_term,
+};
 use crate::runtime::resources::lock;
 use crate::term::Reference;
 use agreement::{

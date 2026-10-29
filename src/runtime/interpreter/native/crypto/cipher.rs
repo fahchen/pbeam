@@ -3,7 +3,10 @@
 //! `do_exor/2` (`cipher.c`, `api_ng.c`, `aead.c`, and `math.c` of OTP
 //! 29.1.1). The safe `openssl` crate makes each OpenSSL call.
 
-use super::*;
+use super::{
+    AtomTable, BeamError, BifResult, CIPHERS, ExceptionClass, Map, Scheduler, Term, atom_name,
+    c_error, c_error_text, iodata_bytes, print_term,
+};
 use openssl::cipher::{Cipher, CipherRef};
 use openssl::cipher_ctx::{CipherCtx, CipherCtxRef};
 

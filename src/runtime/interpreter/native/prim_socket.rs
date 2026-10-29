@@ -12,7 +12,7 @@
 //! other function of the table stops the run with the runtime error of the
 //! static library (`Library::unbound_fails`).
 
-use super::*;
+use super::{Arc, BeamError, BifResult, Binding, ExceptionClass, Job, Map, Scheduler, Term, error};
 use crate::runtime::resources::lock;
 use crate::runtime::sockets::Sockets;
 

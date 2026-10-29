@@ -18,7 +18,7 @@ use num_bigint::BigInt;
 use num_traits::Signed;
 
 use super::BifResult::Value;
-use super::*;
+use super::{BifResult, ExceptionClass, Scheduler, Term, erlang};
 use crate::runtime::scheduler::CONTEXT_REDS;
 use crate::term::{MAX_BIG_DIGITS, fits_big_arity};
 

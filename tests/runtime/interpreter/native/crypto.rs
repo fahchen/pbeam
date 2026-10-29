@@ -1,6 +1,9 @@
 use super::*;
+use std::sync::Arc;
+
 use crate::runtime::capability::{AllowAll, Policy};
 use crate::runtime::process::tests::frame;
+use crate::term::Atom;
 
 /// Return a scheduler whose current process is a new root process.
 fn scheduler() -> Scheduler {

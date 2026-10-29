@@ -30,7 +30,10 @@
 //! and the functions of the library run for the loaded module instance.
 
 use super::bif::denial;
-use super::*;
+use super::{
+    Arc, Atom, AtomTable, BeamError, BeamModule, BifResult, Binary, ExceptionClass, Instruction,
+    Map, Scheduler, Term, bif, call_arguments, error, print_term,
+};
 use crate::runtime::{
     Job, NifContext,
     capability::{CapabilityKind, Operation},

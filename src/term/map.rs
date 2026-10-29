@@ -1189,7 +1189,7 @@ impl Hamt {
         limit: usize,
         direction: Direction,
     ) -> Result<Option<Chunk<'_>>, BeamError> {
-        let mut above: Vec<(Entries, usize)> = Vec::new();
+        let mut above: Vec<(Entries<'_>, usize)> = Vec::new();
         let mut entries = Entries::Node(&self.root);
         let mut position = loop {
             let position = path_element(path, above.len());

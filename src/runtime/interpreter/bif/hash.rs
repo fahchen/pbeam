@@ -21,7 +21,7 @@
 //! turn (see `docs/erts-differences.md`).
 
 use super::BifResult::{TrapBif, Value};
-use super::*;
+use super::{BeamError, BifResult, Binary, Scheduler, Term};
 use crate::term::{make_hash, make_hash2};
 use num_bigint::Sign;
 

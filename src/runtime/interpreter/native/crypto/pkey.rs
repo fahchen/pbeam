@@ -10,7 +10,10 @@
 //! characteristic-two field give a runtime error (row "NIF stubs" of
 //! `docs/erts-differences.md`).
 
-use super::*;
+use super::{
+    BeamError, BifResult, Hash, Hasher, Md, PKey, Scheduler, Term, atom_name, c_error, error,
+    iodata_bytes,
+};
 use openssl::bn::{BigNum, BigNumContext};
 use openssl::dsa::Dsa;
 use openssl::ec::{EcGroup, EcKey, EcPoint};

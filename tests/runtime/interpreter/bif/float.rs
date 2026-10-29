@@ -4,6 +4,7 @@
 //! number of bytes.
 
 use super::*;
+use crate::runtime::interpreter::ExceptionClass;
 use crate::term::Binary;
 
 #[test]

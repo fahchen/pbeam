@@ -3,7 +3,7 @@
 //! `rand_uniform_nif/2`, and `rand_seed_nif/1`. As ERTS, PBeam takes the
 //! bytes from the OpenSSL RAND generator, through the safe `openssl` crate.
 
-use super::*;
+use super::{BifResult, Term};
 use openssl::bn::BigNum;
 use openssl::error::ErrorStack;
 

@@ -4,7 +4,7 @@
 //! (`bif.c:3699-3725`) give them.
 
 use super::BifResult::Value;
-use super::*;
+use super::{BifResult, Term};
 use crate::term::float_text;
 
 /// The default number of digits after the point of `float_to_list/1`,

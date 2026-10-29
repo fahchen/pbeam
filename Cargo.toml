@@ -870,12 +870,10 @@ path = "tests/integration/erts_debug_size.rs"
 unsafe_op_in_unsafe_fn = "warn"                      # each unsafe op needs its own unsafe block
 missing_debug_implementations = "allow"              # #1347 turns on: every public type implements Debug
 missing_docs = "allow"                               # #1347 turns on: [lib] document every public item
-unreachable_pub = "allow"                            # #1346 turns on: pub items that aren't actually exported
+unreachable_pub = "warn"                             # pub items that aren't actually exported
 rust_2018_idioms = { level = "warn", priority = -1 } # 2018-edition idioms, e.g. Formatter<'_>
 
 # m23 allow list: lints of the groups above with a hit on main. The named task removes the line and fixes the hits.
-# #1346
-elided_lifetimes_in_paths = "allow"
 
 [lints.clippy]
 # Groups first, at lower priority so the individual settings below win.
@@ -905,8 +903,8 @@ redundant_clone = "warn"            # a clone whose original is never used again
 rc_buffer = "allow"                 # #1349 turns on: Rc<String> / Rc<Vec<T>>: use Rc<str> / Rc<[T]>
 
 # Idioms.
-string_add = "warn"        # build strings with format! or push_str, not +
-wildcard_imports = "allow" # #1346 turns on: no glob imports (use super::* in tests is allowed)
+string_add = "warn"       # build strings with format! or push_str, not +
+wildcard_imports = "warn" # no glob imports (use super::* in tests is allowed)
 
 # Output and debugging leftovers.
 dbg_macro = "warn"

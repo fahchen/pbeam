@@ -4,7 +4,7 @@
 //! `docs/erts-differences.md`).
 
 use super::BifResult::Value;
-use super::*;
+use super::{BeamError, BifResult, Scheduler, Term};
 use crate::runtime::capability::{CapabilityKind, Denied};
 
 /// Run `pbeam_cap:revoke(Pid, Kind)`: revoke the copies of the capability

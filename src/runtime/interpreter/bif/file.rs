@@ -2,7 +2,7 @@
 //! encoding of the host (`erl_unicode.c`).
 
 use super::BifResult::Value;
-use super::*;
+use super::{BeamError, BifResult, Term};
 use crate::runtime::host::{FilenameEncoding, filename_encoding};
 use crate::runtime::unicode::{name_from_native, native_filename};
 

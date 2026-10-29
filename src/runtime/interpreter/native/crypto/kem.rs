@@ -8,7 +8,7 @@
 //! "NIF stubs" of `docs/erts-differences.md`).
 
 use super::pkey::{Failure, finish_in, fromdata_failed, octet_string, octet_string_key};
-use super::*;
+use super::{BeamError, BifResult, Id, PKey, Scheduler, Term, atom_name, c_error};
 use openssl::pkey::{Private, Public};
 
 /// The names that `EVP_PKEY_CTX_new_from_name` loads ML-KEM from in

@@ -1,6 +1,7 @@
 use super::*;
 use crate::runtime::capability::{AllowAll, Policy};
 use crate::runtime::process::tests::frame;
+use crate::term::{Atom, AtomTable};
 
 /// Return a scheduler whose current process is a new root process.
 fn scheduler() -> Scheduler {

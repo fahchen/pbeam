@@ -2,7 +2,10 @@
 //! and `mac_final_nif/1` (`mac.c:514-887` of OTP 29.1.1, with the OpenSSL 3
 //! API). The safe `openssl` crate makes each OpenSSL call.
 
-use super::*;
+use super::{
+    BeamError, BifResult, Hash, HashMap, Id, Md, PKey, Reference, Scheduler, Signer, Term,
+    atom_name, c_error, cmac_cipher, error, iodata_bytes, lock,
+};
 use openssl::cipher_ctx::CipherCtx;
 use openssl::error::ErrorStack;
 use openssl::md_ctx::MdCtx;

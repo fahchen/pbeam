@@ -2,7 +2,7 @@
 //! (`erl_math.c:35-141`) give them.
 
 use super::BifResult::Value;
-use super::*;
+use super::{BifResult, Term};
 
 /// Return the double of an argument of a `math` BIF, as `math_call_1` and
 /// `math_call_2` read one (`erl_math.c:43-56`, `107-133`). A float, a small

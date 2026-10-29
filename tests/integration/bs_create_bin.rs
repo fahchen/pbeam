@@ -826,7 +826,7 @@ fn raises_the_erts_error_info_for_integer_and_utf8_segments() {
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let int = Term::Integer;
     let (one, other) = (atom("one"), atom("other"));
-    let cases: Vec<FailureCase> = vec![
+    let cases: Vec<FailureCase<'_>> = vec![
         (
             "byte",
             vec![other.clone()],
@@ -1151,7 +1151,7 @@ fn raises_the_erts_error_info_for_integer_and_utf8_segments() {
     // fails only when the size times the unit overflows 64 bits
     // (jit/x86/instr_bs.cpp:1942-1943), so ERTS on an x86_64 host stops at
     // the allocation. Compare these cases with ERTS only on arm64.
-    let reference_cases: Vec<&FailureCase> = cases
+    let reference_cases: Vec<&FailureCase<'_>> = cases
         .iter()
         .filter(|(.., value)| cfg!(target_arch = "aarch64") || *value != int(1 << 52))
         .collect();
@@ -1816,7 +1816,7 @@ fn raises_the_erts_error_info_for_utf16_and_utf32_segments() {
     let int = Term::Integer;
     let other = atom("other");
     let bignum = Term::BigInt(Arc::new(BigInt::from(1u8) << 64u32));
-    let cases: Vec<UtfFailureCase> = vec![
+    let cases: Vec<UtfFailureCase<'_>> = vec![
         ("utf16", vec![int(-1)], 1, "utf16", "type", int(-1)),
         ("utf16", vec![int(0xD800)], 1, "utf16", "type", int(0xD800)),
         ("utf16", vec![int(0xDFFF)], 1, "utf16", "type", int(0xDFFF)),

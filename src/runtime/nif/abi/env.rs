@@ -539,7 +539,7 @@ pub(super) unsafe fn env<'a>(env: *mut Env) -> &'a mut Env {
 /// `env` is the env of the current call, and `ip` points to a writable C
 /// `int`, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_get_int(
+pub(super) unsafe extern "C" fn enif_get_int(
     env_pointer: *mut Env,
     term: NifTerm,
     ip: *mut c_int,
@@ -566,7 +566,7 @@ pub unsafe extern "C" fn enif_get_int(
 /// `env` is the env of the current call, and `ip` points to a writable C
 /// `unsigned int`, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_get_uint(
+pub(super) unsafe extern "C" fn enif_get_uint(
     env_pointer: *mut Env,
     term: NifTerm,
     ip: *mut c_uint,
@@ -598,7 +598,7 @@ pub unsafe extern "C" fn enif_get_uint(
 /// `env` is the env of the current call, and `bin` points to a writable
 /// `ErlNifBinary`, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_inspect_binary(
+pub(super) unsafe extern "C" fn enif_inspect_binary(
     env_pointer: *mut Env,
     term: NifTerm,
     bin: *mut ErlNifBinary,
@@ -639,7 +639,7 @@ pub unsafe extern "C" fn enif_inspect_binary(
 /// `env` is the env of the current call, and `buf` points to `len`
 /// writable bytes, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_get_string(
+pub(super) unsafe extern "C" fn enif_get_string(
     env_pointer: *mut Env,
     list: NifTerm,
     buf: *mut c_char,
@@ -675,7 +675,7 @@ pub unsafe extern "C" fn enif_get_string(
 ///
 /// `env` is the env of the current call, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_make_int(env_pointer: *mut Env, i: c_int) -> NifTerm {
+pub(super) unsafe extern "C" fn enif_make_int(env_pointer: *mut Env, i: c_int) -> NifTerm {
     // SAFETY: the C API gives the env of the current call.
     let env = unsafe { env(env_pointer) };
     env.put(Slot::Term(Term::Integer(i.into())))
@@ -692,7 +692,7 @@ pub unsafe extern "C" fn enif_make_int(env_pointer: *mut Env, i: c_int) -> NifTe
 /// `env` is the env of the current call, and `termp` points to a writable
 /// `ERL_NIF_TERM`, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_make_new_binary(
+pub(super) unsafe extern "C" fn enif_make_new_binary(
     env_pointer: *mut Env,
     size: usize,
     termp: *mut NifTerm,
@@ -718,7 +718,7 @@ pub unsafe extern "C" fn enif_make_new_binary(
 ///
 /// `env` is the env of the current call, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_make_badarg(env_pointer: *mut Env) -> NifTerm {
+pub(super) unsafe extern "C" fn enif_make_badarg(env_pointer: *mut Env) -> NifTerm {
     // SAFETY: the C API gives the env of the current call.
     let env = unsafe { env(env_pointer) };
     env.raise(Term::static_atom("badarg"))
@@ -732,7 +732,10 @@ pub unsafe extern "C" fn enif_make_badarg(env_pointer: *mut Env) -> NifTerm {
 ///
 /// `env` is the env of the current call, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_raise_exception(env_pointer: *mut Env, reason: NifTerm) -> NifTerm {
+pub(super) unsafe extern "C" fn enif_raise_exception(
+    env_pointer: *mut Env,
+    reason: NifTerm,
+) -> NifTerm {
     // SAFETY: the C API gives the env of the current call.
     let env = unsafe { env(env_pointer) };
     let reason = env.term(reason);
@@ -747,7 +750,7 @@ pub unsafe extern "C" fn enif_raise_exception(env_pointer: *mut Env, reason: Nif
 ///
 /// The C API has no precondition. `enif_free` frees the block.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_alloc(size: usize) -> *mut c_void {
+pub(super) unsafe extern "C" fn enif_alloc(size: usize) -> *mut c_void {
     // SAFETY: `malloc` accepts each size and gives NULL on failure.
     unsafe { libc::malloc(size) }
 }
@@ -761,7 +764,7 @@ pub unsafe extern "C" fn enif_alloc(size: usize) -> *mut c_void {
 /// `ptr` is NULL or a block of `enif_alloc` or `enif_realloc` that the
 /// NIF did not free, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
+pub(super) unsafe extern "C" fn enif_realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
     // SAFETY: the caller gives NULL or a live block of `malloc`.
     unsafe { libc::realloc(ptr, size) }
 }
@@ -774,7 +777,7 @@ pub unsafe extern "C" fn enif_realloc(ptr: *mut c_void, size: usize) -> *mut c_v
 /// `ptr` is NULL or a block of `enif_alloc` or `enif_realloc` that the
 /// NIF did not free, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_free(ptr: *mut c_void) {
+pub(super) unsafe extern "C" fn enif_free(ptr: *mut c_void) {
     // SAFETY: the caller gives NULL or a live block of `malloc`.
     unsafe { libc::free(ptr) }
 }
@@ -789,7 +792,7 @@ pub unsafe extern "C" fn enif_free(ptr: *mut c_void) {
 ///
 /// `bin` points to a writable `ErlNifBinary`, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_alloc_binary(size: usize, bin: *mut ErlNifBinary) -> c_int {
+pub(super) unsafe extern "C" fn enif_alloc_binary(size: usize, bin: *mut ErlNifBinary) -> c_int {
     // SAFETY: `malloc` accepts each size and gives NULL on failure. A block
     // of 1 byte for a binary of 0 bytes gives an address that is not NULL.
     let data = unsafe { libc::malloc(size.max(1)) };
@@ -816,7 +819,7 @@ pub unsafe extern "C" fn enif_alloc_binary(size: usize, bin: *mut ErlNifBinary) 
 /// `bin` points to an `ErlNifBinary` of `enif_alloc_binary` that the NIF
 /// owns, or one with a NULL `ref_bin`, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_release_binary(bin: *mut ErlNifBinary) {
+pub(super) unsafe extern "C" fn enif_release_binary(bin: *mut ErlNifBinary) {
     // SAFETY: the C API requires that `bin` points to an `ErlNifBinary`.
     // A `ref_bin` that is not NULL is a live block of `malloc` of
     // `enif_alloc_binary`, and `free` of NULL does nothing.
@@ -837,7 +840,7 @@ pub unsafe extern "C" fn enif_release_binary(bin: *mut ErlNifBinary) {
 /// `enif_inspect_binary`, or of `enif_inspect_iolist_as_binary`, whose
 /// `size` bytes at `data` are readable, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_make_binary(
+pub(super) unsafe extern "C" fn enif_make_binary(
     env_pointer: *mut Env,
     bin: *mut ErlNifBinary,
 ) -> NifTerm {
@@ -869,7 +872,7 @@ pub unsafe extern "C" fn enif_make_binary(
 /// `env` is the env of the current call, and `bin` points to a writable
 /// `ErlNifBinary`, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_inspect_iolist_as_binary(
+pub(super) unsafe extern "C" fn enif_inspect_iolist_as_binary(
     env_pointer: *mut Env,
     term: NifTerm,
     bin: *mut ErlNifBinary,
@@ -927,7 +930,7 @@ fn atom_bytes(name: &str, encoding: c_int) -> Option<Vec<u8>> {
 /// `env` is the env of the current call, and `buf` points to `len`
 /// writable bytes, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_get_atom(
+pub(super) unsafe extern "C" fn enif_get_atom(
     env_pointer: *mut Env,
     atom: NifTerm,
     buf: *mut c_char,
@@ -964,7 +967,7 @@ pub unsafe extern "C" fn enif_get_atom(
 /// `env` is the env of the current call, and `dp` points to a writable C
 /// `double`, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_get_double(
+pub(super) unsafe extern "C" fn enif_get_double(
     env_pointer: *mut Env,
     term: NifTerm,
     dp: *mut c_double,
@@ -990,7 +993,7 @@ pub unsafe extern "C" fn enif_get_double(
 /// `env` is the env of the current call, and `ip` points to a writable C
 /// `long`, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_get_long(
+pub(super) unsafe extern "C" fn enif_get_long(
     env_pointer: *mut Env,
     term: NifTerm,
     ip: *mut c_long,
@@ -1015,7 +1018,7 @@ pub unsafe extern "C" fn enif_get_long(
 /// `env` is the env of the current call, and `head` and `tail` point to
 /// writable `ERL_NIF_TERM`s, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_get_list_cell(
+pub(super) unsafe extern "C" fn enif_get_list_cell(
     env_pointer: *mut Env,
     term: NifTerm,
     head: *mut NifTerm,
@@ -1051,7 +1054,7 @@ pub unsafe extern "C" fn enif_get_list_cell(
 /// `env` is the env of the current call, and `len` points to a writable C
 /// `unsigned`, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_get_list_length(
+pub(super) unsafe extern "C" fn enif_get_list_length(
     env_pointer: *mut Env,
     term: NifTerm,
     len: *mut c_uint,
@@ -1080,7 +1083,10 @@ pub unsafe extern "C" fn enif_get_list_length(
 /// `env` is the env of the current call, and `name` is a C string, as the
 /// C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_make_atom(env_pointer: *mut Env, name: *const c_char) -> NifTerm {
+pub(super) unsafe extern "C" fn enif_make_atom(
+    env_pointer: *mut Env,
+    name: *const c_char,
+) -> NifTerm {
     // SAFETY: the C API gives the env of the current call.
     let env = unsafe { env(env_pointer) };
     // SAFETY: the C API requires that `name` is a C string.
@@ -1096,7 +1102,7 @@ pub unsafe extern "C" fn enif_make_atom(env_pointer: *mut Env, name: *const c_ch
 ///
 /// `env` is the env of the current call, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_make_double(env_pointer: *mut Env, d: c_double) -> NifTerm {
+pub(super) unsafe extern "C" fn enif_make_double(env_pointer: *mut Env, d: c_double) -> NifTerm {
     // SAFETY: the C API gives the env of the current call.
     let env = unsafe { env(env_pointer) };
     if !d.is_finite() {
@@ -1112,7 +1118,7 @@ pub unsafe extern "C" fn enif_make_double(env_pointer: *mut Env, d: c_double) ->
 ///
 /// `env` is the env of the current call, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_make_long(env_pointer: *mut Env, i: c_long) -> NifTerm {
+pub(super) unsafe extern "C" fn enif_make_long(env_pointer: *mut Env, i: c_long) -> NifTerm {
     // SAFETY: the C API gives the env of the current call.
     let env = unsafe { env(env_pointer) };
     env.make(Term::Integer(i))
@@ -1127,7 +1133,7 @@ pub unsafe extern "C" fn enif_make_long(env_pointer: *mut Env, i: c_long) -> Nif
 /// `env` is the env of the current call, and the call has `cnt` variable
 /// arguments of the type `ERL_NIF_TERM`, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_make_list(
+pub(super) unsafe extern "C" fn enif_make_list(
     env_pointer: *mut Env,
     cnt: c_uint,
     mut args: ...
@@ -1149,7 +1155,7 @@ pub unsafe extern "C" fn enif_make_list(
 ///
 /// `env` is the env of the current call, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_make_list_cell(
+pub(super) unsafe extern "C" fn enif_make_list_cell(
     env_pointer: *mut Env,
     car: NifTerm,
     cdr: NifTerm,
@@ -1170,7 +1176,7 @@ pub unsafe extern "C" fn enif_make_list_cell(
 /// `env` is the env of the current call, and `arr` points to `cnt`
 /// readable `ERL_NIF_TERM`s, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_make_list_from_array(
+pub(super) unsafe extern "C" fn enif_make_list_from_array(
     env_pointer: *mut Env,
     arr: *const NifTerm,
     cnt: c_uint,
@@ -1195,7 +1201,7 @@ pub unsafe extern "C" fn enif_make_list_from_array(
 /// `env` is the env of the current call, and the call has `cnt` variable
 /// arguments of the type `ERL_NIF_TERM`, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_make_tuple(
+pub(super) unsafe extern "C" fn enif_make_tuple(
     env_pointer: *mut Env,
     cnt: c_uint,
     mut args: ...
@@ -1227,7 +1233,7 @@ pub unsafe extern "C" fn enif_make_tuple(
 /// `env` is the env of the current call, and `tried` is NULL or points to
 /// a writable `ErlNifResourceFlags`, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_open_resource_type(
+pub(super) unsafe extern "C" fn enif_open_resource_type(
     env_pointer: *mut Env,
     _module_str: *const c_char,
     _name_str: *const c_char,
@@ -1260,7 +1266,7 @@ pub unsafe extern "C" fn enif_open_resource_type(
 ///
 /// `kind` is a type of `enif_open_resource_type`, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_alloc_resource(
+pub(super) unsafe extern "C" fn enif_alloc_resource(
     kind: *const ResourceType,
     size: usize,
 ) -> *mut c_void {
@@ -1284,7 +1290,7 @@ pub unsafe extern "C" fn enif_alloc_resource(
 /// `obj` is the data of a resource object with a C reference, as the C
 /// API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_release_resource(obj: *mut c_void) {
+pub(super) unsafe extern "C" fn enif_release_resource(obj: *mut c_void) {
     resource::release(obj.expose_provenance());
 }
 
@@ -1295,7 +1301,7 @@ pub unsafe extern "C" fn enif_release_resource(obj: *mut c_void) {
 ///
 /// `obj` is the data of a live resource object, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_keep_resource(obj: *mut c_void) {
+pub(super) unsafe extern "C" fn enif_keep_resource(obj: *mut c_void) {
     resource::keep(obj.expose_provenance());
 }
 
@@ -1309,7 +1315,10 @@ pub unsafe extern "C" fn enif_keep_resource(obj: *mut c_void) {
 ///
 /// `env` is the env of the current call, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_make_resource(env_pointer: *mut Env, obj: *mut c_void) -> NifTerm {
+pub(super) unsafe extern "C" fn enif_make_resource(
+    env_pointer: *mut Env,
+    obj: *mut c_void,
+) -> NifTerm {
     // SAFETY: the C API gives the env of the current call.
     let env = unsafe { env(env_pointer) };
     let Some(term) = resource::term(obj.expose_provenance()) else {
@@ -1332,7 +1341,7 @@ pub unsafe extern "C" fn enif_make_resource(env_pointer: *mut Env, obj: *mut c_v
 /// `env` is the env of the current call, and `objp` points to a writable
 /// `void*`, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_get_resource(
+pub(super) unsafe extern "C" fn enif_get_resource(
     env_pointer: *mut Env,
     term: NifTerm,
     kind: *const ResourceType,
@@ -1362,7 +1371,7 @@ pub unsafe extern "C" fn enif_get_resource(
 ///
 /// `env` is an env of `enif_alloc_env`, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_clear_env(env_pointer: *mut Env) {
+pub(super) unsafe extern "C" fn enif_clear_env(env_pointer: *mut Env) {
     // SAFETY: the C API gives an env of `enif_alloc_env`, which the NIF
     // keeps until it calls `enif_free_env`.
     unsafe { env(env_pointer) }.clear();
@@ -1375,7 +1384,7 @@ pub unsafe extern "C" fn enif_clear_env(env_pointer: *mut Env) {
 ///
 /// `env` is the env of the current call, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_is_atom(env_pointer: *mut Env, term: NifTerm) -> c_int {
+pub(super) unsafe extern "C" fn enif_is_atom(env_pointer: *mut Env, term: NifTerm) -> c_int {
     // SAFETY: the C API gives the env of the current call.
     let env = unsafe { env(env_pointer) };
     c_int::from(matches!(env.get(term), Some(Term::Atom(_))))
@@ -1388,7 +1397,7 @@ pub unsafe extern "C" fn enif_is_atom(env_pointer: *mut Env, term: NifTerm) -> c
 ///
 /// `env` is the env of the current call, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_is_empty_list(env_pointer: *mut Env, term: NifTerm) -> c_int {
+pub(super) unsafe extern "C" fn enif_is_empty_list(env_pointer: *mut Env, term: NifTerm) -> c_int {
     // SAFETY: the C API gives the env of the current call.
     let env = unsafe { env(env_pointer) };
     c_int::from(matches!(env.get(term), Some(Term::Nil)))
@@ -1402,7 +1411,7 @@ pub unsafe extern "C" fn enif_is_empty_list(env_pointer: *mut Env, term: NifTerm
 ///
 /// `env` is the env of the current call, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_is_list(env_pointer: *mut Env, term: NifTerm) -> c_int {
+pub(super) unsafe extern "C" fn enif_is_list(env_pointer: *mut Env, term: NifTerm) -> c_int {
     // SAFETY: the C API gives the env of the current call.
     let env = unsafe { env(env_pointer) };
     c_int::from(matches!(env.get(term), Some(Term::Nil | Term::Cons(_))))
@@ -1418,7 +1427,7 @@ pub unsafe extern "C" fn enif_is_list(env_pointer: *mut Env, term: NifTerm) -> c
 /// `env` is the env of the current call, and `ip` points to a writable C
 /// `unsigned long`, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_get_ulong(
+pub(super) unsafe extern "C" fn enif_get_ulong(
     env_pointer: *mut Env,
     term: NifTerm,
     ip: *mut c_ulong,
@@ -1457,7 +1466,7 @@ pub unsafe extern "C" fn enif_get_ulong(
 /// bytes, and `atom` points to a writable `ERL_NIF_TERM`, as the C API
 /// requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_make_new_atom_len(
+pub(super) unsafe extern "C" fn enif_make_new_atom_len(
     env_pointer: *mut Env,
     name: *const c_char,
     len: usize,
@@ -1499,7 +1508,7 @@ pub unsafe extern "C" fn enif_make_new_atom_len(
 /// `env` is the env of the current call, and `arr` points to `cnt`
 /// readable `ERL_NIF_TERM`s, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_make_tuple_from_array(
+pub(super) unsafe extern "C" fn enif_make_tuple_from_array(
     env_pointer: *mut Env,
     arr: *const NifTerm,
     cnt: c_uint,
@@ -1526,7 +1535,7 @@ pub unsafe extern "C" fn enif_make_tuple_from_array(
 /// `env` is the env of the current call, and `value` points to a writable
 /// `ERL_NIF_TERM`, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_get_map_value(
+pub(super) unsafe extern "C" fn enif_get_map_value(
     env_pointer: *mut Env,
     map: NifTerm,
     key: NifTerm,
@@ -1563,7 +1572,7 @@ pub unsafe extern "C" fn enif_get_map_value(
 /// readable `ERL_NIF_TERM`s, and `map_out` points to a writable
 /// `ERL_NIF_TERM`, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_make_map_from_arrays(
+pub(super) unsafe extern "C" fn enif_make_map_from_arrays(
     env_pointer: *mut Env,
     keys: *const NifTerm,
     values: *const NifTerm,
@@ -1611,7 +1620,7 @@ pub unsafe extern "C" fn enif_make_map_from_arrays(
 /// `ErlNifResourceTypeInit`, and `tried` is NULL or points to a writable
 /// `ErlNifResourceFlags`, as the C API requires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn enif_init_resource_type(
+pub(super) unsafe extern "C" fn enif_init_resource_type(
     env_pointer: *mut Env,
     _name_str: *const c_char,
     init: *const ErlNifResourceTypeInit,

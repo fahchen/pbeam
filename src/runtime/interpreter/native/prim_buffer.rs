@@ -17,7 +17,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use super::*;
+use super::{BeamError, BifResult, Binding, ExceptionClass, Job, Scheduler, Term};
 use crate::runtime::buffers::{Buffer, Buffers};
 use crate::runtime::resources::lock;
 use num_traits::ToPrimitive;
