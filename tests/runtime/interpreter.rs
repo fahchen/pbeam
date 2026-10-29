@@ -4392,13 +4392,11 @@ fn reads_the_current_stacktrace_of_the_calling_process() {
         );
     }
     // ERTS 29.1.1: process_info(self(), {dictionary, k}) is
-    // {{dictionary, k}, undefined}, process_info(self(), [messages]) is
-    // [{messages, []}], and process_info(self(), status) is
-    // {status, running}. PBeam does not implement them yet.
+    // {{dictionary, k}, undefined}, and process_info(self(), [messages]) is
+    // [{messages, []}]. PBeam does not implement them yet.
     for (process, item) in [
         (root(), dictionary()),
         (root(), Term::list_from(vec![test_atom("messages")])),
-        (root(), test_atom("status")),
     ] {
         assert_eq!(
             process_info(process.clone(), item.clone())
@@ -4410,6 +4408,12 @@ fn reads_the_current_stacktrace_of_the_calling_process() {
             )
         );
     }
+    // ERTS 29.1.1: process_info(self(), status) is {status, running}, as
+    // for the item that `process_info/1` reports.
+    assert_eq!(
+        process_info(root(), test_atom("status")).unwrap(),
+        Term::tuple(vec![test_atom("status"), test_atom("running")])
+    );
     // ERTS 29.1.1: process_info(self(), registered_name) is [] for a
     // process without a name.
     assert_eq!(
