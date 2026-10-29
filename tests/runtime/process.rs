@@ -294,6 +294,45 @@ fn reads_each_item_of_another_process_that_a_remote_request_carries() {
     }
 }
 
+/// A process with no frame and no undefined start reads `undefined` as its
+/// current function, and a process error handler reads its module. A frame
+/// whose module is not in the code table gives the error of the read.
+#[test]
+fn reads_the_current_function_and_the_error_handler_of_another_process() {
+    let atoms = AtomTable::new();
+    let code = crate::runtime::interpreter::CodeTable::default();
+    let mut process = ProcessState::new(ProcessId(0), undefined_start(), vec![]);
+    process.undefined_start = None;
+    process.error_handler = Some("my_handler".to_owned());
+    let request = crate::runtime::interpreter::bif::erlang::ProcessInfoRequest {
+        code: &code,
+        atoms: &atoms,
+        current: 0,
+        messages: 0,
+        caller: false,
+        registered_name: None,
+    };
+    let item = |process: &ProcessState, name: &'static str| {
+        request.item(process, &Term::static_atom(name))
+    };
+    assert_eq!(
+        item(&process, "current_function").unwrap(),
+        Some(Term::tuple(vec![
+            Term::static_atom("current_function"),
+            Term::static_atom("undefined")
+        ]))
+    );
+    assert_eq!(
+        item(&process, "error_handler").unwrap(),
+        Some(Term::tuple(vec![
+            Term::static_atom("error_handler"),
+            Term::Atom(atoms.put("my_handler").unwrap())
+        ]))
+    );
+    process.frames.push(frame());
+    assert!(item(&process, "status").is_err());
+}
+
 /// An undefined start, whose frames need no code table.
 fn undefined_start() -> Start {
     Start::Undefined {
