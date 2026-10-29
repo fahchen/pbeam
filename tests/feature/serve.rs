@@ -98,6 +98,7 @@ fn serves_hello_world_from_the_plug_example_as_pinned_erts() {
     );
     let bundled = serve_one_file();
     serves_concurrent_requests_on_several_schedulers_as_pinned_erts();
+    gives_the_command_line_arguments_of_the_executable_to_the_release();
     // The NIF record of this acceptance: each module of a NIF library that
     // the release boot loads. A module with an `on_load` function is loaded
     // only when the function returns `ok`, so `erlang:load_nif/2` gave `ok`
@@ -418,7 +419,11 @@ fn builds_the_one_file_executable_with_the_mix_task_and_runs_it_clean() {
     assert_eq!(response, erts);
 }
 
-#[test]
+/// Check the arguments of a one-file run. The serve test calls it after its
+/// build of the release: under nextest each test runs in a process of its
+/// own, so `ONE_FILE_RUN` cannot keep another test from rewriting
+/// `target/examples/plug_hello`, and a test of its own could also run before
+/// any build of the example.
 fn gives_the_command_line_arguments_of_the_executable_to_the_release() {
     // A one-file executable starts its bundle also with arguments. The
     // arguments reach the release as `System.argv()` unchanged, also `erl`,
