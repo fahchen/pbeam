@@ -450,6 +450,11 @@ fn decodes_each_identifier_tag_and_checks_the_node() {
         decode_with(&atoms, &other_pid, AtomPolicy::Create),
         Err(DecodeError::Unsupported(_))
     ));
+}
+
+#[test]
+fn decodes_the_identifier_tags_of_another_node() {
+    let atoms = AtomTable::new();
     // A port and a reference of another node, and an old reference of
     // another node, give the runtime error of the missing term.
     let foo = vec![119, 3, 102, 111, 111];
@@ -495,6 +500,11 @@ fn decodes_each_identifier_tag_and_checks_the_node() {
             Err(DecodeError::Unsupported(_))
         ));
     }
+}
+
+#[test]
+fn decodes_identifier_numbers_that_pbeam_cannot_hold() {
+    let atoms = AtomTable::new();
     // A legacy creation above 3 raises badarg before the node check
     // (`is_tiny_creation`, `external.c:71-72`, `3162`).
     let mut tiny_pid = vec![103];
@@ -683,6 +693,15 @@ fn decodes_the_unsupported_forms_and_local_terms() {
         decode_with(&atoms, &bad_function, AtomPolicy::Create),
         Err(DecodeError::Badarg)
     ));
+    assert!(matches!(
+        decode_with(&atoms, &export, AtomPolicy::ExistingOnly),
+        Err(DecodeError::Unsupported(_))
+    ));
+}
+
+#[test]
+fn decodes_the_arity_of_an_export_term() {
+    let atoms = AtomTable::new();
     // A bignum that fits a small integer decodes to the integer.
     // ERTS takes an export arity that is a small integer above 2^32 - 1
     // (`external.c:5014-5030`). A PBeam fun holds its arity as a `u32`, so
@@ -708,10 +727,11 @@ fn decodes_the_unsupported_forms_and_local_terms() {
         decode_with(&atoms, &negative, AtomPolicy::Create),
         Err(DecodeError::Badarg)
     ));
-    assert!(matches!(
-        decode_with(&atoms, &export, AtomPolicy::ExistingOnly),
-        Err(DecodeError::Unsupported(_))
-    ));
+}
+
+#[test]
+fn decodes_local_terms_with_their_block_hash() {
+    let atoms = AtomTable::new();
     // A local pid holds `NIL_EXT` for the node, and its hash covers the
     // pid bytes (`external.c:3651-3654`, `5250-5255`).
     let options = Options {

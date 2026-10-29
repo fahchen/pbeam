@@ -209,7 +209,17 @@ fn imports_a_fun_between_two_atom_tables() {
             Term::Integer(1),
         ])
     );
+}
 
+#[test]
+fn rejects_an_atom_index_outside_the_source_table_on_import() {
+    // The two tables are two copies of one program, so the local fun is of
+    // the program of the destination. The source holds three names that the
+    // destination does not, so each later name gets a higher index in the
+    // source: the module and the function of a fun have different indices
+    // in the two tables.
+    let source = AtomTable::new();
+    let destination = source.clone();
     // An index at or above the source table is not a value of the table, for
     // a term atom and for the module of a local fun.
     let outside_index = u32::try_from(source.read_indices().len()).unwrap();

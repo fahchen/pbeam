@@ -213,6 +213,10 @@ fn map_of(keys: i64) -> Term {
 /// two terms that share one storage, two terms with equal content and
 /// different storage, one deep term, and one long list.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "case table: one entry for each comparison shape, and the entries share the fixtures"
+)]
 fn reports_the_allocation_count_of_one_comparison() {
     let shared_tuple = tuple_of(1000);
     let equal_tuple = tuple_of(1000);
@@ -334,6 +338,10 @@ fn reports_the_allocation_count_of_one_comparison() {
 /// Print the cost of the comparison rows of the audit, and of the compound
 /// shapes that the removal of the pair stack must keep.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "table of measurements: one `report` call for each comparison shape, and the calls share the fixtures"
+)]
 fn prints_the_comparison_cost() {
     let tuple_1000 = tuple_of(1000);
     let other_1000 = tuple_of(1000);

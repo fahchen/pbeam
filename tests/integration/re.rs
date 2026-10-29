@@ -313,14 +313,22 @@ fn exports_compiled_patterns_as_pinned_erts() {
         assert_eq!(header.bytes().unwrap()[12..], [1, unicode]);
         assert_eq!(pattern.bytes().unwrap(), source);
         assert_eq!(**given, Term::list_from(options));
-        bytes.push([header, pattern, encoded]);
+        bytes.push([
+            header.bytes().unwrap(),
+            pattern.bytes().unwrap(),
+            encoded.bytes().unwrap(),
+        ]);
     }
+    checks_the_encoded_forms(&bytes, &single_options);
+}
+
+/// Check the `Encoded` binaries of the exports: the `bytes` of the header, the
+/// source, and the encoded form of each export, in the order of the probe. The
+/// `single_options` are the options of the exports from the index 3.
+fn checks_the_encoded_forms(bytes: &[[&[u8]; 3]], single_options: &[&str]) {
     // Each compile option changes `Encoded`. `bsr_unicode` is the default,
     // and a later bsr option replaces an earlier one.
-    let encoded: Vec<&[u8]> = bytes
-        .iter()
-        .map(|[_, _, encoded]| encoded.bytes().unwrap())
-        .collect();
+    let encoded: Vec<&[u8]> = bytes.iter().map(|[_, _, encoded]| *encoded).collect();
     let plain = encoded[0];
     let (by_option, bsr_orders) = encoded[3..].split_at(single_options.len());
     for (option, &bytes) in single_options.iter().zip(by_option) {
@@ -338,10 +346,7 @@ fn exports_compiled_patterns_as_pinned_erts() {
     let exports: Vec<String> = bytes
         .iter()
         .map(|binaries| {
-            let binaries: Vec<String> = binaries
-                .iter()
-                .map(|bytes| text(bytes.bytes().unwrap()))
-                .collect();
+            let binaries: Vec<String> = binaries.iter().map(|bytes| text(bytes)).collect();
             format!("[{}]", binaries.join(","))
         })
         .collect();

@@ -335,6 +335,10 @@ impl Correction {
         clippy::similar_names,
         reason = "the names `mtime`, `stime`, and `smtime_diff` are the names of `check_time_correction` in `erl_time_sup.c`"
     )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "mirrors `check_time_correction` of `erl_time_sup.c` (497-683) step by step: the error check and the drift measurement share the locals of the original"
+    )]
     fn check_time_correction(&mut self, mut os_times: impl FnMut() -> (i64, i64)) -> (i64, i64) {
         let (os_mtime, os_stime) = os_times();
         let ci = self.curr;

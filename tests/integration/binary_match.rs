@@ -1087,7 +1087,6 @@ fn runs_the_utf16_and_utf32_match_instructions_as_pinned_erts() {
     // values are the results of the pinned ERTS.
     let program = BeamProgram::load(&[BS_UTF_PROBE]).unwrap();
     let short = Term::Atom(program.atom("short").unwrap());
-    let int = Term::Atom(program.atom("int").unwrap());
     let pair = |code_point: i64, rest: &[u8]| {
         Term::tuple(vec![Term::Integer(code_point), Term::binary(rest.to_vec())])
     };
@@ -1131,9 +1130,27 @@ fn runs_the_utf16_and_utf32_match_instructions_as_pinned_erts() {
     skipped.extend(vec![short.clone(); 6]);
     assert_eq!(bs_utf_each("skip16", &big16), skipped);
     let mut skipped_little = vec![rest(&[]); 7];
-    skipped_little.extend(vec![short.clone(); 6]);
+    skipped_little.extend(vec![short; 6]);
     assert_eq!(bs_utf_each("skip16_little", &little16), skipped_little);
+}
 
+#[test]
+fn runs_the_utf32_match_instructions_as_pinned_erts() {
+    // `bs_get_utf16` and `bs_skip_utf16` call `erts_bs_get_utf16`
+    // (erl_bits.c:2223-2285; jit/arm/instr_bs.cpp:905-934). A unit that is
+    // not a surrogate is one character, and a high and a low surrogate are
+    // one character. A lone surrogate and fewer than 16 bits fail.
+    // `bs_get_utf32` and `bs_skip_utf32` read a 32-bit integer and fail for
+    // a surrogate or a value above 16#10FFFF, with the position moved back
+    // (jit/arm/ops.tab:1086-1095, instr_bs.cpp:936-983). The expected
+    // values are the results of the pinned ERTS.
+    let program = BeamProgram::load(&[BS_UTF_PROBE]).unwrap();
+    let short = Term::Atom(program.atom("short").unwrap());
+    let int = Term::Atom(program.atom("int").unwrap());
+    let pair = |code_point: i64, rest: &[u8]| {
+        Term::tuple(vec![Term::Integer(code_point), Term::binary(rest.to_vec())])
+    };
+    let rest = |bytes: &[u8]| Term::binary(bytes.to_vec());
     let big32: Vec<Vec<u8>> = [
         &[0, 0, 0, 65, 1][..],
         &[0, 1, 246, 0],

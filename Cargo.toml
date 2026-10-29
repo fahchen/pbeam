@@ -924,8 +924,6 @@ module_inception = "allow"        # a leaf module named after its main item is f
 enum_glob_use = "allow"           # use Enum::* inside a function that matches on it
 
 # m23 allow list: lints of the groups above with a hit on main. The named task removes the line and fixes the hits.
-# #1349
-too_many_lines = "allow"
 # #1350
 manual_assert = "allow"
 # #1351

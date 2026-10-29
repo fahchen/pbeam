@@ -37,6 +37,10 @@ fn reference() -> String {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "case table: one expected stack trace for each probe call, and the entries share the frame helpers"
+)]
 fn keeps_the_stack_trace_frames_of_error_1_and_raise_3_as_pinned_erts() {
     // `system_flag(backtrace_depth, Depth)` returns the old depth and sets
     // at most 64 (`bif.c:5108-5115`, `error.h:206`). The stack trace of

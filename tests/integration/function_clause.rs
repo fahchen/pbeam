@@ -34,6 +34,10 @@ fn reference() -> String {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "case table: one expected stack for each probe call, and the entries share the frame helpers"
+)]
 fn raises_function_clause_with_the_arguments_and_the_caller_frames_as_pinned_erts() {
     // `i_func_info` raises `error:function_clause` and sets the current MFA
     // (`jit/arm/beam_asm_module.cpp:484-497`). The first frame holds the

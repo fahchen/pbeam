@@ -371,6 +371,10 @@ fn prints_the_size_of_every_structure() {
 
 /// Print the cost of every derivation that the audit names.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "table of measurements: one `report` call for each derivation, and the calls share the fixtures"
+)]
 fn prints_the_cost_of_every_derivation() {
     struct Position {
         index: usize,

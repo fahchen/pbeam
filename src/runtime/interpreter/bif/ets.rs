@@ -161,6 +161,10 @@ fn denied(cause: &'static str) -> BifResult {
 /// # Errors
 ///
 /// Return a runtime error for the table type `ordered_set`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "option table of `ets:new/2`: one arm for each table option, as the option loop of `ets_new_2` in `erl_db.c` (2585-2658); the arms share the state of the loop"
+)]
 pub(super) fn new(
     context: &mut BifContext<'_>,
     name: &Term,
@@ -557,6 +561,10 @@ fn insert_objects(
 ///
 /// Return a runtime error for a table with the key position 0: ERTS aborts
 /// the emulator there (`Invalid tag in make_internal_hash`).
+#[expect(
+    clippy::too_many_lines,
+    reason = "mirrors the list insert of `ets_insert_2` in `erl_db.c` (1927-2310) step by step, in one labeled block with one exit for each yield of the original; a split would break the line-by-line mapping"
+)]
 pub(super) fn insert_list(
     context: &mut BifContext<'_>,
     id: Reference,
@@ -3635,44 +3643,7 @@ pub(super) fn select_replace_trap(
         }
         (reductions, trap)
     } else {
-        let table = &mut *taken;
-        let mut iterations = REPLACE_ITERATIONS;
-        let mut read = |table: &mut Table, bucket: usize, iterations: &mut i64| {
-            let (read, replaced) = table.replace_chain(bucket, |object| {
-                let found = compiled.run(atoms, object)?;
-                found.tuple_elements().map(<[Term]>::to_vec)
-            });
-            *iterations -= read;
-            got += replaced;
-        };
-        let mut walk = None;
-        match (resume, compiled.bound_key(keypos)) {
-            (Some((Term::Integer(bucket), ..)), _) => walk = Some(*bucket as usize),
-            _ if compiled.matches_nothing(keypos) => {}
-            (_, Some(key)) => {
-                if let Some(bucket) = table.key_bucket(atoms, key) {
-                    read(table, bucket, &mut iterations);
-                }
-            }
-            _ => walk = Some(0),
-        }
-        // The walk traps at a bucket boundary once it read 1000 objects
-        // (`match_traverse`, `erl_db_hash.c:1895-1960`).
-        let mut trap = None;
-        while let Some(bucket) = walk.take() {
-            read(table, bucket, &mut iterations);
-            match table.next_bucket(bucket) {
-                Some(next) if iterations <= 0 => {
-                    trap = Some((Term::Integer(next as i64), Term::Nil));
-                }
-                next => walk = next,
-            }
-        }
-        // A trap uses all reductions (`on_simple_trap`).
-        (
-            trap.is_none().then_some(REPLACE_ITERATIONS - iterations),
-            trap,
-        )
+        replace_hash(atoms, &mut taken, &compiled, keypos, resume, &mut got)
     };
     let writes = taken.writes() as i64;
     drop(taken);
@@ -3704,6 +3675,58 @@ pub(super) fn select_replace_trap(
         function: "select_replace_trap",
         arguments: count_arguments(&id, spec, (&position, &end, got, writes)),
     })
+}
+
+/// Replace the matching objects of a hash table for `select_replace_trap`:
+/// the bucket of a bound key, or the walk over the buckets from the start or
+/// from the bucket of `resume`. Add the replaced objects to `got`. Return the
+/// reductions of the turn, or `None` for a trap that uses all of them, and the
+/// position of the trap.
+fn replace_hash(
+    atoms: &AtomTable,
+    table: &mut Table,
+    compiled: &MatchSpec,
+    keypos: usize,
+    resume: Option<(&Term, &Term, i64, i64)>,
+    got: &mut i64,
+) -> (Option<i64>, Option<(Term, Term)>) {
+    let mut iterations = REPLACE_ITERATIONS;
+    let mut read = |table: &mut Table, bucket: usize, iterations: &mut i64| {
+        let (read, replaced) = table.replace_chain(bucket, |object| {
+            let found = compiled.run(atoms, object)?;
+            found.tuple_elements().map(<[Term]>::to_vec)
+        });
+        *iterations -= read;
+        *got += replaced;
+    };
+    let mut walk = None;
+    match (resume, compiled.bound_key(keypos)) {
+        (Some((Term::Integer(bucket), ..)), _) => walk = Some(*bucket as usize),
+        _ if compiled.matches_nothing(keypos) => {}
+        (_, Some(key)) => {
+            if let Some(bucket) = table.key_bucket(atoms, key) {
+                read(table, bucket, &mut iterations);
+            }
+        }
+        _ => walk = Some(0),
+    }
+    // The walk traps at a bucket boundary once it read 1000 objects
+    // (`match_traverse`, `erl_db_hash.c:1895-1960`).
+    let mut trap = None;
+    while let Some(bucket) = walk.take() {
+        read(table, bucket, &mut iterations);
+        match table.next_bucket(bucket) {
+            Some(next) if iterations <= 0 => {
+                trap = Some((Term::Integer(next as i64), Term::Nil));
+            }
+            next => walk = next,
+        }
+    }
+    // A trap uses all reductions (`on_simple_trap`).
+    (
+        trap.is_none().then_some(REPLACE_ITERATIONS - iterations),
+        trap,
+    )
 }
 
 /// Return whether each clause of `spec` is a 3-tuple whose body keeps the

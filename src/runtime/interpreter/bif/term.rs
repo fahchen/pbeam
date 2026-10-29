@@ -481,6 +481,10 @@ fn encode(term: &Term, atoms: &AtomTable, options: &Options) -> Result<Vec<u8>, 
 /// # Errors
 ///
 /// The errors of [`encode`].
+#[expect(
+    clippy::too_many_lines,
+    reason = "mirrors the encoder `enc_term` of `external.c`: one arm for each term type with the patch of the fun size; the arms share the output and the work stack"
+)]
 fn encode_parts(
     term: &Term,
     atoms: &AtomTable,
@@ -1073,6 +1077,10 @@ fn check_sysname(input: &[u8], index: &mut usize, scope: NodeScope) -> Result<()
 /// the lengths, the atom encodings, the reference counts, and the local
 /// block hashes. A term that PBeam decodes to an unsupported form passes the
 /// check, because its structure is valid.
+#[expect(
+    clippy::too_many_lines,
+    reason = "mirrors the size walk `decoded_size` of `external.c`: one arm for each external term tag with the check of the node scope; each arm is short"
+)]
 fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
     let mut index = 0usize;
     let mut scope = NodeScope::Remote;
@@ -1427,6 +1435,10 @@ impl Decoder<'_> {
     /// Decode one term, as `dec_term` (`external.c:4270-5340`) does. The
     /// frames hold the containers that the walk still fills, so a deep term
     /// uses no Rust stack.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "mirrors the decoder `dec_term` of `external.c`: one arm for each external term tag, and the work stack that fills the containers"
+    )]
     fn term(&mut self) -> Result<Term, DecodeError> {
         let mut frames: Vec<Frame> = Vec::new();
         'parse: loop {

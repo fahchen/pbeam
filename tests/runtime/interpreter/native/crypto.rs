@@ -320,6 +320,10 @@ fn gives_the_pinned_erts_pbkdf2_value_for_each_eligible_digest() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "case table: one entry for each bad argument of `pbkdf2_hmac`"
+)]
 fn checks_the_pbkdf2_arguments_in_the_erts_order() {
     type Case = (
         Term,

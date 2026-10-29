@@ -616,35 +616,23 @@ fn expression(atoms: &AtomTable, term: &Term, numbers: &[i32]) -> Result<Expr, S
             if name == "andalso" || name == "orelse" {
                 // `dmc_andalso` and `dmc_orelse` accept two or more
                 // operands (`erl_db_util.c:4760-4827`).
-                let mut operands = elements[1..]
-                    .iter()
-                    .map(|operand| expression(atoms, operand, numbers))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let mut operands = operands.drain(..);
-                let first = operands.next().expect("the form has an operand");
-                return Ok(operands.fold(first, |left, right| {
+                return fold_operands(atoms, elements, numbers, |left, right| {
                     let (left, right) = (Box::new(left), Box::new(right));
                     if name == "andalso" {
                         Expr::AndAlso(left, right)
                     } else {
                         Expr::OrElse(left, right)
                     }
-                }));
+                });
             }
             if (name == "and" || name == "or") && elements.len() > 3 {
                 // `dmc_and` and `dmc_or` accept two or more operands
                 // (`erl_db_util.c:4701-4757`). A left fold keeps the
                 // left-to-right evaluation.
                 let function = if name == "and" { Guard::And } else { Guard::Or };
-                let mut operands = elements[1..]
-                    .iter()
-                    .map(|operand| expression(atoms, operand, numbers))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let mut operands = operands.drain(..);
-                let first = operands.next().expect("the form has an operand");
-                return Ok(
-                    operands.fold(first, |left, right| Expr::Call(function, vec![left, right]))
-                );
+                return fold_operands(atoms, elements, numbers, |left, right| {
+                    Expr::Call(function, vec![left, right])
+                });
             }
             let Some(function) = guard(name, elements.len() - 1) else {
                 return Err(if known_guard(name, elements.len() - 1) {
@@ -662,6 +650,24 @@ fn expression(atoms: &AtomTable, term: &Term, numbers: &[i32]) -> Result<Expr, S
         Term::Map(_) => Err(SpecError::Unsupported("map construction".to_owned())),
         _ => Ok(Expr::Constant(term.clone())),
     }
+}
+
+/// Compile the operands of the form `elements` (the name and its operands)
+/// and fold them from the left with `combine`, as the evaluation goes from
+/// left to right. The form has at least one operand.
+fn fold_operands(
+    atoms: &AtomTable,
+    elements: &[Term],
+    numbers: &[i32],
+    combine: impl FnMut(Expr, Expr) -> Expr,
+) -> Result<Expr, SpecError> {
+    let mut operands = elements[1..]
+        .iter()
+        .map(|operand| expression(atoms, operand, numbers))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter();
+    let first = operands.next().expect("the form has an operand");
+    Ok(operands.fold(first, combine))
 }
 
 /// Return the guard function `name/arity`, or `None` when PBeam does not
@@ -847,6 +853,10 @@ fn part(
 
 /// Run the guard function `function` over `arguments`, as the BIF of the
 /// match program does. Return `None` for a failure.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one arm for each guard function of the match specification; each arm is one expression or a short check, as the guard calls of `erl_db_util.c` (`db_prog_match`)"
+)]
 fn call(atoms: &AtomTable, function: Guard, arguments: &[Term]) -> Option<Term> {
     let truth = |value: bool| Some(Term::static_atom(if value { "true" } else { "false" }));
     match function {

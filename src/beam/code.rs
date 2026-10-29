@@ -863,6 +863,10 @@ enum PartialTerm {
 /// A truncated term, an atom that is not UTF-8, a new atom when the atom
 /// table is full, a map with a duplicate key, or an external fun with an
 /// arity outside `0..=255` is an error.
+#[expect(
+    clippy::too_many_lines,
+    reason = "mirrors `dec_term` of `external.c`: one arm for each external term tag, and the loop that gives a finished term to its container; each arm is short"
+)]
 fn read_external_term(
     data: &[u8],
     cursor: &mut usize,

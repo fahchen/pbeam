@@ -15,6 +15,10 @@ const EXPECTED: &[u8] = include_bytes!("../../fixtures/existing_atom/existing_at
 const BITS_EXPECTED: &[u8] = b"{error,badarg}\n";
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "case table: one expected result for each name and encoding, and the entries share the helpers"
+)]
 fn reads_atoms_that_exist_as_pinned_erts() {
     // `erlang:list_to_existing_atom/1` follows `list_to_existing_atom_1`
     // (bif.c:3239-3258), which reads the name with `erts_unicode_list_to_buf`

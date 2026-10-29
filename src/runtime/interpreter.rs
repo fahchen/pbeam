@@ -1277,6 +1277,10 @@ impl BeamProgram {
     /// // `{undef, [{undef_target, missing, [p], []}]}`.
     /// assert!(matches!(program.run(&mut scheduler)?, Outcome::Exit { result: None, .. }));
     /// ```
+    #[expect(
+        clippy::too_many_lines,
+        reason = "instruction dispatch loop: one arm for each instruction, and a split would move work out of the hot path"
+    )]
     fn run(&self, scheduler: &mut Scheduler) -> Result<Outcome, BeamError> {
         // ERTS starts each process with `i_apply_only` of its MFA
         // (`erl_process.c:12616`; JIT `jit/beam_jit_main.cpp:258`). Its
@@ -3944,50 +3948,7 @@ impl BeamProgram {
                 module,
                 function,
                 arguments,
-            } => {
-                let arity = u32::try_from(arguments.len())
-                    .map_err(|_| error("arity exceeds BEAM limit"))?;
-                let process = scheduler.current_process_mut();
-                for (index, argument) in (0..).zip(arguments) {
-                    write(process, &Operand::X(index), argument)?;
-                }
-                // ERTS resolves the target through its export entry. A
-                // function that has no loaded export has a stub entry that
-                // calls `error_handler:undefined_function/3`
-                // (`erts_export_get_or_make_stub`, export.c:228-242;
-                // `call_error_handler`, beam_common.c:1294-1342). Thus a
-                // `re:run/2,3` call that runs before the pinned `re` module
-                // is loaded traps to `re:grun/3` or `re:urun/3`, and the
-                // error handler loads `re` and enters that function
-                // (`error_handler.erl:85-98`).
-                let frame = scheduler
-                    .synced_code()
-                    .export_frame(module, function, arity)?;
-                if let Some(frame) = frame {
-                    let process = scheduler.current_process_mut();
-                    enter_frame(process, frame, entry);
-                    // A BIF trap always switches out the process
-                    // (`context_switch_simplified` in
-                    // `jit/arm/instr_bif.cpp:525-536`, `676-701`). The
-                    // process enters the target when it runs again, so
-                    // the entry costs one reduction of the next turn.
-                    Ok(Some(Outcome::Yield))
-                } else {
-                    // ERTS switches out at the trap, and the export
-                    // stub of the target runs in the next turn
-                    // (`context_switch_simplified` in
-                    // `jit/arm/instr_bif.cpp:525-536`, `676-701`). Keep
-                    // the call for `run`, so the switch out happens
-                    // before the error handler.
-                    scheduler.current_process_mut().pending_trap = Some(PendingTrap {
-                        module,
-                        function,
-                        arity,
-                        entry,
-                    });
-                    Ok(Some(Outcome::Yield))
-                }
-            }
+            } => Self::finish_trap(scheduler, module, function, arguments, entry),
             BifResult::TrapBif {
                 module,
                 function,
@@ -4058,6 +4019,59 @@ impl BeamProgram {
                 process.registers = vec![Some(module), Some(function), Some(arguments)];
                 Ok(Some(Outcome::Hibernate))
             }
+        }
+    }
+
+    /// Write the arguments of a `BifResult::Trap` and enter the target of the
+    /// trap, or keep the call for `run` when the target has no loaded export.
+    fn finish_trap(
+        scheduler: &mut Scheduler,
+        module: &'static str,
+        function: &'static str,
+        arguments: Vec<Term>,
+        entry: CallKind,
+    ) -> Result<Option<Outcome>, BeamError> {
+        let arity =
+            u32::try_from(arguments.len()).map_err(|_| error("arity exceeds BEAM limit"))?;
+        let process = scheduler.current_process_mut();
+        for (index, argument) in (0..).zip(arguments) {
+            write(process, &Operand::X(index), argument)?;
+        }
+        // ERTS resolves the target through its export entry. A
+        // function that has no loaded export has a stub entry that
+        // calls `error_handler:undefined_function/3`
+        // (`erts_export_get_or_make_stub`, export.c:228-242;
+        // `call_error_handler`, beam_common.c:1294-1342). Thus a
+        // `re:run/2,3` call that runs before the pinned `re` module
+        // is loaded traps to `re:grun/3` or `re:urun/3`, and the
+        // error handler loads `re` and enters that function
+        // (`error_handler.erl:85-98`).
+        let frame = scheduler
+            .synced_code()
+            .export_frame(module, function, arity)?;
+        if let Some(frame) = frame {
+            let process = scheduler.current_process_mut();
+            enter_frame(process, frame, entry);
+            // A BIF trap always switches out the process
+            // (`context_switch_simplified` in
+            // `jit/arm/instr_bif.cpp:525-536`, `676-701`). The
+            // process enters the target when it runs again, so
+            // the entry costs one reduction of the next turn.
+            Ok(Some(Outcome::Yield))
+        } else {
+            // ERTS switches out at the trap, and the export
+            // stub of the target runs in the next turn
+            // (`context_switch_simplified` in
+            // `jit/arm/instr_bif.cpp:525-536`, `676-701`). Keep
+            // the call for `run`, so the switch out happens
+            // before the error handler.
+            scheduler.current_process_mut().pending_trap = Some(PendingTrap {
+                module,
+                function,
+                arity,
+                entry,
+            });
+            Ok(Some(Outcome::Yield))
         }
     }
 
@@ -6369,6 +6383,10 @@ fn integer_type_failure(parts: &[BinaryPart<'_>], first: usize) -> BinarySegment
 /// runtime error. A result whose size in bits is not a multiple of 8 is a
 /// runtime error, because PBeam has no bitstring term. A match context in
 /// a `binary` segment is a runtime invariant error.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one arm for each `bs_create_bin` segment type, as the size pass and the construct pass of `jit/arm/instr_bs.cpp` have one case for each; an arm moved out of the loop needs the bool and the state of the loop as parameters"
+)]
 fn create_binary(
     atoms: &AtomTable,
     process: &mut ProcessState,

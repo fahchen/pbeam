@@ -512,6 +512,10 @@ impl State {
     /// assert!(matches!(state.mix_term(&mut stack, &term), Some(Item::Term(Term::Integer(1)))));
     /// assert_eq!(stack.len(), 1);
     /// ```
+    #[expect(
+        clippy::too_many_lines,
+        reason = "mirrors `make_internal_hash` of `erl_term_hashing.c`: one arm for each term type, and the arms share the stack"
+    )]
     fn mix_term<'a>(&mut self, stack: &mut Vec<Item<'a>>, term: &'a Term) -> Option<Item<'a>> {
         match shape(term) {
             Shape::Immediate(word) => self.mix_immediate(word),
@@ -897,6 +901,10 @@ enum HashStep<'a> {
 /// assert_eq!(make_hash(&atoms, &Term::static_atom("abc")), 26499);
 /// assert_eq!(make_hash(&atoms, &Term::Integer(1)), 1_688_579_892);
 /// ```
+#[expect(
+    clippy::too_many_lines,
+    reason = "mirrors `make_hash` of `erl_term_hashing.c`: one arm for each term type, and the arms share the stack and the hash"
+)]
 pub(crate) fn make_hash(atoms: &AtomTable, term: &Term) -> u32 {
     let mut hash: u32 = 0;
     let mut stack: Vec<HashStep<'_>> = Vec::new();
@@ -1483,6 +1491,10 @@ fn push_children<'a>(
 /// assert_eq!(make_hash2(&atoms, &Term::static_atom("abc")), (26499, 0));
 /// assert_eq!(make_hash2(&atoms, &Term::Integer(1)).0, 539_485_162);
 /// ```
+#[expect(
+    clippy::too_many_lines,
+    reason = "mirrors `make_hash2` of `erl_term_hashing.c`: one arm for each term type, and the arms share the stack and the hash"
+)]
 pub(crate) fn make_hash2(atoms: &AtomTable, term: &Term) -> (u32, u64) {
     // The fast paths before the walk (`erl_term_hashing.c:1005-1030`).
     if let Term::Atom(atom) = term {

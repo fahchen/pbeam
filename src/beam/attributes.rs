@@ -376,6 +376,10 @@ impl<'a> Cursor<'a> {
     /// container, so a term of any depth needs no recursion. The identity
     /// bytes of a pid, a port, or a reference stay in [`Cursor::extra`] until
     /// the tag of the atom of its node consumes them.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm for each external term format tag, as the size walk of `decoded_size` in `external.c` has one case for each tag; each arm is short"
+    )]
     fn skip_term(&mut self) -> Result<(), BeamError> {
         let mut remaining: u64 = 1;
         let mut stack: Vec<u64> = Vec::new();

@@ -575,6 +575,10 @@ impl Scheduler {
     /// ```rust,ignore
     /// let handled = scheduler.handle_signal(id, &mut walk, node, Signal::Flush, HandlingPoint::Running)?;
     /// ```
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm for each signal type, as `erts_proc_sig_handle_incoming` in `erl_proc_sig_queue.c` has one case for each signal"
+    )]
     fn handle_signal(
         &mut self,
         id: ProcessId,

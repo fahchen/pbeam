@@ -1043,6 +1043,10 @@ pub(super) enum RunStage {
 /// Return the runtime error of the scheduler for a run without a new
 /// reference, and a runtime error for a PCRE2 result that this code does
 /// not expect.
+#[expect(
+    clippy::too_many_lines,
+    reason = "mirrors `re_run` of `erl_bif_re.c` (1500-1905) step by step: the pattern, the subject, the match, the restart loop, and the result; the steps share the locals of the original"
+)]
 pub(super) fn run(
     context: &mut BifContext<'_>,
     subject: &Term,

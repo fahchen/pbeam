@@ -784,6 +784,10 @@ impl Inet {
     /// 20 more bytes on IPv6, and fewer bytes give a runtime error. A failed
     /// `setsockopt` of these options does not fail the request
     /// (inet_drv.c:7589-7802).
+    #[expect(
+        clippy::too_many_lines,
+        reason = "option table: one arm for each `INET_REQ_SETOPTS` option code, as `inet_set_opts` in `inet_drv.c` (7018-7802); each arm is short"
+    )]
     fn set_options(
         &mut self,
         mut request: &[u8],

@@ -117,6 +117,10 @@ impl Expected<'_> {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "case table: one entry for each `counters` and `atomics` call, and the entries share the fixture program"
+)]
 fn runs_the_counters_calls_of_the_elixir_logger_start_as_pinned_erts() {
     // The Elixir Logger of the plug_hello release starts with
     // `counters:new(1, [atomics])`

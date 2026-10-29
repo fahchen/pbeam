@@ -203,6 +203,17 @@ fn makes_an_array_and_writes_through_it() {
         .unwrap()
     ));
     assert!(is_value(&info(&mut scheduler, &reference).unwrap()));
+}
+
+#[test]
+fn rejects_bad_arguments_of_the_atomics_bifs() {
+    // The three BIFs of the release path over one array of one atomic:
+    // `erts_internal:atomics_new/2`, `atomics:get/2`, and `atomics:add/3`.
+    let mut scheduler = Scheduler::new(AtomTable::new());
+    let result = new(&mut scheduler, &Term::Integer(1), &Term::Integer(1)).unwrap();
+    let BifResult::Value(reference) = result else {
+        panic!("not a value: {result:?}");
+    };
     // A term that is not a reference of an array, an index outside the
     // array, a value outside its range, an increment outside both ranges,
     // a size of 0, a size that is not an integer, and options outside the

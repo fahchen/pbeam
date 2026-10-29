@@ -1749,6 +1749,10 @@ pub(super) fn spawn_link(
 /// assert!(matches!(result, BifResult::Value(Term::Tuple(_))));
 /// assert!(matches!(spawn_opt(&mut context, &module, &function, &Term::nil(), &link_x)?, BifResult::Raise { .. }));
 /// ```
+#[expect(
+    clippy::too_many_lines,
+    reason = "option table: one arm for each spawn option, as the option parser of `erl_process.c` (12253-12424); the arms share the state of the loop"
+)]
 pub(super) fn spawn_opt(
     context: &mut BifContext<'_>,
     module: &Term,
@@ -3332,6 +3336,10 @@ const ENDIAN: &str = "little";
 /// Each other item gives a runtime error, also an item that ERTS rejects
 /// with `badarg`. A new atom in a full atom table gives the error of
 /// `AtomTable::put`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "item table: one arm for each `erlang:system_info/1` item, each arm is short"
+)]
 pub(super) fn system_info(scheduler: &mut Scheduler, item: &Term) -> Result<BifResult, BeamError> {
     let schedulers = scheduler.scheduler_count();
     let online = i64::try_from(scheduler.node().scheduler_count()).expect("a scheduler count fits");
@@ -5290,14 +5298,7 @@ pub(super) fn process_info(
                 // continuation pointers, without the current function, which
                 // is `process_info/2`: at most `backtrace_depth` frames
                 // (`erl_bif_info.c:2397-2460`).
-                let stacktrace = match item {
-                    Term::Atom(name) if scheduler.atoms.name_of(name) == "current_stacktrace" => {
-                        let mut frames = mfa_stacktrace(scheduler, 0)?;
-                        frames.truncate(scheduler.node().backtrace_depth());
-                        Some(Term::tuple(vec![item.clone(), Term::list_from(frames)]))
-                    }
-                    _ => None,
-                };
+                let stacktrace = caller_stacktrace(scheduler, item)?;
                 let (caller, code, atoms) = scheduler.current_process_code_and_atoms();
                 let messages = caller.mailbox.message_count();
                 let request = ProcessInfoRequest {
@@ -5336,28 +5337,10 @@ pub(super) fn process_info(
         // An item that a read of another process does not support stays
         // unsupported here, because the owner reads the item as the target.
         if let Some(index) = scheduler.remote_owner(*id) {
-            if let Term::Atom(name) = item
-                && OTHER_PROCESS_INFO_ITEMS.contains(&scheduler.atoms.name_of(name))
-            {
-                let caller = scheduler.current_process_mut().id;
-                let reference = scheduler.make_ref()?;
-                scheduler.current_process_mut().mailbox.set_save_end();
-                let request = Signal::ProcessInfo {
-                    requester: caller,
-                    reference,
-                    item: item.clone(),
-                };
-                // The pending monitor of the caller goes before the
-                // request, and a target that exits before the owner drains
-                // the inbox is answered with `undefined` there.
-                scheduler.send_signal_to_owner(index, Some(caller), *id, request);
-                return Ok(Trap {
-                    module: "erts_internal",
-                    function: "await_result",
-                    arguments: vec![Term::Reference(reference)],
-                });
-            }
-            return Err(unsupported(&scheduler.atoms));
+            return match remote_process_info(scheduler, index, *id, item)? {
+                Some(trap) => Ok(trap),
+                None => Err(unsupported(&scheduler.atoms)),
+            };
         }
         return Ok(Value(Term::static_atom("undefined")));
     };
@@ -5384,28 +5367,82 @@ pub(super) fn process_info(
     let forced = matches!(item, Term::Atom(name)
         if matches!(scheduler.atoms.name_of(name), "memory" | "total_heap_size"));
     if forced || target.exiting.is_some() || target.mailbox.has_incoming() {
-        let caller = scheduler.current_process_mut().id;
-        let reference = scheduler.make_ref()?;
-        scheduler.current_process_mut().mailbox.set_save_end();
-        let request = Signal::ProcessInfo {
-            requester: caller,
-            reference,
-            item: item.clone(),
-        };
+        let (caller, reference, request) = process_info_request(scheduler, item)?;
         scheduler
             .send_signal(Some(caller), *id, request)
             .expect("the process is in the process table");
-        return Ok(Trap {
-            module: "erts_internal",
-            function: "await_result",
-            arguments: vec![Term::Reference(reference)],
-        });
+        return Ok(await_result(reference));
     }
     // Only `links` charges extra here: the items with a queue charge
     // went as a request above.
     let extra = super::item_reductions(item, &info, 0, MessageQueue::OffHeap);
     scheduler.current_process_mut().bump_reductions(1 + extra);
     Ok(signals_return(scheduler, process, info))
+}
+
+/// The `current_stacktrace` item of the calling process: the frames of the
+/// process, without the current function, at most `backtrace_depth` frames.
+/// Return `None` for another item.
+fn caller_stacktrace(scheduler: &mut Scheduler, item: &Term) -> Result<Option<Term>, BeamError> {
+    Ok(match item {
+        Term::Atom(name) if scheduler.atoms.name_of(name) == "current_stacktrace" => {
+            let mut frames = mfa_stacktrace(scheduler, 0)?;
+            frames.truncate(scheduler.node().backtrace_depth());
+            Some(Term::tuple(vec![item.clone(), Term::list_from(frames)]))
+        }
+        _ => None,
+    })
+}
+
+/// Send the `Signal::ProcessInfo` request for `item` to the scheduler `index`
+/// that owns the process `id`, and trap to wait for the answer. Return `None`
+/// for an item that a read of another process does not support.
+fn remote_process_info(
+    scheduler: &mut Scheduler,
+    index: usize,
+    id: ProcessId,
+    item: &Term,
+) -> Result<Option<BifResult>, BeamError> {
+    if let Term::Atom(name) = item
+        && OTHER_PROCESS_INFO_ITEMS.contains(&scheduler.atoms.name_of(name))
+    {
+        let (caller, reference, request) = process_info_request(scheduler, item)?;
+        // The pending monitor of the caller goes before the
+        // request, and a target that exits before the owner drains
+        // the inbox is answered with `undefined` there.
+        scheduler.send_signal_to_owner(index, Some(caller), id, request);
+        return Ok(Some(await_result(reference)));
+    }
+    Ok(None)
+}
+
+/// Make the reference and the `Signal::ProcessInfo` request of the calling
+/// process for `item`, and set the save pointer of its mailbox to the end for
+/// the wait on the answer. Return the id of the caller, the reference, and the
+/// request.
+fn process_info_request(
+    scheduler: &mut Scheduler,
+    item: &Term,
+) -> Result<(ProcessId, Reference, Signal), BeamError> {
+    let caller = scheduler.current_process_mut().id;
+    let reference = scheduler.make_ref()?;
+    scheduler.current_process_mut().mailbox.set_save_end();
+    let request = Signal::ProcessInfo {
+        requester: caller,
+        reference,
+        item: item.clone(),
+    };
+    Ok((caller, reference, request))
+}
+
+/// The trap that waits in `erts_internal:await_result/1` for the answer to a
+/// request with `reference`.
+fn await_result(reference: Reference) -> BifResult {
+    Trap {
+        module: "erts_internal",
+        function: "await_result",
+        arguments: vec![Term::Reference(reference)],
+    }
 }
 
 /// Return the result of `erlang:process_info/2` for a list of items of the

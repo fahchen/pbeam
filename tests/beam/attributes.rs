@@ -212,6 +212,10 @@ fn reads_an_improper_tail_and_refuses_a_missing_one() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "case table: one entry for each external term tag that the attribute walk skips"
+)]
 fn skips_every_supported_tag() {
     // One attribute of each tag shape before the declaration.
     let mut new_pid = vec![88];

@@ -248,38 +248,6 @@ fn reads_nested_literals_and_marks_unsupported_tags_at_any_depth() {
         read(&atoms, &[131, 104, 2, 119, 2, b'o', b'k', 106]).unwrap(),
         Some(Term::tuple(vec![Term::static_atom("ok"), Term::nil()]))
     );
-    // NEW_FLOAT_EXT (70) 1.0 loads; an infinity is an error, as `dec_term`
-    // rejects it (`external.c:4666-4668`).
-    assert_eq!(
-        read(&atoms, &[131, 70, 63, 240, 0, 0, 0, 0, 0, 0]).unwrap(),
-        Some(Term::Float(1.0))
-    );
-    assert!(read(&atoms, &[131, 70, 127, 240, 0, 0, 0, 0, 0, 0]).is_err());
-    // SMALL_BIG_EXT (110) and LARGE_BIG_EXT (111) load as integers in
-    // their canonical form (`external.c:4457-4497`): 5 is a small integer,
-    // each sign byte but 0 is negative, leading zero bytes are stripped, and
-    // a value of more than `BIG_ARITY_MAX` digits is an error.
-    let big = |sign: i32, shift: u32| Term::from_bigint(num_bigint::BigInt::from(sign) << shift);
-    assert_eq!(
-        read(&atoms, &[131, 110, 1, 0, 5]).unwrap(),
-        Some(Term::Integer(5))
-    );
-    assert_eq!(
-        read(&atoms, &[131, 110, 0, 1]).unwrap(),
-        Some(Term::Integer(0))
-    );
-    let two_64 = [131, 110, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0];
-    assert_eq!(read(&atoms, &two_64).unwrap(), Some(big(1, 64)));
-    let negative = [131, 110, 9, 2, 0, 0, 0, 0, 0, 0, 0, 0, 1];
-    assert_eq!(read(&atoms, &negative).unwrap(), Some(big(-1, 64)));
-    let mut large = vec![131, 111, 0, 0, 1, 1, 0];
-    large.extend([0; 256]);
-    large.push(1);
-    assert_eq!(read(&atoms, &large).unwrap(), Some(big(1, 2048)));
-    let mut huge = vec![131, 111, 0, 8, 0, 1, 0];
-    huge.extend(vec![0; 524_288]);
-    huge.push(1);
-    assert!(read(&atoms, &huge).is_err());
     // NEW_PID_EXT (88) inside a tuple, inside a list, and as a list tail.
     let bignum = [88, 1, 0, 5];
     assert_eq!(
@@ -325,7 +293,70 @@ fn reads_nested_literals_and_marks_unsupported_tags_at_any_depth() {
         read(&atoms, &[131, 108, 0, 0, 0, 0, 106]).unwrap(),
         Some(Term::nil())
     );
+    let list = Some(Term::list_from(vec![atom(&atoms, "a"), atom(&atoms, "b")]));
+    assert_eq!(nested, list);
+    let t = || Box::new(atom(&atoms, "t"));
+    assert_eq!(
+        nil_head,
+        Some(Term::list_with_tail(vec![Term::nil()], *t()))
+    );
+    assert_eq!(
+        list_tail,
+        Some(Term::list_with_tail(
+            vec![atom(&atoms, "a"), atom(&atoms, "b")],
+            *t()
+        ))
+    );
+    assert_eq!(empty, Some(*t()));
+    assert_eq!(proper, list);
+}
 
+#[test]
+fn reads_float_and_big_literals() {
+    let atoms = AtomTable::new();
+    let read = |atoms: &AtomTable, bytes: &[u8]| read_literal(bytes, atoms);
+    // NEW_FLOAT_EXT (70) 1.0 loads; an infinity is an error, as `dec_term`
+    // rejects it (`external.c:4666-4668`).
+    assert_eq!(
+        read(&atoms, &[131, 70, 63, 240, 0, 0, 0, 0, 0, 0]).unwrap(),
+        Some(Term::Float(1.0))
+    );
+    assert!(read(&atoms, &[131, 70, 127, 240, 0, 0, 0, 0, 0, 0]).is_err());
+    // SMALL_BIG_EXT (110) and LARGE_BIG_EXT (111) load as integers in
+    // their canonical form (`external.c:4457-4497`): 5 is a small integer,
+    // each sign byte but 0 is negative, leading zero bytes are stripped, and
+    // a value of more than `BIG_ARITY_MAX` digits is an error.
+    let big = |sign: i32, shift: u32| Term::from_bigint(num_bigint::BigInt::from(sign) << shift);
+    assert_eq!(
+        read(&atoms, &[131, 110, 1, 0, 5]).unwrap(),
+        Some(Term::Integer(5))
+    );
+    assert_eq!(
+        read(&atoms, &[131, 110, 0, 1]).unwrap(),
+        Some(Term::Integer(0))
+    );
+    let two_64 = [131, 110, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0];
+    assert_eq!(read(&atoms, &two_64).unwrap(), Some(big(1, 64)));
+    let negative = [131, 110, 9, 2, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    assert_eq!(read(&atoms, &negative).unwrap(), Some(big(-1, 64)));
+    let mut large = vec![131, 111, 0, 0, 1, 1, 0];
+    large.extend([0; 256]);
+    large.push(1);
+    assert_eq!(read(&atoms, &large).unwrap(), Some(big(1, 2048)));
+    let mut huge = vec![131, 111, 0, 8, 0, 1, 0];
+    huge.extend(vec![0; 524_288]);
+    huge.push(1);
+    assert!(read(&atoms, &huge).is_err());
+}
+
+#[test]
+fn reads_map_literals() {
+    let atoms = AtomTable::new();
+    let read = |atoms: &AtomTable, bytes: &[u8]| read_literal(bytes, atoms);
+    // The nested list literal of the other test made `a` before `b`, so `a` has the
+    // lower atom index here too.
+    atoms.put("a").unwrap();
+    atoms.put("b").unwrap();
     // #{b => [], a => {}} keeps its pairs in flatmap key order. The first literal made a
     // before b, so a has the lower atom index.
     let map = read(
@@ -363,7 +394,28 @@ fn reads_nested_literals_and_marks_unsupported_tags_at_any_depth() {
             .to_string(),
         "duplicate key in BEAM map literal"
     );
+    // erlc writes #{1 => v, ..., 33 => v} as 131,116,0,0,0,33,97,1,119,1,118,...;
+    // 33 keys give a hashmap in the ERTS order, from either input order.
+    let literal = |keys: &mut dyn Iterator<Item = u8>| {
+        let mut bytes = vec![131, 116, 0, 0, 0, 33];
+        for key in keys {
+            bytes.extend([97, key, 119, 1, b'v']);
+        }
+        read(&atoms, &bytes).unwrap().unwrap()
+    };
+    let forward = literal(&mut (1..=33));
+    assert_eq!(forward, literal(&mut (1..=33).rev()));
+    assert!(
+        debug_term(&forward, &atoms).starts_with(
+            "Map([(Integer(18), Atom(\"v\")), (Integer(4), Atom(\"v\")), (Integer(12), "
+        )
+    );
+}
 
+#[test]
+fn reads_integer_literals() {
+    let atoms = AtomTable::new();
+    let read = |atoms: &AtomTable, bytes: &[u8]| read_literal(bytes, atoms);
     // SMALL_INTEGER_EXT: 1 and 255.
     assert_eq!(read(&atoms, &[131, 97, 1]).unwrap(), Some(Term::Integer(1)));
     assert_eq!(
@@ -381,24 +433,12 @@ fn reads_nested_literals_and_marks_unsupported_tags_at_any_depth() {
         assert_eq!(read(&atoms, &literal).unwrap(), Some(Term::Integer(value)));
     }
     assert!(read(&atoms, &[131, 98, 0, 0, 1]).is_err());
+}
 
-    // erlc writes #{1 => v, ..., 33 => v} as 131,116,0,0,0,33,97,1,119,1,118,...;
-    // 33 keys give a hashmap in the ERTS order, from either input order.
-    let literal = |keys: &mut dyn Iterator<Item = u8>| {
-        let mut bytes = vec![131, 116, 0, 0, 0, 33];
-        for key in keys {
-            bytes.extend([97, key, 119, 1, b'v']);
-        }
-        read(&atoms, &bytes).unwrap().unwrap()
-    };
-    let forward = literal(&mut (1..=33));
-    assert_eq!(forward, literal(&mut (1..=33).rev()));
-    assert!(
-        debug_term(&forward, &atoms).starts_with(
-            "Map([(Integer(18), Atom(\"v\")), (Integer(4), Atom(\"v\")), (Integer(12), "
-        )
-    );
-
+#[test]
+fn reads_a_deeply_nested_literal() {
+    let atoms = AtomTable::new();
+    let read = |atoms: &AtomTable, bytes: &[u8]| read_literal(bytes, atoms);
     // ERTS decodes a term nested 1000000 levels deep; so does PBeam.
     let mut deep = vec![131];
     for _ in 0..1_000_000 {
@@ -407,23 +447,6 @@ fn reads_nested_literals_and_marks_unsupported_tags_at_any_depth() {
     deep.push(106);
     let term = read(&atoms, &deep).unwrap().unwrap();
     assert!(format!("{term:?}").starts_with("Tuple([Tuple(["));
-
-    let list = Some(Term::list_from(vec![atom(&atoms, "a"), atom(&atoms, "b")]));
-    assert_eq!(nested, list);
-    let t = || Box::new(atom(&atoms, "t"));
-    assert_eq!(
-        nil_head,
-        Some(Term::list_with_tail(vec![Term::nil()], *t()))
-    );
-    assert_eq!(
-        list_tail,
-        Some(Term::list_with_tail(
-            vec![atom(&atoms, "a"), atom(&atoms, "b")],
-            *t()
-        ))
-    );
-    assert_eq!(empty, Some(*t()));
-    assert_eq!(proper, list);
 }
 
 #[test]

@@ -497,106 +497,9 @@ impl AtomTable {
         let mut imported: HashMap<usize, Term> = HashMap::new();
         while let Some(step) = work.pop() {
             match step {
-                ImportStep::Term(term) => match term {
-                    Term::Atom(atom) => ready.push(Term::Atom(self.import_atom(source, atom)?)),
-                    Term::Tuple(elements) => {
-                        let key = elements.identity();
-                        if let Some(term) = imported.get(&key) {
-                            ready.push(term.clone());
-                        } else {
-                            work.push(ImportStep::Tuple {
-                                key,
-                                len: elements.len(),
-                            });
-                            work.extend(elements.iter().rev().map(ImportStep::Term));
-                        }
-                    }
-                    Term::Cons(cell) => {
-                        let key = cell.identity();
-                        if let Some(term) = imported.get(&key) {
-                            ready.push(term.clone());
-                        } else {
-                            work.push(ImportStep::Cons { key });
-                            work.push(ImportStep::Term(&cell.tail));
-                            work.push(ImportStep::Term(&cell.head));
-                        }
-                    }
-                    Term::Map(map) => {
-                        let key = map.identity();
-                        if let Some(term) = imported.get(&key) {
-                            ready.push(term.clone());
-                        } else {
-                            work.push(ImportStep::Map {
-                                key,
-                                len: map.len(),
-                            });
-                            for (key, value) in map.iter().collect::<Vec<_>>().into_iter().rev() {
-                                work.push(ImportStep::Term(value));
-                                work.push(ImportStep::Term(key));
-                            }
-                        }
-                    }
-                    Term::Fun(fun) => {
-                        let key = fun.identity();
-                        if let Some(term) = imported.get(&key) {
-                            ready.push(term.clone());
-                        } else {
-                            match fun.target() {
-                                Target::External {
-                                    module,
-                                    function,
-                                    arity,
-                                } => {
-                                    let module = self.import_atom(source, module)?;
-                                    let function = self.import_atom(source, function)?;
-                                    work.push(ImportStep::Fun {
-                                        key,
-                                        module,
-                                        function,
-                                        arity: *arity,
-                                    });
-                                }
-                                Target::Local(lambda) => {
-                                    let module = lambda.module();
-                                    let name = source
-                                        .name(module.index())
-                                        .ok_or_else(|| outside_atom_table(module.index()))?;
-                                    if source.program != self.program {
-                                        return Err(error(format!(
-                                            "local fun of module {name} belongs to another program"
-                                        )));
-                                    }
-                                    // A local fun holds the entry label of its
-                                    // function, and the code of its module is
-                                    // not part of the host term. A run can load
-                                    // different code under one module name on
-                                    // demand, and the destination run can load
-                                    // such code after this import, so the
-                                    // import cannot check that the label names
-                                    // the same function of the destination.
-                                    return Err(error(format!(
-                                        "local fun of module {name} has no verified code in this program"
-                                    )));
-                                }
-                            }
-                        }
-                    }
-                    Term::Record(_) => {
-                        return Err(error(
-                            "unsupported import of a native record into another atom table",
-                        ));
-                    }
-                    Term::Binary(_)
-                    | Term::Integer(_)
-                    | Term::BigInt(_)
-                    | Term::Float(_)
-                    | Term::Nil
-                    | Term::Pid(_)
-                    | Term::Port(_)
-                    | Term::Reference(_)
-                    | Term::Resource(_)
-                    | Term::MatchContext(_) => ready.push(term.clone()),
-                },
+                ImportStep::Term(term) => {
+                    self.import_visit(source, term, &mut work, &mut ready, &imported)?;
+                }
                 ImportStep::Tuple { key, len } => {
                     let elements = ready.split_off(ready.len() - len);
                     let term = Term::tuple(elements);
@@ -641,6 +544,131 @@ impl AtomTable {
         Ok(ready
             .pop()
             .expect("the import leaves the result of the root"))
+    }
+
+    /// Import one term of the walk of [`Self::import_term`]: push the result
+    /// of an immediate or of an imported compound, or push the steps that
+    /// import the children of a compound that is not imported yet.
+    fn import_visit<'a>(
+        &self,
+        source: &AtomTable,
+        term: &'a Term,
+        work: &mut Vec<ImportStep<'a>>,
+        ready: &mut Vec<Term>,
+        imported: &HashMap<usize, Term>,
+    ) -> Result<(), BeamError> {
+        match term {
+            Term::Atom(atom) => ready.push(Term::Atom(self.import_atom(source, atom)?)),
+            Term::Tuple(elements) => {
+                let key = elements.identity();
+                if let Some(term) = imported.get(&key) {
+                    ready.push(term.clone());
+                } else {
+                    work.push(ImportStep::Tuple {
+                        key,
+                        len: elements.len(),
+                    });
+                    work.extend(elements.iter().rev().map(ImportStep::Term));
+                }
+            }
+            Term::Cons(cell) => {
+                let key = cell.identity();
+                if let Some(term) = imported.get(&key) {
+                    ready.push(term.clone());
+                } else {
+                    work.push(ImportStep::Cons { key });
+                    work.push(ImportStep::Term(&cell.tail));
+                    work.push(ImportStep::Term(&cell.head));
+                }
+            }
+            Term::Map(map) => {
+                let key = map.identity();
+                if let Some(term) = imported.get(&key) {
+                    ready.push(term.clone());
+                } else {
+                    work.push(ImportStep::Map {
+                        key,
+                        len: map.len(),
+                    });
+                    for (key, value) in map.iter().collect::<Vec<_>>().into_iter().rev() {
+                        work.push(ImportStep::Term(value));
+                        work.push(ImportStep::Term(key));
+                    }
+                }
+            }
+            Term::Fun(fun) => {
+                let key = fun.identity();
+                if let Some(term) = imported.get(&key) {
+                    ready.push(term.clone());
+                } else {
+                    work.push(self.import_fun(source, fun, key)?);
+                }
+            }
+            Term::Record(_) => {
+                return Err(error(
+                    "unsupported import of a native record into another atom table",
+                ));
+            }
+            Term::Binary(_)
+            | Term::Integer(_)
+            | Term::BigInt(_)
+            | Term::Float(_)
+            | Term::Nil
+            | Term::Pid(_)
+            | Term::Port(_)
+            | Term::Reference(_)
+            | Term::Resource(_)
+            | Term::MatchContext(_) => ready.push(term.clone()),
+        }
+        Ok(())
+    }
+
+    /// The step that builds the external fun `fun` of `source` in this table,
+    /// remembered at `key`. A local fun is a runtime error.
+    fn import_fun<'a>(
+        &self,
+        source: &AtomTable,
+        fun: &Fun,
+        key: usize,
+    ) -> Result<ImportStep<'a>, BeamError> {
+        match fun.target() {
+            Target::External {
+                module,
+                function,
+                arity,
+            } => {
+                let module = self.import_atom(source, module)?;
+                let function = self.import_atom(source, function)?;
+                Ok(ImportStep::Fun {
+                    key,
+                    module,
+                    function,
+                    arity: *arity,
+                })
+            }
+            Target::Local(lambda) => {
+                let module = lambda.module();
+                let name = source
+                    .name(module.index())
+                    .ok_or_else(|| outside_atom_table(module.index()))?;
+                if source.program != self.program {
+                    return Err(error(format!(
+                        "local fun of module {name} belongs to another program"
+                    )));
+                }
+                // A local fun holds the entry label of its
+                // function, and the code of its module is
+                // not part of the host term. A run can load
+                // different code under one module name on
+                // demand, and the destination run can load
+                // such code after this import, so the
+                // import cannot check that the label names
+                // the same function of the destination.
+                Err(error(format!(
+                    "local fun of module {name} has no verified code in this program"
+                )))
+            }
+        }
     }
 
     /// Return the atom of `source` that the atom `atom` names, in this

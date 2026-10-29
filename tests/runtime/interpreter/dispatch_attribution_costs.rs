@@ -204,6 +204,10 @@ fn cursor_scheduler() -> (Scheduler, Arc<BeamModule>) {
 
 /// Print the cost of every part that an ablation cannot separate.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "table of measurements: one `report` call for each instruction part, and the calls share the fixtures"
+)]
 fn prints_the_cost_of_every_instruction_part() {
     let module = floor_module();
     let instructions = &module.instructions;

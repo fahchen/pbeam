@@ -1426,6 +1426,10 @@ fn raises_or_jumps_when_put_map_exact_gets_no_map_or_no_key() {
         "root process exited with {{badmap,foo},[]}"
     );
     assert_eq!(run(3, atom("foo")).unwrap().term, test_atom("failed"));
+}
+
+#[test]
+fn raises_or_jumps_when_put_map_exact_gets_a_key_that_a_map_cannot_hold() {
     // A key of a type that a PBeam map cannot hold is a missing key.
     let tuple_key = |fail_label| {
         make_program(
@@ -1450,6 +1454,10 @@ fn raises_or_jumps_when_put_map_exact_gets_no_map_or_no_key() {
         "root process exited with {{badkey,{}},[]}"
     );
     assert_eq!(tuple_key(3).unwrap().term, test_atom("failed"));
+}
+
+#[test]
+fn raises_badkey_when_put_map_exact_gets_a_missing_reference_key() {
     // A reference is a key of the map, so a missing reference key raises
     // `{badkey, Ref}` as another missing key does.
     let references = make_program(
@@ -1473,6 +1481,10 @@ fn raises_or_jumps_when_put_map_exact_gets_no_map_or_no_key() {
     .execute("fixture", "main", &[]);
     let error = references.unwrap_err().to_string();
     assert!(error.contains("badkey,#Ref<0.0.1.1>"), "{error}");
+}
+
+#[test]
+fn changes_a_map_with_alias_reference_keys_by_put_map_exact() {
     // An alias reference has a PBeam order, so the exact change finds two
     // alias keys as it finds two references (`src/term/order.rs`).
     let alias = |number| Term::Reference(crate::Reference(number).pid_reference());
@@ -3061,6 +3073,48 @@ fn sets_the_position_after_a_failed_equal_command_as_the_jit_read() {
         position(&[1, 0], vec![ensure(16), byte(), equal(8)], true),
         Ok(Term::Integer(16))
     );
+}
+
+#[test]
+fn sets_the_position_after_a_failed_equal_command_of_wide_reads_as_the_jit_read() {
+    let ensure = |size| BinaryMatchCommand::EnsureAtLeast {
+        size,
+        unit: std::num::NonZeroU64::new(1).unwrap(),
+    };
+    let equal = |size| BinaryMatchCommand::Equal { size, value: 1 };
+    let skip = |size| BinaryMatchCommand::Skip { size };
+    // Run the commands on `bytes` and return the position at the fail
+    // label.
+    let position = |bytes: &[u8], commands, test_heap| {
+        make_program(
+            vec![
+                Instruction::Move(Operand::Value(Term::binary(bytes.to_vec())), Operand::X(0)),
+                Instruction::BinaryMatchStart {
+                    fail_label: 1,
+                    source: Operand::X(0),
+                    destination: Operand::X(1),
+                },
+                Instruction::BinaryMatch {
+                    fail_label: 3,
+                    context: Operand::X(1),
+                    commands,
+                    test_heap,
+                },
+                Instruction::Move(atom("matched"), Operand::X(0)),
+                Instruction::Return,
+                Instruction::Label(3),
+                Instruction::BinaryGetPosition {
+                    context: Operand::X(1),
+                    destination: Operand::X(0),
+                },
+                Instruction::Return,
+            ],
+            0,
+        )
+        .execute("fixture", "main", &[])
+        .map(|host| host.term)
+        .map_err(|error| error.to_string())
+    };
     // 32 and 40 bits do not fit in one read of 64 bits: 32.
     assert_eq!(
         position(&[0; 9], vec![ensure(72), equal(32), equal(40)], false),
@@ -4348,7 +4402,6 @@ fn reads_the_current_stacktrace_of_the_calling_process() {
     let process_info =
         |process: Term, item: Term| call_ext_with("erlang", "process_info", vec![process, item]);
     let root = || Term::Pid(crate::ProcessId(0));
-    let dictionary = || Term::tuple(vec![test_atom("dictionary"), test_atom("k")]);
     // ERTS 29.1.1 checks the item before the process. It raises badarg for
     // process_info(a, current_stacktrace), process_info(a, bogus_item),
     // process_info(self(), bogus_item), process_info(self(), 5),
@@ -4384,6 +4437,14 @@ fn reads_the_current_stacktrace_of_the_calling_process() {
             bif_badarg_exit("erlang", "process_info", &texts, ERTS_ERRORS)
         );
     }
+}
+
+#[test]
+fn reads_process_info_of_a_process_that_is_not_alive_and_of_the_caller_items() {
+    let process_info =
+        |process: Term, item: Term| call_ext_with("erlang", "process_info", vec![process, item]);
+    let root = || Term::Pid(crate::ProcessId(0));
+    let dictionary = || Term::tuple(vec![test_atom("dictionary"), test_atom("k")]);
     // ERTS 29.1.1: a process that is not alive gives undefined for each
     // valid item, also a list of items (`erl_bif_info.c:1384-1386`).
     for item in [
@@ -4838,6 +4899,9 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
             InsertKind::Insert,
         ));
     };
+    let mut table = Table::new(caller, Access::Public, 1, TableType::Set);
+    table.busy = None;
+    scheduler.ets.exclusive().create(Reference(0), None, table);
     let type_atom = program.atom("type").expect("the atom type exists");
     let arguments = [
         ("lookup", vec![id.clone(), Term::Integer(5)]),
@@ -4863,15 +4927,9 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
         // (`erl_db.c:2050-2055`).
         (
             "insert",
-            vec![
-                id.clone(),
-                Term::list_from([object.clone(), object.clone()]),
-            ],
+            vec![id, Term::list_from([object.clone(), object])],
         ),
     ];
-    let mut table = Table::new(caller, Access::Public, 1, TableType::Set);
-    table.busy = None;
-    scheduler.ets.exclusive().create(Reference(0), None, table);
     for (function, arguments) in &arguments {
         busy(&mut scheduler);
         let result = BeamProgram::bif(&mut scheduler, "ets", function, arguments).unwrap();
@@ -4889,6 +4947,39 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
             "ets:{function}/2 did not run again"
         );
     }
+}
+
+#[test]
+fn completes_a_busy_list_insert_before_a_short_list_insert() {
+    // `handle_lacking_permission` completes the list insert of a table with
+    // `DB_BUSY` before the operation of the process that uses it, and it
+    // charges the units of the work to that process (`erl_db.c:769-798`,
+    // `2152-2197`). The operation of the process then traps and runs again
+    // in a later turn (`erl_db.c:2223-2253`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let caller = scheduler.current_process_mut().id;
+    let id = Term::Reference(Reference(0));
+    let object = Term::tuple(vec![Term::Integer(5), Term::Integer(6)]);
+    // The table runs the list insert of another process: the walk of its
+    // one object did not finish (`erl_db.c:2310-2319`).
+    let busy = |scheduler: &mut Scheduler| {
+        scheduler
+            .ets
+            .exclusive()
+            .table_by_id(Reference(0))
+            .expect("the table is live")
+            .busy = Some(Busy::new(
+            ProcessId(99),
+            vec![vec![Term::Integer(5)]],
+            InsertKind::Insert,
+        ));
+    };
+    let mut table = Table::new(caller, Access::Public, 1, TableType::Set);
+    table.busy = None;
+    scheduler.ets.exclusive().create(Reference(0), None, table);
     // A short list insert that the units cover runs `can_insert_without_yield`
     // (`erl_db.c:2002-2014`), also in the turn that follows a trap in the
     // take of the table (`erl_db.c:1963-1994`).
@@ -4917,8 +5008,8 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
         "ets",
         "insert",
         vec![
-            id.clone(),
-            Term::list_from([object.clone(), object.clone()]),
+            id,
+            Term::list_from([object.clone(), object]),
             Term::Integer(2),
             Term::Integer(1),
             Term::static_atom("false"),
@@ -4930,6 +5021,38 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
         matches!(result, BifResult::Value(value) if value == Term::static_atom("true")),
         "the short list insert did not take the objects without a copy"
     );
+}
+
+#[test]
+fn completes_a_busy_list_insert_before_ets_match() {
+    // `handle_lacking_permission` completes the list insert of a table with
+    // `DB_BUSY` before the operation of the process that uses it, and it
+    // charges the units of the work to that process (`erl_db.c:769-798`,
+    // `2152-2197`). The operation of the process then traps and runs again
+    // in a later turn (`erl_db.c:2223-2253`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let caller = scheduler.current_process_mut().id;
+    let id = Term::Reference(Reference(0));
+    // The table runs the list insert of another process: the walk of its
+    // one object did not finish (`erl_db.c:2310-2319`).
+    let busy = |scheduler: &mut Scheduler| {
+        scheduler
+            .ets
+            .exclusive()
+            .table_by_id(Reference(0))
+            .expect("the table is live")
+            .busy = Some(Busy::new(
+            ProcessId(99),
+            vec![vec![Term::Integer(5)]],
+            InsertKind::Insert,
+        ));
+    };
+    let mut table = Table::new(caller, Access::Public, 1, TableType::Set);
+    table.busy = None;
+    scheduler.ets.exclusive().create(Reference(0), None, table);
     // `ets:match/2,3` completes the insert of the busy table before it
     // reads the objects, so it sees each of them (`erl_db.c:769-787`).
     scheduler.current_process_mut().fcalls = 1;
@@ -4990,7 +5113,7 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
         "ets",
         "select_trap",
         vec![
-            id.clone(),
+            id,
             pattern,
             Term::Integer(0),
             Term::Integer(0),
@@ -5004,6 +5127,38 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
         matches!(result, BifResult::TrapBif { .. }),
         "ets:select_trap/7 did not complete the insert of the other process"
     );
+}
+
+#[test]
+fn completes_a_busy_list_insert_before_a_list_with_bad_objects() {
+    // `handle_lacking_permission` completes the list insert of a table with
+    // `DB_BUSY` before the operation of the process that uses it, and it
+    // charges the units of the work to that process (`erl_db.c:769-798`,
+    // `2152-2197`). The operation of the process then traps and runs again
+    // in a later turn (`erl_db.c:2223-2253`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let caller = scheduler.current_process_mut().id;
+    let id = Term::Reference(Reference(0));
+    // The table runs the list insert of another process: the walk of its
+    // one object did not finish (`erl_db.c:2310-2319`).
+    let busy = |scheduler: &mut Scheduler| {
+        scheduler
+            .ets
+            .exclusive()
+            .table_by_id(Reference(0))
+            .expect("the table is live")
+            .busy = Some(Busy::new(
+            ProcessId(99),
+            vec![vec![Term::Integer(5)]],
+            InsertKind::Insert,
+        ));
+    };
+    let mut table = Table::new(caller, Access::Public, 1, TableType::Set);
+    table.busy = None;
+    scheduler.ets.exclusive().create(Reference(0), None, table);
     // A list whose objects are bad raises `badarg`, and it completes the
     // list insert of a busy table first, as ERTS takes the table before it
     // raises the error (`erl_db.c:2036-2047`).
@@ -5016,12 +5171,31 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
         matches!(result, BifResult::TrapBif { .. }),
         "the bad list did not complete the insert of the other process"
     );
-    let result =
-        BeamProgram::bif_trap(&mut scheduler, "ets", "insert", vec![id.clone(), bad]).unwrap();
+    let result = BeamProgram::bif_trap(&mut scheduler, "ets", "insert", vec![id, bad]).unwrap();
     assert!(
         matches!(result, BifResult::Raise { .. }),
         "the bad list did not raise badarg"
     );
+}
+
+#[test]
+fn completes_a_busy_list_insert_before_the_last_object_of_a_plain_list_insert() {
+    // `handle_lacking_permission` completes the list insert of a table with
+    // `DB_BUSY` before the operation of the process that uses it, and it
+    // charges the units of the work to that process (`erl_db.c:769-798`,
+    // `2152-2197`). The operation of the process then traps and runs again
+    // in a later turn (`erl_db.c:2223-2253`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let caller = scheduler.current_process_mut().id;
+    let id = Term::Reference(Reference(0));
+    // The table runs the list insert of another process: the walk of its
+    // one object did not finish (`erl_db.c:2310-2319`).
+    let mut table = Table::new(caller, Access::Public, 1, TableType::Set);
+    table.busy = None;
+    scheduler.ets.exclusive().create(Reference(0), None, table);
     // A plain list insert that uses the last of its budget on its last
     // object traps with all units of the insert charged, and it returns
     // `true` in its next turn (`erl_db.c:1936-1940`, `2180-2196`).
@@ -5057,7 +5231,7 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
         "ets",
         "insert",
         vec![
-            id.clone(),
+            id,
             Term::list_from([objects(1), objects(2)]),
             Term::Integer(8),
             Term::Integer(1),
@@ -5070,6 +5244,26 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
         matches!(result, BifResult::Value(value) if value == Term::static_atom("true")),
         "the insert that charged all of its units did not return true"
     );
+}
+
+#[test]
+fn gives_the_result_of_a_list_insert_that_ended_in_another_turn() {
+    // `handle_lacking_permission` completes the list insert of a table with
+    // `DB_BUSY` before the operation of the process that uses it, and it
+    // charges the units of the work to that process (`erl_db.c:769-798`,
+    // `2152-2197`). The operation of the process then traps and runs again
+    // in a later turn (`erl_db.c:2223-2253`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let caller = scheduler.current_process_mut().id;
+    let id = Term::Reference(Reference(0));
+    // The table runs the list insert of another process: the walk of its
+    // one object did not finish (`erl_db.c:2310-2319`).
+    let mut table = Table::new(caller, Access::Public, 1, TableType::Set);
+    table.busy = None;
+    scheduler.ets.exclusive().create(Reference(0), None, table);
     // A list insert that ended in another turn gives its result to the
     // process that started it, also after the table went away
     // (`erl_db.c:2142-2150`, `2223-2244`).
@@ -5082,7 +5276,7 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
         "ets",
         "insert",
         vec![
-            id.clone(),
+            id,
             Term::Integer(7),
             Term::Integer(5),
             Term::Integer(1),
@@ -5095,6 +5289,26 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
         matches!(result, BifResult::Value(value) if value == Term::static_atom("true")),
         "the process did not read the result of the insert that ended"
     );
+}
+
+#[test]
+fn completes_a_busy_list_insert_of_its_own_table_step_by_step() {
+    // `handle_lacking_permission` completes the list insert of a table with
+    // `DB_BUSY` before the operation of the process that uses it, and it
+    // charges the units of the work to that process (`erl_db.c:769-798`,
+    // `2152-2197`). The operation of the process then traps and runs again
+    // in a later turn (`erl_db.c:2223-2253`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let caller = scheduler.current_process_mut().id;
+    let id = Term::Reference(Reference(0));
+    // The table runs the list insert of another process: the walk of its
+    // one object did not finish (`erl_db.c:2310-2319`).
+    let mut table = Table::new(caller, Access::Public, 1, TableType::Set);
+    table.busy = None;
+    scheduler.ets.exclusive().create(Reference(0), None, table);
     // The process that runs the insert takes its own table: the steps of
     // the walk and of the insert are its own (`erl_db.c:2077-2107`).
     scheduler.ets.exclusive().create(
@@ -5114,17 +5328,45 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
         InsertKind::Insert,
     ));
     scheduler.ets.shared().reserve_result(caller);
-    let result = BeamProgram::bif(
-        &mut scheduler,
-        "ets",
-        "lookup",
-        &[id.clone(), Term::Integer(5)],
-    )
-    .unwrap();
+    let result =
+        BeamProgram::bif(&mut scheduler, "ets", "lookup", &[id, Term::Integer(5)]).unwrap();
     assert!(
         matches!(result, BifResult::Value(_)),
         "the process that runs the insert found the table busy"
     );
+}
+
+#[test]
+fn completes_a_busy_list_insert_of_another_process_before_its_own_call() {
+    // `handle_lacking_permission` completes the list insert of a table with
+    // `DB_BUSY` before the operation of the process that uses it, and it
+    // charges the units of the work to that process (`erl_db.c:769-798`,
+    // `2152-2197`). The operation of the process then traps and runs again
+    // in a later turn (`erl_db.c:2223-2253`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let caller = scheduler.current_process_mut().id;
+    let id = Term::Reference(Reference(0));
+    let object = Term::tuple(vec![Term::Integer(5), Term::Integer(6)]);
+    // The table runs the list insert of another process: the walk of its
+    // one object did not finish (`erl_db.c:2310-2319`).
+    let busy = |scheduler: &mut Scheduler| {
+        scheduler
+            .ets
+            .exclusive()
+            .table_by_id(Reference(0))
+            .expect("the table is live")
+            .busy = Some(Busy::new(
+            ProcessId(99),
+            vec![vec![Term::Integer(5)]],
+            InsertKind::Insert,
+        ));
+    };
+    let mut table = Table::new(caller, Access::Public, 1, TableType::Set);
+    table.busy = None;
+    scheduler.ets.exclusive().create(Reference(0), None, table);
     // A list insert that takes the table of another list insert completes
     // it first, and its own call runs again (`erl_db.c:2077`, `2223-2253`).
     scheduler.current_process_mut().fcalls = 1;
@@ -5134,8 +5376,8 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
         "ets",
         "insert",
         vec![
-            id.clone(),
-            Term::list_from([object.clone(), object.clone()]),
+            id,
+            Term::list_from([object.clone(), object]),
             Term::Integer(0),
             Term::Integer(1),
             Term::static_atom("false"),
@@ -5147,6 +5389,39 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
         matches!(result, BifResult::TrapBif { .. }),
         "the list insert did not complete the insert of the other process"
     );
+}
+
+#[test]
+fn runs_the_steps_of_a_list_insert_while_another_process_holds_the_table() {
+    // `handle_lacking_permission` completes the list insert of a table with
+    // `DB_BUSY` before the operation of the process that uses it, and it
+    // charges the units of the work to that process (`erl_db.c:769-798`,
+    // `2152-2197`). The operation of the process then traps and runs again
+    // in a later turn (`erl_db.c:2223-2253`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let caller = scheduler.current_process_mut().id;
+    let id = Term::Reference(Reference(0));
+    let object = Term::tuple(vec![Term::Integer(5), Term::Integer(6)]);
+    // The table runs the list insert of another process: the walk of its
+    // one object did not finish (`erl_db.c:2310-2319`).
+    let busy = |scheduler: &mut Scheduler| {
+        scheduler
+            .ets
+            .exclusive()
+            .table_by_id(Reference(0))
+            .expect("the table is live")
+            .busy = Some(Busy::new(
+            ProcessId(99),
+            vec![vec![Term::Integer(5)]],
+            InsertKind::Insert,
+        ));
+    };
+    let mut table = Table::new(caller, Access::Public, 1, TableType::Set);
+    table.busy = None;
+    scheduler.ets.exclusive().create(Reference(0), None, table);
     // A list insert of the same table runs its own steps while another
     // process holds the table: it reads no result of its own there
     // (`erl_db.c:2223-2253`).

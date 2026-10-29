@@ -1081,6 +1081,10 @@ fn cost(name: &str, calls: f64, expected: i64, body: impl Fn() -> i64) {
 /// over it, and a walk of `erts_internal:map_next/3`. Each number is the
 /// minimum of [`MAP_COST_RUNS`] runs, in nanosecond for each call.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "table of measurements: one `cost` call for each map operation, and the calls share the map"
+)]
 fn records_the_map_operation_cost() {
     // Each key is its own value, so a read and a walk consume an integer and
     // the sum of a round is known.

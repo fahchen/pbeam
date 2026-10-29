@@ -539,6 +539,10 @@ pub(super) fn aead_cipher_nif(
 /// # Errors
 ///
 /// The failure of the first check or OpenSSL call that fails.
+#[expect(
+    clippy::too_many_lines,
+    reason = "mirrors `aead_cipher` of `aead.c` (180-332) step by step; the error tuples name the line of each check in `aead.c`, so a split would break the mapping"
+)]
 fn aead(scheduler: &Scheduler, arguments: &[Term]) -> Result<Option<Term>, CipherFailure> {
     let encrypt: i8 = match atom_name(scheduler, &arguments[6]) {
         "true" => 1,

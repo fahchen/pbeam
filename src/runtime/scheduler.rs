@@ -917,6 +917,10 @@ impl Scheduler {
     /// scheduler.drain_release(RELEASE_BATCH);
     /// assert!(scheduler.release.is_empty());
     /// ```
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm for each `Release` kind of the bounded release work list; each arm moves a bounded number of terms"
+    )]
     fn drain_release(&mut self, budget: usize) {
         let mut moved = 0;
         let mut terms = Vec::new();
@@ -3821,6 +3825,10 @@ impl Scheduler {
     /// them, before the first step. ERTS stops the emulator with this text
     /// and a crash dump (`erl_process.c:14186-14188`); PBeam writes no crash
     /// dump.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "mirrors the first step of `erts_continue_exit_process` in `erl_process.c` (14186-14188 and the exit steps before the links); the steps share the locals of the original"
+    )]
     pub(super) fn finish_current(
         &mut self,
         reason: Term,
@@ -4010,6 +4018,10 @@ impl Scheduler {
     /// ```rust,ignore
     /// scheduler.exit_links(process, ExitPhase::Links(None), 3850);
     /// ```
+    #[expect(
+        clippy::too_many_lines,
+        reason = "mirrors the exit phases of `erts_continue_exit_process` in `erl_process.c`: one arm for each phase of the state machine, and each arm yields with the position of its walk"
+    )]
     fn exit_links(&mut self, mut process: ProcessState, mut phase: ExitPhase, mut reds: i32) {
         let id = process.id;
         let reason = process

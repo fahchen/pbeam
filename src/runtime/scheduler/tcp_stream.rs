@@ -265,42 +265,8 @@ impl Scheduler {
                     )]
                 }
                 Event::ActiveDatagram { address, data } => {
-                    // `{udp, S, {A, B, C, D}, Port, Data}` (`load_address`,
-                    // inet_drv.c:4124-4158).
-                    // `address` is `[Family, P1, P0, A, B, C, D]`, or
-                    // `[5, N, B1, ..., BN]` of a `local` address, which
-                    // gives `{local, Name}` and the port 0
-                    // (inet_drv.c:1945-1948).
-                    let (ip, from) = match address.as_slice() {
-                        [5, _, name @ ..] => (
-                            vec![Term::static_atom("local"), Term::binary(name.to_vec())],
-                            Term::Integer(0),
-                        ),
-                        // `[0]`, `AF_UNSPEC`, gives `{unspec, <<>>}` and the
-                        // port 0 (inet_drv.c:1956-1963).
-                        [0] => (
-                            vec![
-                                Term::Atom(self.atoms.put("unspec")?),
-                                Term::binary(Vec::new()),
-                            ],
-                            Term::Integer(0),
-                        ),
-                        _ => (
-                            address[3..]
-                                .iter()
-                                .map(|byte| Term::Integer((*byte).into()))
-                                .collect(),
-                            Term::Integer(u16::from_be_bytes([address[1], address[2]]).into()),
-                        ),
-                    };
-                    let message = Term::tuple(vec![
-                        Term::Atom(self.atoms.put("udp")?),
-                        Term::Port(port),
-                        Term::tuple(ip),
-                        from,
-                        tcp.data_term(data),
-                    ]);
-                    vec![(owner, message)]
+                    let data = tcp.data_term(data);
+                    vec![(owner, self.udp_message(port, &address, data)?)]
                 }
                 Event::Passive => {
                     let tag = Term::Atom(self.atoms.put("udp_passive")?);
@@ -315,20 +281,14 @@ impl Scheduler {
                     if let Some(timer) = connector.timer {
                         self.cancel_port_timer(timer);
                     }
-                    let status = match result {
-                        Ok(()) => Term::static_atom("ok"),
-                        Err(name) => error_status(Term::Atom(self.atoms.put(&name)?)),
-                    };
+                    let status = self.unit_status(result)?;
                     vec![(
                         connector.caller,
                         Self::async_message(port, connector.id, status),
                     )]
                 }
                 Event::Replied { sender, result } => {
-                    let status = match result {
-                        Ok(()) => Term::static_atom("ok"),
-                        Err(name) => error_status(Term::Atom(self.atoms.put(&name)?)),
-                    };
+                    let status = self.unit_status(result)?;
                     let message = Term::tuple(vec![
                         Term::Atom(Atom::INET_REPLY),
                         Term::Port(port),
@@ -365,6 +325,55 @@ impl Scheduler {
             }
         }
         Ok(exit)
+    }
+
+    /// The status term of a result with no value: `ok`, or the error status
+    /// of the atom of the error name.
+    fn unit_status(&self, result: Result<(), String>) -> Result<Term, BeamError> {
+        Ok(match result {
+            Ok(()) => Term::static_atom("ok"),
+            Err(name) => error_status(Term::Atom(self.atoms.put(&name)?)),
+        })
+    }
+
+    /// The message `{udp, Port, Ip, From, Data}` of an active datagram whose
+    /// address bytes are `address`.
+    fn udp_message(&self, port: PortId, address: &[u8], data: Term) -> Result<Term, BeamError> {
+        // `{udp, S, {A, B, C, D}, Port, Data}` (`load_address`,
+        // inet_drv.c:4124-4158).
+        // `address` is `[Family, P1, P0, A, B, C, D]`, or
+        // `[5, N, B1, ..., BN]` of a `local` address, which
+        // gives `{local, Name}` and the port 0
+        // (inet_drv.c:1945-1948).
+        let (ip, from) = match address {
+            [5, _, name @ ..] => (
+                vec![Term::static_atom("local"), Term::binary(name.to_vec())],
+                Term::Integer(0),
+            ),
+            // `[0]`, `AF_UNSPEC`, gives `{unspec, <<>>}` and the
+            // port 0 (inet_drv.c:1956-1963).
+            [0] => (
+                vec![
+                    Term::Atom(self.atoms.put("unspec")?),
+                    Term::binary(Vec::new()),
+                ],
+                Term::Integer(0),
+            ),
+            _ => (
+                address[3..]
+                    .iter()
+                    .map(|byte| Term::Integer((*byte).into()))
+                    .collect(),
+                Term::Integer(u16::from_be_bytes([address[1], address[2]]).into()),
+            ),
+        };
+        Ok(Term::tuple(vec![
+            Term::Atom(self.atoms.put("udp")?),
+            Term::Port(port),
+            Term::tuple(ip),
+            from,
+            data,
+        ]))
     }
 
     /// End a step of the port `port` after its port lock: close the port

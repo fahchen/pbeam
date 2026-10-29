@@ -2072,6 +2072,10 @@ fn test_operands(left: &Operand, right: &Operand) -> Option<(TestOperand, TestOp
     clippy::too_many_arguments,
     reason = "each argument is one decoded chunk that the code refers to"
 )]
+#[expect(
+    clippy::too_many_lines,
+    reason = "decode table: one arm for each BEAM opcode that reads its operands in the order of `genop.tab`; each arm is short"
+)]
 pub(super) fn parse_code(
     data: &[u8],
     atom_table: &AtomTable,

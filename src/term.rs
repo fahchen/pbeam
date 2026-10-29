@@ -861,6 +861,10 @@ impl Term {
     /// assert!(Term::Integer(2).equal(&Term::Float(2.0), Comparison::Arithmetic));
     /// assert!(!Term::Integer(2).equal(&Term::Float(2.0), Comparison::Exact));
     /// ```
+    #[expect(
+        clippy::too_many_lines,
+        reason = "mirrors `eq` of `utils.c`: one arm for each term type pair on the hot path of every term comparison, and a split would move work out of the loop"
+    )]
     fn equal(&self, other: &Term, mode: Comparison) -> bool {
         let mut pairs = EqStack::new();
         let mut left = self;
@@ -1122,18 +1126,14 @@ pub fn debug_term(term: &Term, atoms: &AtomTable) -> String {
 /// Write the `Debug` text of `term` to `out`, with the atom name from `atoms`
 /// when it is `Some` and the atom index when it is `None`.
 fn write_debug(term: &Term, atoms: Option<&AtomTable>, out: &mut impl fmt::Write) -> fmt::Result {
-    enum Item<'a> {
-        Term(&'a Term),
-        Text(&'static str),
-    }
-    let mut items = vec![Item::Term(term)];
+    let mut items = vec![DebugItem::Term(term)];
     while let Some(item) = items.pop() {
         let term = match item {
-            Item::Text(text) => {
+            DebugItem::Text(text) => {
                 out.write_str(text)?;
                 continue;
             }
-            Item::Term(term) => term,
+            DebugItem::Term(term) => term,
         };
         match term {
             Term::Atom(atom) => match atoms {
@@ -1155,31 +1155,21 @@ fn write_debug(term: &Term, atoms: Option<&AtomTable>, out: &mut impl fmt::Write
                 match tail {
                     None => {
                         out.write_str("List([")?;
-                        items.push(Item::Text("])"));
+                        items.push(DebugItem::Text("])"));
                     }
                     Some(tail) => {
                         out.write_str("ImproperList([")?;
-                        items.push(Item::Text(")"));
-                        items.push(Item::Term(tail));
-                        items.push(Item::Text("], "));
+                        items.push(DebugItem::Text(")"));
+                        items.push(DebugItem::Term(tail));
+                        items.push(DebugItem::Text("], "));
                     }
                 }
-                for (index, element) in elements.iter().enumerate().rev() {
-                    items.push(Item::Term(element));
-                    if index > 0 {
-                        items.push(Item::Text(", "));
-                    }
-                }
+                push_debug_elements(&mut items, elements.iter().copied());
             }
             Term::Tuple(elements) => {
                 out.write_str("Tuple([")?;
-                items.push(Item::Text("])"));
-                for (index, element) in elements.iter().enumerate().rev() {
-                    items.push(Item::Term(element));
-                    if index > 0 {
-                        items.push(Item::Text(", "));
-                    }
-                }
+                items.push(DebugItem::Text("])"));
+                push_debug_elements(&mut items, elements.iter());
             }
             Term::Record(record) => {
                 let def = record.def();
@@ -1191,13 +1181,8 @@ fn write_debug(term: &Term, atoms: Option<&AtomTable>, out: &mut impl fmt::Write
                     None => (def.module.index().to_string(), def.name.index().to_string()),
                 };
                 write!(out, "Record({module}:{name}, [")?;
-                items.push(Item::Text("])"));
-                for (index, element) in record.values().iter().enumerate().rev() {
-                    items.push(Item::Term(element));
-                    if index > 0 {
-                        items.push(Item::Text(", "));
-                    }
-                }
+                items.push(DebugItem::Text("])"));
+                push_debug_elements(&mut items, record.values().iter());
             }
             Term::Fun(fun) => {
                 let (target, free) = (fun.target(), fun.free());
@@ -1209,32 +1194,48 @@ fn write_debug(term: &Term, atoms: Option<&AtomTable>, out: &mut impl fmt::Write
                     }
                     None => write!(out, "Fun({target:?}, [")?,
                 }
-                items.push(Item::Text("])"));
-                for (index, element) in free.iter().enumerate().rev() {
-                    items.push(Item::Term(element));
-                    if index > 0 {
-                        items.push(Item::Text(", "));
-                    }
-                }
+                items.push(DebugItem::Text("])"));
+                push_debug_elements(&mut items, free.iter());
             }
             Term::Map(map) => {
                 out.write_str("Map([")?;
-                items.push(Item::Text("])"));
+                items.push(DebugItem::Text("])"));
                 let pairs: Vec<_> = map.iter().collect();
                 for (index, (key, value)) in pairs.into_iter().enumerate().rev() {
-                    items.push(Item::Text(")"));
-                    items.push(Item::Term(value));
-                    items.push(Item::Text(", "));
-                    items.push(Item::Term(key));
-                    items.push(Item::Text("("));
+                    items.push(DebugItem::Text(")"));
+                    items.push(DebugItem::Term(value));
+                    items.push(DebugItem::Text(", "));
+                    items.push(DebugItem::Term(key));
+                    items.push(DebugItem::Text("("));
                     if index > 0 {
-                        items.push(Item::Text(", "));
+                        items.push(DebugItem::Text(", "));
                     }
                 }
             }
         }
     }
     Ok(())
+}
+
+/// A step of the `Debug` text walk of [`write_debug`]: a term to write, or text
+/// to write after the terms above it on the stack.
+enum DebugItem<'a> {
+    Term(&'a Term),
+    Text(&'static str),
+}
+
+/// Push `elements` on `items` in reverse, so that the walk writes them in
+/// order with ", " between them.
+fn push_debug_elements<'a>(
+    items: &mut Vec<DebugItem<'a>>,
+    elements: impl DoubleEndedIterator<Item = &'a Term> + ExactSizeIterator,
+) {
+    for (index, element) in elements.enumerate().rev() {
+        items.push(DebugItem::Term(element));
+        if index > 0 {
+            items.push(DebugItem::Text(", "));
+        }
+    }
 }
 
 /// An identifier for a process in this runtime. The order of identifiers

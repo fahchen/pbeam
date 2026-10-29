@@ -304,65 +304,7 @@ fn reads_writes_seeks_and_closes_a_file_resource_as_erts() {
     ] {
         assert_eq!(text(&mut scheduler, |s| write_nif(s, &fd, &bad)), BADARG);
     }
-    let mark =
-        |scheduler: &mut Scheduler, name: &str| Term::Atom(scheduler.atoms.put(name).unwrap());
-    let (bof, cur, eof) = (
-        mark(&mut scheduler, "bof"),
-        mark(&mut scheduler, "cur"),
-        mark(&mut scheduler, "eof"),
-    );
-    for (mark, offset, expected) in [
-        (
-            eof,
-            Term::Integer(0),
-            "Value(Tuple([Atom(\"ok\"), Integer(68)]))",
-        ),
-        (
-            cur,
-            Term::Integer(-1),
-            "Value(Tuple([Atom(\"ok\"), Integer(67)]))",
-        ),
-        (
-            bof.clone(),
-            Term::Integer(-1),
-            "Value(Tuple([Atom(\"error\"), Atom(\"einval\")]))",
-        ),
-        (bof.clone(), Term::static_atom("ok"), BADARG),
-        (Term::Integer(1), Term::Integer(0), BADARG),
-        (Term::static_atom("ok"), Term::Integer(0), BADARG),
-        (
-            bof,
-            Term::Integer(1),
-            "Value(Tuple([Atom(\"ok\"), Integer(1)]))",
-        ),
-    ] {
-        assert_eq!(
-            text(&mut scheduler, |s| seek_nif(s, &fd, &mark, &offset)),
-            expected
-        );
-    }
-    for (size, expected) in [
-        (
-            Term::Integer(2),
-            "Value(Tuple([Atom(\"ok\"), Binary([98, 99])]))",
-        ),
-        (Term::Integer(0), "Value(Atom(\"eof\"))"),
-        (Term::static_atom("ok"), BADARG),
-        (
-            Term::Integer(-1),
-            "Value(Tuple([Atom(\"error\"), Atom(\"einval\")]))",
-        ),
-        (
-            Term::Float(1.0),
-            "Value(Tuple([Atom(\"error\"), Atom(\"einval\")]))",
-        ),
-        (
-            Term::Integer(1 << 62),
-            "Value(Tuple([Atom(\"error\"), Atom(\"enomem\")]))",
-        ),
-    ] {
-        assert_eq!(text(&mut scheduler, |s| read_nif(s, &fd, &size)), expected);
-    }
+    seeks_and_reads(&mut scheduler, &fd);
     assert_eq!(
         text(&mut scheduler, |s| close_nif(s, &fd)),
         "Value(Atom(\"ok\"))"
@@ -415,6 +357,70 @@ fn reads_writes_seeks_and_closes_a_file_resource_as_erts() {
     std::fs::remove_dir_all(&directory).unwrap();
 }
 
+/// Seek and read through the file resource `fd`, which holds the 68 bytes that
+/// the caller wrote, and check the results and the errors.
+fn seeks_and_reads(scheduler: &mut Scheduler, fd: &Term) {
+    let mark =
+        |scheduler: &mut Scheduler, name: &str| Term::Atom(scheduler.atoms.put(name).unwrap());
+    let (bof, cur, eof) = (
+        mark(scheduler, "bof"),
+        mark(scheduler, "cur"),
+        mark(scheduler, "eof"),
+    );
+    for (mark, offset, expected) in [
+        (
+            eof,
+            Term::Integer(0),
+            "Value(Tuple([Atom(\"ok\"), Integer(68)]))",
+        ),
+        (
+            cur,
+            Term::Integer(-1),
+            "Value(Tuple([Atom(\"ok\"), Integer(67)]))",
+        ),
+        (
+            bof.clone(),
+            Term::Integer(-1),
+            "Value(Tuple([Atom(\"error\"), Atom(\"einval\")]))",
+        ),
+        (bof.clone(), Term::static_atom("ok"), BADARG),
+        (Term::Integer(1), Term::Integer(0), BADARG),
+        (Term::static_atom("ok"), Term::Integer(0), BADARG),
+        (
+            bof,
+            Term::Integer(1),
+            "Value(Tuple([Atom(\"ok\"), Integer(1)]))",
+        ),
+    ] {
+        assert_eq!(
+            text(scheduler, |s| seek_nif(s, fd, &mark, &offset)),
+            expected
+        );
+    }
+    for (size, expected) in [
+        (
+            Term::Integer(2),
+            "Value(Tuple([Atom(\"ok\"), Binary([98, 99])]))",
+        ),
+        (Term::Integer(0), "Value(Atom(\"eof\"))"),
+        (Term::static_atom("ok"), BADARG),
+        (
+            Term::Integer(-1),
+            "Value(Tuple([Atom(\"error\"), Atom(\"einval\")]))",
+        ),
+        (
+            Term::Float(1.0),
+            "Value(Tuple([Atom(\"error\"), Atom(\"einval\")]))",
+        ),
+        (
+            Term::Integer(1 << 62),
+            "Value(Tuple([Atom(\"error\"), Atom(\"enomem\")]))",
+        ),
+    ] {
+        assert_eq!(text(scheduler, |s| read_nif(s, fd, &size)), expected);
+    }
+}
+
 #[test]
 fn changes_names_directories_and_links_with_the_errors_of_erts() {
     use std::os::unix::fs::PermissionsExt;
@@ -436,49 +442,8 @@ fn changes_names_directories_and_links_with_the_errors_of_erts() {
     let enoent = "Value(Tuple([Atom(\"error\"), Atom(\"enoent\")]))";
     let eexist = "Value(Tuple([Atom(\"error\"), Atom(\"eexist\")]))";
     let enotsup = "Value(Tuple([Atom(\"error\"), Atom(\"enotsup\")]))";
+    rejects_a_path_with_a_slash_only(&mut scheduler, &empty);
     let invalid = Term::binary(b"/".to_vec());
-    for name in [
-        "del_file_nif",
-        "del_dir_nif",
-        "make_dir_nif",
-        "set_cwd_nif",
-        "altname_nif",
-    ] {
-        let binding = BINDINGS
-            .iter()
-            .find(|binding| (binding.name, binding.arity) == (name, 1))
-            .unwrap();
-        assert_eq!(
-            text(&mut scheduler, |s| (binding.run)(
-                s,
-                std::slice::from_ref(&invalid)
-            )),
-            einval,
-            "{name}"
-        );
-    }
-    for name in ["rename_nif", "make_hard_link_nif", "make_soft_link_nif"] {
-        let binding = BINDINGS
-            .iter()
-            .find(|binding| (binding.name, binding.arity) == (name, 2))
-            .unwrap();
-        assert_eq!(
-            text(&mut scheduler, |s| (binding.run)(
-                s,
-                &[invalid.clone(), nif_path(&empty)]
-            )),
-            einval,
-            "{name} first"
-        );
-        assert_eq!(
-            text(&mut scheduler, |s| (binding.run)(
-                s,
-                &[nif_path(&empty), invalid.clone()]
-            )),
-            einval,
-            "{name} second"
-        );
-    }
     // `rename` of the root gives `EINVAL`, and a non-empty target gives
     // `EEXIST` for the `ENOTEMPTY` of the host (unix_prim_file.c:945-958).
     assert_eq!(
@@ -569,6 +534,56 @@ fn changes_names_directories_and_links_with_the_errors_of_erts() {
         0o777
     );
     std::fs::remove_dir_all(&directory).unwrap();
+}
+
+/// Drive the bindings that take one path or two paths with a path that has
+/// no NUL end and only a slash, and check that each gives `EINVAL`. The
+/// directory `empty` is the second path.
+fn rejects_a_path_with_a_slash_only(scheduler: &mut Scheduler, empty: &std::path::Path) {
+    let einval = "Value(Tuple([Atom(\"error\"), Atom(\"einval\")]))";
+    let invalid = Term::binary(b"/".to_vec());
+    for name in [
+        "del_file_nif",
+        "del_dir_nif",
+        "make_dir_nif",
+        "set_cwd_nif",
+        "altname_nif",
+    ] {
+        let binding = BINDINGS
+            .iter()
+            .find(|binding| (binding.name, binding.arity) == (name, 1))
+            .unwrap();
+        assert_eq!(
+            text(scheduler, |s| (binding.run)(
+                s,
+                std::slice::from_ref(&invalid)
+            )),
+            einval,
+            "{name}"
+        );
+    }
+    for name in ["rename_nif", "make_hard_link_nif", "make_soft_link_nif"] {
+        let binding = BINDINGS
+            .iter()
+            .find(|binding| (binding.name, binding.arity) == (name, 2))
+            .unwrap();
+        assert_eq!(
+            text(scheduler, |s| (binding.run)(
+                s,
+                &[invalid.clone(), nif_path(empty)]
+            )),
+            einval,
+            "{name} first"
+        );
+        assert_eq!(
+            text(scheduler, |s| (binding.run)(
+                s,
+                &[nif_path(empty), invalid.clone()]
+            )),
+            einval,
+            "{name} second"
+        );
+    }
 }
 
 #[test]

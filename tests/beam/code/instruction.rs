@@ -1517,18 +1517,20 @@ fn decodes_the_bs_start_match4_bs_get_binary2_and_bs_get_tail_instructions_of_bs
         code.push(0x03);
         code
     };
-    let (instructions, _, _) = parse_code(
-        &code(&parts),
-        &table,
-        &atoms,
-        &[],
-        &[],
-        &[],
-        &[],
-        &[],
-        &mut LineTable::default(),
-    )
-    .unwrap();
+    let parse = |parts: &[&[u8]]| {
+        parse_code(
+            &code(parts),
+            &table,
+            &atoms,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &mut LineTable::default(),
+        )
+    };
+    let (instructions, _, _) = parse(&parts).unwrap();
     assert!(
         matches!(
             instructions.as_slice(),
@@ -1577,37 +1579,17 @@ fn decodes_the_bs_start_match4_bs_get_binary2_and_bs_get_tail_instructions_of_bs
     );
     // A size `all` with unit 0 has no `ensure_at_least` command.
     assert_eq!(
-        parse_code(
-            &code(&[&[0x77, 0x35, 0x03, 0x20, 0x42, 0x00, 0x00, 0x13]]),
-            &table,
-            &atoms,
-            &[],
-            &[],
-            &[],
-            &[],
-            &[],
-            &mut LineTable::default()
-        )
-        .unwrap_err()
-        .to_string(),
+        parse(&[&[0x77, 0x35, 0x03, 0x20, 0x42, 0x00, 0x00, 0x13]])
+            .unwrap_err()
+            .to_string(),
         "BEAM bs_get_binary2 has unit 0"
     );
     // The ERTS loader has no form of `bs_start_match4` with another atom
     // (jit/arm/ops.tab:1036-1052).
     assert_eq!(
-        parse_code(
-            &code(&[&[0xAA, 0x12, 0x20, 0x03, 0x03]]),
-            &table,
-            &atoms,
-            &[],
-            &[],
-            &[],
-            &[],
-            &[],
-            &mut LineTable::default()
-        )
-        .unwrap_err()
-        .to_string(),
+        parse(&[&[0xAA, 0x12, 0x20, 0x03, 0x03]])
+            .unwrap_err()
+            .to_string(),
         "unsupported BEAM bs_start_match4 fail operand atom1"
     );
 }
@@ -3153,6 +3135,16 @@ fn reads_bs_create_bin_segments_and_rejects_malformed_lists() {
             Some(BinarySegment::Unsupported(kind)) if kind.is_static("append")
         ));
     }
+}
+
+#[test]
+fn reads_bs_create_bin_integer_and_utf_segments_and_rejects_short_lists() {
+    let atoms: Vec<Atom> = ["string", "binary", "all", "integer", "append"]
+        .into_iter()
+        .map(|name| Atom::from_static(name).unwrap())
+        .collect();
+    let read =
+        |bytes: &[u8], strings: &[u8]| read_binary_segments(bytes, &mut 0, &atoms, &[], strings);
     // {atom,integer},1,1,nil,{x,0},{integer,8},
     // {atom,integer},2,8,{literal,[little]},{x,1},{x,2},
     // {atom,integer},3,1,{literal,[signed,native]},{x,0},{integer,16},
@@ -3236,6 +3228,10 @@ fn reads_bs_create_bin_segments_and_rejects_malformed_lists() {
 #[expect(
     clippy::match_same_arms,
     reason = "each variant has its own arm that names every field, so a changed field is a compile error; merged arms would hide that"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "table: one arm for each instruction, and each arm sums the sizes of its fields"
 )]
 fn arm_field_bytes(instruction: &Instruction) -> usize {
     use std::mem::size_of_val;

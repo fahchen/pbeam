@@ -1004,6 +1004,10 @@ impl BeamProgram {
     /// let result = BeamProgram::bif_trap(&mut scheduler, "erlang", "length", vec![rest, Term::Integer(64000)])?;
     /// assert!(matches!(result, BifResult::Value(Term::Integer(64001))));
     /// ```
+    #[expect(
+        clippy::too_many_lines,
+        reason = "trap table: one arm for each BIF that traps, each arm rebuilds the state of one BIF from its trap arguments"
+    )]
     pub(super) fn bif_trap(
         scheduler: &mut Scheduler,
         module: &str,

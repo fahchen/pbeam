@@ -611,6 +611,10 @@ fn open_fd_port(
 ///
 /// An option that ERTS accepts and PBeam does not support returns a runtime
 /// error, also when a later element is not valid.
+#[expect(
+    clippy::too_many_lines,
+    reason = "option table: one branch for each `open_port` option, as the option loop of `erl_bif_port.c` (850-1022); the branches share the state of the loop"
+)]
 fn port_settings(atoms: &AtomTable, settings: &Term) -> Result<Option<PortSettings>, BeamError> {
     let Some(elements) = settings.proper_list() else {
         return Ok(None);

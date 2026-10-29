@@ -481,6 +481,10 @@ fn raises_badarg_with_the_erts_error_info_for_an_append_segment() {
             caught(function, segment, reason, value)
         );
     }
+}
+
+#[test]
+fn formats_the_erts_error_info_for_an_append_segment_as_the_reference() {
     let frame = |function: &str, cause: &str| {
         format!(
             "{{error,badarg,{{bs_create_bin_append_probe,{function},2,[{{error_info,\
@@ -655,6 +659,10 @@ fn integer_calls<'a>(
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "case table: one entry for each integer or utf8 segment form, and the entries share the program"
+)]
 fn builds_integer_and_utf8_segments_as_pinned_erts() {
     // Each case runs one segment form that the compiler writes: sizes 0, 8,
     // 16, and 72, the big, little, and native byte orders, sizes in a
@@ -817,6 +825,10 @@ fn jumps_to_the_fail_label_for_integer_and_utf8_segments_that_fail() {
 type FailureCase<'a> = (&'a str, Vec<Term>, &'a str, i64, &'a str, &'a str, Term);
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "case table: one entry for each bad integer, utf8, or binary segment, and the entries share the program"
+)]
 fn raises_the_erts_error_info_for_integer_and_utf8_segments() {
     // The size pass checks the sizes of `integer` segments, the code
     // points of `utf8` segments, and the terms of `binary` segments in
@@ -1478,6 +1490,10 @@ fn builds_float_segments_and_raises_their_failures_as_pinned_erts() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "case table: one entry for each float value, and the entries share the program"
+)]
 fn builds_16_bit_float_segments_as_pinned_erts() {
     // A 16-bit float segment rounds a float, a small integer, or a bignum
     // once to binary16, ties to even, and keeps the sign of a zero. A value
@@ -1701,7 +1717,7 @@ fn builds_utf16_and_utf32_segments_as_pinned_erts() {
         run_utf(
             &program,
             "utf16_native",
-            &[vec![Term::Integer(65)], vec![face.clone()]]
+            &[vec![Term::Integer(65)], vec![face]]
         ),
         [
             binary(if cfg!(target_endian = "little") {
@@ -1712,6 +1728,19 @@ fn builds_utf16_and_utf32_segments_as_pinned_erts() {
             binary(&[61, 216, 0, 222]),
         ]
     );
+}
+
+#[test]
+fn builds_utf32_segments_as_pinned_erts() {
+    // A `utf16` segment writes two bytes for a code point below 0x10000 and
+    // four bytes for each other one, in the byte order of the flags
+    // (`erts_bs_put_utf16`, erl_bits.c:1221-1282; `am_utf16` in
+    // jit/arm/instr_bs.cpp:1751-1765, 2407-2427). A `utf32` segment writes
+    // the code point as a 32-bit integer, as an `integer` segment of 32
+    // bits does (jit/arm/instr_bs.cpp:2428-2452).
+    let program = BeamProgram::load(&[BS_CREATE_BIN_UTF_PROBE]).unwrap();
+    let binary = |bytes: &[u8]| Term::binary(bytes.to_vec());
+    let face = Term::Integer(0x1F600);
     assert_eq!(
         run_utf(
             &program,
@@ -1804,6 +1833,10 @@ fn builds_utf16_and_utf32_segments_as_pinned_erts() {
 type UtfFailureCase<'a> = (&'a str, Vec<Term>, i64, &'a str, &'a str, Term);
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "case table: one entry for each bad utf16 or utf32 segment, and the entries share the program"
+)]
 fn raises_the_erts_error_info_for_utf16_and_utf32_segments() {
     // A `utf16` segment fails at the construct pass for a term that is not
     // a code point from 0 to 16#10FFFF outside 16#D800 to 16#DFFF, with

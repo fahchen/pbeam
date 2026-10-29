@@ -131,6 +131,10 @@ const BADARGS: &[u8] = br"[{error,badarg,[{error_info,#{module => erl_erts_error
 ";
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "case table: one expected result for each request line"
+)]
 fn serves_http_request_lines_as_pinned_erts() {
     let result = run("request_lines");
     let get = atom(&result, "GET");

@@ -89,6 +89,10 @@ fn call(atoms: &AtomTable, name: &str, arguments: Vec<Term>) -> Term {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "case table: one entry for each guard function of the match specification"
+)]
 fn runs_each_guard_function_of_the_match_specification() {
     let atoms = test_atom_table();
     let var1 = atom(&atoms, "$1");
@@ -482,8 +486,6 @@ fn builds_match_specification_terms_and_rejects_bad_ones() {
     let atoms = test_atom_table();
     let at = |atoms: &AtomTable, name| atom(atoms, name);
     let head = Term::tuple(vec![at(&atoms, "$1"), at(&atoms, "$2")]);
-    let ok = Term::static_atom("true");
-    let key_k = atom(&atoms, "k");
     let spec = Term::list_from(vec![Term::tuple(vec![
         head.clone(),
         Term::nil(),
@@ -528,13 +530,20 @@ fn builds_match_specification_terms_and_rejects_bad_ones() {
         "element",
         vec![Term::Integer(3), Term::static_atom("$_")],
     )]);
-    let spec = Term::list_from(vec![Term::tuple(vec![head.clone(), Term::nil(), body])]);
+    let spec = Term::list_from(vec![Term::tuple(vec![head, Term::nil(), body])]);
     assert_eq!(
         MatchSpec::compile(&atoms, &spec)
             .unwrap()
             .run(&atoms, &[Term::Integer(1), Term::Integer(2)]),
         Some(Term::static_atom("EXIT"))
     );
+}
+
+#[test]
+fn builds_match_specification_bodies_with_bignums_and_failing_division() {
+    let atoms = test_atom_table();
+    let at = |atoms: &AtomTable, name| atom(atoms, name);
+    let head = Term::tuple(vec![at(&atoms, "$1"), at(&atoms, "$2")]);
     // A large arithmetic result becomes a bignum, and division by zero fails.
     let big = Term::Integer(1 << 40);
     let body = Term::list_from(vec![call(&atoms, "*", vec![big.clone(), big])]);
@@ -550,13 +559,21 @@ fn builds_match_specification_terms_and_rejects_bad_ones() {
         "/",
         vec![Term::Float(1.0), Term::Float(0.0)],
     )]);
-    let spec = Term::list_from(vec![Term::tuple(vec![head.clone(), Term::nil(), body])]);
+    let spec = Term::list_from(vec![Term::tuple(vec![head, Term::nil(), body])]);
     assert_eq!(
         MatchSpec::compile(&atoms, &spec)
             .unwrap()
             .run(&atoms, &[Term::Integer(1), Term::Integer(2)]),
         Some(Term::static_atom("EXIT"))
     );
+}
+
+#[test]
+fn rejects_bad_match_specifications() {
+    let atoms = test_atom_table();
+    let at = |atoms: &AtomTable, name| atom(atoms, name);
+    let head = Term::tuple(vec![at(&atoms, "$1"), at(&atoms, "$2")]);
+    let ok = Term::static_atom("true");
     // An unsupported guard, a map expression, and a bad specification.
     let unsupported = Term::list_from(vec![Term::tuple(vec![
         head.clone(),
@@ -633,7 +650,7 @@ fn builds_match_specification_terms_and_rejects_bad_ones() {
     let compiled = MatchSpec::compile(
         &atoms,
         &Term::list_from(vec![Term::tuple(vec![
-            head.clone(),
+            head,
             Term::nil(),
             Term::list_from([ok.clone()]),
         ])]),
@@ -641,8 +658,17 @@ fn builds_match_specification_terms_and_rejects_bad_ones() {
     .unwrap();
     assert_eq!(
         compiled.run(&atoms, &[Term::Integer(1), Term::Integer(2)]),
-        Some(ok.clone())
+        Some(ok)
     );
+}
+
+#[test]
+fn gives_the_key_and_the_match_nothing_test_of_a_match_specification() {
+    let atoms = test_atom_table();
+    let at = |atoms: &AtomTable, name| atom(atoms, name);
+    let head = Term::tuple(vec![at(&atoms, "$1"), at(&atoms, "$2")]);
+    let ok = Term::static_atom("true");
+    let key_k = atom(&atoms, "k");
     // A single clause gives its key and its match-nothing test, and a
     // specification with two clauses gives neither.
     let one = Term::list_from(vec![Term::tuple(vec![
@@ -707,6 +733,10 @@ fn builds_match_specification_terms_and_rejects_bad_ones() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "case table: one `fails` call for each guard and expression that fails"
+)]
 fn fails_each_guard_and_expression_like_the_match_program() {
     let atoms = test_atom_table();
     let var1 = atom(&atoms, "$1");
@@ -855,10 +885,13 @@ fn fails_each_guard_and_expression_like_the_match_program() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "case table: one entry for each expression that shifts a list or a number"
+)]
 fn shifts_lists_and_boolean_forms_like_the_match_program() {
     let atoms = test_atom_table();
     let head = Term::static_atom("_");
-    let ok = Term::static_atom("true");
     let run_expression = |atoms: &AtomTable, expression: Term| {
         let spec = Term::list_from([Term::tuple(vec![
             head.clone(),
@@ -983,6 +1016,23 @@ fn shifts_lists_and_boolean_forms_like_the_match_program() {
             Term::static_atom("EXIT")
         ))
     );
+}
+
+#[test]
+fn takes_the_boolean_forms_like_the_match_program() {
+    let atoms = test_atom_table();
+    let head = Term::static_atom("_");
+    let ok = Term::static_atom("true");
+    let run_expression = |atoms: &AtomTable, expression: Term| {
+        let spec = Term::list_from([Term::tuple(vec![
+            head.clone(),
+            Term::nil(),
+            Term::list_from([expression]),
+        ])]);
+        MatchSpec::compile(atoms, &spec)
+            .unwrap()
+            .run(atoms, &[Term::Integer(1)])
+    };
     // The boolean forms take two or more operands.
     for (form, operands, expected) in [
         ("and", vec![ok.clone(), ok.clone(), ok.clone()], ok.clone()),
@@ -1021,7 +1071,7 @@ fn shifts_lists_and_boolean_forms_like_the_match_program() {
                 Term::static_atom("false"),
                 Term::static_atom("false"),
             ],
-            ok.clone(),
+            ok,
         ),
     ] {
         let mut elements = vec![atom(&atoms, form)];
@@ -1032,6 +1082,23 @@ fn shifts_lists_and_boolean_forms_like_the_match_program() {
             "{form}"
         );
     }
+}
+
+#[test]
+fn takes_one_operand_of_the_boolean_forms_like_the_match_program() {
+    let atoms = test_atom_table();
+    let head = Term::static_atom("_");
+    let ok = Term::static_atom("true");
+    let run_expression = |atoms: &AtomTable, expression: Term| {
+        let spec = Term::list_from([Term::tuple(vec![
+            head.clone(),
+            Term::nil(),
+            Term::list_from([expression]),
+        ])]);
+        MatchSpec::compile(atoms, &spec)
+            .unwrap()
+            .run(atoms, &[Term::Integer(1)])
+    };
     // One operand is allowed. `and` and `or` check the boolean; `andalso`
     // and `orelse` give the operand (`erl_db_util.c:4701-4855`).
     for (form, operand, expected) in [

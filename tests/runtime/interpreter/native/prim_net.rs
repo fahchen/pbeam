@@ -324,6 +324,52 @@ fn encodes_each_macos_interface_address_form_as_prim_net_nif() {
             ("scope_id", integer(0)),
         ]))
     );
+}
+
+#[test]
+fn encodes_each_macos_link_address_form_as_prim_net_nif() {
+    // The macOS families and `sockaddr_dl` forms of `esock_encode_sockaddr`
+    // with the length -1 (`socket_util.c:723-915`, `1599-1656`,
+    // `2830-2859`). The Linux CI host runs them here.
+    use crate::runtime::host::ifaddrs::{Address, Entry};
+    let atoms = AtomTable::new();
+    let atom = |name: &str| Term::Atom(atoms.put(name).unwrap());
+    let map = |pairs: Vec<(&str, Term)>| {
+        let pairs = pairs
+            .into_iter()
+            .map(|(key, value)| (atom(key), value))
+            .collect();
+        Term::Map(Map::from_pairs(pairs, &atoms).unwrap())
+    };
+    let address = |family, bytes: &[u8]| Address {
+        family,
+        bytes: bytes.to_vec(),
+    };
+    let inet_bytes = [16, 2, 0, 80, 10, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0];
+    let encode = |flags, dstaddr| {
+        let entry = Entry {
+            name: vec![b'u', 0xE9],
+            flags,
+            addr: Some(address(2, &inet_bytes)),
+            netmask: None,
+            dstaddr,
+        };
+        let entry = ifaddrs::macos_entry(entry).ok().unwrap();
+        let BifResult::Value(value) = ifaddrs::result(&atoms, Ok(vec![entry])).unwrap() else {
+            panic!("the result is a value");
+        };
+        let Term::Tuple(tuple) = &value else {
+            panic!("the result is {{ok, List}}");
+        };
+        tuple[1].proper_list().unwrap().next().unwrap().clone()
+    };
+    let get = |entry: &Term, key: &str| {
+        let Term::Map(entry) = entry else {
+            panic!("an entry is a map");
+        };
+        entry.get(&atom(key)).cloned()
+    };
+    let integer = |value: i64| Term::Integer(value);
     let link = |bytes: &[u8]| get(&encode(0x10, Some(address(18, bytes))), "dstaddr");
     let dl = |kind: Term, data: &[u8]| {
         map(vec![

@@ -434,6 +434,10 @@ fn disassemble(module: &str) -> HashMap<String, Vec<String>> {
 /// the compiled shape fails here, because the numbers would then measure
 /// other work.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "case table: one expected disassembly for each loop function"
+)]
 fn keeps_the_measured_instructions_in_each_loop() {
     let loops = disassemble("dispatch_probe");
     for function in LOOP_FUNCTIONS {
@@ -662,13 +666,19 @@ fn records_the_interpreter_dispatch_baseline() {
         })
         .unwrap();
 
+    print_baseline(&rows, floor);
+}
+
+/// Print the tables of the baseline: the rows of each probe, and the added
+/// cost of one instruction over the `floor` row of the local floor loop.
+fn print_baseline(rows: &[(Probe, u128, u128)], floor: &(Probe, u128, u128)) {
     println!("Interpreter dispatch baseline: minimum of {RUNS} runs of each probe.");
     println!();
     println!(
         "| shape | iterations | PBeam ns for each iteration | ERTS ns for each iteration | PBeam ns for the run | ERTS ns for the run |"
     );
     println!("| --- | --- | --- | --- | --- | --- |");
-    for (probe, pbeam, erts) in &rows {
+    for (probe, pbeam, erts) in rows {
         println!(
             "| {} | {} | {:.1} | {:.2} | {} | {} |",
             probe.shape,
@@ -684,7 +694,7 @@ fn records_the_interpreter_dispatch_baseline() {
         "| added instruction | added PBeam ns for each iteration | added ERTS ns for each iteration |"
     );
     println!("| --- | --- | --- |");
-    for (probe, pbeam, erts) in &rows {
+    for (probe, pbeam, erts) in rows {
         if probe.function.starts_with("floor") {
             continue;
         }
