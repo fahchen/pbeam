@@ -18,6 +18,7 @@ use crate::runtime::sockets::Sockets;
 
 mod atoms;
 mod io;
+mod ioctl;
 mod select;
 mod socket;
 mod supports;
@@ -105,6 +106,24 @@ pub(super) const BINDINGS: &[Binding] = &[
         run: |scheduler, arguments| socket::info_1(scheduler, &arguments[0]),
     },
     Binding {
+        name: "nif_ioctl",
+        arity: 2,
+        job: Job::Normal,
+        run: |scheduler, arguments| ioctl::ioctl(scheduler, &arguments[0], &arguments[1..]),
+    },
+    Binding {
+        name: "nif_ioctl",
+        arity: 3,
+        job: Job::Normal,
+        run: |scheduler, arguments| ioctl::ioctl(scheduler, &arguments[0], &arguments[1..]),
+    },
+    Binding {
+        name: "nif_ioctl",
+        arity: 4,
+        job: Job::Normal,
+        run: |scheduler, arguments| ioctl::ioctl(scheduler, &arguments[0], &arguments[1..]),
+    },
+    Binding {
         name: "nif_listen",
         arity: 2,
         job: Job::Normal,
@@ -125,10 +144,22 @@ pub(super) const BINDINGS: &[Binding] = &[
         },
     },
     Binding {
+        name: "nif_peeloff",
+        arity: 2,
+        job: Job::Normal,
+        run: |_, _| Ok(socket::sctp_notsup()),
+    },
+    Binding {
         name: "nif_peername",
         arity: 1,
         job: Job::Normal,
         run: |scheduler, arguments| socket::peername(scheduler, &arguments[0]),
+    },
+    Binding {
+        name: "nif_peernames",
+        arity: 2,
+        job: Job::Normal,
+        run: |_, _| Ok(socket::sctp_notsup()),
     },
     Binding {
         name: "nif_recv",
@@ -159,6 +190,39 @@ pub(super) const BINDINGS: &[Binding] = &[
         },
     },
     Binding {
+        name: "nif_recvmmsg",
+        arity: 6,
+        job: Job::Normal,
+        run: |scheduler, arguments| {
+            io::recvmmsg(
+                scheduler,
+                &arguments[0],
+                [
+                    &arguments[1],
+                    &arguments[2],
+                    &arguments[3],
+                    &arguments[4],
+                    &arguments[5],
+                ],
+            )
+        },
+    },
+    Binding {
+        name: "nif_recvmsg",
+        arity: 5,
+        job: Job::Normal,
+        run: |scheduler, arguments| {
+            io::recvmsg(
+                scheduler,
+                &arguments[0],
+                &arguments[1],
+                &arguments[2],
+                &arguments[3],
+                &arguments[4],
+            )
+        },
+    },
+    Binding {
         name: "nif_send",
         arity: 4,
         job: Job::Normal,
@@ -169,6 +233,71 @@ pub(super) const BINDINGS: &[Binding] = &[
                 &arguments[1],
                 &arguments[2],
                 &arguments[3],
+            )
+        },
+    },
+    Binding {
+        name: "nif_sendfile",
+        arity: 1,
+        job: Job::Normal,
+        run: |scheduler, arguments| io::sendfile::deferred_close(scheduler, &arguments[0]),
+    },
+    Binding {
+        name: "nif_sendfile",
+        arity: 4,
+        job: Job::Normal,
+        run: |scheduler, arguments| {
+            io::sendfile::sendfile(
+                scheduler,
+                &arguments[0],
+                &arguments[1],
+                &arguments[2],
+                &arguments[3],
+                None,
+            )
+        },
+    },
+    Binding {
+        name: "nif_sendfile",
+        arity: 5,
+        job: Job::Normal,
+        run: |scheduler, arguments| {
+            io::sendfile::sendfile(
+                scheduler,
+                &arguments[0],
+                &arguments[1],
+                &arguments[2],
+                &arguments[3],
+                Some(&arguments[4]),
+            )
+        },
+    },
+    Binding {
+        name: "nif_sendmmsg",
+        arity: 4,
+        job: Job::Normal,
+        run: |scheduler, arguments| {
+            io::sendmmsg(
+                scheduler,
+                &arguments[0],
+                &arguments[1],
+                &arguments[2],
+                &arguments[3],
+            )
+        },
+    },
+    Binding {
+        name: "nif_sendmsg",
+        arity: 5,
+        job: Job::Normal,
+        run: |scheduler, arguments| {
+            io::sendmsg(
+                scheduler,
+                &arguments[0],
+                &arguments[1],
+                &arguments[2],
+                &arguments[3],
+                &arguments[4],
             )
         },
     },
@@ -212,6 +341,12 @@ pub(super) const BINDINGS: &[Binding] = &[
         arity: 1,
         job: Job::Normal,
         run: |scheduler, arguments| socket::sockname(scheduler, &arguments[0]),
+    },
+    Binding {
+        name: "nif_socknames",
+        arity: 2,
+        job: Job::Normal,
+        run: |_, _| Ok(socket::sctp_notsup()),
     },
     Binding {
         name: "nif_supports",

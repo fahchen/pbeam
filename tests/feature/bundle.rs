@@ -254,9 +254,8 @@ fn builds_and_runs_the_executable_of_a_project_outside_the_repository() {
     // The task built the release of the project config before the bundle.
     assert!(project.join("rel/releases/start_erl.data").is_file());
     // The default output is `<app>.bundle` next to the release directory.
-    // The run starts in another directory. It removes the `erlexec` flag
-    // variables that `pbeam erl` rejects, so that a shell setting does not
-    // change the run.
+    // The run starts in another directory. It removes the `erlexec`
+    // variables, so that a shell setting does not change the run.
     let clean = directory.join("clean");
     fs::create_dir(&clean).unwrap();
     let executable = clean.join("outside");
