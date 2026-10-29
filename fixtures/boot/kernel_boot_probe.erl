@@ -4,7 +4,7 @@
 -behaviour(supervisor).
 -export([main/0, main/1, lookup/0, gethost/0, supports/0, socket/0, sockopt/0, socket_select/0, socket_io/0,
          socket_dgram/0,         socket_acceptors/0, socket_connect_invalid/0, socket_recvfrom_flags/0, socket_recvfrom_local_flags/0,
-         socket_recvfrom_errqueue/0, socket_sendv/0, socket_msg/0, socket_backend_tcp/0, socket_backend_udp/0, sockopt_otp/0, sockopt_select_read/0, sockopt_host/0, sockopt_raw/0, sockopt_pkt/0, start/2, stop/1, init/1]).
+         socket_recvfrom_errqueue/0, socket_sendv/0, socket_msg/0, socket_sendmmsg/0, socket_recvmmsg/0, socket_backend_tcp/0, socket_backend_udp/0, sockopt_otp/0, sockopt_select_read/0, sockopt_host/0, sockopt_raw/0, sockopt_pkt/0, start/2, stop/1, init/1]).
 
 %% `erl -noshell -boot start_clean -pa fixtures/boot -s kernel_boot_probe
 %% main -kernel logger_level warning` runs main/0 in the boot process of init after the boot script
@@ -518,6 +518,22 @@ socket_msg() ->
                _ -> skipped
            end,
     erlang:display({socket_msg, Plain, Opts, Ctrl, Inet6, Stream, Counters, Mmsg}),
+    init:stop().
+
+%% `-s kernel_boot_probe socket_sendmmsg` and `socket_recvmmsg` run
+%% socket:sendmmsg/4 and socket:recvmmsg/6 on an inet datagram socket,
+%% which ERTS on Linux runs with sendmmsg(2) and recvmmsg(2).
+socket_sendmmsg() ->
+    {ok, U} = socket:open(inet, dgram, udp),
+    ok = socket:bind(U, #{family => inet, addr => {127, 0, 0, 1}, port => 0}),
+    {ok, A} = socket:sockname(U),
+    erlang:display({socket_sendmmsg, socket:sendmmsg(U, [#{addr => A, iov => [<<"m">>]}], [], infinity)}),
+    init:stop().
+
+socket_recvmmsg() ->
+    {ok, U} = socket:open(inet, dgram, udp),
+    ok = socket:bind(U, #{family => inet, addr => {127, 0, 0, 1}, port => 0}),
+    erlang:display({socket_recvmmsg, socket:recvmmsg(U, 1, 0, 0, [], 0)}),
     init:stop().
 
 %% Return `Term` with each map as the sorted list of its pairs: the order of

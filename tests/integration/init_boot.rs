@@ -733,6 +733,16 @@ fn stops_the_run_at_the_socket_calls_that_pbeam_does_not_support() {
             "socket_recvfrom_errqueue",
             "prim_socket:nif_recvfrom/4: the flags 8192 on a socket of the domain 2 are not supported",
         ));
+        // ERTS on Linux runs `sendmmsg(2)` and `recvmmsg(2)`
+        // (unix_socket_syncio.c:4111-4524).
+        probes.push((
+            "socket_sendmmsg",
+            "prim_socket:nif_sendmmsg/4 is not supported: see \"NIF stubs\" in docs/erts-differences.md",
+        ));
+        probes.push((
+            "socket_recvmmsg",
+            "prim_socket:nif_recvmmsg/6 is not supported: see \"NIF stubs\" in docs/erts-differences.md",
+        ));
     }
     for (probe, text) in probes {
         let child = Command::new(env::current_exe().unwrap())
