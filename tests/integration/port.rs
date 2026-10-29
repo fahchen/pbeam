@@ -388,11 +388,12 @@ fn queues_the_output_of_a_busy_port_as_pinned_erts() {
     // The pipe takes what it holds and the queue keeps the rest; the port
     // is busy between its limits, `nosuspend` gives `false`, `force` gives
     // `notsup`, a busy port suspends the sender while another process runs,
-    // and a close writes the queue first (sys_drivers.c:1058-1135,
+    // a close writes the queue first and then ends the port, and a limit
+    // that is not an integer gives `badarg` (sys_drivers.c:1058-1135,
     // 1455-1493; erl_bif_port.c:175-230, 824-825, 920-975).
     assert_runs(
         "busy()",
-        "[false,true,{error,notsup},{error,badarg},false,true,{100,true},true,[{error,badarg},{error,badarg},{error,badarg},{error,badarg}],{error,badarg},true,true,{70,true},true,normal,{70,true},epipe,undefined,{status,suspended},{error,badarg},[{error,notsup},false,false]]",
+        "[false,true,{error,notsup},{error,badarg},false,true,{100,true},true,[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}],{error,badarg},true,true,{70,true},true,normal,<<55,49,54,56,48,10>>,{70,true},epipe,undefined,{status,suspended},{error,badarg},[{error,notsup},false,false]]",
     );
 }
 

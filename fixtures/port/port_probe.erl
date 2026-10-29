@@ -643,7 +643,7 @@ busy() ->
     OffFull = fill(Off, B, 0, 100),
     Swapped = is_port(open_port({spawn, "true"}, [{busy_limits_port, {300, 200}}, {busy_limits_msgq, {1 bsl 63, 1 bsl 63}}])),
     Bad = [error_of(fun() -> open_port({spawn, "true"}, [{busy_limits_port, L}]) end)
-           || L <- [{0, 10}, {10, 1 bsl 64}, foo, {1, 2, 3}]],
+           || L <- [{0, 10}, {10, 1 bsl 64}, foo, {1, 2, 3}, {a, 2}]],
     BadMsgq = error_of(fun() -> open_port({spawn, "true"}, [{busy_limits_msgq, {0, 1}}]) end),
     %% The exit of a busy port resumes its suspended sender, whose
     %% command then finds no port (io.c:3895).
@@ -655,18 +655,23 @@ busy() ->
     Sent = lists_all([port_command(Slow, B) || _ <- lists_seq(100)]),
     Ticker ! stop,
     Ticked = receive {ticks, N} -> N > 0 after 2000 -> missing end,
+    %% The program counts its input after the port wrote the queue and
+    %% terminated, which closes the pipe; a second program reads the count.
+    F = "/tmp/port_probe_busy_" ++ os:getpid(),
     Closing = open_port({spawn_executable, sh()},
-                        [binary, {busy_limits_port, disabled}, {args, ["-c", "sleep 1; cat >/dev/null"]}]),
+                        [binary, {busy_limits_port, disabled}, {args, ["-c", "sleep 1; wc -c | tr -d ' ' > " ++ F]}]),
     Queued = fill(Closing, B, 0, 70),
     Closed = port_close(Closing),
     Exit = receive {'EXIT', Closing, Reason} -> Reason after 3000 -> missing end,
+    Wait = "i=0; while [ ! -s " ++ F ++ " ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i+1)); done; cat " ++ F ++ "; rm -f " ++ F,
+    Flushed = read_count(open_port({spawn_executable, sh()}, [binary, {args, ["-c", Wait]}]), <<>>),
     %% A queue whose reader exits fails the port with epipe.
     Gone = open_port({spawn_executable, sh()}, [binary, out, {busy_limits_port, disabled}, {args, ["-c", "sleep 0.3"]}]),
     GoneQueued = fill(Gone, B, 0, 70),
     GoneExit = receive {'EXIT', Gone, GoneReason} -> GoneReason after 3000 -> missing end,
     GoneInfo = erlang:port_info(Gone),
     [Full, Queue, Force, BadOpt, LowFull, LowQueue, OffFull, Swapped, Bad, BadMsgq, Sent, Ticked,
-     Queued, Closed, Exit, GoneQueued, GoneExit, GoneInfo, WaiterStatus, WaiterDown, Checks].
+     Queued, Closed, Exit, Flushed, GoneQueued, GoneExit, GoneInfo, WaiterStatus, WaiterDown, Checks].
 
 %% Fill the queue until the port is busy and stays busy: a macOS pipe grows
 %% while it is written, and the growth can take the queue.
@@ -696,6 +701,14 @@ error_of(F) ->
 
 tick(Parent, N) ->
     receive stop -> Parent ! {ticks, N} after 10 -> tick(Parent, N + 1) end.
+
+%% The output of the program of `P` until its exit, as one binary.
+read_count(P, Count) ->
+    receive
+        {P, {data, More}} -> read_count(P, <<Count/binary, More/binary>>);
+        {'EXIT', P, normal} -> Count
+    after 8000 -> missing
+    end.
 
 lists_seq(0) -> [];
 lists_seq(N) -> [N | lists_seq(N - 1)].
