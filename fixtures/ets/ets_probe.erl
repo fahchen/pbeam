@@ -1777,9 +1777,9 @@ walk_error(F, T, K) ->
 %% owner and the reference numbers (`erts_cmp_compound`, utils.c:2283-2286),
 %% and a PBeam reference compares its three number words, because it keeps
 %% no pid (row "Term order" of docs/erts-differences.md). The cases give the
-%% same shape on both runtimes: a step from a key that the table does not
+%% same result on both runtimes: a step from a key that the table does not
 %% hold, a lookup of an arithmetic key, and the first key of a table that
-%% holds two aliases.
+%% holds two aliases of one process, which is the first alias.
 walk_alias(Case) ->
     O = ets:new(ets_probe, [ordered_set]),
     A = erlang:alias([]),
@@ -1793,7 +1793,7 @@ walk_alias(Case) ->
             [ets:lookup(O, 1), ets:delete(O, A), ets:lookup(O, B)];
         unordered_first ->
             true = ets:insert(O, {B, 2}),
-            ets:first(O);
+            ets:first(O) =:= A;
         cleared ->
             true = ets:insert(O, {B, 2}),
             true = ets:delete_all_objects(O),

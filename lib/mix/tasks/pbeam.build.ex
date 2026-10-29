@@ -45,9 +45,10 @@ defmodule Mix.Tasks.Pbeam.Build do
     app = Mix.Project.config()[:app]
 
     # With no `--release`, the task builds the release of the project
-    # config itself. The release task must run in the prod environment,
-    # and `--overwrite` builds again when the release directory already
-    # has a build.
+    # config itself. It builds only the release of the prod environment,
+    # the configuration that ships, so no development configuration goes
+    # into an executable. `--overwrite` builds again when the release
+    # directory already has a build.
     unless Keyword.get(options, :release) do
       if Mix.env() != :prod do
         Mix.raise("pbeam.build: run the task with MIX_ENV=prod, the environment of the release")

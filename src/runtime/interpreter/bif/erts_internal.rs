@@ -2477,8 +2477,7 @@ pub(super) fn term_type(atoms: &AtomTable, term: &Term) -> Result<BifResult, Bea
 ///
 /// # Errors
 ///
-/// Return a runtime error when the result depends on the order of an
-/// alias reference.
+/// Never returns an error: each term has a place in the term order.
 pub(super) fn cmp_term(
     atoms: &AtomTable,
     left: &Term,

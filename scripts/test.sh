@@ -25,6 +25,13 @@ mix test --cover --warnings-as-errors
   MIX_ENV='test' mix compile --warnings-as-errors
   mix test --cover --warnings-as-errors
 )
+# The exqlite fixture fetches exqlite from Hex and builds its NIF library from source with the host cc (config :exqlite, force_build: true). Its entry module has the same gates.
+(
+  cd fixtures/exqlite
+  mix deps.get --check-locked
+  MIX_ENV='test' mix compile --warnings-as-errors
+  mix test --cover --warnings-as-errors
+)
 
 # Only the exact empty bootstrap is exempt; any Rust source addition enables coverage.
 rust_sources=$(git ls-files --cached --others --exclude-standard -- '*.rs')

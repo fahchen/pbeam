@@ -15,7 +15,7 @@ use std::{
     io::{IoSlice, Write},
     os::{
         fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
-        unix::{ffi::OsStrExt, fs::PermissionsExt},
+        unix::ffi::OsStrExt,
     },
     thread,
 };
@@ -115,12 +115,13 @@ pub(crate) enum SpawnError {
 #[derive(Debug)]
 pub(crate) struct Child {
     /// The OS pid of the child, as `port_info/1` gives it in `os_pid`. It
-    /// is 0 when the start failed before the program ran: the port closes
-    /// before `port_info/1` can read it.
+    /// is 0 when the start failed before the program ran, where ERTS gives
+    /// the pid of the child that failed (`sys_drivers.c:1331`); row "Ports"
+    /// of `docs/erts-differences.md` records it.
     pub(crate) os_pid: libc::pid_t,
     /// The write end of the input pipe, which is fd 0 or 3 of the child,
     /// or `None` with the `in` option: ERTS closes the parent end after
-    /// the handshake (`sys_drivers.c:1312-1321`), and the child keeps the
+    /// the handshake (`sys_drivers.c:1320-1329`), and the child keeps the
     /// standard input of the node (`erl_child_setup.c:317-321`,
     /// `334-337`). A write returns `EBADF`, as the `writev` of the driver
     /// on its closed fd does (`sys_drivers.c:1145`, `1177`).
@@ -301,7 +302,7 @@ fn start(
     Ok(Child {
         os_pid,
         // ERTS closes the parent end that its direction does not use
-        // after the handshake (`sys_drivers.c:1307-1321`).
+        // after the handshake (`sys_drivers.c:1320-1329`).
         input: read_write.write.then_some(input),
         output: read_write.read.then_some(output),
         status,
@@ -337,7 +338,8 @@ fn failed(
 /// `None` when the child can enter it, as the `chdir` of the child setup
 /// program does (`erl_child_setup.c:302-306`): `metadata` resolves the
 /// path as `chdir` does, a path that is not a directory gives `ENOTDIR`,
-/// and a directory without an execute bit gives `EACCES`.
+/// and `access` with `X_OK` gives the errno of a directory that the user
+/// cannot search, with the rights of the user (root, ACLs).
 ///
 /// # Examples
 ///
@@ -349,8 +351,9 @@ fn enter_error(dir: &[u8]) -> Option<c_int> {
     match fs::metadata(OsStr::from_bytes(dir)) {
         Err(error) => Some(error.raw_os_error().unwrap_or(libc::ENOENT)),
         Ok(metadata) if !metadata.is_dir() => Some(libc::ENOTDIR),
-        Ok(metadata) if metadata.permissions().mode() & 0o111 == 0 => Some(libc::EACCES),
-        Ok(_) => None,
+        Ok(_) => nix::unistd::access(OsStr::from_bytes(dir), nix::unistd::AccessFlags::X_OK)
+            .err()
+            .map(|error| error as c_int),
     }
 }
 

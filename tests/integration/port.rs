@@ -232,7 +232,7 @@ fn runs_the_in_and_out_options_as_pinned_erts() {
     // `in` sets DO_READ and `out` sets DO_WRITE (erl_bif_port.c:991-994),
     // and without both options the port keeps the two directions
     // (erl_bif_port.c:1015-1016). The driver closes the parent end of the
-    // missing direction after the handshake (sys_drivers.c:1307-1321), so
+    // missing direction after the handshake (sys_drivers.c:1320-1329), so
     // a write to an `in` port fails with ebadf (sys_drivers.c:1145, 1177)
     // and an `out` port sends no data message and no exit status
     // (sys_drivers.c:746-753), and a write after the child exited fails
@@ -389,7 +389,7 @@ fn opens_a_port_on_an_fd_that_is_not_open_as_pinned_erts() {
     // port opens, and its write fails with `ebadf` (sys_drivers.c:1180-1184).
     assert_runs(
         "fd_closed()",
-        "[[],true,[{'EXIT',port,ebadf}],undefined,{error,einval}]",
+        "[[],true,[{'EXIT',port,ebadf}],undefined,{error,einval},[true,ebadf,[],true]]",
     );
 }
 

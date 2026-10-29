@@ -18,6 +18,13 @@ defmodule PlugHelloTest do
     assert ["text/plain" <> _] = Plug.Conn.get_resp_header(conn, "content-type")
   end
 
+  test "GET /release answers the RELEASE_* variables" do
+    conn = PlugHello.call(conn(:get, "/release"), PlugHello.init([]))
+    assert conn.status == 200
+    assert conn.resp_body == inspect(List.duplicate(nil, 9))
+    assert ["text/plain" <> _] = Plug.Conn.get_resp_header(conn, "content-type")
+  end
+
   test "another path answers 404" do
     assert PlugHello.call(conn(:get, "/other"), []).status == 404
     assert PlugHello.call(conn(:post, "/"), []).status == 404

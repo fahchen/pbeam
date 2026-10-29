@@ -11,6 +11,9 @@
 /fixtures/bcrypt/_build/
 /fixtures/bcrypt/deps/
 /fixtures/bcrypt/cover/
+/fixtures/exqlite/_build/
+/fixtures/exqlite/deps/
+/fixtures/exqlite/cover/
 
 # Agent scratch files. Skills under .agents/skills/ stay tracked.
 /.agents/.handoff/

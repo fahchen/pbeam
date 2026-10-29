@@ -52,7 +52,14 @@ mod connect;
 mod datagram;
 mod stream;
 
-use std::{collections::VecDeque, ffi::c_int, io, os::fd::AsRawFd, time::Duration};
+use std::{
+    collections::VecDeque,
+    ffi::c_int,
+    io,
+    net::{Ipv4Addr, Ipv6Addr},
+    os::fd::AsRawFd,
+    time::Duration,
+};
 
 use nix::sys::socket::{getsockopt, setsockopt, sockopt};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
@@ -199,6 +206,13 @@ pub(in crate::runtime) struct Inet {
     /// that one poll event reads (`INET_PACKET_POLL`, 5, at the start,
     /// inet_drv.c:1072, 14508).
     read_packets: i32,
+    /// A `udp_inet` socket whose read select is off: it reads no datagram,
+    /// also in active mode, until a receive request or a change of the
+    /// option `active` selects it again. The timeout of a receive
+    /// (inet_drv.c:15021-15024), the last datagram of an active socket that
+    /// becomes passive (inet_drv.c:15570-15573), and a change to passive
+    /// (inet_drv.c:7960-7967) turn the select off.
+    read_off: bool,
     /// The option `send_timeout` in milliseconds, -1 for `infinity` (the
     /// start value, `INET_INFINITY`).
     send_timeout: i32,
@@ -292,6 +306,7 @@ impl Inet {
             active: 0,
             active_count: 0,
             read_packets: 5,
+            read_off: false,
             send_timeout: -1,
             send_timeout_close: 0,
             delay_send: false,
@@ -381,9 +396,9 @@ impl Inet {
         (!self.acceptors.is_empty()).then(|| socket.as_raw_fd())
     }
 
-    /// Return the fd of an active datagram socket, which the port reads for
-    /// datagrams (`sock_select(desc, FD_READ, 1)`, inet_drv.c:7960-7967,
-    /// 14619-14621), else `None`.
+    /// Return the fd of an active datagram socket whose read select is on,
+    /// which the port reads for datagrams (`sock_select(desc, FD_READ, 1)`,
+    /// inet_drv.c:7960-7967, 14619-14621), else `None`.
     ///
     /// # Examples
     ///
@@ -392,7 +407,8 @@ impl Inet {
     /// ```
     pub(in crate::runtime) fn receive_fd(&self) -> Option<c_int> {
         let socket = self.socket.as_ref()?;
-        (self.socket_type == SocketType::Datagram && self.active != 0).then(|| socket.as_raw_fd())
+        (self.socket_type == SocketType::Datagram && self.active != 0 && !self.read_off)
+            .then(|| socket.as_raw_fd())
     }
 
     /// Run the request `command` of the process `caller` with the bytes
@@ -424,6 +440,9 @@ impl Inet {
                 let old = self.active;
                 let mut count = 0;
                 let reply = self.set_options(request, &mut count)?;
+                if reply == [OK] {
+                    self.select_datagram_read(old);
+                }
                 if count > 0 {
                     return Ok(Control::Passive { reply, count });
                 }
@@ -471,8 +490,15 @@ impl Inet {
             return error_reply("einval");
         };
         if how != SHUT_READ && self.stream.output_size() > 0 {
-            self.stream.pending_shutdown =
-                matches!(how, SHUT_WRITE | SHUT_READ_WRITE).then_some(how);
+            // ERTS adds the flag of each request, and the queue end runs
+            // the write shutdown when its flag is set (inet_drv.c:12362-12367,
+            // 13968-13969), so a write request stays over a later both. Another
+            // `how` gives `ok` and adds no flag.
+            if how == SHUT_WRITE
+                || (how == SHUT_READ_WRITE && self.stream.pending_shutdown.is_none())
+            {
+                self.stream.pending_shutdown = Some(how);
+            }
             return vec![OK];
         }
         self.shutdown(how)
@@ -482,9 +508,7 @@ impl Inet {
     /// reply, as `sock_shutdown` gives it (inet_drv.c:12368-12377). A how
     /// that is not 0, 1, or 2 gives `einval`.
     fn shutdown(&mut self, how: u8) -> Vec<u8> {
-        let Some(socket) = self.socket.as_ref() else {
-            return error_reply("enotconn");
-        };
+        let socket = self.socket.as_ref().expect("a connected port has a socket");
         let how = match how {
             SHUT_READ => std::net::Shutdown::Read,
             SHUT_WRITE => std::net::Shutdown::Write,
@@ -679,7 +703,7 @@ impl Inet {
     /// assert_eq!(port.address(&[9, 0]), Err(b"\0eafnosupport".to_vec()));
     /// ```
     fn address(&self, request: &[u8]) -> Result<SockAddr, Vec<u8>> {
-        use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
+        use std::net::{SocketAddrV4, SocketAddrV6};
         let (&tag, address) = request.split_first().expect("a request of 2 bytes");
         let address: SockAddr = match (tag, address) {
             (AF_INET, &[p1, p0, a, b, c, d, ..]) => {
@@ -741,6 +765,13 @@ impl Inet {
     /// `broadcast`, `sndbuf`, `recbuf`, `multicast_ttl`, and
     /// `multicast_loop` does not fail the request (inet_drv.c:7293-7360,
     /// 7571-7587, 7923-7942).
+    ///
+    /// `multicast_if`, `add_membership`, and `drop_membership` on a `local`
+    /// socket, and a membership whose family is not the family of the
+    /// socket, give `einval`. A membership takes 12 more bytes on IPv4 and
+    /// 20 more bytes on IPv6, and fewer bytes give a runtime error. A failed
+    /// `setsockopt` of these options does not fail the request
+    /// (inet_drv.c:7589-7802).
     fn set_options(
         &mut self,
         mut request: &[u8],
@@ -831,6 +862,61 @@ impl Inet {
                 13 => self.set_socket(libc::IP_MULTICAST_LOOP, false, |socket| {
                     socket.set_multicast_loop_v4(value != 0)
                 }),
+                11 => match self.family {
+                    AF_INET => self.set_socket(libc::IP_MULTICAST_IF, false, |socket| {
+                        socket.set_multicast_if_v4(&Ipv4Addr::from(value as u32))
+                    }),
+                    // ERTS gives the index in network byte order
+                    // (`sock_htonl`, inet_drv.c:7608).
+                    AF_INET6 => self.set_socket(libc::IPV6_MULTICAST_IF, false, |socket| {
+                        socket.set_multicast_if_v6((value as u32).to_be())
+                    }),
+                    _ => false,
+                },
+                14 | 15 => {
+                    let add = *option == 14;
+                    match (value, self.family) {
+                        (1, AF_INET) => {
+                            let Some((head, rest)) = request.split_first_chunk::<12>() else {
+                                return Err(self
+                                    .unsupported("option membership with", "fewer than 12 bytes"));
+                            };
+                            request = rest;
+                            let [i3, i2, i1, i0, g3, g2, g1, g0, a3, a2, a1, a0] = *head;
+                            let index = u32::from_be_bytes([i3, i2, i1, i0]);
+                            let group = Ipv4Addr::new(g3, g2, g1, g0);
+                            let interface = Ipv4Addr::new(a3, a2, a1, a0);
+                            let kind = if add {
+                                libc::IP_ADD_MEMBERSHIP
+                            } else {
+                                libc::IP_DROP_MEMBERSHIP
+                            };
+                            self.set_socket(kind, false, |socket| {
+                                membership_v4(socket, add, group, index, interface)
+                            })
+                        }
+                        (2, AF_INET6) => {
+                            let Some((head, _)) = request.split_first_chunk::<20>() else {
+                                return Err(self
+                                    .unsupported("option membership with", "fewer than 20 bytes"));
+                            };
+                            // The driver skips the options after it
+                            // (`len -= len`, inet_drv.c:7780).
+                            request = &[];
+                            let [i3, i2, i1, i0, ref group @ ..] = *head;
+                            let index = u32::from_be_bytes([i3, i2, i1, i0]);
+                            let group = Ipv6Addr::from(*group);
+                            self.set_socket(IPV6_MEMBERSHIP[usize::from(add)], false, |socket| {
+                                if add {
+                                    socket.join_multicast_v6(&group, index)
+                                } else {
+                                    socket.leave_multicast_v6(&group, index)
+                                }
+                            })
+                        }
+                        _ => false,
+                    }
+                }
                 0 => self.set_socket(libc::SO_REUSEADDR, false, |socket| {
                     socket.set_reuse_address(value != 0)
                 }),
@@ -871,8 +957,14 @@ impl Inet {
                 47 if value != 0 => return Err(error(RECVTTL_ON)),
                 // PBeam never sets `IP_RECVTTL`, so a socket has it off.
                 47 => self.socket.is_some(),
-                // macOS has no `TCP_NOPUSH`, so ERTS skips the option
-                // (inet_drv.c:1102-1104, 7506-7521).
+                // ERTS sets `TCP_CORK` where the host has it, and skips the
+                // option on macOS, which has no `TCP_NOPUSH` for ERTS
+                // (inet_drv.c:1101-1105, 7506-7521).
+                #[cfg(target_os = "linux")]
+                48 => self.set_socket(libc::TCP_CORK, false, |socket| {
+                    socket.set_tcp_cork(value != 0)
+                }),
+                #[cfg(not(target_os = "linux"))]
                 48 => true,
                 30 | 35 | 31 if !self.has_stream_socket() => true,
                 30 => {
@@ -894,6 +986,25 @@ impl Inet {
             }
         }
         Ok(vec![OK])
+    }
+
+    /// Set the read select of an open `udp_inet` socket after a valid
+    /// `SETOPTS` that changed the option `active` from `old`, as
+    /// `inet_set_opts` does (inet_drv.c:7945-7967): an active socket reads,
+    /// and a passive socket does not. A change to passive also stops the
+    /// timer of the receive that waits, which then waits until the close of
+    /// the port (inet_drv.c:7961-7964). The timer service drops the stopped
+    /// timer when it comes, as no receive holds it.
+    fn select_datagram_read(&mut self, old: i32) {
+        if self.socket_type != SocketType::Datagram || self.socket.is_none() || self.active == old {
+            return;
+        }
+        self.read_off = self.active == 0;
+        if self.read_off
+            && let Some(receiver) = &mut self.stream.receiver
+        {
+            receiver.timer = None;
+        }
     }
 
     /// Return the result of a `SETOPTS` with the reply `reply` that changed
@@ -994,8 +1105,26 @@ impl Inet {
                 7 => size(Socket::recv_buffer_size),
                 12 => integer(Socket::multicast_ttl_v4),
                 13 => flag(Socket::multicast_loop_v4, 1),
-                // macOS gives no `TCP_NOPUSH`, so `nopush` is false
-                // (inet_drv.c:9451-9464).
+                // The driver writes the family after 4 bytes that it does
+                // not write, and the interface after the end of the reply
+                // (inet_drv.c:9497-9528). PBeam gives 0 for the 4 bytes.
+                11 => {
+                    if !matches!(self.family, AF_INET | AF_INET6) {
+                        return Ok(error_reply("einval"));
+                    }
+                    if reply.len() + 9 > MAX_OPT_BUFFER {
+                        return Ok(error_reply("einval"));
+                    }
+                    reply.push(option);
+                    reply.extend([0; 4]);
+                    reply.extend(i32::from(self.family).to_be_bytes());
+                    continue;
+                }
+                // ERTS reads `TCP_CORK` where the host has it, and gives 0 on
+                // macOS (inet_drv.c:9451-9460).
+                #[cfg(target_os = "linux")]
+                48 => flag(Socket::tcp_cork, 1),
+                #[cfg(not(target_os = "linux"))]
                 48 => Some(0),
                 30 => self.has_stream_socket().then_some(self.send_timeout),
                 35 => self.has_stream_socket().then_some(self.send_timeout_close),
@@ -1117,6 +1246,57 @@ fn linger_time(on: i32, seconds: u32) -> Result<Option<Duration>, BeamError> {
     (on != 0 || seconds == 0)
         .then_some(time)
         .ok_or_else(|| error(LINGER_TIME))
+}
+
+/// The socket constants of `add_membership` and `drop_membership` on an
+/// IPv6 socket, by `add` (`INET_ADD_MEMBERSHIP` and `INET_DROP_MEMBERSHIP`,
+/// inet_drv.c:1126-1137).
+#[cfg(target_os = "linux")]
+const IPV6_MEMBERSHIP: [c_int; 2] = [libc::IPV6_DROP_MEMBERSHIP, libc::IPV6_ADD_MEMBERSHIP];
+#[cfg(not(target_os = "linux"))]
+const IPV6_MEMBERSHIP: [c_int; 2] = [libc::IPV6_LEAVE_GROUP, libc::IPV6_JOIN_GROUP];
+
+/// Join (`add`) or leave the IPv4 group `group` with `ip_mreqn`, as
+/// `inet_set_opts` does on Linux (inet_drv.c:7696-7711). The kernel finds
+/// the device by the index `index` when it is not 0, else by the address
+/// `interface` (`ip_mc_find_dev`), so the call gives only one of them.
+#[cfg(target_os = "linux")]
+fn membership_v4(
+    socket: &Socket,
+    add: bool,
+    group: Ipv4Addr,
+    index: u32,
+    interface: Ipv4Addr,
+) -> io::Result<()> {
+    use socket2::InterfaceIndexOrAddress;
+    let interface = if index == 0 {
+        InterfaceIndexOrAddress::Address(interface)
+    } else {
+        InterfaceIndexOrAddress::Index(index)
+    };
+    if add {
+        socket.join_multicast_v4_n(&group, &interface)
+    } else {
+        socket.leave_multicast_v4_n(&group, &interface)
+    }
+}
+
+/// Join (`add`) or leave the IPv4 group `group` with `ip_mreq`, which has
+/// no index, as `inet_set_opts` does without `ip_mreqn`
+/// (inet_drv.c:7728-7742).
+#[cfg(not(target_os = "linux"))]
+fn membership_v4(
+    socket: &Socket,
+    add: bool,
+    group: Ipv4Addr,
+    _index: u32,
+    interface: Ipv4Addr,
+) -> io::Result<()> {
+    if add {
+        socket.join_multicast_v4(&group, &interface)
+    } else {
+        socket.leave_multicast_v4(&group, &interface)
+    }
 }
 
 /// Set an option with `set`, as `inet_setopt` does without `SO_PRIORITY`

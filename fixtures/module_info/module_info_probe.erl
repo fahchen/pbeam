@@ -13,11 +13,12 @@ main() ->
              || M <- [module_info_missing, "module_info_probe"]],
     [erlang:pre_loaded(), module_info_probe:module_info(module), Info1 | Info].
 
-%% The key that PBeam does not implement.
+%% exported_from_module prepends each export of the module in the order of
+%% the export table (erl_bif_info.c:5822-5862), where the loader puts the
+%% exports in ExpT order (jit/asm_load.c:1180-1186).
 exports() -> erlang:get_module_info(module_info_probe, exports).
 
 %% erlang:get_module_info/1, which Module:module_info/0 calls
-%% (erl_bif_info.c:5946-5984, 6010-6019). A module that is not an atom or
-%% that names no loaded module raises badarg. PBeam cannot give the key
-%% `exports`, so the call of a loaded module stops the run at that key.
+%% (erl_bif_info.c:5946-5984, 6010-6019): the pairs of the keys module,
+%% exports, attributes, compile, and md5.
 info() -> erlang:get_module_info(module_info_probe).

@@ -127,12 +127,6 @@ impl Atom {
         self.index
     }
 
-    /// Return the atom of the atom-table index `index`, which a term that
-    /// another env made carries.
-    pub(crate) fn from_index(index: u32) -> Atom {
-        Atom { index }
-    }
-
     /// Return a static atom without a table. A static atom has the same
     /// index in every atom table. Return `None` for a name that is not
     /// static.
@@ -401,6 +395,20 @@ impl AtomTable {
             .get(index % ATOM_CHUNK)?
             .get()
             .map(Arc::as_ref)
+    }
+
+    /// Return the atom at `index`, or `None` for an index that the table
+    /// does not hold.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let table = AtomTable::new();
+    /// assert_eq!(table.atom_at(506), table.get("ok"));
+    /// assert_eq!(table.atom_at(1048576), None);
+    /// ```
+    pub(crate) fn atom_at(&self, index: u32) -> Option<Atom> {
+        self.name(index).map(|_| Atom { index })
     }
 
     /// Return the name of `atom` from this table. Read it with

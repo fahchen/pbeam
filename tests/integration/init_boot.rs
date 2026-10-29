@@ -38,8 +38,9 @@ const ISOLATED_ERROR: &str = "PBEAM_INIT_BOOT_ISOLATED_ERROR";
 /// The pinned modules that the boot runs before the probe: `erl_init` and
 /// the modules that `erl_init:start/2` and `init` call
 /// (erl_init.erl:35-50; init.erl:586-596, 1164-1358).
-const BOOT_MODULES: [&str; 10] = [
+const BOOT_MODULES: [&str; 11] = [
     "erl_init",
+    "erts_code_purger",
     "init",
     "erl_prim_loader",
     "prim_file",
@@ -81,7 +82,10 @@ fn boots_init_with_a_fixed_boot_script_as_pinned_erts() {
     // the boot status of `init` at each step of the script, waits for the
     // exit of the boot process, and displays the registered name of `init`,
     // the steps, and the status `{started, started}` of the main loop of
-    // `init` (init.erl:700-704). It then halts with status 0.
+    // `init` (init.erl:700-704). The names include `erts_code_purger`, which
+    // the emulator starts after `init` with high priority and the group leader
+    // of `init` (erl_init.c:402-418, 2550-2557). It then halts
+    // with status 0.
     let reference = Command::new("erl")
         .args(["-noshell", "-boot", BOOT_FILE, "-pa", "fixtures/boot"])
         .stdin(Stdio::null())
@@ -92,7 +96,8 @@ fn boots_init_with_a_fixed_boot_script_as_pinned_erts() {
         recorder_linked_to_init,true,\
         steps,[{first,{starting,init_kernel_started}},{second,{starting,applications_loaded}}],\
         names,[{init,true},{erl_prim_loader,true},{init__boot__on_load_handler,true},\
-        {init_boot_probe_recorder,true}],alive,true}\r\n";
+        {init_boot_probe_recorder,true},{erts_code_purger,true}],\
+        purger,[{priority,high},{group_leader,<0.0.0>}],alive,true}\r\n";
     assert_eq!(
         (
             String::from_utf8_lossy(&reference.stdout).as_ref(),
@@ -474,6 +479,24 @@ fn sets_and_gets_the_raw_and_native_socket_options_as_pinned_erts() {
         reference.contains("{error,{invalid,{value_spec,foo}}}"),
         "{reference}"
     );
+    assert_eq!(node, reference, "PBeam");
+}
+
+#[test]
+fn sets_msfilter_and_gets_pktoptions_as_pinned_erts() {
+    // `kernel_boot_probe:sockopt_pkt/0` runs `esock_setopt_msfilter` and
+    // `esock_getopt_pktoptions` with the control message encoders of
+    // `cmsgLevelIP` (prim_socket_nif.c:8602-8695, 13255-13405, 14176-14215,
+    // 14335-14387, 14453-14490). Only Linux has the two options, so the test
+    // compares the two runs on the host.
+    let (reference, status, node) = run_kernel_boot("sockopt_pkt", false, &["{sockopt_pkt,"]);
+    assert_eq!(status, Some(0), "ERTS");
+    assert!(
+        reference.starts_with("{sockopt_pkt,[{error,"),
+        "{reference}"
+    );
+    #[cfg(target_os = "linux")]
+    assert!(reference.contains("{type,pktinfo}"), "{reference}");
     assert_eq!(node, reference, "PBeam");
 }
 

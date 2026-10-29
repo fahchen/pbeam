@@ -1,0 +1,83 @@
+{
+  "version": 3,
+  "id": "mvspzbib-xwdwjw",
+  "objective": "Implement pbeam #1291 so the from-source fs_notify 0.1.2 NIF loads and delivers filesystem events with pinned-ERTS behavior, and Suikou can be packaged and exercised on PBeam.\nSuccess criteria: every enif symbol required by the fs_notify NIF 2.18 load resolves without SIGABRT; the 79 unused names fail clearly only when called; the 12 watch-run functions have real implementations with pinned-ERTS fixture comparisons; a native library thread can allocate an independent env and send immediately while the node is alive; a watcher receives a real file event with the same observable result as pinned ERTS; `mix pbeam.build` / `mise run package` succeeds and the packaged Suikou server and CLI complete a smoke test on PBeam.\nBoundaries: work in `/Users/admin/Workspace/pbeam/.worktrees/task-1291` on branch `task-1291`, plus the Suikou consumer only for verification or a separately justified consumer fix. In scope are the 79 load-only exports, the 12 watch-run implementations, the run-global NIF registry, registration in `Interpreter::run_on_schedulers`, documentation, and consumer verification. Other unsupported BIFs, including the cold-start `get_module_info(exports)` gap, are out of scope unless they block the agreed consumer path; then stop and ask.\nConstraints: use `workbuddy/deepseek-v4.1-flash` for delegated implementation; the assistant reviews every diff before commit. Do not push, merge main, amend commits, or modify GitHub issues, PRs, or the board. Keep commits atomic and in Conventional Commits format. Match pinned ERTS 29.1.1 and cite OTP source file:line. New `unsafe` stays inside `src/runtime/nif/abi/` under ADR 0001. One active run may register at a time; library-thread sends during a live run are immediate. After the node is destroyed, `NULL` / `0` is the lifetime boundary, not a reason to keep the node alive. Do not commit Suikou's local exqlite patch.\nIf blocked: stop and ask the user, including if DeepSeek Flash is unavailable or a new unrelated runtime gap blocks the consumer path.",
+  "status": "paused",
+  "autoContinue": false,
+  "usage": {
+    "tokensUsed": 272234,
+    "activeSeconds": 700
+  },
+  "sisyphus": false,
+  "revision": 245,
+  "createdAt": "2026-10-28T23:02:33.731Z",
+  "updatedAt": "2026-10-28T23:32:44.419Z",
+  "scheduler": {
+    "version": 1,
+    "owner": "01a17fc4-6d52-75f4-a193-107de6f79105",
+    "generation": "4968fd69-65a7-48c9-954d-aaa203a82189",
+    "used": 40,
+    "phase": "idle",
+    "repairUsed": false
+  },
+  "verificationContract": "run focused `cargo nextest` tests and fixture probes against pinned ERTS for each change, plus `cargo fmt --all -- --check` and `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`; prove the missing-symbol count is zero and the native-thread watch event arrives; run `mise run check-brief` once after implementation; record exact commands, results, commits, and remaining gaps in `/Users/admin/Workspace/pbeam-suikou-integration.md`.",
+  "taskList": {
+    "tasks": [
+      {
+        "id": "task-1",
+        "title": "Export all remaining load-only NIF symbols",
+        "status": "complete",
+        "verificationContract": "The 79 Group B names are generated from one table, the recomputed missing-symbol count is zero, unsupported calls fail clearly, focused tests/fmt/clippy pass, and loading the from-source fs_notify library no longer dies in `nif_init`.",
+        "completedAt": "2026-10-28T23:18:25.194Z",
+        "evidence": "commit 3f7bb5a on task-1291; independently recomputed: fs_notify references 130 names, nm -gU target/debug/pbeam exports 122, missing exactly the 12 Group A names (Group B missing 0, none of the 12 in"
+      },
+      {
+        "id": "task-2",
+        "title": "Implement the twelve fs_notify watch-run NIF functions",
+        "status": "pending",
+        "verificationContract": "Each Group A function has an OTP file:line citation and a pinned-ERTS fixture comparison; focused tests, fmt, and clippy pass with full line coverage of new branches."
+      },
+      {
+        "id": "task-3",
+        "title": "Support NIF env allocation and immediate send on native library threads",
+        "status": "pending",
+        "verificationContract": "A safe run-global registry is registered for the live run and cleared on every exit path; native-thread alloc/send works during the run, dead targets and post-run calls return the ERTS-compatible boundary results, and focused concurrency tests plus fmt/clippy pass."
+      },
+      {
+        "id": "task-4",
+        "title": "Verify fs_notify and the packaged Suikou consumer end to end",
+        "status": "pending",
+        "verificationContract": "A real watcher receives a file event with the pinned-ERTS result; `mix pbeam.build` / `mise run package` and the packaged server/CLI smoke test pass; `mise run check-brief` runs once; the handoff document records commits, evidence, and any remaining gaps."
+      }
+    ],
+    "blockCompletion": true,
+    "proposedAt": "2026-10-28T14:08:33.717Z"
+  },
+  "activePath": ".pi/goals/active_goal_2026102823023373_mvspzbib-xwdwjw.md",
+  "stopReason": "user"
+}
+
+# Goal Prompt
+
+Implement pbeam #1291 so the from-source fs_notify 0.1.2 NIF loads and delivers filesystem events with pinned-ERTS behavior, and Suikou can be packaged and exercised on PBeam.
+Success criteria: every enif symbol required by the fs_notify NIF 2.18 load resolves without SIGABRT; the 79 unused names fail clearly only when called; the 12 watch-run functions have real implementations with pinned-ERTS fixture comparisons; a native library thread can allocate an independent env and send immediately while the node is alive; a watcher receives a real file event with the same observable result as pinned ERTS; `mix pbeam.build` / `mise run package` succeeds and the packaged Suikou server and CLI complete a smoke test on PBeam.
+Boundaries: work in `/Users/admin/Workspace/pbeam/.worktrees/task-1291` on branch `task-1291`, plus the Suikou consumer only for verification or a separately justified consumer fix. In scope are the 79 load-only exports, the 12 watch-run implementations, the run-global NIF registry, registration in `Interpreter::run_on_schedulers`, documentation, and consumer verification. Other unsupported BIFs, including the cold-start `get_module_info(exports)` gap, are out of scope unless they block the agreed consumer path; then stop and ask.
+Constraints: use `workbuddy/deepseek-v4.1-flash` for delegated implementation; the assistant reviews every diff before commit. Do not push, merge main, amend commits, or modify GitHub issues, PRs, or the board. Keep commits atomic and in Conventional Commits format. Match pinned ERTS 29.1.1 and cite OTP source file:line. New `unsafe` stays inside `src/runtime/nif/abi/` under ADR 0001. One active run may register at a time; library-thread sends during a live run are immediate. After the node is destroyed, `NULL` / `0` is the lifetime boundary, not a reason to keep the node alive. Do not commit Suikou's local exqlite patch.
+If blocked: stop and ask the user, including if DeepSeek Flash is unavailable or a new unrelated runtime gap blocks the consumer path.
+
+## Progress
+
+- Status: paused
+- Auto-continue: off
+- Sisyphus mode: no
+- Time spent: 11m40s
+- Tokens used: 272K (272,234) tokens
+- Verification contract: run focused `cargo nextest` tests and fixture probes against pinned ERTS for each change, plus `cargo fmt --all -- --check` and `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`; prove the missing-symbol count is zero and the native-thread watch event arrives; run `mise run check-brief` once after implementation; record exact commands, results, commits, and remaining gaps in `/Users/admin/Workspace/pbeam-suikou-integration.md`.
+## Tasks
+
+<!-- blockCompletion: true -->
+- [x] task-1: Export all remaining load-only NIF symbols — evidence: commit 3f7bb5a on task-1291; independently recomputed: fs_notify references 130 names, nm -gU target/debug/pbeam exports 122, missing exactly the 12 Group A names (Group B missing 0, none of the 12 in
+- [ ] task-2: Implement the twelve fs_notify watch-run NIF functions — contract: Each Group A function has an OTP file:line citation and a pinned-ERTS fixture comparison; focused tests, fmt, and clippy pass with full line coverage of new branches.
+- [ ] task-3: Support NIF env allocation and immediate send on native library threads — contract: A safe run-global registry is registered for the live run and cleared on every exit path; native-thread alloc/send works during the run, dead targets and post-run calls return the ERTS-compatible boundary results, and focused concurrency tests plus fmt/clippy pass.
+- [ ] task-4: Verify fs_notify and the packaged Suikou consumer end to end — contract: A real watcher receives a file event with the pinned-ERTS result; `mix pbeam.build` / `mise run package` and the packaged server/CLI smoke test pass; `mise run check-brief` runs once; the handoff document records commits, evidence, and any remaining gaps.
+

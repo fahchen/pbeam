@@ -99,9 +99,9 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ### Give the exports key of module_info in the ERTS export table order
 
-- **Now:** `erlang:get_module_info/2` stops the run with a runtime error for the key `exports`, and `erlang:get_module_info/1`, which `Module:module_info/0` calls, stops at that key. ERTS gives the exports in the order of its export table, where an entry that an import, an `apply`, or a call made before the load of the module keeps its earlier place (`erl_bif_info.c:5822-5862`).
+- **Now:** `erlang:get_module_info/2` gives the key `exports` in the reverse of the `ExpT` order of the module (#1312), which is the ERTS order only when the load of the module made each of its export entries. ERTS gives the exports in the order of its export table, where an entry that an import, an `apply`, a call, or an earlier load of the module made before the load keeps its earlier place (`erl_bif_info.c:5822-5862`).
 - **Option:** a node-wide export index and on-demand loading that matches ERTS, as the [design options of #1227](https://github.com/fahchen/pbeam/issues/1227#issuecomment-6380029298) describe.
-- **Trigger:** when a workload reads `module_info(exports)` or `module_info/0`.
+- **Trigger:** when a workload depends on the order of `module_info(exports)` for a module that another module referred to before its load, or for a module that was loaded again.
 - **Source:** #1227 (closed as not planned) and #1068.
 
 ### Keep the parts of a chunked binary when the md5 walk traps

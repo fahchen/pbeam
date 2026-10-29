@@ -679,5 +679,10 @@ fn advises_a_file_and_gives_its_host_handle_as_erts() {
         text(&mut scheduler, |s| (binding.run)(s, &arguments)),
         BADARG
     );
+    // ERTS 29.1.1: `prim_file:get_handle_nif(make_ref())` raises badarg, as
+    // `file_handle_wrapper` does for a reference that is not a file
+    // resource (prim_file_nif.c:323-325).
+    let other = Term::Reference(scheduler.make_ref().unwrap());
+    assert_eq!(text(&mut scheduler, |s| get_handle_nif(s, &other)), BADARG);
     std::fs::remove_dir_all(&directory).unwrap();
 }

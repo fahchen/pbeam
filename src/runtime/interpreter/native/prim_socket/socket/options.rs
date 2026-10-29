@@ -7,9 +7,7 @@
 //! APIs, which have one typed call for each option. An option without a
 //! typed call, and a native value or value spec, go through [`raw_set`]
 //! and [`raw_get`], the two owner-approved `unsafe` calls of `setsockopt`
-//! and `getsockopt` (#1209). The options `{ip, msfilter}` and
-//! `{ip | ipv6, pktoptions}` stop the run with a runtime error (row "NIF
-//! stubs" of `docs/erts-differences.md`).
+//! and `getsockopt` (#1209).
 
 use nix::errno::Errno;
 use nix::sys::socket::{getsockopt, setsockopt, sockopt};
@@ -110,6 +108,9 @@ enum Form {
     /// `esock_setopt_in6_update_membership` (`prim_socket_nif.c:8961-9005`).
     #[cfg(target_os = "linux")]
     Membership6,
+    /// `esock_setopt_msfilter` (`prim_socket_nif.c:8602-8695`).
+    #[cfg(target_os = "linux")]
+    Msfilter,
 }
 
 /// A decoded value of a host option that [`set_host`] writes.
@@ -227,11 +228,12 @@ pub(in crate::runtime::interpreter::native::prim_socket) fn setopt_5(
     // `nif_supports(options)` (prim_socket.erl:1273-1280), and the native
     // forms return above.
     let name = option_name(level, opt).expect("prim_socket gives a host option");
+    // Each host option without a set form has no set handler in ERTS:
+    // `{socket, type}`, and on Linux `{ip, mtu}`, `{ip, pktoptions}`,
+    // `{socket, domain}`, and `{socket, protocol}` (`prim_socket_nif.c:3272-3274`,
+    // `3377-3379`, `3481-3488`, `3580-3586`, `3654-3660`, `8512-8514`).
     let Some(form) = set_form(name) else {
-        return match get_form_only(name) {
-            true => Ok(invalid(atom(scheduler, "socket_option")?)),
-            false => Err(unsupported(&format!("option {name:?}"))),
-        };
+        return Ok(invalid(atom(scheduler, "socket_option")?));
     };
     let decoded = match form {
         Form::Bool => decode_bool(scheduler, value).map(|flag| Value::Int(flag.into())),
@@ -255,6 +257,8 @@ pub(in crate::runtime::interpreter::native::prim_socket) fn setopt_5(
         Form::Congestion => decode_str(value, CONGESTION_NAME_MAX + 1).map(Value::Bytes),
         #[cfg(target_os = "linux")]
         Form::Membership6 => decode_membership6(scheduler, value),
+        #[cfg(target_os = "linux")]
+        Form::Msfilter => decode_msfilter(scheduler, value).map(Value::Bytes),
     };
     let Some(decoded) = decoded else {
         return Ok(invalid(atom(scheduler, "value")?));
@@ -279,19 +283,9 @@ fn setopt_native(
         (Some(bytes), _, _) => bytes,
         (None, Some(integer), _) => integer.to_ne_bytes().to_vec(),
         (None, None, Some(flag)) => i32::from(flag).to_ne_bytes().to_vec(),
-        // `esock_make_error_invalid` gives `{error, {invalid, value}}`
-        // (`prim_socket_nif.c:8455`, `socket_util.c:3303-3308`), which
-        // `prim_socket:setopt_common/4` does not rewrite.
-        (None, None, None) => {
-            let reason = Term::tuple(vec![
-                Term::static_atom("invalid"),
-                atom(scheduler, "value")?,
-            ]);
-            return Ok(BifResult::Value(Term::tuple(vec![
-                Term::static_atom("error"),
-                reason,
-            ])));
-        }
+        // `prim_socket:setopt_common/4` does not rewrite the error of
+        // `esock_make_error_invalid` (`prim_socket_nif.c:8455`).
+        (None, None, None) => return error_invalid(scheduler, "value"),
     };
     let result = keep_tos_and_priority(host, opt, || raw_set(host, level, opt, bytes.as_slice()));
     host_result(scheduler, result.map(|()| None))
@@ -304,7 +298,7 @@ fn set_form(name: (&str, &str)) -> Option<Form> {
             "socket",
             "broadcast" | "keepalive" | "reuseaddr" | "reuseport" | "oobinline" | "dontroute",
         )
-        | ("socket", "timestamp")
+        | ("socket", "timestamp" | "acceptconn")
         | ("tcp", "nodelay")
         | ("ip", "multicast_loop" | "recvtos" | "hdrincl")
         | ("ipv6", "v6only" | "recvtclass" | "multicast_loop") => Some(Form::Bool),
@@ -335,6 +329,8 @@ fn set_form(name: (&str, &str)) -> Option<Form> {
         ("tcp", "congestion") => Some(Form::Congestion),
         #[cfg(target_os = "linux")]
         ("ipv6", "add_membership" | "drop_membership") => Some(Form::Membership6),
+        #[cfg(target_os = "linux")]
+        ("ip", "msfilter") => Some(Form::Msfilter),
         _ => raw_form(name),
     }
 }
@@ -434,6 +430,129 @@ fn decode_membership6(scheduler: &Scheduler, value: &Term) -> Option<Value> {
         in6_addr(scheduler, multiaddr)?,
         uint(interface)?,
     ))
+}
+
+/// Return the `struct ip_msfilter` of `esock_setopt_msfilter`
+/// (`prim_socket_nif.c:8617-8670`): no bytes for the atom `null`, or the
+/// map `#{multiaddr := Addr, interface := Addr, mode := include | exclude,
+/// slist := [Addr]}` in `IP_MSFILTER_SIZE(length(Slist))` bytes, with the
+/// addresses of `esock_decode_in_addr` and the modes `MCAST_INCLUDE` and
+/// `MCAST_EXCLUDE` of `decode_msfilter_mode` (`prim_socket_nif.c:8676-8693`).
+#[cfg(target_os = "linux")]
+fn decode_msfilter(scheduler: &Scheduler, value: &Term) -> Option<Vec<u8>> {
+    if atom_name(scheduler, value) == Some("null") {
+        return Some(Vec::new());
+    }
+    let multiaddr = field(&scheduler.atoms, value, "multiaddr")?;
+    let interface = field(&scheduler.atoms, value, "interface")?;
+    let mode = match atom_name(scheduler, field(&scheduler.atoms, value, "mode")?) {
+        Some("include") => libc::MCAST_INCLUDE,
+        Some("exclude") => libc::MCAST_EXCLUDE,
+        _ => return None,
+    };
+    let sources = field(&scheduler.atoms, value, "slist")?
+        .proper_list()?
+        .map(|source| in_addr(scheduler, source))
+        .collect::<Option<Vec<_>>>()?;
+    let mut bytes = Vec::new();
+    bytes.extend(in_addr(scheduler, multiaddr)?.octets());
+    bytes.extend(in_addr(scheduler, interface)?.octets());
+    bytes.extend(mode.to_ne_bytes());
+    // `imsf_numsrc` is a `uint32_t`, so a longer list wraps as in C.
+    bytes.extend((sources.len() as u32).to_ne_bytes());
+    bytes.extend(sources.iter().flat_map(Ipv4Addr::octets));
+    Some(bytes)
+}
+
+/// Return the four bytes at `at` of `bytes`.
+#[cfg(target_os = "linux")]
+fn word(bytes: &[u8], at: usize) -> [u8; 4] {
+    [bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]
+}
+
+/// Return the list of `esock_getopt_pktoptions` for the control messages in
+/// `buffer` (`prim_socket_nif.c:13269-13405`): a map `#{level, type, data,
+/// value}` for each message, without `value` when the data is shorter than
+/// the value, up to the first header whose data does not fit, such as the
+/// zero bytes after the last message. The Linux kernel gives only
+/// `IP_PKTINFO`, `IP_TTL`, and `IP_TOS` for `IP_PKTOPTIONS`
+/// (`net/ipv4/ip_sockglue.c`), with the encoders of the table `cmsgLevelIP`
+/// (`prim_socket_nif.c:14176-14215`, `14335-14387`, `14453-14490`,
+/// `15674-15694`). The level is an integer (`socket_util.c:3054-3060`).
+///
+/// # Errors
+///
+/// Another message stops the run. A new atom in a full atom table gives
+/// the error of `AtomTable::put`.
+#[cfg(target_os = "linux")]
+fn pktoptions(scheduler: &mut Scheduler, buffer: &[u8]) -> Result<Term, BeamError> {
+    const HEADER: usize = std::mem::size_of::<libc::cmsghdr>();
+    // glibc `CMSG_ALIGN` aligns to a `size_t`, the type of `cmsg_len`.
+    const SIZE: usize = std::mem::size_of::<usize>();
+    let address = |bytes: &[u8]| {
+        Term::tuple(
+            bytes
+                .iter()
+                .map(|byte| Term::Integer((*byte).into()))
+                .collect(),
+        )
+    };
+    let mut messages = Vec::new();
+    let mut start = 0;
+    // ERTS also reads a header past the end of the buffer; PBeam stops.
+    while let Some(header) = buffer.get(start..start + HEADER) {
+        let mut length = [0; SIZE];
+        length.copy_from_slice(&header[..SIZE]);
+        let length = usize::from_ne_bytes(length);
+        let level = i32::from_ne_bytes(word(header, SIZE));
+        let kind = i32::from_ne_bytes(word(header, SIZE + 4));
+        // A length below the header size wraps the data size, as in C.
+        let Some(data) = buffer.get(start + HEADER..start.wrapping_add(length)) else {
+            break;
+        };
+        let (name, value) = match (level, kind) {
+            (libc::IPPROTO_IP, libc::IP_TOS) => {
+                let value = match data.first() {
+                    Some(tos) => Some(tos_term(scheduler, (*tos).into())?),
+                    None => None,
+                };
+                ("tos", value)
+            }
+            (libc::IPPROTO_IP, libc::IP_TTL) => {
+                let value = (data.len() >= 4).then(|| i32::from_ne_bytes(word(data, 0)));
+                ("ttl", value.map(|ttl| Term::Integer(ttl.into())))
+            }
+            (libc::IPPROTO_IP, libc::IP_PKTINFO) => {
+                let value = match data.get(..12) {
+                    Some(info) => {
+                        let index = u32::from_ne_bytes(word(info, 0));
+                        let entries = [
+                            ("ifindex", Term::Integer(index.into())),
+                            ("spec_dst", address(&info[4..8])),
+                            ("addr", address(&info[8..12])),
+                        ];
+                        let entries = pairs(scheduler, &entries)?;
+                        Some(map(scheduler, entries))
+                    }
+                    None => None,
+                };
+                ("pktinfo", value)
+            }
+            _ => {
+                return Err(unsupported(&format!("control message {{{level}, {kind}}}")));
+            }
+        };
+        let mut entries = vec![
+            ("level", Term::Integer(level.into())),
+            ("type", atom(scheduler, name)?),
+            ("data", Term::binary(data.to_vec())),
+        ];
+        entries.extend(value.map(|value| ("value", value)));
+        let entries = pairs(scheduler, &entries)?;
+        messages.push(map(scheduler, entries));
+        start += length.next_multiple_of(SIZE);
+    }
+    Ok(Term::list_from(messages))
 }
 
 /// Return the `struct linger` of `esock_setopt_linger`
@@ -605,23 +724,14 @@ fn decode_str(value: &Term, max: usize) -> Option<Vec<u8>> {
     )
 }
 
-/// Return whether ERTS has no set handler for the host option `name` that
-/// PBeam gets (`prim_socket_nif.c:3272-3274`, `3377-3379`, `3481-3488`,
-/// `3580-3586`, `8512-8514`).
-fn get_form_only(name: (&str, &str)) -> bool {
-    match name {
-        ("socket", "type") => true,
-        #[cfg(target_os = "linux")]
-        ("ip", "mtu") | ("socket", "domain" | "protocol") => true,
-        _ => false,
-    }
-}
-
 /// Return whether ERTS has no get handler for the host option `name` that
-/// PBeam sets (`prim_socket_nif.c:3496-3541`, `3781-3833`, `12234-12236`).
+/// PBeam sets (`prim_socket_nif.c:3496-3541`, `3571-3577`, `3781-3833`,
+/// `12234-12236`).
 fn set_form_only(name: (&str, &str)) -> bool {
     match name {
         ("ip", "add_membership" | "drop_membership") => true,
+        #[cfg(target_os = "linux")]
+        ("ip", "msfilter") => true,
         _ if matches!(raw_form(name), Some(Form::Source | Form::Addrform)) => true,
         #[cfg(target_os = "linux")]
         ("ipv6", "add_membership" | "drop_membership") => true,
@@ -950,9 +1060,18 @@ fn getopt(
     if set_form_only(name) {
         return Ok(invalid(atom(scheduler, "socket_option")?));
     }
-    let Some(got) = get_host(host, name, (level, opt)) else {
-        return Err(unsupported(&format!("option {name:?}")));
-    };
+    // `esock_getopt_pktoptions` reads into a buffer of `rCtrlSz` bytes, cut
+    // to a `socklen_t` as in C (`prim_socket_nif.c:13285-13295`).
+    #[cfg(target_os = "linux")]
+    if name == ("ip", "pktoptions") {
+        let buffer = vec![0; socket.options.recv_ctrl as libc::socklen_t as usize];
+        let value = match raw_get(host, level, opt, Some(buffer)) {
+            Ok(bytes) => Ok(Some(pktoptions(scheduler, &bytes)?)),
+            Err(failure) => Err(failure),
+        };
+        return host_result(scheduler, value);
+    }
+    let got = get_host(host, name, (level, opt)).expect("each host option has a get handler");
     let value = match got {
         Ok(Got::Bool(value)) => Ok(Some(Term::static_atom(if value {
             "true"
@@ -1016,6 +1135,12 @@ fn getopt_native(
         }
         (None, Some("boolean"), _) => {
             raw_int(host, level, opt).map(|value| Some(boolean(value != 0)))
+        }
+        // `esock_getopt_bin_opt` gives `{error, {invalid, data_size}}` for
+        // a size that a `socklen_t` cannot hold
+        // (`prim_socket_nif.c:13187-13189`).
+        (None, _, Some(bytes)) if libc::socklen_t::try_from(bytes.len()).is_err() => {
+            return error_invalid(scheduler, "data_size");
         }
         (None, _, Some(bytes)) => raw_get(host, level, opt, Some(bytes.to_vec())).map(binary),
         (None, _, None) => return Ok(invalid(atom(scheduler, "value")?)),
@@ -1204,13 +1329,10 @@ fn size_term(size: usize) -> Term {
     Term::from_bigint(size.into())
 }
 
-/// Return `{error, {invalid, not_owner}}` of `esock_make_error_invalid`
-/// (`prim_socket_nif.c:8075-8079`).
-fn not_owner(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
-    let reason = Term::tuple(vec![
-        Term::static_atom("invalid"),
-        atom(scheduler, "not_owner")?,
-    ]);
+/// Return `{error, {invalid, Reason}}` of `esock_make_error_invalid`
+/// (`socket_util.c:3303-3308`).
+fn error_invalid(scheduler: &mut Scheduler, reason: &str) -> Result<BifResult, BeamError> {
+    let reason = Term::tuple(vec![Term::static_atom("invalid"), atom(scheduler, reason)?]);
     Ok(BifResult::Value(Term::tuple(vec![
         Term::static_atom("error"),
         reason,
@@ -1262,7 +1384,7 @@ fn setopt_otp(
         }
         OTP_CTRL_PROC => {
             if socket.owner != Some(scheduler.current_process().id) {
-                return not_owner(scheduler);
+                return error_invalid(scheduler, "not_owner");
             }
             let Term::Pid(owner) = value else {
                 return invalid_value(scheduler);
@@ -1312,7 +1434,7 @@ fn setopt_otp(
         }
         OTP_META => {
             if socket.owner != Some(scheduler.current_process().id) {
-                return not_owner(scheduler);
+                return error_invalid(scheduler, "not_owner");
             }
             socket.meta = value.clone();
             ok

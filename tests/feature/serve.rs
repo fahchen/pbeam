@@ -98,6 +98,7 @@ fn serves_hello_world_from_the_plug_example_as_pinned_erts() {
     );
     let bundled = serve_one_file();
     serves_concurrent_requests_on_several_schedulers_as_pinned_erts();
+    gives_the_command_line_arguments_of_the_executable_to_the_release();
     // The NIF record of this acceptance: each module of a NIF library that
     // the release boot loads. A module with an `on_load` function is loaded
     // only when the function returns `ok`, so `erlang:load_nif/2` gave `ok`
@@ -418,7 +419,11 @@ fn builds_the_one_file_executable_with_the_mix_task_and_runs_it_clean() {
     assert_eq!(response, erts);
 }
 
-#[test]
+/// Check the arguments of a one-file run. The serve test calls it after its
+/// build of the release: under nextest each test runs in a process of its
+/// own, so `ONE_FILE_RUN` cannot keep another test from rewriting
+/// `target/examples/plug_hello`, and a test of its own could also run before
+/// any build of the example.
 fn gives_the_command_line_arguments_of_the_executable_to_the_release() {
     // A one-file executable starts its bundle also with arguments. The
     // arguments reach the release as `System.argv()` unchanged, also `erl`,
@@ -455,6 +460,16 @@ fn gives_the_command_line_arguments_of_the_executable_to_the_release() {
     let stderr_reader = collect(child.stderr.take().unwrap(), Arc::clone(&stderr));
     let stream = wait_for_server(&mut child, port);
     let response = stream.and_then(|stream| request_argv_after_cli(port, stream));
+    // The launcher exports the `RELEASE_*` variables of `bin/plug_hello`
+    // (#1311).
+    let release = TcpStream::connect(("127.0.0.1", port))
+        .map_err(|error| error.to_string())
+        .and_then(|stream| {
+            exchange(
+                stream,
+                b"GET /release HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            )
+        });
     let status = stop_with_term(child);
     stdout_reader.join().unwrap();
     stderr_reader.join().unwrap();
@@ -483,6 +498,12 @@ fn gives_the_command_line_arguments_of_the_executable_to_the_release() {
         "stdout: {}\nstderr: {}",
         text(&stdout),
         text(&stderr)
+    );
+    let (_status_line, _headers, release) = release.unwrap();
+    assert_eq!(
+        String::from_utf8(release).unwrap(),
+        "[\"plug_hello\", \"0.1.0\", \"start\", \"plug_hello\", \"embedded\", \
+         \"plug_hello\", \"none\", \"start\", \"start_clean\"]"
     );
     fs::remove_dir_all(&directory).unwrap();
 }

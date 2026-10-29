@@ -63,6 +63,10 @@ name = "nif_bcrypt"
 path = "tests/feature/nif_bcrypt.rs"
 
 [[test]]
+name = "nif_exqlite"
+path = "tests/feature/nif_exqlite.rs"
+
+[[test]]
 name = "diagnostics_feature"
 path = "tests/feature/diagnostics.rs"
 
@@ -198,6 +202,10 @@ path = "tests/integration/nif_resources.rs"
 [[test]]
 name = "nif_messages"
 path = "tests/integration/nif_messages.rs"
+
+[[test]]
+name = "nif_atoms"
+path = "tests/integration/nif_atoms.rs"
 
 [[test]]
 name = "extension_library"

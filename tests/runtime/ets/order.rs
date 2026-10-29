@@ -89,3 +89,19 @@ fn compares_keys_and_probes_with_equality_and_partial_order() {
     assert!(left == right);
     assert_eq!(left.partial_cmp(right), Some(Ordering::Equal));
 }
+
+#[test]
+fn gives_the_first_error_of_the_split_test() {
+    // `split` gives the error of `below` (`KeyOrder::split`): the probe
+    // keeps the first error of the search. Each key fails with its own
+    // error, and the error of key 1, which the search compares first,
+    // stays when the later keys fail too.
+    let (_, order) = order(&[Term::Integer(1), Term::Integer(3), Term::Integer(5)]);
+    let split = order.split(|key| Err(crate::error::BeamError::Runtime(format!("split {key:?}"))));
+    assert_eq!(
+        split,
+        Err(crate::error::BeamError::Runtime(
+            "split Integer(1)".to_owned()
+        ))
+    );
+}

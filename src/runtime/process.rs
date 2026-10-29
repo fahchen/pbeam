@@ -604,7 +604,7 @@ impl Frame {
 /// carries. The owner of the target process reads each item from the same
 /// values that `erlang:process_info/1` reports, so a request to a process of
 /// another scheduler carries only these items.
-pub(super) const OTHER_PROCESS_INFO_ITEMS: [&str; 21] = [
+pub(super) const OTHER_PROCESS_INFO_ITEMS: [&str; 22] = [
     "messages",
     "dictionary",
     "trap_exit",
@@ -614,6 +614,7 @@ pub(super) const OTHER_PROCESS_INFO_ITEMS: [&str; 21] = [
     "status",
     "registered_name",
     "heap_size",
+    "stack_size",
     "total_heap_size",
     "memory",
     "garbage_collection",

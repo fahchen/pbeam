@@ -77,9 +77,7 @@ pub(crate) enum Insert {
 /// ```
 fn flatmap_holds(pairs: &[(Term, Term)], key: &Term, atoms: &AtomTable) -> bool {
     pairs
-        .binary_search_by(|(existing, _)| {
-            flatmap_order(existing, key, atoms).unwrap_or(Ordering::Equal)
-        })
+        .binary_search_by(|(existing, _)| flatmap_order(existing, key, atoms))
         .is_ok()
 }
 
@@ -664,33 +662,14 @@ impl Map {
     ///     (Term::static_atom("abs"), Term::Integer(1)),
     ///     (Term::static_atom("value"), Term::Integer(2)),
     /// ];
-    /// Map::sort_pairs(&mut pairs, &atoms)?;
+    /// Map::sort_pairs(&mut pairs, &atoms);
     /// // value has atom index 745, abs has atom index 762, and an atom
     /// // comes before a tuple.
     /// assert_eq!(pairs[0].0, Term::static_atom("value"));
     /// assert_eq!(pairs[2].0, Term::tuple(vec![]));
     /// ```
-    ///
-    /// # Errors
-    ///
-    /// Sort the pairs in the flatmap key order.
-    ///
-    /// Return a runtime error when the order depends on an alias reference,
-    /// which has no PBeam term order. Compiled code cannot get this error:
-    /// the ERTS loader sorts only literal keys, and a literal cannot hold a
-    /// reference.
-    pub(crate) fn sort_pairs(
-        pairs: &mut [(Term, Term)],
-        atoms: &AtomTable,
-    ) -> Result<(), BeamError> {
-        let mut failure = None;
-        pairs.sort_by(|(left, _), (right, _)| {
-            flatmap_order(left, right, atoms).unwrap_or_else(|error| {
-                failure.get_or_insert(error);
-                Ordering::Equal
-            })
-        });
-        failure.map_or(Ok(()), Err)
+    pub(crate) fn sort_pairs(pairs: &mut [(Term, Term)], atoms: &AtomTable) {
+        pairs.sort_by(|(left, _), (right, _)| flatmap_order(left, right, atoms));
     }
 
     /// Set a key to a value. Replace the value when the key exists. A
@@ -1145,9 +1124,7 @@ fn update_flat(
     }
     if pairs.len() + added.len() <= SMALL_MAP_LIMIT {
         for (_, key, value) in operations {
-            match pairs.binary_search_by(|(existing, _)| {
-                flatmap_order(existing, &key, atoms).expect("supported map keys have a term order")
-            }) {
+            match pairs.binary_search_by(|(existing, _)| flatmap_order(existing, &key, atoms)) {
                 Ok(index) => pairs[index].1 = value,
                 Err(index) => pairs.insert(index, (key, value)),
             }
@@ -1562,26 +1539,17 @@ impl Node {
 ///
 /// // true has index 1 and abs_path has index 26.
 /// let (abs_path, true_) = (Term::static_atom("abs_path"), Term::static_atom("true"));
-/// assert_eq!(flatmap_order(&true_, &abs_path, &atoms)?, Ordering::Less);
+/// assert_eq!(flatmap_order(&true_, &abs_path, &atoms), Ordering::Less);
 /// let list = |atom: &Term| Term::list_from([atom.clone()]);
-/// assert_eq!(flatmap_order(&list(&true_), &list(&abs_path), &atoms)?, Ordering::Greater);
-/// assert_eq!(flatmap_order(&Term::Integer(1), &true_, &atoms)?, Ordering::Less);
+/// assert_eq!(flatmap_order(&list(&true_), &list(&abs_path), &atoms), Ordering::Greater);
+/// assert_eq!(flatmap_order(&Term::Integer(1), &true_, &atoms), Ordering::Less);
 /// // An integer is less than a float in the exact order.
-/// assert_eq!(flatmap_order(&Term::Float(1.0), &Term::Integer(2), &atoms)?, Ordering::Greater);
+/// assert_eq!(flatmap_order(&Term::Float(1.0), &Term::Integer(2), &atoms), Ordering::Greater);
 /// ```
-///
-/// # Errors
-///
-/// Return a runtime error when the order depends on two different
-/// references, which have no PBeam term order.
-pub(crate) fn flatmap_order(
-    left: &Term,
-    right: &Term,
-    atoms: &AtomTable,
-) -> Result<Ordering, BeamError> {
+pub(crate) fn flatmap_order(left: &Term, right: &Term, atoms: &AtomTable) -> Ordering {
     match (left, right) {
-        (Term::Atom(left), Term::Atom(right)) => Ok(left.index().cmp(&right.index())),
-        _ => left.compare_exact(right, atoms),
+        (Term::Atom(left), Term::Atom(right)) => left.index().cmp(&right.index()),
+        _ => left.order_exact(right, atoms),
     }
 }
 

@@ -53,7 +53,10 @@ watch(Boot) ->
                     names, [{Name, is_pid(whereis(Name))}
                             || Name <- [init, erl_prim_loader,
                                         init__boot__on_load_handler,
-                                        init_boot_probe_recorder]],
+                                        init_boot_probe_recorder,
+                                        erts_code_purger]],
+                    purger, [process_info(whereis(erts_code_purger), Item)
+                             || Item <- [priority, group_leader]],
                     alive, is_process_alive(Init)}),
     halt().
 

@@ -22,23 +22,23 @@ fn gives_a_runtime_error_for_a_new_atom_when_the_atom_table_is_full() {
     );
 }
 
-/// The handle of an atom is env-independent: an atom that one env makes,
-/// which a NIF of a library caches as rustler caches its atoms (rustler
-/// 0.38.0, `src/types/atom.rs:21-23`), reads as the same atom in another
-/// env, as no env owns an ERTS atom (`erl_term.h`, `make_atom`).
 #[test]
-fn reads_an_atom_of_another_env() {
+fn reads_the_atom_of_an_atom_handle_in_each_env_of_the_table() {
+    // An ERTS atom is an immediate term (`make_atom`, `erl_term.h:300`).
     let atoms = Arc::new(AtomTable::new());
-    let handle = {
-        let mut env = Env::new(&atoms, None, &[]);
-        env.make_atom(b"pbeam_shared")
-    };
-    let other = Env::new(&atoms, None, &[]);
-    assert_eq!(handle & ATOM_HANDLE, ATOM_HANDLE);
-    assert_eq!(
-        other.get(handle),
-        Some(Term::Atom(atoms.put("pbeam_shared").unwrap()))
-    );
-    // An atom handle takes no slot of the env that reads it.
-    assert_eq!(other.handles(), Vec::<usize>::new());
+    let mut load = Env::new(&atoms, None, &[]);
+    let handle = load.make_atom(b"pbeam_kept");
+    drop(load);
+    let call = Env::new(&atoms, None, &[Term::Integer(1)]);
+    assert_eq!(call.get(handle), atoms.get("pbeam_kept").map(Term::Atom));
+    assert_eq!(call.get(1), Some(Term::Integer(1)));
+}
+
+#[test]
+fn reads_no_term_for_an_atom_handle_of_no_atom() {
+    // ERTS reads such a handle as a term, which is undefined behavior.
+    let atoms = Arc::new(AtomTable::new());
+    let env = Env::new(&atoms, None, &[]);
+    assert_eq!(env.get(ATOM_HANDLE | 1_048_576), None);
+    assert_eq!(env.get(ATOM_HANDLE | (1 << 32)), None);
 }
