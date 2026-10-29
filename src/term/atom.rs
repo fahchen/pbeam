@@ -127,6 +127,12 @@ impl Atom {
         self.index
     }
 
+    /// Return the atom of the atom-table index `index`, which a term that
+    /// another env made carries.
+    pub(crate) fn from_index(index: u32) -> Atom {
+        Atom { index }
+    }
+
     /// Return a static atom without a table. A static atom has the same
     /// index in every atom table. Return `None` for a name that is not
     /// static.
