@@ -402,10 +402,6 @@ fn stops_the_run_for_each_port_part_that_is_not_implemented() {
             "unsupported open_port/2 option {line, L} whose low 32 bits are not positive",
         ),
         (
-            "busy_limits",
-            "unsupported open_port/2 option busy_limits_port",
-        ),
-        (
             "empty_line",
             "unsupported open_port/2 option {line, L} whose low 32 bits are not positive",
         ),
@@ -413,7 +409,6 @@ fn stops_the_run_for_each_port_part_that_is_not_implemented() {
             "fd_list",
             "unsupported open_port/2 without the binary option",
         ),
-        ("force", "unsupported erlang:port_command/3 options"),
         ("register", "unsupported erlang:register/2 with a port"),
     ] {
         let argument = Term::Atom(program.atom(case).unwrap());

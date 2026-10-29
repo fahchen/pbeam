@@ -216,11 +216,53 @@ impl Scheduler {
     /// The error of [`Self::tcp_send_ready`].
     pub(in crate::runtime) fn port_writable(&mut self, fd: libc::c_int) -> Result<(), BeamError> {
         let handles = self.node.ports().handles(self.index);
-        let sending = port::inet_port(&handles, fd, Inet::send_fd);
-        match sending {
-            Some(port) => self.tcp_send_ready(port),
-            None => Ok(()),
+        if let Some(port) = port::inet_port(&handles, fd, Inet::send_fd) {
+            return self.tcp_send_ready(port);
         }
+        if let Some(port) = port::spawn_port(&handles, fd) {
+            self.spawn_writable(port)?;
+        }
+        Ok(())
+    }
+
+    /// Write the queue of the spawn port `id` to its input pipe, as
+    /// `ready_output` does (`sys_drivers.c:1455-1493`): resume the
+    /// processes that waited for the busy port when the queue goes below
+    /// the low limit (`set_busy_port`, `io.c:5203`), end a closing port
+    /// whose queue is empty, and close the port with the `errno` of a
+    /// failed write (`driver_failure_posix`).
+    ///
+    /// # Errors
+    ///
+    /// A new atom in a full atom table gives the error of `AtomTable::put`.
+    fn spawn_writable(&mut self, id: PortId) -> Result<(), BeamError> {
+        let cell = self.node.port(id);
+        let mut slot = cell.as_ref().map(port::lock);
+        let Some(Driver::Spawn(spawn)) = slot
+            .as_mut()
+            .and_then(|slot| slot.as_mut())
+            .map(|port| &mut port.driver)
+        else {
+            return Ok(());
+        };
+        let flushed = spawn.flush();
+        drop(slot);
+        match flushed {
+            Ok(resumed) => {
+                for process in resumed {
+                    self.resume(process);
+                }
+                self.tcp_flushed(id);
+            }
+            Err(errno) => {
+                let reason = Term::Atom(
+                    self.atoms
+                        .put(&crate::runtime::host::errno::errno_id(errno))?,
+                );
+                self.close_port(id, reason);
+            }
+        }
+        Ok(())
     }
 
     /// Close the open port `id` with the exit reason `reason`, as
@@ -342,11 +384,20 @@ impl Scheduler {
         // bytes before `flush_port` (io.c:3939-3948). With `linger {true,
         // 0}`, `tcp_inet_flush` drops the queue and the port terminates with
         // `CLOSING` set, so its stop sends no message (io.c:3659-3721).
+        // A spawn port with a queue also waits for its queue
+        // (`fd_flush`, sys_drivers.c:1468-1469).
         let queued = flush
             && reason != Term::static_atom("kill")
-            && matches!(&port.driver, Driver::Inet(tcp) if tcp.has_output());
-        let flushes =
-            queued && !port.closing && matches!(&port.driver, Driver::Inet(tcp) if tcp.flushes());
+            && match &port.driver {
+                Driver::Inet(tcp) => tcp.has_output(),
+                Driver::Spawn(spawn) => spawn.queued_fd().is_some(),
+            };
+        let flushes = queued
+            && !port.closing
+            && match &port.driver {
+                Driver::Inet(tcp) => tcp.flushes(),
+                Driver::Spawn(_) => true,
+            };
         let links = std::mem::take(&mut port.links);
         let monitors = std::mem::take(&mut port.monitors);
         port.closing |= queued;

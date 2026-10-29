@@ -461,7 +461,11 @@ impl Scheduler {
             .as_mut()
             .filter(|slot| {
                 slot.as_ref().is_some_and(|item| {
-                    item.closing && matches!(&item.driver, Driver::Inet(tcp) if !tcp.has_output())
+                    item.closing
+                        && match &item.driver {
+                            Driver::Inet(tcp) => !tcp.has_output(),
+                            Driver::Spawn(spawn) => spawn.queued_fd().is_none(),
+                        }
                 })
             })
             .and_then(|slot| slot.take());
