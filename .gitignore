@@ -14,6 +14,9 @@
 /fixtures/exqlite/_build/
 /fixtures/exqlite/deps/
 /fixtures/exqlite/cover/
+/fixtures/fs_notify/_build/
+/fixtures/fs_notify/deps/
+/fixtures/fs_notify/cover/
 
 # Agent scratch files. Skills under .agents/skills/ stay tracked.
 /.agents/.handoff/
