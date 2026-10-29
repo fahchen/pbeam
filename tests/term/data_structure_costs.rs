@@ -47,11 +47,13 @@ thread_local! {
     static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
 }
 
-// SAFETY: the allocator forwards each operation to `System`, which is a
-// valid allocator, and it only adds a count of the current thread.
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
+// SAFETY: each method forwards its arguments to `System`, which is a valid
+// allocator, so the `GlobalAlloc` contract holds. The count only changes a
+// `Cell` of the current thread, which does not allocate, unwind, or touch
+// the memory of the caller.
 unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
         count_one();

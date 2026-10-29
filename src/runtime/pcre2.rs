@@ -760,6 +760,11 @@ impl MatchContext {
         // only write a limit field of the context.
         let context = unsafe { pcre2_match_context_create_8(std::ptr::null_mut()) };
         let context = NonNull::new(context).expect("PCRE2 match context allocation failed");
+        // SAFETY: `context` is non-null and came from
+        // `pcre2_match_context_create_8` above. Nothing else owns or reads
+        // it yet, so the set functions write a limit field of a valid
+        // context. Each set function only fails with a return code, which
+        // cannot happen for a valid context.
         unsafe {
             if let Some(limit) = match_limit {
                 pcre2_set_match_limit_8(context.as_ptr(), limit);

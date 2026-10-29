@@ -55,8 +55,9 @@ fn full_pipe() -> (PipeReader, PipeWriter) {
     let fd = writer.as_raw_fd();
     // SAFETY: `fcntl` changes only the status flags of an open fd.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-    // SAFETY: as above.
     assert_eq!(
+        // SAFETY: as above. `flags` came from `F_GETFL` of the same open fd,
+        // and `fcntl` with `F_SETFL` reads no pointer.
         unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) },
         0
     );

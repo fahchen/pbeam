@@ -966,15 +966,18 @@ fn child_setup_failure(bytes: &[u8]) -> Option<String> {
 #[cfg(target_os = "macos")]
 fn open_terminal() -> Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd), std::io::Error> {
     let (mut master, mut slave) = (-1, -1);
-    // SAFETY: `openpty` writes two new fds to `master` and `slave`, and
-    // accepts a null name. `fcntl` changes only the fd flags. Each `OwnedFd`
-    // takes one new fd.
     let mut win = libc::winsize {
         ws_row: 24,
         ws_col: 80,
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
+    // SAFETY: `openpty` writes two new fds through the pointers to `master`
+    // and `slave`, and `win` is a live `winsize` that it only reads. It
+    // accepts a null name and a null `termios`. `fcntl` changes only the
+    // flags of an fd that `openpty` just opened. If `openpty` fails, the
+    // block returns before it uses the fds. Each `OwnedFd` takes one new fd
+    // that nothing else owns.
     let (master, slave) = unsafe {
         use std::os::fd::FromRawFd;
 

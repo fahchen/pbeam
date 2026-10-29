@@ -892,8 +892,8 @@ allow_attributes = "allow"                # #1352 turns on: prefer #[expect] ove
 allow_attributes_without_reason = "allow" # #1352 turns on: every suppression says why (needs rust-version 1.81+)
 
 # Unsafe must be justified.
-undocumented_unsafe_blocks = "allow"    # #1348 turns on: // SAFETY: comment on every unsafe block
-multiple_unsafe_ops_per_block = "allow" # #1348 turns on: one unsafe operation per block
+undocumented_unsafe_blocks = "warn"     # // SAFETY: comment on every unsafe block
+multiple_unsafe_ops_per_block = "allow" # a split adds unsafe blocks, which CLAUDE.md forbids
 
 # API shape.
 fn_params_excessive_bools = "allow" # #1349 turns on: bool parameters: use an enum or two methods

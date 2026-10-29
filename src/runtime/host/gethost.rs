@@ -568,13 +568,16 @@ fn hosts_reply(unit: u8, addresses: &[Vec<u8>], names: &[Vec<u8>]) -> Vec<u8> {
 
 /// Read the current `h_errno`.
 fn h_errno_value() -> c_int {
-    // SAFETY: glibc and musl return the address of the `h_errno` of the
-    // thread; macOS has one global `int`. The caller holds `NETDB`.
     #[cfg(target_os = "linux")]
+    // SAFETY: glibc and musl return the address of the `h_errno` of the
+    // thread, which is valid to read for the life of the thread.
     unsafe {
         *__h_errno_location()
     }
     #[cfg(not(target_os = "linux"))]
+    // SAFETY: macOS has one global `int` `h_errno`, which is always
+    // initialized. The caller holds `NETDB`, so no call of the network
+    // database functions writes it during this read.
     unsafe {
         h_errno
     }

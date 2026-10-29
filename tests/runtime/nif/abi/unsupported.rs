@@ -16,6 +16,10 @@ use crate::runtime::scheduler::node::Node;
 #[test]
 fn gives_the_default_value_of_each_unimplemented_function() {
     let mut result = 0;
+    // SAFETY: each stub ignores all of its arguments and reads no pointer,
+    // so the null pointers and the 0 values cannot cause a fault. The
+    // variadic stubs ignore the arguments after the fixed ones. The test
+    // thread runs no NIF call, so a stub only returns its default value.
     unsafe {
         result |= enif_binary_to_term(null_mut(), null(), 0, null_mut(), 0) as c_int;
         result |= enif_compare(0, 0);

@@ -1767,8 +1767,10 @@ fn open_stream(
             let (master, slave) = open_terminal(columns, rows);
             let mut quiet = mode(&slave);
             quiet.c_lflag &= !(libc::ECHO | libc::ICANON);
-            // SAFETY: `tcsetattr` reads one `termios` from the pointer.
             assert_eq!(
+                // SAFETY: `tcsetattr` reads one `termios` from the pointer.
+                // `quiet` is a live `termios` value that `mode` made, and
+                // `slave` owns an open terminal fd for the whole call.
                 unsafe { libc::tcsetattr(slave.as_raw_fd(), libc::TCSANOW, &quiet) },
                 0
             );
