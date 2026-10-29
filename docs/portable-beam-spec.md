@@ -219,19 +219,27 @@ Automatic `FromTerm`/`IntoTerm` conversions and attribute macros may follow when
 
 ## 9. Bundle and executable build
 
-The proposed command is:
+The implemented command is:
 
 ```sh
-mix pbeam.build
+MIX_ENV=prod mix pbeam.build
 ```
+
+The task `Mix.Tasks.Pbeam.Build` of the `pbeam` Mix package runs in a Mix project that has `pbeam` as a dependency. The build host needs Erlang, Elixir, and the Rust toolchain of the pins of the PBeam source (`mise.toml`); the executable needs none of them.
 
 It performs these steps:
 
-1. Compile the Elixir application with the existing toolchain.
-2. Collect the Mix release and the modules of the start set.
-3. Read native declaration metadata and configured native crate paths.
+1. Run `mix release` for the release of the project config, unless `--release` names a built release directory.
+2. Stop with an error when the ERTS version of the release (`releases/start_erl.data`) is not the ERTS version of the Erlang that runs the command, which must be the pinned OTP, because PBeam runs the OTP modules of that OTP.
+3. Collect the Mix release and the modules of the start set.
 4. Write one bundle with the `pbeam_bundle` tool.
-5. Build the `pbeam` binary for the selected target, append the bundle and the trailer, and write the application executable, illustrated as `dist/my_app` in the discussion.
+5. Build the `pbeam` binary for the host, append the bundle and the trailer, and write the application executable at `<app>.bundle` next to the release directory, or at the path of `--output`.
+
+Reading native declaration metadata and configured native crate paths, proposed in section 8, stays proposed work of the native integration.
+
+At startup the executable runs its bundle with or without arguments of the command line. The arguments reach the release in order, as `System.argv()` and `init:get_plain_arguments/0` give them: the boot places them behind a bare `--`, where Elixir's `Kernel.CLI` ends its own parsing, so also an argument such as `erl` reaches the release and does not start the `erl` command of the binary. The re-exec of the boot of the extracted release marks itself with the hidden word `--embedded-boot` as its first word. A run with that first word drops it and runs the command line of the binary, not the bundle, so a release cannot get `--embedded-boot` as its first argument.
+
+At startup the executable runs its bundle with or without arguments of the command line. The arguments reach the release in order, as `System.argv()` and `init:get_plain_arguments/0` give them: the boot places them behind a bare `--`, where Elixir's `Kernel.CLI` ends its own parsing, so also an argument such as `erl` reaches the release and does not start the `erl` command of the binary. The re-exec of the boot of the extracted release marks itself with the hidden word `--embedded-boot` as its first word. A run with that first word drops it and runs the command line of the binary, not the bundle, so a release cannot get `--embedded-boot` as its first argument.
 
 The bundle contains identifying/version metadata, an entry MFA, compiler/OTP compatibility metadata, a module table, a resource table, and the module/resource payload. Compression was proposed, but its codec and necessity are not settled. The example `otp: 28` is illustrative, not a compatibility commitment.
 
