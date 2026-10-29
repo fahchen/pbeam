@@ -449,6 +449,10 @@ fn gives_the_command_line_arguments_of_the_executable_to_the_release() {
         .current_dir(&clean)
         .env("TMPDIR", &temporary)
         .env("PORT", port.to_string())
+        // The re-exec of `pbeam erl` reads the flag variables as `erlexec`
+        // does, so the `-extra` word of `ERL_ZFLAGS` follows the arguments
+        // of the command line (`erlexec.c:2195-2201`, `2255-2260`).
+        .env("ERL_ZFLAGS", "-extra z")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -495,7 +499,7 @@ fn gives_the_command_line_arguments_of_the_executable_to_the_release() {
     });
     assert_eq!(
         body,
-        "[\"a\", \"erl\", \"--c\"]",
+        "[\"a\", \"erl\", \"--c\", \"z\"]",
         "stdout: {}\nstderr: {}",
         text(&stdout),
         text(&stderr)
