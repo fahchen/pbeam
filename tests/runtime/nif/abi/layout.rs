@@ -38,6 +38,15 @@ int main(void)
     printf("%zu\n", offsetof(ErlNifBinary, ref_bin));
     printf("%zu\n", offsetof(ErlNifBinary, __spare__));
     printf("%zu\n", sizeof(ErlNifPid));
+    printf("%zu\n", sizeof(ErlNifMonitor));
+    printf("%zu\n", sizeof(ErlNifPort));
+    printf("%zu\n", sizeof(ErlNifMapIterator));
+    printf("%zu\n", sizeof(ErlNifResourceTypeInit));
+    printf("%zu\n", offsetof(ErlNifResourceTypeInit, dtor));
+    printf("%zu\n", offsetof(ErlNifResourceTypeInit, stop));
+    printf("%zu\n", offsetof(ErlNifResourceTypeInit, down));
+    printf("%zu\n", offsetof(ErlNifResourceTypeInit, members));
+    printf("%zu\n", offsetof(ErlNifResourceTypeInit, dyncall));
     return 0;
 }
 "#;
@@ -98,6 +107,15 @@ fn mirrors_the_layout_of_the_vendored_erl_nif_header() {
             offset_of!(ErlNifBinary, ref_bin),
             offset_of!(ErlNifBinary, spare),
             size_of::<ErlNifPid>(),
+            size_of::<ErlNifMonitor>(),
+            size_of::<ErlNifPort>(),
+            size_of::<ErlNifMapIterator>(),
+            size_of::<ErlNifResourceTypeInit>(),
+            offset_of!(ErlNifResourceTypeInit, dtor),
+            offset_of!(ErlNifResourceTypeInit, stop),
+            offset_of!(ErlNifResourceTypeInit, down),
+            offset_of!(ErlNifResourceTypeInit, members),
+            offset_of!(ErlNifResourceTypeInit, dyncall),
         ]
     );
 }

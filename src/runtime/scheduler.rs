@@ -1284,6 +1284,8 @@ impl Scheduler {
             || self.node.poll.serves(self.index)
             // A handled host signal becomes a message to `erl_signal_server`.
             || self.whereis("erl_signal_server").is_some()
+            // A thread of a NIF library sends into the inbox at any time.
+            || self.node.has_nif_library()
     }
 
     /// Wait for at most `timeout`, or without end for `None`, until fd 0
@@ -1334,10 +1336,14 @@ impl Scheduler {
             return Ok(true);
         }
         let wake = self.wake.as_ref().map(|wake| wake.as_raw_fd());
+        // Another thread sends into the inbox of the scheduler: another
+        // scheduler, or a thread of a NIF library. Else only the poll thread
+        // writes the wake socket, for the fds that it serves.
+        let inbox = self.multi || self.node.has_nif_library();
         let own: Vec<_> = [
             dirty.then(|| self.dirty.wake_fd()),
             signal::notify_fd(),
-            wake.filter(|_| self.multi),
+            wake.filter(|_| inbox),
         ]
         .into_iter()
         .flatten()
@@ -1357,10 +1363,7 @@ impl Scheduler {
             .into_iter()
             .map(|entry| (entry, index))
             .collect();
-        let mut reads: Vec<_> = own
-            .into_iter()
-            .chain(wake.filter(|_| !self.multi))
-            .collect();
+        let mut reads: Vec<_> = own.into_iter().chain(wake.filter(|_| !inbox)).collect();
         let mut writes = Vec::new();
         for &((fd, direction), _) in &owned {
             match direction {
@@ -2989,9 +2992,11 @@ impl Scheduler {
 
     /// Move each delivery of the inbox of this scheduler into the signal
     /// queue or the mailbox of its target, in inbox order. Return true when
-    /// the inbox held a delivery.
+    /// the inbox held a delivery. In a run with one scheduler, only a thread
+    /// of a NIF library sends into the inbox (`enif_send`,
+    /// `enif_monitor_process`).
     pub(super) fn drain_inbox(&mut self) -> bool {
-        if !self.multi {
+        if !self.multi && !self.node.has_nif_library() {
             return false;
         }
         let node = Arc::clone(&self.node);
@@ -4086,6 +4091,9 @@ impl Scheduler {
                             }
                             TargetMonitor::File(file) => {
                                 lock(&self.node().resources.kind::<Files>()).monitor_down(file);
+                            }
+                            TargetMonitor::Nif(monitor) => {
+                                crate::runtime::nif::abi::monitor_down(monitor, id);
                             }
                             TargetMonitor::Socket(socket) => {
                                 self.socket_owner_down(id, socket);

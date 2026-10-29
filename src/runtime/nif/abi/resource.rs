@@ -19,8 +19,10 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use super::Handle;
 use super::env::Env;
+use super::layout::{DownFn, ErlNifMonitor, ErlNifPid, ErlNifResourceTypeInit};
 use crate::AtomTable;
 use crate::Term;
+use crate::term::ProcessId;
 use crate::term::Reference;
 
 /// `ErlNifResourceDtor`: `void (*)(ErlNifEnv*, void*)` (`erl_nif.h:216`).
@@ -55,6 +57,8 @@ struct Entry {
 pub(crate) struct ResourceType {
     /// The destructor, or `None`.
     dtor: Option<DtorFn>,
+    /// The down callback of `enif_monitor_process`, or `None`.
+    down: Option<DownFn>,
     /// The atom table of the load, for the env of the destructor.
     atoms: Arc<AtomTable>,
     /// The library of the load.
@@ -67,6 +71,25 @@ impl ResourceType {
     pub(super) fn new(dtor: Option<DtorFn>, atoms: Arc<AtomTable>, library: Arc<Handle>) -> Self {
         Self {
             dtor,
+            down: None,
+            atoms,
+            _library: library,
+        }
+    }
+
+    /// Return a new type with the callbacks of `init`, which a library of
+    /// NIF 2.16 or newer gives: ERTS reads the fields from the last one
+    /// down, so a struct of `members` members has only its first
+    /// `members` callbacks (`erl_nif.c:2747-2756`).
+    pub(super) fn with_init(
+        init: &ErlNifResourceTypeInit,
+        atoms: Arc<AtomTable>,
+        library: Arc<Handle>,
+    ) -> Self {
+        let members = init.members.max(0);
+        Self {
+            dtor: (members >= 1).then_some(init.dtor).flatten(),
+            down: (members >= 3).then_some(init.down).flatten(),
             atoms,
             _library: library,
         }
@@ -179,6 +202,94 @@ pub(super) fn keep(data: usize) {
 pub(super) fn release(data: usize) {
     let released = lock().get_mut(&data).and_then(|entry| entry.kept.pop());
     drop(released);
+}
+
+/// Return the down callback of the type of the object at `data`, which
+/// ERTS keeps in the monitors of the object: without it,
+/// `enif_monitor_process` gives -1 (`erl_nif.c:3947-3952`).
+pub(super) fn down_of(data: usize) -> Option<DownFn> {
+    lock()
+        .get(&data)
+        .and_then(|entry| entry.object.upgrade())
+        .and_then(|object| object.kind.down)
+}
+
+/// The monitors of `enif_monitor_process` that wait for the exit of their
+/// process: the object and the down callback of each monitor, by the
+/// number of its reference. ERTS keeps them in the monitor tree of the
+/// object (`erl_nif.c:3959-3966`). A monitor does not keep its object:
+/// ERTS runs the down callback only while a reference keeps the object
+/// (`erl_nif.c:3091-3115`), and the destructor removes the monitors of
+/// the object (`erl_nif.c:2974-3030`).
+static MONITORS: Mutex<BTreeMap<u64, Monitored>> = Mutex::new(BTreeMap::new());
+
+/// A monitor of [`MONITORS`]: the object, the address of its data, and the
+/// down callback of its type.
+struct Monitored {
+    object: Weak<Resource>,
+    data: usize,
+    down: DownFn,
+}
+
+/// The number of the next monitor reference.
+static NEXT_MONITOR: AtomicU64 = AtomicU64::new(1);
+
+/// Lock the monitor table, also after a panic of another thread.
+fn monitors() -> std::sync::MutexGuard<'static, BTreeMap<u64, Monitored>> {
+    MONITORS.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Add a monitor of the object at `data` with the down callback `down`,
+/// and return its reference.
+pub(super) fn add_monitor(data: usize, down: DownFn) -> Reference {
+    let object = lock()
+        .get(&data)
+        .map(|entry| entry.object.clone())
+        .unwrap_or_default();
+    let reference = Reference(NEXT_MONITOR.fetch_add(1, Ordering::Relaxed));
+    monitors().insert(reference.0, Monitored { object, data, down });
+    reference
+}
+
+/// Remove the monitor `monitor` of the object at `data` and return true,
+/// or return false when the object has no such monitor, as
+/// `enif_demonitor_process` finds it (`erl_nif.c:4014-4023`).
+pub(super) fn demonitor(data: usize, monitor: Reference) -> bool {
+    // The entry compares the address and does not take the object, so no
+    // drop of the object runs its destructor while the table is locked.
+    let mut monitors = monitors();
+    let owned = monitors
+        .get(&monitor.0)
+        .is_some_and(|entry| entry.data == data);
+    owned && monitors.remove(&monitor.0).is_some()
+}
+
+/// Run the down callback of the monitor `monitor` for the exit of the
+/// process `pid`, as `erts_fire_nif_monitor` does
+/// (`erl_nif.c:3059-3119`): once, only while the monitor is in the table,
+/// and only while a reference keeps the object. The env of the callback
+/// has no process (`pre_nif_noproc`, `erl_nif.c:3110`).
+pub(crate) fn monitor_down(monitor: Reference, pid: ProcessId) {
+    let entry = monitors().remove(&monitor.0);
+    let Some((object, down)) = entry.and_then(|entry| Some((entry.object.upgrade()?, entry.down)))
+    else {
+        return;
+    };
+    let mut env = Env::new(&object.kind.atoms, None, &[]);
+    let mut nif_pid = ErlNifPid::of(pid);
+    let mut nif_monitor = ErlNifMonitor::of(monitor);
+    // SAFETY: `down` is the down callback of a type whose library the
+    // object keeps open, the data is the live object, and the env, the pid,
+    // and the monitor live until the callback returns, as the C API gives
+    // them to a down callback.
+    unsafe {
+        down(
+            &raw mut env,
+            std::ptr::with_exposed_provenance_mut(object.data),
+            &raw mut nif_pid,
+            &raw mut nif_monitor,
+        );
+    }
 }
 
 /// `ERL_NIF_RT_CREATE` of `ErlNifResourceFlags` (`erl_nif.h:188-192`).

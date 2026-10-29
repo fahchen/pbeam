@@ -90,6 +90,13 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ## Runtime
 
+### Give the OS pid of the child of a failed port start
+
+- **Now:** a spawn port whose start runs no program (a `cd` that `chdir` refuses, an `execve` that fails) has the `os_pid` 0, because PBeam starts the program with `posix_spawn`, which fails before a child exists, or checks the directory before the start. ERTS forks the child in `erl_child_setup`, and the driver records its pid (`erts/emulator/sys/unix/sys_drivers.c:1331`), so a port with `out`, which stays open after such a start, gives that pid in `port_info/2`. Row "Ports" of `docs/erts-differences.md` records it.
+- **Option:** a fork-based start that makes a child for each start and reports the failure as its exit status, as `erl_child_setup.c:302-306` and `361-369` do.
+- **Trigger:** a consumer that reads `os_pid` after a failed start.
+- **Source:** the review of PR #1334 (#1203) and the owner decision of 2026-10-29.
+
 ### Free magic-reference resources when the last reference term is dropped
 
 - **Now:** the compiled programs of ETS select continuations, the compiled binary patterns, and the atomics and counters arrays stay until the run ends, where ERTS frees each one with the last reference term (`erl_db_util.h:617-619`). A `Reference` term is a plain `u64`, so PBeam cannot see when the last term goes.

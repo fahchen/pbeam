@@ -22,6 +22,10 @@
  *    9  enif_send of a term that no env has: undefined in ERTS
  *   10  enif_send of Arg to the caller with a NULL env and no message env:
  *       the send result
+ *   11  start a thread of the library, which waits 20 ms, sends {thread, 7}
+ *       in an env of enif_alloc_env and the atom bare with no message env
+ *       to the pid Arg, and then sends {sent, Result1, Result2,
+ *       enif_thread_type()} to the caller: ok, or not_pid
  *
  * dirty_probe:
  *    0  enif_send of {dirty, Arg} in an env of enif_alloc_env with a NULL
@@ -30,7 +34,10 @@
  *    1  enif_send of {dirty, 0} in an env of enif_alloc_env with a NULL
  *       env to the pid Arg: the send result, or not_pid
  */
+#include <pthread.h>
 #include <stddef.h>
+#include <stdlib.h>
+#include <unistd.h>
 #include "erl_nif.h"
 
 static ErlNifPid loader;
@@ -51,6 +58,34 @@ static int send_tuple(ErlNifEnv *env, ErlNifPid *pid, const char *tag, int value
     int sent = enif_send(env, pid, msg_env, msg);
     enif_free_env(msg_env);
     return sent;
+}
+
+/* The receivers of the thread of probe 11. */
+typedef struct {
+    ErlNifPid target;
+    ErlNifPid caller;
+} receivers;
+
+/* The thread of probe 11: it runs on no scheduler and in no NIF call. */
+static void *send_from_thread(void *arg)
+{
+    receivers *to = arg;
+    ErlNifEnv *msg_env = enif_alloc_env();
+    ERL_NIF_TERM msg;
+    int first, second;
+
+    usleep(20000);
+    msg = enif_make_tuple(msg_env, 2, enif_make_atom(msg_env, "thread"), enif_make_int(msg_env, 7));
+    first = enif_send(NULL, &to->target, msg_env, msg);
+    enif_clear_env(msg_env);
+    second = enif_send(NULL, &to->target, NULL, enif_make_atom(msg_env, "bare"));
+    enif_clear_env(msg_env);
+    msg = enif_make_tuple(msg_env, 4, enif_make_atom(msg_env, "sent"), enif_make_int(msg_env, first),
+                          enif_make_int(msg_env, second), enif_make_int(msg_env, enif_thread_type()));
+    enif_send(NULL, &to->caller, msg_env, msg);
+    enif_free_env(msg_env);
+    free(to);
+    return NULL;
 }
 
 static ERL_NIF_TERM probe(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
@@ -113,6 +148,18 @@ static ERL_NIF_TERM probe(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
     case 10:
         enif_self(env, &pid);
         return enif_make_int(env, enif_send(NULL, &pid, NULL, argv[1]));
+    case 11: {
+        receivers *to = malloc(sizeof(receivers));
+        pthread_t thread;
+        if (!enif_get_local_pid(env, argv[1], &to->target)) {
+            free(to);
+            return enif_make_atom(env, "not_pid");
+        }
+        enif_self(env, &to->caller);
+        pthread_create(&thread, NULL, send_from_thread, to);
+        pthread_detach(thread);
+        return enif_make_atom(env, "ok");
+    }
     default:
         return enif_make_badarg(env);
     }

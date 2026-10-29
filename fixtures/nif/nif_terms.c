@@ -29,6 +29,20 @@
  *   16  enif_make_list_cell with a term that no enif call made
  *   17  enif_get_atom as in 5 with the encoding 0, which is neither
  *       ERL_NIF_LATIN1 nor ERL_NIF_UTF8
+ *   18  enif_is_atom, enif_is_empty_list, and enif_is_list of Arg
+ *   19  enif_get_ulong of Arg: {High32, Low32}
+ *   20  enif_get_map_value of [Map | Key], or none
+ *   21  enif_make_map_from_arrays of the keys a and Arg and the values 1
+ *       and 2, or duplicate
+ *   22  enif_make_tuple_from_array of three Arg
+ *   23  enif_make_new_atom_len of Arg 'a' bytes, or none
+ *   24  enif_thread_type
+ *   25  enif_clear_env of a new env that holds a term, then a new term in
+ *       it: cleared
+ *   26  enif_make_new_atom_len of the first Len bytes of C3 A9 FF with the
+ *       encoding Encoding of Arg [Encoding | Len], or none
+ *   27  enif_compare of Arg with itself and enif_system_info, which PBeam
+ *       does not implement yet: a stub with a result and a stub without one
  */
 #include <stdint.h>
 #include <string.h>
@@ -195,6 +209,76 @@ static ERL_NIF_TERM probe(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
         return enif_raise_exception(env, argv[1]);
     case 17:
         return get_atom(env, argv[1], (ErlNifCharEncoding)0);
+    case 18:
+        return enif_make_tuple(env, 3, boolean(env, enif_is_atom(env, argv[1])),
+                               boolean(env, enif_is_empty_list(env, argv[1])),
+                               boolean(env, enif_is_list(env, argv[1])));
+    case 19: {
+        unsigned long number;
+        if (!enif_get_ulong(env, argv[1], &number)) {
+            return enif_make_badarg(env);
+        }
+        return enif_make_tuple(env, 2, enif_make_long(env, (long)(number >> 32)),
+                               enif_make_long(env, (long)(number & 0xffffffffUL)));
+    }
+    case 20: {
+        ERL_NIF_TERM map, key, found;
+        if (!enif_get_list_cell(env, argv[1], &map, &key)) {
+            return enif_make_badarg(env);
+        }
+        return enif_get_map_value(env, map, key, &found) ? found : enif_make_atom(env, "none");
+    }
+    case 21: {
+        ERL_NIF_TERM keys[2], values[2], map;
+        keys[0] = enif_make_atom(env, "a");
+        keys[1] = argv[1];
+        values[0] = enif_make_long(env, 1);
+        values[1] = enif_make_long(env, 2);
+        return enif_make_map_from_arrays(env, keys, values, 2, &map) ? map : enif_make_atom(env, "duplicate");
+    }
+    case 22: {
+        ERL_NIF_TERM elements[3];
+        elements[0] = argv[1];
+        elements[1] = argv[1];
+        elements[2] = argv[1];
+        return enif_make_tuple_from_array(env, elements, 3);
+    }
+    case 23: {
+        static char name[300];
+        ERL_NIF_TERM atom;
+        if (!enif_get_long(env, argv[1], &value) || value < 0 || value > 300) {
+            return enif_make_badarg(env);
+        }
+        memset(name, 'a', sizeof name);
+        return enif_make_new_atom_len(env, name, (size_t)value, &atom, ERL_NIF_LATIN1) ? atom
+                                                                                     : enif_make_atom(env, "none");
+    }
+    case 26: {
+        static const char name[] = "\xc3\xa9\xff";
+        ERL_NIF_TERM head, tail, atom;
+        int encoding;
+        if (!enif_get_list_cell(env, argv[1], &head, &tail) || !enif_get_int(env, head, &encoding) ||
+            !enif_get_long(env, tail, &value) || value < 0 || value > 3) {
+            return enif_make_badarg(env);
+        }
+        return enif_make_new_atom_len(env, name, (size_t)value, &atom, (ErlNifCharEncoding)encoding)
+                   ? atom
+                   : enif_make_atom(env, "none");
+    }
+    case 27:
+        value = enif_compare(argv[1], argv[1]);
+        enif_system_info(NULL, 0);
+        return enif_make_int(env, (int)value);
+    case 24:
+        return enif_make_int(env, enif_thread_type());
+    case 25: {
+        ErlNifEnv *other = enif_alloc_env();
+        (void)enif_make_long(other, 1);
+        enif_clear_env(other);
+        (void)enif_make_long(other, 2);
+        enif_free_env(other);
+        return enif_make_atom(env, "cleared");
+    }
     default:
         return enif_make_list_cell(env, argv[1], (ERL_NIF_TERM)12345);
     }

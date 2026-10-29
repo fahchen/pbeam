@@ -67,6 +67,10 @@ name = "nif_exqlite"
 path = "tests/feature/nif_exqlite.rs"
 
 [[test]]
+name = "nif_fs_notify"
+path = "tests/feature/nif_fs_notify.rs"
+
+[[test]]
 name = "diagnostics_feature"
 path = "tests/feature/diagnostics.rs"
 
