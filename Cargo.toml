@@ -928,6 +928,7 @@ enum_glob_use = "allow"           # use Enum::* inside a function that matches o
 
 # m23 allow list: lints of the groups above with a hit on main. The named task removes the line and fixes the hits.
 # #1345
+redundant_else = "allow"
 unreadable_literal = "allow"
 assert_is_empty = "allow"
 redundant_closure_for_method_calls = "allow"
