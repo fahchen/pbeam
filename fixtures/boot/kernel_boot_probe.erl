@@ -4,7 +4,7 @@
 -behaviour(supervisor).
 -export([main/0, main/1, lookup/0, gethost/0, supports/0, socket/0, sockopt/0, socket_select/0, socket_io/0,
          socket_dgram/0,         socket_acceptors/0, socket_connect_invalid/0, socket_recvfrom_flags/0, socket_recvfrom_local_flags/0,
-         socket_recvfrom_errqueue/0, socket_sendv/0, socket_backend_tcp/0, socket_backend_udp/0, sockopt_otp/0, sockopt_host/0, sockopt_raw/0, start/2, stop/1, init/1]).
+         socket_recvfrom_errqueue/0, socket_sendv/0, socket_backend_tcp/0, socket_backend_udp/0, sockopt_otp/0, sockopt_host/0, sockopt_raw/0, sockopt_pkt/0, start/2, stop/1, init/1]).
 
 %% `erl -noshell -boot start_clean -pa fixtures/boot -s kernel_boot_probe
 %% main -kernel logger_level warning` runs main/0 in the boot process of init after the boot script
@@ -209,7 +209,7 @@ sockopt() ->
               socket:getopt(S, O), socket:setopt(S, O, 1)]
              || O <- [{socket, broadcast}, {socket, keepalive}, {socket, reuseaddr},
                       {socket, reuseport}, {socket, oobinline}, {socket, dontroute},
-                      {tcp, nodelay}]],
+                      {tcp, nodelay}, {socket, acceptconn}]],
     Ints = [[socket:setopt(S, O, V), socket:getopt(S, O), socket:setopt(S, O, foo),
              socket:setopt(S, O, 1 bsl 40), socket:setopt(S, O, -1)]
             || {O, V} <- [{{tcp, keepcnt}, 5}, {{tcp, keepintvl}, 7}, {{ip, ttl}, 33},
@@ -842,6 +842,41 @@ sockopt_raw() ->
     [ok = socket:close(S) || S <- [T, U, U6, A6]],
     Closed = [socket:setopt_native(U, N, 1), socket:getopt_native(U, N, integer)],
     erlang:display(unmap({sockopt_raw, Bools, Ints, Pmtu, Sources, Addrform, Native, Closed})),
+    init:stop().
+
+%% `-s kernel_boot_probe sockopt_pkt` runs socket:setopt/3 with
+%% {ip, msfilter} and socket:getopt/2 with {ip, pktoptions}, which only
+%% Linux has: the values, the invalid values, the control messages of a
+%% TCP socket, and the control messages that a small control buffer cuts.
+sockopt_pkt() ->
+    process_flag(trap_exit, true),
+    {ok, U} = socket:open(inet, dgram, udp),
+    Group = {224, 0, 0, 251},
+    Filter = #{multiaddr => Group, interface => {127, 0, 0, 1}, mode => exclude,
+               slist => [{127, 0, 0, 2}, {10, 0, 0, 1}]},
+    Msfilter = [socket:setopt(U, {ip, msfilter}, V) || V <- [null, Filter, Filter#{mode := include, slist := []}]]
+        ++ [socket:setopt(U, {ip, add_membership}, #{multiaddr => Group, interface => {127, 0, 0, 1}})]
+        ++ [socket:setopt(U, {ip, msfilter}, V)
+            || V <- [Filter, Filter#{mode := include, slist := [{127, 0, 0, 1}]}, Filter#{interface := any}, null,
+                     foo, maps:remove(slist, Filter), Filter#{multiaddr := foo}, Filter#{interface := foo},
+                     Filter#{mode := foo}, Filter#{slist := [{1, 2, 3, 4} | x]}, Filter#{slist := [foo]},
+                     Filter#{slist := x}]]
+        ++ [socket:getopt(U, {ip, msfilter})],
+    {ok, T} = socket:open(inet, stream, tcp),
+    Pkt = [socket:getopt(T, {ip, pktoptions}), socket:getopt(U, {ip, pktoptions}),
+           socket:setopt(T, {ip, pktoptions}, [])]
+        ++ [socket:setopt(T, {ip, O}, true) || O <- [pktinfo, recvttl, recvtos]]
+        ++ [socket:bind(T, #{family => inet, addr => loopback, port => 0}),
+            socket:setopt(T, {ip, multicast_ttl}, 5), socket:getopt(T, {ip, pktoptions})],
+    Short = [begin
+                 {ok, S} = socket:open(inet, stream, tcp),
+                 R = [socket:setopt(S, {ip, O}, true), socket:setopt(S, {otp, rcvctrlbuf}, Size),
+                      socket:getopt(S, {ip, pktoptions})],
+                 ok = socket:close(S),
+                 R
+             end || {O, Size} <- [{recvtos, 16}, {recvttl, 19}, {pktinfo, 20}, {pktinfo, 32}]],
+    [ok = socket:close(S) || S <- [T, U]],
+    erlang:display(unmap({sockopt_pkt, Msfilter, Pkt, Short})),
     init:stop().
 
 %% `-s kernel_boot_probe sockopt_otp` runs socket:setopt/3 and
