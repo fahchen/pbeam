@@ -622,8 +622,11 @@ fn send_messages(
 /// PBeam sends each message with the safe `sendmsg` of socket2: the
 /// `sendmmsg` of nix sends one list of typed control messages with each
 /// message. A nonblocking `sendmmsg(2)` sends the messages in turn until
-/// the first error, which it gives only when it sends no message
-/// (`sendmmsg(2)`), and so does this loop.
+/// the first error or the first message that it sends in part, and it gives
+/// the error only when it sends no message (`sendmmsg(2)`), and so does
+/// this loop. So only the last message that it sends can be partial. Linux
+/// sends at most `MAX_RW_COUNT` bytes, below 2 GiB, in one message, so the
+/// `(int)` of `Written` (`unix_socket_syncio.c:4498-4499`) does not wrap.
 ///
 /// # Errors
 ///
@@ -671,7 +674,13 @@ fn send_messages(
     let mut written = Vec::new();
     for (address, buffers, control) in &parts {
         match send_message(&state, address.as_ref(), buffers, control.as_deref(), flags) {
-            Ok(sent) => written.push(sent),
+            // `sendmmsg(2)` stops after a message that it sends in part.
+            Ok(sent) => {
+                written.push(sent);
+                if sent != buffers.iter().map(|buffer| buffer.len()).sum::<usize>() {
+                    break;
+                }
+            }
             Err(failure) if written.is_empty() => {
                 let request = (key, caller, reference);
                 return send_result(scheduler, state, Err(failure), 0, false, request);
