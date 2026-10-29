@@ -512,7 +512,10 @@ socket_sendfile() ->
     Waits = case socket:sendfile(C2, G, 0, 0, nowait) of
                 {select, {{select_info, sendfile, Handle} = Info, Bytes2}} ->
                     [Positive(Bytes2), socket:sendfile(C2, F, 0, 1, nowait),
-                     Raised(fun() -> prim_socket:sendfile(Ref2, Bytes2, 0, make_ref()) end),
+                     case Raised(fun() -> prim_socket:sendfile(Ref2, Bytes2, 0, make_ref()) end) of
+                         {select, N2} when is_integer(N2) -> select;
+                         Cont -> Cont
+                     end,
                      prim_socket:sendfile_deferred_close(Ref2),
                      Raised(fun() -> prim_socket:sendfile(Ref2, Bytes2, 0, Handle) end),
                      case socket:cancel(C2, Info) of
