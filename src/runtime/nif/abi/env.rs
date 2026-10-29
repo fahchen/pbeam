@@ -216,8 +216,9 @@ impl Drop for Env {
 }
 
 impl Env {
-    /// Return the env of a call with `arguments` as the handles
-    /// `1..=arguments.len()`.
+    /// Return the env of a call with `arguments` in its slots
+    /// `1..=arguments.len()`. The handle of an argument is its slot number,
+    /// except for an atom argument, which has its atom handle.
     ///
     /// # Examples
     ///
@@ -243,7 +244,7 @@ impl Env {
     }
 
     /// Return the env of the load callback of the library `library` in the
-    /// process `process`, with the load info `info` as the handle 1.
+    /// process `process`, with the load info `info` in the slot 1.
     pub(super) fn load(
         atoms: &Arc<AtomTable>,
         process: ProcessId,
