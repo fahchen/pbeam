@@ -140,6 +140,10 @@ fn word(term: &Term) -> Option<u32> {
 /// let result = checksum(&mut scheduler, Sum::Crc32, None, &Term::binary(b"abc".to_vec()))?;
 /// assert!(matches!(result, BifResult::Value(Term::Integer(891568578))));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn checksum(
     scheduler: &mut Scheduler,
     kind: Sum,

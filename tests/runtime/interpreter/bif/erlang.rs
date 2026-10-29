@@ -220,7 +220,7 @@ fn returns_the_on_load_flag_of_prepared_code() {
     let mut scheduler = Scheduler::new(AtomTable::new());
     scheduler.code = fixture_code();
     let frame = scheduler.code.mfa_frame("fixture", "main", 0).unwrap();
-    scheduler.start(frame, vec![], AllowAll.initial()).unwrap();
+    scheduler.start(frame, vec![], AllowAll.initial());
     scheduler.schedule_next().unwrap();
     let plain = BeamModule::new(
         "fixture".into(),
@@ -276,7 +276,7 @@ fn loads_over_old_code_and_returns_not_purged_for_current_and_old_code() {
     .unwrap();
     scheduler.code = CodeTable::new(HashMap::from([("fixture".into(), Arc::new(first))]));
     let frame = scheduler.code.mfa_frame("fixture", "main", 0).unwrap();
-    scheduler.start(frame, vec![], AllowAll.initial()).unwrap();
+    scheduler.start(frame, vec![], AllowAll.initial());
     scheduler.schedule_next().unwrap();
     assert_eq!(scheduler.code.delete("fixture"), Some(true));
     assert_eq!(scheduler.code.delete("fixture"), Some(false));
@@ -328,9 +328,7 @@ fn denies_a_code_delete_without_its_capability() {
     let mut scheduler = Scheduler::new(AtomTable::new());
     scheduler.code = fixture_code();
     let frame = scheduler.code.mfa_frame("fixture", "main", 0).unwrap();
-    scheduler
-        .start(frame, vec![], Vec::new())
-        .expect("the root starts");
+    scheduler.start(frame, vec![], Vec::new());
     scheduler.schedule_next().unwrap();
     let fixture = Term::Atom(scheduler.atoms.put("fixture").unwrap());
     let denied = delete_module(&mut scheduler, &fixture).unwrap();
@@ -446,7 +444,7 @@ fn keeps_the_on_load_flag_after_finish_loading() {
     let mut scheduler = Scheduler::new(AtomTable::new());
     scheduler.code = fixture_code();
     let frame = scheduler.code.mfa_frame("fixture", "main", 0).unwrap();
-    scheduler.start(frame, vec![], AllowAll.initial()).unwrap();
+    scheduler.start(frame, vec![], AllowAll.initial());
     scheduler.schedule_next().unwrap();
     let plain = BeamModule::new(
         "plain".into(),

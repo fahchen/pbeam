@@ -900,7 +900,7 @@ fn_params_excessive_bools = "allow" # #1349 turns on: bool parameters: use an en
 struct_excessive_bools = "allow"    # #1349 turns on: many bool fields: use an enum or bitflags
 clone_on_ref_ptr = "warn"           # write Rc::clone(&x) so cheap clones are visible
 redundant_clone = "warn"            # a clone whose original is never used again
-rc_buffer = "allow"                 # #1349 turns on: Rc<String> / Rc<Vec<T>>: use Rc<str> / Rc<[T]>
+rc_buffer = "warn"                  # Rc<String> / Rc<Vec<T>>: use Rc<str> / Rc<[T]>
 
 # Idioms.
 string_add = "warn"       # build strings with format! or push_str, not +
@@ -925,16 +925,7 @@ enum_glob_use = "allow"           # use Enum::* inside a function that matches o
 
 # m23 allow list: lints of the groups above with a hit on main. The named task removes the line and fixes the hits.
 # #1349
-unnecessary_wraps = "allow"
 too_many_lines = "allow"
-similar_names = "allow"
-needless_pass_by_value = "allow"
-unused_self = "allow"
-trivially_copy_pass_by_ref = "allow"
-struct_field_names = "allow"
-option_option = "allow"
-many_single_char_names = "allow"
-large_stack_arrays = "allow"
 # #1350
 manual_assert = "allow"
 # #1351

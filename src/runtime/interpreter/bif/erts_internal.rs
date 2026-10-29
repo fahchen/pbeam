@@ -363,10 +363,10 @@ pub(super) fn open_port(
     } else if is_gethost(&path) {
         spawn::serve(move |input, output| gethost::serve(&args, input, output))
     } else {
-        let arg0 = settings.arg0.as_deref().unwrap_or(&path);
+        let program_name = settings.arg0.as_deref().unwrap_or(&path);
         spawn::spawn(
             &path,
-            arg0,
+            program_name,
             &args,
             settings.streams,
             settings.read_write,
@@ -924,15 +924,15 @@ pub(super) type Slot<'a> = Option<port::PortGuard<'a>>;
 /// # Examples
 ///
 /// ```rust,ignore
-/// let found = found_port(scheduler, &Term::Port(port))?;
+/// let found = found_port(scheduler, &Term::Port(port));
 /// let mut slot = lock_found(&found);
 /// assert!(open(&mut slot).is_some());
 /// ```
-pub(super) fn found_port(scheduler: &mut Scheduler, port: &Term) -> Result<Found, BeamError> {
+pub(super) fn found_port(scheduler: &mut Scheduler, port: &Term) -> Found {
     let Term::Port(id) = port else {
-        return Ok(None);
+        return None;
     };
-    Ok(scheduler.node.port(*id).map(|cell| (*id, cell)))
+    scheduler.node.port(*id).map(|cell| (*id, cell))
 }
 
 /// Lock the port of `found`.
@@ -1001,7 +1001,7 @@ pub(super) fn port_command(
     // One lock of the port covers the check, the capability, and the
     // write or the send of the `tcp_inet` driver with its messages, as the
     // port lock does in `erts_port_output` (io.c:1715-2088).
-    let found = found_port(scheduler, port)?;
+    let found = found_port(scheduler, port);
     let mut slot = lock_found(&found);
     let (Some(port_state), Some(bytes), Some(&(id, _))) =
         (open(&mut slot), iolist::iodata_bytes(data), found.as_ref())
@@ -1127,7 +1127,7 @@ pub(super) fn port_close(
     port: &Term,
 ) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
-    let found = found_port(scheduler, port)?;
+    let found = found_port(scheduler, port);
     let mut slot = lock_found(&found);
     let (Some(port_state), Some(&(id, _))) = (open(&mut slot), found.as_ref()) else {
         drop(slot);
@@ -1172,7 +1172,7 @@ pub(super) fn port_exit(
     port: &Term,
     reason: &Term,
 ) -> Result<BifResult, BeamError> {
-    let found = found_port(scheduler, port)?;
+    let found = found_port(scheduler, port);
     let mut slot = lock_found(&found);
     if let (Some(port_state), Some(&(id, _))) = (open(&mut slot), found.as_ref()) {
         if let Some(denied) = port_denial(scheduler, &port_state.name, Operation::Close)? {
@@ -1220,7 +1220,7 @@ pub(super) fn port_call(
     let valid = operation
         .small_integer()
         .is_some_and(|value| u32::try_from(value).is_ok());
-    let found = found_port(scheduler, port)?;
+    let found = found_port(scheduler, port);
     let mut slot = lock_found(&found);
     if let (Some(port_state), true) = (located(&mut slot), valid)
         && let Some(denied) = port_denial(scheduler, &port_state.name, Operation::Command)?
@@ -1282,7 +1282,7 @@ pub(super) fn port_bang(
     id: PortId,
     message: &Term,
 ) -> Result<Option<BifResult>, BeamError> {
-    let found = found_port(scheduler, &Term::Port(id))?;
+    let found = found_port(scheduler, &Term::Port(id));
     let mut slot = lock_found(&found);
     let Some(port_state) = open(&mut slot) else {
         return Ok(None);
@@ -1400,7 +1400,7 @@ pub(super) fn port_control(
     let command = operation
         .small_integer()
         .and_then(|value| u32::try_from(value).ok());
-    let found = found_port(scheduler, port)?;
+    let found = found_port(scheduler, port);
     let mut slot = lock_found(&found);
     let (Some(port_state), Some(command), Some(bytes), Some(&(id, _))) = (
         located(&mut slot),
@@ -1516,7 +1516,7 @@ pub(super) fn port_denial(
 /// The atom `capability_denied` in a full atom table.
 pub(super) fn port_info(context: &mut BifContext<'_>, port: &Term) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
-    let found = found_port(scheduler, port)?;
+    let found = found_port(scheduler, port);
     let mut slot = lock_found(&found);
     let info = match (port, located(&mut slot)) {
         (&Term::Port(id), Some(port_state)) => {
@@ -1530,8 +1530,7 @@ pub(super) fn port_info(context: &mut BifContext<'_>, port: &Term) -> Result<Bif
             Term::list_from(
                 PORT_INFO_ITEMS
                     .iter()
-                    .map(|&name| port_item(id, port, name))
-                    .collect::<Result<Vec<_>, _>>()?,
+                    .map(|&name| port_item(id, port, name)),
             )
         }
         (Term::Port(_) | Term::Atom(_), _) => Term::static_atom("undefined"),
@@ -1574,9 +1573,9 @@ const OTHER_PORT_ITEMS: [&str; 6] = [
 /// # Examples
 ///
 /// ```rust,ignore
-/// let item = port_item(id, port, "links")?;
+/// let item = port_item(id, port, "links");
 /// ```
-fn port_item(id: PortId, port: &Port, name: &str) -> Result<Term, BeamError> {
+fn port_item(id: PortId, port: &Port, name: &str) -> Term {
     let value = match name {
         "name" => Term::list_from(port.name.iter().map(|&byte| Term::Integer(byte.into()))),
         // `erts_bld_port_info` conses each entry of the post-order walk to
@@ -1610,7 +1609,7 @@ fn port_item(id: PortId, port: &Port, name: &str) -> Result<Term, BeamError> {
             Driver::Inet(_) => Term::static_atom("undefined"),
         },
     };
-    Ok(Term::tuple(vec![Term::static_atom(name), value]))
+    Term::tuple(vec![Term::static_atom(name), value])
 }
 
 /// Run `erts_internal:port_info(Port, Item)`, which `erlang:port_info/2`
@@ -1641,7 +1640,7 @@ pub(super) fn port_info_item(
     item: &Term,
 ) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
-    let found = found_port(scheduler, port)?;
+    let found = found_port(scheduler, port);
     let mut slot = lock_found(&found);
     let info = match (port, located(&mut slot)) {
         (&Term::Port(id), Some(port_state)) => {
@@ -1667,7 +1666,7 @@ pub(super) fn port_info_item(
             scheduler
                 .current_process_mut()
                 .bump_reductions(PORT_REDUCTIONS);
-            port_item(id, port_state, name)?
+            port_item(id, port_state, name)
         }
         (Term::Port(_) | Term::Atom(_), _) => Term::static_atom("undefined"),
         _ => Term::static_atom("badtype"),
@@ -1706,7 +1705,7 @@ pub(super) fn port_connect(
     pid: &Term,
 ) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
-    let found = found_port(scheduler, port)?;
+    let found = found_port(scheduler, port);
     let mut slot = lock_found(&found);
     let name = open(&mut slot).map(|port_state| port_state.name.clone());
     drop(slot);
@@ -2088,6 +2087,10 @@ const PTAB_REDS_MULTIPLIER: u64 = 25;
 /// # Errors
 ///
 /// A budget of the current process that is less than 0.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn processes_next(
     scheduler: &mut Scheduler,
     first: &Term,

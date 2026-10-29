@@ -467,6 +467,10 @@ pub(super) struct ProcessState {
     /// timer, as the yield state of the ERTS walk keeps the next node
     /// (`erl_rbtree.h:1392-1396`). `None` until the exit switches out. The
     /// exit then continues with no new bump.
+    #[expect(
+        clippy::option_option,
+        reason = "three states: exit not continued, after the last timer, and the next timer position"
+    )]
     pub(super) continue_exit: Option<Option<WalkPosition>>,
     /// The ERTS flag `EXF_LOG` of the exception that ends the process
     /// (`error.h:73`, `112`). An uncaught `error`, or an uncaught `throw`

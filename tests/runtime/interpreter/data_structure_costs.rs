@@ -642,14 +642,14 @@ fn prints_the_cost_of_every_derivation() {
         &crate::term::test_atom_table(),
     )
     .unwrap();
-    let flat_4 = Map::from_pairs(
+    let four_pairs = Map::from_pairs(
         (0..4)
             .map(|key| (Term::Integer(key), Term::Integer(key)))
             .collect(),
         &crate::term::test_atom_table(),
     )
     .unwrap();
-    let flat_2 = Map::from_pairs(
+    let two_pairs = Map::from_pairs(
         (0..2)
             .map(|key| (Term::Integer(key), Term::Integer(key)))
             .collect(),
@@ -657,8 +657,8 @@ fn prints_the_cost_of_every_derivation() {
     )
     .unwrap();
     for (name, map, key) in [
-        ("map_get_2_flatmap", &flat_2, 1),
-        ("map_get_4_flatmap", &flat_4, 3),
+        ("map_get_2_flatmap", &two_pairs, 1),
+        ("map_get_4_flatmap", &four_pairs, 3),
         ("map_get_32_flatmap", &flat_32, 31),
     ] {
         report(
@@ -894,8 +894,8 @@ fn prints_the_cost_of_every_derivation() {
         &collision_key,
         &map_1000,
         &flat_32,
-        &flat_4,
-        &flat_2,
+        &four_pairs,
+        &two_pairs,
         &grown,
         &preallocated,
     ));

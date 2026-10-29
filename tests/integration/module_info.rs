@@ -170,10 +170,10 @@ fn without_chunks(beam: &[u8], drop: &[&[u8; 4]]) -> Vec<u8> {
 
 /// Return `beam` with the chunk `CInf` replaced by `data`, which is 4 bytes
 /// long.
-fn with_compile_info(beam: &[u8], data: &[u8; 4]) -> Vec<u8> {
+fn with_compile_info(beam: &[u8], data: [u8; 4]) -> Vec<u8> {
     let mut out = without_chunks(beam, &[b"CInf"]);
     out.extend_from_slice(b"CInf\0\0\0\x04");
-    out.extend_from_slice(data);
+    out.extend_from_slice(&data);
     let size = (out.len() - 8) as u32;
     out[4..8].copy_from_slice(&size.to_be_bytes());
     out
@@ -244,7 +244,7 @@ fn refuses_a_compile_chunk_that_is_not_an_external_term() {
     // The ERTS loader refuses the module with `badfile` when the `CInf`
     // chunk is not one valid external term (jit/asm_load.c:1096-1111): a
     // first byte that is not 131, or a term that ends early.
-    let failure = BeamProgram::load(&[&with_compile_info(MODULE_INFO_CHUNKS, b"\0\0\0\0")])
+    let failure = BeamProgram::load(&[&with_compile_info(MODULE_INFO_CHUNKS, *b"\0\0\0\0")])
         .unwrap_err()
         .to_string();
     assert!(
@@ -252,7 +252,7 @@ fn refuses_a_compile_chunk_that_is_not_an_external_term() {
         "{failure}"
     );
     assert!(
-        BeamProgram::load(&[&with_compile_info(MODULE_INFO_CHUNKS, b"\x83\x68\x02\x6a")]).is_err()
+        BeamProgram::load(&[&with_compile_info(MODULE_INFO_CHUNKS, *b"\x83\x68\x02\x6a")]).is_err()
     );
 }
 

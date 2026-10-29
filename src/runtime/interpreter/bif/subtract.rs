@@ -283,6 +283,10 @@ impl Subtract {
     /// ```rust,ignore
     /// let step = state.length(&mut process, true)?;
     /// ```
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "stage method of `subtract`; every stage returns `Result<Step, BeamError>`"
+    )]
     fn length(&mut self, process: &mut ProcessState, left: bool) -> Result<Step, BeamError> {
         const ELEMENTS_PER_RED: usize = 32;
         let budget = ELEMENTS_PER_RED * process.bif_reductions_or_zero();
@@ -345,6 +349,10 @@ impl Subtract {
     /// ```rust,ignore
     /// let step = state.naive_left(&mut process)?;
     /// ```
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "stage method of `subtract`; every stage returns `Result<Step, BeamError>`"
+    )]
     fn naive_left(&mut self, process: &mut ProcessState) -> Result<Step, BeamError> {
         const CHECKS_PER_RED: usize = 16;
         let budget = CHECKS_PER_RED * process.bif_reductions_or_zero();
@@ -385,6 +393,10 @@ impl Subtract {
     /// ```rust,ignore
     /// let step = state.naive_right(&mut process)?;
     /// ```
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "stage method of `subtract`; every stage returns `Result<Step, BeamError>`"
+    )]
     fn naive_right(&mut self, process: &mut ProcessState) -> Result<Step, BeamError> {
         const CHECKS_PER_RED: usize = 16;
         let budget = CHECKS_PER_RED * process.bif_reductions_or_zero();

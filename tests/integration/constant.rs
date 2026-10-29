@@ -87,12 +87,12 @@ fn assemble_chunks(chunks: Vec<([u8; 4], Vec<u8>)>) -> Vec<u8> {
     beam
 }
 
-fn edit_chunk(beam: &[u8], name: &[u8; 4], edit: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
+fn edit_chunk(beam: &[u8], name: [u8; 4], edit: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
     let mut edit = Some(edit);
     let chunks = beam_chunks(beam)
         .into_iter()
         .map(|(id, mut data)| {
-            if &id == name {
+            if id == name {
                 edit.take().unwrap()(&mut data);
             }
             (id, data)
@@ -147,53 +147,53 @@ fn rejects_duplicate_and_missing_required_chunks() {
 #[test]
 fn rejects_bad_atom_table_count_encoding_and_names() {
     assert!(
-        BeamModule::load(&edit_chunk(constant_fixture(), b"AtU8", |data| {
+        BeamModule::load(&edit_chunk(constant_fixture(), *b"AtU8", |data| {
             data[0..4].copy_from_slice(&(-100i32).to_be_bytes());
         }))
         .is_err()
     );
     assert!(
-        BeamModule::load(&edit_chunk(constant_fixture(), b"AtU8", |data| data[0..4]
+        BeamModule::load(&edit_chunk(constant_fixture(), *b"AtU8", |data| data[0..4]
             .copy_from_slice(&i32::MIN.to_be_bytes())))
         .is_err()
     );
     assert!(
-        BeamModule::load(&edit_chunk(constant_fixture(), b"AtU8", |data| data[0..4]
+        BeamModule::load(&edit_chunk(constant_fixture(), *b"AtU8", |data| data[0..4]
             .copy_from_slice(&3i32.to_be_bytes())))
         .is_err()
     );
     assert!(
-        BeamModule::load(&edit_chunk(constant_fixture(), b"AtU8", |data| *data
+        BeamModule::load(&edit_chunk(constant_fixture(), *b"AtU8", |data| *data
             .last_mut()
             .unwrap() =
             255))
         .is_err()
     );
     assert!(
-        BeamModule::load(&edit_chunk(constant_fixture(), b"AtU8", |data| data.push(0))).is_err()
+        BeamModule::load(&edit_chunk(constant_fixture(), *b"AtU8", |data| data.push(0))).is_err()
     );
 }
 
 #[test]
 fn rejects_invalid_exports_and_code_header() {
     assert!(
-        BeamModule::load(&edit_chunk(constant_fixture(), b"ExpT", |data| data.truncate(4)))
+        BeamModule::load(&edit_chunk(constant_fixture(), *b"ExpT", |data| data.truncate(4)))
             .is_err()
     );
     assert!(
-        BeamModule::load(&edit_chunk(constant_fixture(), b"ExpT", |data| {
+        BeamModule::load(&edit_chunk(constant_fixture(), *b"ExpT", |data| {
             let first = data[4..16].to_vec();
             data[16..28].copy_from_slice(&first);
         }))
         .is_err()
     );
     assert!(
-        BeamModule::load(&edit_chunk(constant_fixture(), b"Code", |data| data[0..4]
+        BeamModule::load(&edit_chunk(constant_fixture(), *b"Code", |data| data[0..4]
             .copy_from_slice(&1u32.to_be_bytes())))
         .is_err()
     );
     assert!(
-        BeamModule::load(&edit_chunk(constant_fixture(), b"Code", |data| data[4..8]
+        BeamModule::load(&edit_chunk(constant_fixture(), *b"Code", |data| data[4..8]
             .copy_from_slice(&1u32.to_be_bytes())))
         .is_err()
     );
@@ -201,7 +201,7 @@ fn rejects_invalid_exports_and_code_header() {
 
 #[test]
 fn rejects_code_labels_outside_declared_range() {
-    let beam = edit_chunk(constant_fixture(), b"Code", |data| {
+    let beam = edit_chunk(constant_fixture(), *b"Code", |data| {
         data[12..16].copy_from_slice(&0u32.to_be_bytes());
     });
     assert!(
@@ -214,7 +214,7 @@ fn rejects_code_labels_outside_declared_range() {
 
 #[test]
 fn rejects_zero_code_label() {
-    let beam = edit_chunk(constant_fixture(), b"Code", |data| {
+    let beam = edit_chunk(constant_fixture(), *b"Code", |data| {
         let label = data
             .windows(2)
             .position(|bytes| bytes == [1, 0x10])
@@ -232,41 +232,41 @@ fn rejects_zero_code_label() {
 #[test]
 fn rejects_invalid_code_stream_and_operands() {
     assert!(
-        BeamModule::load(&edit_chunk(constant_fixture(), b"Code", |data| data
+        BeamModule::load(&edit_chunk(constant_fixture(), *b"Code", |data| data
             [16..20]
             .copy_from_slice(&99u32.to_be_bytes())))
         .is_err()
     );
     assert!(
-        BeamModule::load(&edit_chunk(constant_fixture(), b"Code", |data| *data
+        BeamModule::load(&edit_chunk(constant_fixture(), *b"Code", |data| *data
             .last_mut()
             .unwrap() =
             255))
         .is_err()
     );
     assert!(
-        BeamModule::load(&edit_chunk(constant_fixture(), b"Code", |data| {
+        BeamModule::load(&edit_chunk(constant_fixture(), *b"Code", |data| {
             let i = data.windows(4).position(|w| w == [2, 18, 34, 0]).unwrap();
             data[i + 1] = 19;
         }))
         .is_err()
     );
     assert!(
-        BeamModule::load(&edit_chunk(constant_fixture(), b"Code", |data| {
+        BeamModule::load(&edit_chunk(constant_fixture(), *b"Code", |data| {
             let i = data.windows(2).position(|w| w == [64, 50]).unwrap();
             data[i + 1] = 55;
         }))
         .is_err()
     );
     assert!(
-        BeamModule::load(&edit_chunk(constant_fixture(), b"Code", |data| {
+        BeamModule::load(&edit_chunk(constant_fixture(), *b"Code", |data| {
             let i = data.windows(3).position(|w| w == [64, 50, 3]).unwrap();
             data[i + 2] = 23;
         }))
         .is_err()
     );
     assert!(
-        BeamModule::load(&edit_chunk(constant_fixture(), b"Code", |data| {
+        BeamModule::load(&edit_chunk(constant_fixture(), *b"Code", |data| {
             let i = data.windows(3).position(|w| w == [64, 0x69, 0xe8]).unwrap();
             data[i + 1] = 0x07;
         }))
@@ -277,14 +277,14 @@ fn rejects_invalid_code_stream_and_operands() {
 #[test]
 fn rejects_truncated_atom_and_zero_atom_index() {
     assert!(
-        BeamModule::load(&edit_chunk(constant_fixture(), b"AtU8", |data| {
+        BeamModule::load(&edit_chunk(constant_fixture(), *b"AtU8", |data| {
             *data.last_mut().unwrap() = 0xf0;
         }))
         .is_err()
     );
 
     assert!(
-        BeamModule::load(&edit_chunk(constant_fixture(), b"Code", |data| {
+        BeamModule::load(&edit_chunk(constant_fixture(), *b"Code", |data| {
             let i = data.windows(4).position(|w| w == [2, 18, 34, 0]).unwrap();
             data[i + 1] = 2;
         }))
@@ -294,7 +294,7 @@ fn rejects_truncated_atom_and_zero_atom_index() {
 
 #[test]
 fn rejects_export_labels_outside_declared_range() {
-    let beam = edit_chunk(constant_fixture(), b"ExpT", |data| {
+    let beam = edit_chunk(constant_fixture(), *b"ExpT", |data| {
         for entry in data[4..].chunks_mut(12) {
             entry[8..12].copy_from_slice(&99u32.to_be_bytes());
         }

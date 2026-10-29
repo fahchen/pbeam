@@ -128,7 +128,7 @@ impl Scheduler {
         let caller = self.current_process_mut().id;
         try_reply(accepted, |(id, accepted)| {
             let port = self.open_accepted(caller, accepted)?;
-            self.port_send(caller, self.async_message(listen, id, ok_port(port)));
+            self.port_send(caller, Self::async_message(listen, id, ok_port(port)));
             Ok(async_reply(id))
         })
     }
@@ -187,7 +187,7 @@ impl Scheduler {
         let status = port.map(ok_port).or(error).expect("an accept or an error");
         self.port_send(
             acceptor.caller,
-            self.async_message(listen, acceptor.id, status),
+            Self::async_message(listen, acceptor.id, status),
         );
         Ok(port.is_some())
     }
@@ -215,7 +215,7 @@ impl Scheduler {
         if let Some(acceptor) = self.remove_acceptor(listen, caller, Some(timer)) {
             self.demonitor_acceptor(listen, acceptor);
             let status = error_status(Term::static_atom("timeout"));
-            self.port_send(caller, self.async_message(listen, acceptor.id, status));
+            self.port_send(caller, Self::async_message(listen, acceptor.id, status));
         }
     }
 
@@ -258,7 +258,7 @@ impl Scheduler {
                 self.cancel_port_timer(timer);
             }
             let status = error_status(Term::static_atom("closed"));
-            let message = self.async_message(listen, receiver.id, status);
+            let message = Self::async_message(listen, receiver.id, status);
             if notify {
                 self.port_send(receiver.caller, message);
             }
@@ -268,7 +268,7 @@ impl Scheduler {
             let status = error_status(Term::static_atom("closed"));
             self.port_send(
                 acceptor.caller,
-                self.async_message(listen, acceptor.id, status),
+                Self::async_message(listen, acceptor.id, status),
             );
         }
     }
@@ -326,7 +326,7 @@ impl Scheduler {
 impl Scheduler {
     /// Return the message `{inet_async, L, Ref, Status}` of the listen port
     /// `listen`.
-    pub(super) fn async_message(&self, listen: PortId, id: u16, status: Term) -> Term {
+    pub(super) fn async_message(listen: PortId, id: u16, status: Term) -> Term {
         Term::tuple(vec![
             Term::Atom(Atom::INET_ASYNC),
             Term::Port(listen),

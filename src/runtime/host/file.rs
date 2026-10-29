@@ -718,6 +718,10 @@ fn host_path(path: &CStr) -> &Path {
 /// Return the `errno` of a failed host call. The standard library gives an
 /// error with no `errno` only when its buffer cannot grow, which is
 /// `ENOMEM` in ERTS.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "used as the function of `map_err`, which hands the error over by value"
+)]
 fn os_errno(error: io::Error) -> c_int {
     error.raw_os_error().unwrap_or(libc::ENOMEM)
 }

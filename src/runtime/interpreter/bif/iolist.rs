@@ -325,6 +325,10 @@ fn bump_all_after_walk(process: &mut ProcessState, init: i64) {
 /// assert!(matches!(trap, BifResult::TrapBif { function: "iolist_size_continue", .. }));
 /// assert_eq!(process.fcalls, 0);
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "trap export arm of `bif_trap`; every trap arm returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn iolist_size_continue(
     process: &mut ProcessState,
     term: &Term,
@@ -410,6 +414,10 @@ pub(super) fn iolist_to_iovec(
 /// assert!(matches!(iovec, BifResult::Value(binaries) if binaries == Term::list_from([Term::binary(vec![1])])));
 /// assert_eq!(process.fcalls, 8);
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "trap export arm of `bif_trap`; every trap arm returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn iovec_size(
     process: &mut ProcessState,
     arg: &Term,
@@ -681,6 +689,10 @@ pub(super) fn list_to_bitstring_1(
 /// assert!(matches!(list_to_bitstring(&mut scheduler, &list, "list_to_binary", Unit::Byte)?, BifResult::Value(Term::Binary(bytes)) if bytes == [1, 2]));
 /// assert!(matches!(list_to_bitstring(&mut scheduler, &Term::static_atom("a"), "iolist_to_binary", Unit::Byte)?, BifResult::Raise { .. }));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "result of this helper is the tail of BIF entries that return `Result<BifResult, BeamError>` like every BIF"
+)]
 fn list_to_bitstring(
     scheduler: &mut Scheduler,
     term: &Term,

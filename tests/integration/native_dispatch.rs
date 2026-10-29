@@ -7,6 +7,10 @@ use pbeam_runtime::{
 
 const NATIVE_PROBE: &[u8] = include_bytes!("../../fixtures/native/native_probe.beam");
 
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "NIF function pointer; every NIF returns `Result<NativeResult, BeamError>`"
+)]
 fn add(
     context: &mut NifContext<'_>,
     arguments: &[Term],
@@ -19,6 +23,10 @@ fn add(
     }
 }
 
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "NIF function pointer; every NIF returns `Result<NativeResult, BeamError>`"
+)]
 fn hidden(
     context: &mut NifContext<'_>,
     arguments: &[Term],

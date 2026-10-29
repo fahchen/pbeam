@@ -793,7 +793,7 @@ impl CodeTable {
     ///
     /// ```rust,ignore
     /// code.prepare(reference, module);
-    /// assert_eq!(code.prepared_module(&reference), Some("load_target"));
+    /// assert_eq!(code.prepared_module(reference), Some("load_target"));
     /// ```
     pub(in crate::runtime) fn prepare(&mut self, reference: Reference, module: BeamModule) {
         self.prepared.insert(reference, Arc::new(module));
@@ -807,12 +807,12 @@ impl CodeTable {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(code.prepared_module(&reference), Some("load_target"));
-    /// assert_eq!(code.prepared_module(&other), None);
+    /// assert_eq!(code.prepared_module(reference), Some("load_target"));
+    /// assert_eq!(code.prepared_module(other), None);
     /// ```
-    pub(in crate::runtime) fn prepared_module(&self, reference: &Reference) -> Option<&str> {
+    pub(in crate::runtime) fn prepared_module(&self, reference: Reference) -> Option<&str> {
         self.prepared
-            .get(reference)
+            .get(&reference)
             .map(|module| module.name.as_str())
     }
 
@@ -836,7 +836,7 @@ impl CodeTable {
     ) -> Option<Vec<String>> {
         references
             .iter()
-            .map(|reference| self.prepared_module(reference).map(str::to_owned))
+            .map(|reference| self.prepared_module(*reference).map(str::to_owned))
             .collect()
     }
 
@@ -995,13 +995,13 @@ impl CodeTable {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(code.finished_prepared_on_load(&reference), Some(false));
+    /// assert_eq!(code.finished_prepared_on_load(reference), Some(false));
     /// ```
     pub(in crate::runtime) fn finished_prepared_on_load(
         &self,
-        reference: &Reference,
+        reference: Reference,
     ) -> Option<bool> {
-        self.finished_prepared.get(reference).copied()
+        self.finished_prepared.get(&reference).copied()
     }
 
     /// Return the frame of the `-on_load` function of the module `name` while

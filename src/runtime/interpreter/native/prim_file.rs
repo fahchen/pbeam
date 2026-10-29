@@ -450,6 +450,10 @@ where
 /// let result = dirty(file::get_cwd, |scheduler, cwd| ok_tuple(&scheduler.atoms, cwd.map(Term::binary)))?;
 /// assert!(matches!(result, BifResult::Dirty(_)));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "builds the tail value of NIF functions that return `Result<BifResult, BeamError>` and mix it with fallible arms"
+)]
 pub(super) fn dirty<T: Send + 'static>(
     host: impl FnOnce() -> T + Send + 'static,
     finish: impl FnOnce(&mut Scheduler, T) -> Result<BifResult, BeamError> + Send + 'static,
@@ -1120,6 +1124,10 @@ fn ok(value: Term) -> Term {
 /// ```rust,ignore
 /// assert!(matches!(einval()?, BifResult::Value(Term::Tuple(_))));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "builds the tail value of NIF functions that return `Result<BifResult, BeamError>` and mix it with fallible arms"
+)]
 fn einval() -> Result<BifResult, BeamError> {
     Ok(BifResult::Value(Term::tuple(vec![
         Term::static_atom("error"),

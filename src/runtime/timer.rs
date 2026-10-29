@@ -182,7 +182,7 @@ pub(super) struct Timers {
     queue: BTreeMap<TimerKey, Timer>,
     /// The key of each active BIF timer by its reference, as the ERTS
     /// `btm_tree` of the timer service (`erl_hl_timer.c:312`).
-    bif_timers: HashMap<Reference, TimerKey>,
+    bif_by_reference: HashMap<Reference, TimerKey>,
     /// Start number of the next timer.
     next: u64,
     /// The last time that this scheduler read, as
@@ -223,7 +223,7 @@ impl Timers {
             clock,
             check: (check, 0),
             queue: BTreeMap::new(),
-            bif_timers: HashMap::new(),
+            bif_by_reference: HashMap::new(),
             next: 1,
             last: Cell::new(0),
             check_reds: Cell::new(0),
@@ -445,7 +445,7 @@ impl Timers {
         let key = (end, self.next);
         self.next += 1;
         if let Timer::Bif { reference, .. } = &timer {
-            self.bif_timers.insert(*reference, key);
+            self.bif_by_reference.insert(*reference, key);
         }
         self.queue.insert(key, timer);
         key
@@ -494,7 +494,7 @@ impl Timers {
     /// assert_eq!(timers.cancel_bif(reference), None);
     /// ```
     pub(super) fn cancel_bif(&mut self, reference: Reference) -> Option<(i64, Timer)> {
-        let key = *self.bif_timers.get(&reference)?;
+        let key = *self.bif_by_reference.get(&reference)?;
         self.remove(key).map(|timer| (key.0, timer))
     }
 
@@ -510,7 +510,7 @@ impl Timers {
     fn remove(&mut self, key: TimerKey) -> Option<Timer> {
         let timer = self.queue.remove(&key)?;
         if let Timer::Bif { reference, .. } = &timer {
-            self.bif_timers.remove(reference);
+            self.bif_by_reference.remove(reference);
         }
         Some(timer)
     }

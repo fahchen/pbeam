@@ -742,7 +742,7 @@ impl Map {
                 apply_hash(hamt, operations, hashes, atoms);
             }
             Repr::Flat(pairs) => {
-                if let Convert::Yes(hamt) = update_flat(pairs, operations, hashes, atoms)? {
+                if let Convert::Yes(hamt) = update_flat(pairs, operations, &hashes, atoms)? {
                     self.repr = Some(Arc::new(Repr::Hash(hamt)));
                 }
             }
@@ -1104,11 +1104,11 @@ fn apply_hash(
 fn update_flat(
     pairs: &mut Vec<(Term, Term)>,
     operations: Vec<(Insert, Term, Term)>,
-    hashes: Vec<Option<u64>>,
+    hashes: &[Option<u64>],
     atoms: &AtomTable,
 ) -> Result<Convert, Term> {
     let mut added: Vec<&Term> = Vec::new();
-    for ((kind, key, _), hash) in operations.iter().zip(&hashes) {
+    for ((kind, key, _), hash) in operations.iter().zip(hashes) {
         if hash.is_none() {
             return Err(key.clone());
         }
@@ -1215,7 +1215,9 @@ impl Hamt {
             }
             if remaining == 0 {
                 let elements = above.iter().map(|(_, child)| *child);
-                break Some(encode_path(elements.chain([position]).collect())?);
+                break Some(encode_path(
+                    &elements.chain([position]).collect::<Vec<_>>(),
+                )?);
             }
             // A chunk takes a whole collision node: it may hold more than 16 pairs.
             if let (0, Entries::Collision(collision)) = (position, entries) {
@@ -1601,8 +1603,8 @@ fn path_element(path: u64, depth: usize) -> usize {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(encode_path(vec![0xb, 2])?, 0x2b);
-/// assert!(encode_path(vec![0; 16]).is_err());
+/// assert_eq!(encode_path(&[0xb, 2])?, 0x2b);
+/// assert!(encode_path(&[0; 16]).is_err());
 /// ```
 ///
 /// # Errors
@@ -1614,7 +1616,7 @@ fn path_element(path: u64, depth: usize) -> usize {
 /// so the bignum is not in normal form: on ERTS 29.1.1, it is not equal to
 /// the integer of the same value. With 17 elements, a path into a collision
 /// node, the value is 2^64 or more, or the top digit is 0.
-fn encode_path(elements: Vec<usize>) -> Result<i64, BeamError> {
+fn encode_path(elements: &[usize]) -> Result<i64, BeamError> {
     let depth = elements.len();
     let value = if depth < PATH_ELEMS_PER_DIGIT {
         let value = elements

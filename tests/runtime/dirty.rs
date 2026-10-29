@@ -294,6 +294,10 @@ static GATE: (Mutex<(usize, bool)>, Condvar) = (Mutex::new((0, false)), Condvar:
 
 /// Count the start of the call, wait until the test opens [`GATE`], and
 /// return the name of the thread as a binary.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "NIF function pointer; every NIF returns `Result<NativeResult, BeamError>`"
+)]
 fn gated_thread_name(_: &mut NifContext<'_>, _: &[Term]) -> Result<NativeResult, BeamError> {
     let (state, changed) = &GATE;
     let mut state = state.lock().unwrap();

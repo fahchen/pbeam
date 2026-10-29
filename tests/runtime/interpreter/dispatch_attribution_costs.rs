@@ -195,9 +195,7 @@ fn cursor_scheduler() -> (Scheduler, Arc<BeamModule>) {
     let mut scheduler = Scheduler::new(AtomTable::new());
     scheduler.code = CodeTable::new(HashMap::from([("fixture".to_owned(), Arc::clone(&module))]));
     let frame = code_table::frame(&module, 1, 1).expect("floor_loop/1 exists");
-    scheduler
-        .start(frame, vec![Term::Integer(7)], Vec::new())
-        .expect("the root process starts");
+    scheduler.start(frame, vec![Term::Integer(7)], Vec::new());
     scheduler
         .schedule_next()
         .expect("the root process is runnable");
@@ -416,22 +414,17 @@ fn prints_the_cost_of_every_instruction_part() {
             values.with(<[&crate::term::Term]>::len) as u64
         }),
     );
-    let program = BeamProgram {
-        modules: HashMap::new(),
-        atoms: Arc::new(AtomTable::new()),
-    };
     let mut scheduler = Scheduler::new(AtomTable::new());
     let terms = [Term::Integer(7), Term::Integer(1)];
     report(
         "bif_slice_minus",
         cost(|| {
-            let result = program
-                .bif_slice(
-                    black_box(&mut scheduler),
-                    BifId::ErlangMinus2,
-                    black_box(&terms),
-                )
-                .expect("an integer subtraction does not fail");
+            let result = BeamProgram::bif_slice(
+                black_box(&mut scheduler),
+                BifId::ErlangMinus2,
+                black_box(&terms),
+            )
+            .expect("an integer subtraction does not fail");
             match result {
                 super::bif::BifResult::Value(value) => {
                     black_box(&value);

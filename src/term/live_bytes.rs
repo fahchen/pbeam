@@ -50,6 +50,10 @@ pub(crate) struct LiveBytes {
 
 /// One shared container of a term, by its `Arc`.
 enum Shared {
+    #[expect(
+        clippy::rc_buffer,
+        reason = "`Tuple` shares its elements as `Arc<Vec<Term>>` because `Arc::make_mut` copies and writes them (`set_tuple_element`); an `Arc<[Term]>` cannot do that"
+    )]
     Tuple(Arc<Vec<Term>>),
     Cons(Arc<Cons>),
     Map(Arc<Repr>),
@@ -57,6 +61,10 @@ enum Shared {
     /// One binary view descriptor, the allocation behind a [`Binary`]
     /// handle. Two handles that share one descriptor count it once.
     BinaryView(Binary),
+    #[expect(
+        clippy::rc_buffer,
+        reason = "`Binary` shares byte arrays as `Arc<Vec<u8>>` because `append_in_place` grows the vector through `Arc::get_mut`; an `Arc<[u8]>` cannot grow"
+    )]
     Binary(Arc<Vec<u8>>),
     Fun(Arc<FunThing>),
     Record(Arc<RecordThing>),
@@ -249,7 +257,7 @@ impl LiveBytes {
         if !unique && !self.fresh(Shared::Cons(Arc::clone(cell.arc()))) {
             return;
         }
-        self.bytes += cell.allocated_bytes();
+        self.bytes += ConsRef::allocated_bytes();
         self.push(&cell.head);
         self.push(&cell.tail);
     }
@@ -318,7 +326,7 @@ impl LiveBytes {
     /// recurse here.
     fn binary(&mut self, binary: &Binary) {
         if self.fresh(Shared::BinaryView(binary.clone())) {
-            self.bytes += binary.view_bytes();
+            self.bytes += Binary::view_bytes();
         }
         if self.fresh(Shared::Binary(Arc::clone(binary.backing()))) {
             self.bytes += binary.allocated_bytes();

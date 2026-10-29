@@ -529,6 +529,10 @@ pub(super) fn charge(scheduler: &mut Scheduler, bytes: u64) {
 /// let result = checksum(&mut scheduler, Md5::init(), &Term::binary(b"abc".to_vec()), Checksum::Digest)?;
 /// assert!(matches!(result, BifResult::Value(Term::Binary(bytes)) if bytes.len() == DIGEST_BYTES));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "result of this helper is the tail of BIF entries that return `Result<BifResult, BeamError>` like every BIF"
+)]
 fn checksum(
     scheduler: &mut Scheduler,
     mut state: Md5,

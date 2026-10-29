@@ -116,7 +116,7 @@ fn counts_a_binary_backing_and_a_packed_view() {
     let views = Term::tuple(vec![Term::Binary(packed), Term::Binary(other)]);
     assert_eq!(
         bytes(&views),
-        2 * size_of::<Term>() + 2 * source.view_bytes() + backing + packed_bytes + other_bytes
+        2 * size_of::<Term>() + 2 * Binary::view_bytes() + backing + packed_bytes + other_bytes
     );
 }
 

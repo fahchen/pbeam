@@ -139,7 +139,7 @@ pub(crate) struct Child {
 }
 
 /// Start the program at the native path `path` with the native arguments
-/// `args`, as `spawn_start` (`sys_drivers.c:471-729`) and
+/// `arguments`, as `spawn_start` (`sys_drivers.c:471-729`) and
 /// `erl_child_setup` do for `spawn_executable`:
 ///
 /// 1. Make the output pipe and the input pipe (`sys_drivers.c:484-495`).
@@ -150,7 +150,7 @@ pub(crate) struct Child {
 ///    (`sys_drivers.c:518-526`).
 /// 3. Start the child with `posix_spawn`: the pipes as its fds 0 and 1, or
 ///    3 and 4, the output pipe also as fd 2 with `stderr_to_stdout`, a new
-///    session (`setsid`), an empty signal mask, `argv[0]` `arg0`, the
+///    session (`setsid`), an empty signal mask, `argv[0]` `program_name`, the
 ///    environment and the working directory of `setting`
 ///    (`erl_child_setup.c:290-369`). A directory that the child cannot
 ///    enter fails `posix_spawn` with the `errno` of `chdir`.
@@ -168,13 +168,13 @@ pub(crate) struct Child {
 /// ```
 pub(crate) fn spawn(
     path: &[u8],
-    arg0: &[u8],
-    args: &[Vec<u8>],
+    program_name: &[u8],
+    arguments: &[Vec<u8>],
     streams: Streams,
     read_write: ReadWrite,
     setting: &Setting,
 ) -> Result<Child, SpawnError> {
-    start(path, arg0, args, streams, read_write, setting)
+    start(path, program_name, arguments, streams, read_write, setting)
 }
 
 /// Start the command `command` of `open_port({spawn, Command}, Settings)`
@@ -206,12 +206,12 @@ pub(crate) fn spawn_shell(
     )
 }
 
-/// Start the program at the native path `path` with `argv[0]` `arg0` and
-/// the other arguments `args`, as [`spawn`] describes.
+/// Start the program at the native path `path` with `argv[0]` `program_name` and
+/// the other arguments `arguments`, as [`spawn`] describes.
 fn start(
     path: &[u8],
-    arg0: &[u8],
-    args: &[Vec<u8>],
+    program_name: &[u8],
+    arguments: &[Vec<u8>],
     streams: Streams,
     read_write: ReadWrite,
     setting: &Setting,
@@ -255,11 +255,11 @@ fn start(
         .collect();
     let mut envp: Vec<*const c_char> = environment.iter().map(|entry| entry.as_ptr()).collect();
     envp.push(std::ptr::null());
-    let arg0 = c_string(arg0);
-    let args: Vec<CString> = args.iter().map(|arg| c_string(arg)).collect();
-    let mut argv: Vec<*const c_char> = [arg0.as_ptr()]
+    let program_name = c_string(program_name);
+    let arguments: Vec<CString> = arguments.iter().map(|arg| c_string(arg)).collect();
+    let mut argv: Vec<*const c_char> = [program_name.as_ptr()]
         .into_iter()
-        .chain(args.iter().map(|arg| arg.as_ptr()))
+        .chain(arguments.iter().map(|arg| arg.as_ptr()))
         .collect();
     argv.push(std::ptr::null());
     let (stdin, stdout) = if streams.use_stdio { (0, 1) } else { (3, 4) };

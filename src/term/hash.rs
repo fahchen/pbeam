@@ -488,7 +488,7 @@ fn make_internal_hash(term: &Term) -> u64 {
         };
         match item {
             Item::Term(term) => next = state.mix_term(&mut stack, term),
-            Item::Cells(cells) => next = state.mix_cells(&mut stack, cells),
+            Item::Cells(cells) => next = Some(state.mix_cells(&mut stack, cells)),
             Item::Collision(pairs) => next = state.mix_collision(&mut stack, pairs),
             Item::Node(node) => {
                 state.mix_alpha(TYPE_HASHMAP_NODE);
@@ -515,7 +515,7 @@ impl State {
     fn mix_term<'a>(&mut self, stack: &mut Vec<Item<'a>>, term: &'a Term) -> Option<Item<'a>> {
         match shape(term) {
             Shape::Immediate(word) => self.mix_immediate(word),
-            Shape::List(cells) => return self.mix_cells(stack, cells),
+            Shape::List(cells) => return Some(self.mix_cells(stack, cells)),
             Shape::Tuple(elements) => {
                 self.mix_alpha(TYPE_TUPLE);
                 self.mix_beta(elements.len() as u64);
@@ -660,18 +660,14 @@ impl State {
     /// let (mut state, mut stack) = (State::default(), Vec::new());
     /// let list = Term::list_from([Term::Integer(104), Term::tuple(vec![])]);
     /// let cells = Cells { first: None, rest: &list };
-    /// assert!(matches!(state.mix_cells(&mut stack, cells), Some(Item::Term(_))));
+    /// assert!(matches!(state.mix_cells(&mut stack, cells), Item::Term(_)));
     /// assert!(matches!(stack[..], [Item::Cells(_), Item::CdrMarker]));
     /// // The `[Key | Value]` cell of a collision node with the value {}.
     /// let (key, value) = (Term::Integer(1), Term::tuple(vec![]));
     /// let next = state.mix_cells(&mut stack, Cells { first: Some(&key), rest: &value });
-    /// assert!(matches!(next, Some(Item::Cells(_))));
+    /// assert!(matches!(next, Item::Cells(_)));
     /// ```
-    fn mix_cells<'a>(
-        &mut self,
-        stack: &mut Vec<Item<'a>>,
-        mut cells: Cells<'a>,
-    ) -> Option<Item<'a>> {
+    fn mix_cells<'a>(&mut self, stack: &mut Vec<Item<'a>>, mut cells: Cells<'a>) -> Item<'a> {
         let (mut chunk, mut count) = (0, 0);
         while let Ok((head, after)) = cells.split()
             && let Some(value) = byte(head)
@@ -689,7 +685,7 @@ impl State {
         }
         let (head, cells) = match cells.split() {
             Ok(split) => split,
-            Err(tail) => return Some(Item::Term(tail)),
+            Err(tail) => return Item::Term(tail),
         };
         if let Shape::Immediate(word) = shape(head) {
             self.mix_alpha(pair(TYPE_IMMEDIATE, TYPE_CAR));
@@ -697,14 +693,14 @@ impl State {
             if cells.is_empty() {
                 self.mix_alpha(TYPE_CDR);
             }
-            Some(Item::Cells(cells))
+            Item::Cells(cells)
         } else {
             stack.push(Item::Cells(cells));
             if cells.is_empty() {
                 stack.push(Item::CdrMarker);
             }
             self.mix_alpha(TYPE_CAR);
-            Some(Item::Term(head))
+            Item::Term(head)
         }
     }
 

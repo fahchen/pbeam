@@ -44,7 +44,7 @@ fn insert(scheduler: &mut Scheduler, ids: &[u64]) {
 
 /// Return the state of the process `id` of the scheduler `scheduler`.
 fn process(scheduler: &mut Scheduler, id: u64) -> &mut ProcessState {
-    scheduler.processes.get_mut(&ProcessId(id)).unwrap()
+    scheduler.processes.get_mut(ProcessId(id)).unwrap()
 }
 
 /// Return the pid of each delivery of the inbox of `index`, with `P` for a
@@ -81,12 +81,12 @@ fn gives_half_of_the_queue_to_a_hungry_scheduler() {
     assert_eq!(node.owner(ProcessId(3)), Some(1));
     assert_eq!(node.owner(ProcessId(1)), Some(0));
     assert_eq!(node.owner(ProcessId(4)), Some(0));
-    assert!(!victim.processes.contains_key(&ProcessId(2)));
+    assert!(!victim.processes.contains_key(ProcessId(2)));
     assert_eq!(victim.runnable.ids(), vec![ProcessId(1), ProcessId(4)]);
     assert!(!node.has_hungry(0), "the steal cleared the mark");
     assert!(thief.drain_inbox());
     assert_eq!(thief.runnable.ids(), vec![ProcessId(2), ProcessId(3)]);
-    assert!(thief.processes.contains_key(&ProcessId(3)));
+    assert!(thief.processes.contains_key(ProcessId(3)));
 }
 
 /// A scheduler with one runnable process keeps it, and the mark of the
@@ -166,7 +166,7 @@ fn deliveries_in_flight_follow_the_process_in_order() {
     node.schedule_cleanup(0, ProcessId(1));
     let module = crate::term::Atom::from_static("erlang").unwrap();
     node.check_process_code(0, ProcessId(1), ProcessId(9), Term::Nil, module);
-    let process = victim.processes.remove(&ProcessId(1)).unwrap();
+    let process = victim.processes.remove(ProcessId(1)).unwrap();
     node.transfer(0, 1, Box::new(process), None);
     node.send_message(0, sender, Term::Integer(3), ProcessId(1), None);
     assert_eq!(node.owner(ProcessId(1)), Some(1));

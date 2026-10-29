@@ -476,14 +476,14 @@ fn process_heap_flag(
     let (process, atoms) = context.scheduler.current_process_and_atoms();
     let flags = &mut process.heap_flags;
     if flag.is_static("max_heap_size") {
-        let Some((size, max_flags)) = max_heap_size(value, node.max_heap_flags)
+        let Some((size, max_flags)) = max_heap_size(value, node.max_heap_settings)
             .filter(|(size, _)| *size == 0 || *size >= flags.min_heap_size)
         else {
             return Ok(BifResult::badarg());
         };
-        let old = max_heap_size_map(atoms, flags.max_heap_size, flags.max_heap_flags);
+        let old = max_heap_size_map(atoms, flags.max_heap_size, flags.max_heap_settings);
         flags.max_heap_size = size;
-        flags.max_heap_flags = max_flags;
+        flags.max_heap_settings = max_flags;
         return Ok(Value(old));
     }
     let Some(size) = value.small_integer().filter(|size| *size >= 0) else {
@@ -610,7 +610,7 @@ pub(super) fn system_flag(
     let valid = match (atoms.name_of(item), value) {
         ("system_logger", _) => logger,
         ("fullsweep_after" | "min_heap_size" | "min_bin_vheap_size", _) => size.is_some(),
-        ("max_heap_size", _) => max_heap_size(value, defaults.max_heap_flags)
+        ("max_heap_size", _) => max_heap_size(value, defaults.max_heap_settings)
             .is_some_and(|(size, _)| size == 0 || size >= defaults.min_heap_size),
         ("debug_flags", _) => true,
         ("backtrace_depth", _) => value.small_integer().is_some_and(|depth| depth >= 0),
@@ -663,12 +663,15 @@ pub(super) fn system_flag(
             }
             ("max_heap_size", _) => {
                 let mut flags = scheduler.node().heap_flags_mut();
-                let (size, max_flags) =
-                    max_heap_size(value, flags.max_heap_flags).expect("the value passed the check");
-                let old =
-                    max_heap_size_map(&scheduler.atoms, flags.max_heap_size, flags.max_heap_flags);
+                let (size, max_flags) = max_heap_size(value, flags.max_heap_settings)
+                    .expect("the value passed the check");
+                let old = max_heap_size_map(
+                    &scheduler.atoms,
+                    flags.max_heap_size,
+                    flags.max_heap_settings,
+                );
                 flags.max_heap_size = size;
-                flags.max_heap_flags = max_flags;
+                flags.max_heap_settings = max_flags;
                 Value(old)
             }
             ("backtrace_depth", Some(depth)) => {
@@ -1851,10 +1854,10 @@ pub(super) fn spawn_opt(
                 use_heap = true;
             }
             (_, Some(("max_heap_size", value)))
-                if let Some((size, flags)) = max_heap_size(value, node.max_heap_flags) =>
+                if let Some((size, flags)) = max_heap_size(value, node.max_heap_settings) =>
             {
                 heap.max_heap_size = size;
-                heap.max_heap_flags = flags;
+                heap.max_heap_settings = flags;
                 use_heap = true;
             }
             (_, Some(("scheduler", value)))
@@ -2105,6 +2108,10 @@ pub(super) fn append(
 /// to 0 (`erl_bif_lists.c:182-211`, `bif.h:71-78`), so
 /// `lists_append_alloc` reads 0 and takes no element
 /// (`erl_bif_lists.c:118-161`).
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "trap export arm of `bif_trap`; every trap arm returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn append_chunk(
     process: &mut ProcessState,
     left: &Term,
@@ -2161,6 +2168,10 @@ pub(super) fn append_chunk(
 ///
 /// ERTS reads the budget into a `Uint` (`erl_bif_guard.c:273-280`), so a
 /// negative budget counts the whole list in the call.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn length(
     process: &mut ProcessState,
     list: &Term,
@@ -5268,8 +5279,9 @@ pub(super) fn process_info(
                 let current = scheduler.current_reductions();
                 let registered = scheduler.registered_name_of(caller_id);
                 if let Some(items) = item.proper_list() {
-                    let info = caller_info_list(scheduler, items.cloned().collect(), current)?
-                        .ok_or_else(|| unsupported(&scheduler.atoms))?;
+                    let info =
+                        caller_info_list(scheduler, &items.cloned().collect::<Vec<_>>(), current)?
+                            .ok_or_else(|| unsupported(&scheduler.atoms))?;
                     return Ok(Value(info));
                 }
                 // ERTS builds the frames of the calling process from its
@@ -5406,7 +5418,7 @@ pub(super) fn process_info(
 ///
 /// ```rust,ignore
 /// let items = vec![Term::static_atom("registered_name"), Term::static_atom("status")];
-/// let info = caller_info_list(scheduler, items, 0)?;
+/// let info = caller_info_list(scheduler, &items, 0)?;
 /// assert!(matches!(info, Some(Term::Cons(_))));
 /// ```
 ///
@@ -5415,7 +5427,7 @@ pub(super) fn process_info(
 /// The errors of `process_info_values` and `process_info_term`.
 fn caller_info_list(
     scheduler: &mut Scheduler,
-    items: Vec<Term>,
+    items: &[Term],
     current: u64,
 ) -> Result<Option<Term>, BeamError> {
     let atoms = &scheduler.atoms;
@@ -6139,7 +6151,7 @@ impl ProcessInfoRequest<'_> {
             "max_heap_size" => max_heap_size_map(
                 atoms,
                 values.heap_flags.max_heap_size,
-                values.heap_flags.max_heap_flags,
+                values.heap_flags.max_heap_settings,
             ),
             _ => return Ok(None),
         };
@@ -6340,6 +6352,10 @@ pub(super) fn registered(scheduler: &mut Scheduler) -> Result<BifResult, BeamErr
 /// ```rust,ignore
 /// assert!(matches!(ports(&mut scheduler)?, BifResult::Value(Term::Nil)));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn ports(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
     let ports = scheduler.node.ports().ids();
     Ok(Value(Term::list_from(ports.into_iter().map(Term::Port))))
@@ -6417,6 +6433,10 @@ pub(super) fn alias(context: &mut BifContext<'_>, options: &Term) -> Result<BifR
 /// let BifResult::Value(Term::Reference(reference)) = alias else { return };
 /// assert!(matches!(unalias(&mut context, &Term::Reference(reference))?, BifResult::Value(Term::Atom(atom))) if atom.is_static("true"));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn unalias(
     context: &mut BifContext<'_>,
     reference: &Term,
@@ -6552,6 +6572,10 @@ pub(super) fn delete_module(
 /// # Errors
 ///
 /// The function has no error.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn has_prepared_code_on_load(
     scheduler: &mut Scheduler,
     reference: &Term,
@@ -6559,9 +6583,9 @@ pub(super) fn has_prepared_code_on_load(
     let Term::Reference(reference) = reference else {
         return Ok(BifResult::badarg());
     };
-    let on_load = if scheduler.code.prepared_module(reference).is_some() {
+    let on_load = if scheduler.code.prepared_module(*reference).is_some() {
         scheduler.code.prepared_on_load(&[*reference])
-    } else if let Some(on_load) = scheduler.code.finished_prepared_on_load(reference) {
+    } else if let Some(on_load) = scheduler.code.finished_prepared_on_load(*reference) {
         on_load
     } else {
         return Ok(BifResult::badarg());
@@ -7132,6 +7156,10 @@ fn bif_timer(
 /// let result = cancel_timer(&mut context, &Term::Reference(reference), &Term::nil())?;
 /// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.is_static("false"));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn cancel_timer(
     context: &mut BifContext<'_>,
     reference: &Term,
@@ -7385,7 +7413,7 @@ pub(super) fn port_set_data(
     port: &Term,
     data: &Term,
 ) -> Result<BifResult, BeamError> {
-    let found = erts_internal::found_port(scheduler, port)?;
+    let found = erts_internal::found_port(scheduler, port);
     let mut slot = erts_internal::lock_found(&found);
     let Some(port_state) = erts_internal::open(&mut slot) else {
         return Ok(BifResult::badarg());
@@ -7420,7 +7448,7 @@ pub(super) fn port_get_data(
     scheduler: &mut Scheduler,
     port: &Term,
 ) -> Result<BifResult, BeamError> {
-    let found = erts_internal::found_port(scheduler, port)?;
+    let found = erts_internal::found_port(scheduler, port);
     let mut slot = erts_internal::lock_found(&found);
     let Some(port_state) = erts_internal::open(&mut slot) else {
         return Ok(BifResult::badarg());

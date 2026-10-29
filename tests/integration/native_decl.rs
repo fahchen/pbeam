@@ -17,6 +17,10 @@ const MARKER: i64 = 90210;
 
 /// Return the marker for a binary argument, and `badarg` for any other
 /// argument, as a NIF of the fixture would.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "NIF function pointer; every NIF returns `Result<NativeResult, BeamError>`"
+)]
 fn sha256(
     context: &mut NifContext<'_>,
     arguments: &[Term],

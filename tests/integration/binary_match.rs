@@ -599,6 +599,10 @@ fn bs_get_atom(name: &str) -> Term {
 }
 
 /// The tuple `{Head, Tail}` of two binaries.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "builds one expected `Result` of a case table whose other cases are `Err`"
+)]
 fn halves(head: &[u8], tail: &[u8]) -> Result<Term, String> {
     Ok(Term::tuple(vec![
         Term::binary(head.to_vec()),
@@ -818,6 +822,10 @@ fn float_calls(cases: &[(&[u8], Term)]) -> Vec<Vec<Term>> {
 }
 
 /// The result `{F, Rest}` of a float segment.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "builds one expected `Result` of a case table whose other cases are `Err`"
+)]
 fn float_rest(value: f64, rest: &[u8]) -> Result<Term, String> {
     Ok(Term::tuple(vec![
         Term::Float(value),

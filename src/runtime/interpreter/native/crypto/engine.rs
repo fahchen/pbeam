@@ -60,6 +60,10 @@ pub(super) fn engine_load_dynamic_nif(
 /// (`engine.c:417`, `441`, `500`, `576`, `605`, `634`, `678`, `748`,
 /// `801`, `840`). PBeam makes no engine resource, so
 /// `enif_get_resource` fails for each term and the NIF gives `badarg`.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "entry of the native function table, whose `run` returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn engine_resource_nif(_: &mut Scheduler, _: &[Term]) -> Result<BifResult, BeamError> {
     Ok(BifResult::badarg())
 }
@@ -67,6 +71,10 @@ pub(super) fn engine_resource_nif(_: &mut Scheduler, _: &[Term]) -> Result<BifRe
 /// Run `engine_get_first_nif/0` (`engine.c:696-733`). PBeam adds no engine
 /// to the OpenSSL list (each call that adds one gives a runtime error), so `ENGINE_get_first` gives NULL and the NIF gives
 /// `{ok, <<>>}` (`engine.c:706-710`).
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "entry of the native function table, whose `run` returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn engine_get_first_nif(_: &mut Scheduler, _: &[Term]) -> Result<BifResult, BeamError> {
     Ok(BifResult::Value(Term::tuple(vec![
         Term::static_atom("ok"),

@@ -798,20 +798,19 @@ impl BeamProgram {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let value = program.bif(&mut scheduler, "erlang", "make_ref", vec![])?;
+    /// let value = BeamProgram::bif(&mut scheduler, "erlang", "make_ref", &[])?;
     /// assert!(matches!(value, BifResult::Value(Term::Reference(_))));
     /// ```
     pub(super) fn bif(
-        &self,
         scheduler: &mut Scheduler,
         module: &str,
         name: &str,
-        arguments: Vec<Term>,
+        arguments: &[Term],
     ) -> Result<BifResult, BeamError> {
         let resolved = resolve(module, name, arguments.len() as u32);
         match resolved {
-            Some(id) => self.bif_slice(scheduler, id, &arguments),
-            None => self.named_bif(scheduler, module, name, &arguments),
+            Some(id) => Self::bif_slice(scheduler, id, arguments),
+            None => Self::named_bif(scheduler, module, name, arguments),
         }
     }
 
@@ -827,11 +826,10 @@ impl BeamProgram {
     ///
     /// ```rust,ignore
     /// let resolved = resolve("erlang", "make_ref", 0);
-    /// let value = program.call_bif(&mut scheduler, "erlang", "make_ref", resolved, &[])?;
+    /// let value = BeamProgram::call_bif(&mut scheduler, "erlang", "make_ref", resolved, &[])?;
     /// assert!(matches!(value, BifResult::Value(Term::Reference(_))));
     /// ```
     pub(super) fn call_bif(
-        &self,
         scheduler: &mut Scheduler,
         module: &str,
         name: &str,
@@ -839,8 +837,8 @@ impl BeamProgram {
         arguments: &[Term],
     ) -> Result<BifResult, BeamError> {
         match resolved {
-            Some(id) => self.bif_slice(scheduler, id, arguments),
-            None => self.named_bif(scheduler, module, name, arguments),
+            Some(id) => Self::bif_slice(scheduler, id, arguments),
+            None => Self::named_bif(scheduler, module, name, arguments),
         }
     }
 
@@ -854,12 +852,11 @@ impl BeamProgram {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let result = program.named_bif(&mut scheduler, "pbeam_cap", "revoke", &[holder, kind])?;
-    /// let error = program.named_bif(&mut scheduler, "erlang", "date", &[]).unwrap_err();
+    /// let result = BeamProgram::named_bif(&mut scheduler, "pbeam_cap", "revoke", &[holder, kind])?;
+    /// let error = BeamProgram::named_bif(&mut scheduler, "erlang", "date", &[]).unwrap_err();
     /// assert_eq!(error.to_string(), "unresolved external MFA erlang:date/0");
     /// ```
     pub(super) fn named_bif(
-        &self,
         scheduler: &mut Scheduler,
         module: &str,
         name: &str,
@@ -887,11 +884,10 @@ impl BeamProgram {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let value = program.bif_slice(&mut scheduler, BifId::ErlangMakeRef0, &[])?;
+    /// let value = BeamProgram::bif_slice(&mut scheduler, BifId::ErlangMakeRef0, &[])?;
     /// assert!(matches!(value, BifResult::Value(Term::Reference(_))));
     /// ```
     pub(super) fn bif_slice(
-        &self,
         scheduler: &mut Scheduler,
         id: BifId,
         arguments: &[Term],
@@ -1005,11 +1001,10 @@ impl BeamProgram {
     ///
     /// ```rust,ignore
     /// let rest = Term::list_from(vec![Term::Integer(1)]);
-    /// let result = program.bif_trap(&mut scheduler, "erlang", "length", vec![rest, Term::Integer(64000)])?;
+    /// let result = BeamProgram::bif_trap(&mut scheduler, "erlang", "length", vec![rest, Term::Integer(64000)])?;
     /// assert!(matches!(result, BifResult::Value(Term::Integer(64001))));
     /// ```
     pub(super) fn bif_trap(
-        &self,
         scheduler: &mut Scheduler,
         module: &str,
         function: &str,
@@ -1427,7 +1422,7 @@ impl BeamProgram {
                     arguments: Vec::new(),
                 },
             }),
-            _ => self.bif(scheduler, module, function, arguments),
+            _ => Self::bif(scheduler, module, function, &arguments),
         }
     }
 }

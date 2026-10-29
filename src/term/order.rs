@@ -94,6 +94,10 @@ impl Term {
     /// # Errors
     ///
     /// Never returns an error: each term has a place in the term order.
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "`Term::compare` keeps its `Result` for the callers that propagate it with `?`, such as the ordered-set key order"
+    )]
     pub(crate) fn compare(&self, other: &Term, atoms: &AtomTable) -> Result<Ordering, BeamError> {
         Ok(self.compare_in(other, false, atoms))
     }
@@ -115,6 +119,10 @@ impl Term {
     /// # Errors
     ///
     /// Never returns an error: each term has a place in the term order.
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "`Term::compare_exact` keeps its `Result` for the callers that propagate it with `?`, such as the ordered-set key order"
+    )]
     pub(crate) fn compare_exact(
         &self,
         other: &Term,

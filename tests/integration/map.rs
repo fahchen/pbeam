@@ -955,7 +955,7 @@ const MAP_TAKE_PROBE: &[u8] = include_bytes!("../../fixtures/map/map_take_probe.
 /// expected value fails: the pinned text is a literal of this test, and
 /// PBeam runs the compiled fixture. The keys are integers, so the map order
 /// does not depend on the atom table.
-fn take_probe(function: &str, expected: Term, erts: &[u8]) {
+fn take_probe(function: &str, expected: &Term, erts: &[u8]) {
     let program = BeamProgram::load(&[MAP_TAKE_PROBE]).unwrap();
     let result = program.execute("map_take_probe", function, &[]).unwrap();
     assert_eq!(
@@ -966,7 +966,7 @@ fn take_probe(function: &str, expected: Term, erts: &[u8]) {
         "{function} must keep the pinned ERTS reference run"
     );
     assert_eq!(
-        result.term, expected,
+        result.term, *expected,
         "{function} must give the pinned ERTS result through PBeam"
     );
 }
@@ -1006,7 +1006,7 @@ fn keeps_a_same_register_update_with_its_aliases_like_erts() {
     ]);
     take_probe(
         "aliases",
-        Term::list_from(vec![
+        &Term::list_from(vec![
             int_map(&[(1, Term::Integer(9)), (2, Term::Integer(2))]),
             source,
             Term::Integer(7),
@@ -1041,7 +1041,7 @@ fn keeps_a_value_that_aliases_the_map_like_erts() {
     let inner = Term::Map(Map::from_pairs(vec![(x, Term::Integer(1))], program.atoms()).unwrap());
     take_probe(
         "aliasing",
-        Term::list_from(vec![
+        &Term::list_from(vec![
             int_map(&[(1, source.clone()), (2, Term::Integer(2))]),
             int_map(&[(2, Term::Integer(2)), (7, two)]),
             int_map(&[(1, source), (2, Term::Integer(2))]),
@@ -1071,7 +1071,7 @@ fn keeps_a_shared_map_and_its_descendants_like_erts() {
     let old = int_map(&[(1, inner.clone())]);
     take_probe(
         "retained",
-        Term::list_from(vec![
+        &Term::list_from(vec![
             old.clone(),
             old,
             int_map(&[(1, inner.clone()), (2, Term::Integer(2))]),
@@ -1095,7 +1095,7 @@ fn raises_badkey_and_badmap_for_a_same_register_update_like_erts() {
     let not_a_map = Term::Atom(program.atom("not_a_map").unwrap());
     take_probe(
         "keys",
-        Term::list_from(vec![
+        &Term::list_from(vec![
             Term::tuple(vec![static_atom("badkey"), Term::Integer(2)]),
             int_map(&[(1, Term::Integer(2))]),
             int_map(&[(1, Term::Integer(1)), (2, Term::Integer(2))]),
@@ -1116,7 +1116,7 @@ fn jumps_to_a_fail_label_in_a_guard_like_erts() {
     let absent = Term::Atom(program.atom("absent").unwrap());
     take_probe(
         "guarded",
-        Term::list_from(vec![present, absent, int_map(&[(1, Term::Integer(1))])]),
+        &Term::list_from(vec![present, absent, int_map(&[(1, Term::Integer(1))])]),
         b"[present,absent,#{1 => 1}]\n",
     );
 }
@@ -1128,7 +1128,7 @@ fn keeps_the_source_of_a_caught_exception_like_erts() {
     let source = int_map(&[(1, Term::Integer(1))]);
     take_probe(
         "caught",
-        Term::list_from(vec![
+        &Term::list_from(vec![
             Term::tuple(vec![
                 static_atom("error"),
                 Term::tuple(vec![static_atom("badkey"), Term::Integer(2)]),

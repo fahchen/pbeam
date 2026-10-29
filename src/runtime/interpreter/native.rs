@@ -407,8 +407,8 @@ pub(super) fn call(
                     atoms: &scheduler.atoms,
                     node: &scheduler.node,
                 };
-                let called = function.call(caller, arguments);
-                finish_shared(scheduler, called)
+                let outcome = function.call(caller, arguments);
+                finish_shared(scheduler, outcome)
             }
             Job::CpuBound | Job::IoBound => Ok(BifResult::Dirty(Work::Shared {
                 library: Arc::clone(&library),

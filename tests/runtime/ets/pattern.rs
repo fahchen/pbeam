@@ -71,16 +71,14 @@ fn run(
     head: Term,
     guards: Vec<Term>,
     body: Vec<Term>,
-    object: Vec<Term>,
+    object: &[Term],
 ) -> Option<Term> {
     let spec = Term::list_from(vec![Term::tuple(vec![
         head,
         Term::list_from(guards),
         Term::list_from(body),
     ])]);
-    MatchSpec::compile(atoms, &spec)
-        .unwrap()
-        .run(atoms, &object)
+    MatchSpec::compile(atoms, &spec).unwrap().run(atoms, object)
 }
 
 /// Return the guard call `{Name, Arguments...}`.
@@ -179,7 +177,7 @@ fn runs_each_guard_function_of_the_match_specification() {
                 head.clone(),
                 vec![guard.clone()],
                 vec![ok.clone()],
-                object
+                &object
             ),
             Some(ok.clone()),
             "{guard:?} {value:?}"
@@ -328,7 +326,7 @@ fn runs_each_guard_function_of_the_match_specification() {
         let guard = equal(&atoms, guard, expected.clone());
         let object = vec![value.clone(), Term::Integer(2)];
         assert_eq!(
-            run(&atoms, head.clone(), vec![guard], vec![ok.clone()], object),
+            run(&atoms, head.clone(), vec![guard], vec![ok.clone()], &object),
             Some(ok.clone()),
             "{shown:?} {value:?} {expected:?}"
         );
@@ -349,7 +347,7 @@ fn runs_each_guard_function_of_the_match_specification() {
                 head.clone(),
                 vec![guard],
                 vec![ok.clone()],
-                vec![value, Term::Integer(1)],
+                &[value, Term::Integer(1)],
             ),
             Some(ok.clone())
         );
@@ -363,7 +361,7 @@ fn runs_each_guard_function_of_the_match_specification() {
                 head.clone(),
                 vec![guard],
                 vec![ok.clone()],
-                vec![Term::Integer(2), Term::Integer(1)]
+                &[Term::Integer(2), Term::Integer(1)]
             ),
             Some(ok.clone())
         );
@@ -375,7 +373,7 @@ fn runs_each_guard_function_of_the_match_specification() {
             head.clone(),
             vec![guard],
             vec![ok.clone()],
-            vec![Term::Integer(2), Term::Integer(1)]
+            &[Term::Integer(2), Term::Integer(1)]
         ),
         Some(ok.clone())
     );
@@ -401,7 +399,7 @@ fn runs_each_guard_function_of_the_match_specification() {
                 head.clone(),
                 vec![guard],
                 vec![ok.clone()],
-                vec![first, second]
+                &[first, second]
             ),
             Some(ok.clone())
         );
@@ -422,7 +420,7 @@ fn runs_each_guard_function_of_the_match_specification() {
             head.clone(),
             vec![andalso, orelse],
             vec![ok.clone()],
-            vec![Term::Integer(1), Term::Integer(2)]
+            &[Term::Integer(1), Term::Integer(2)]
         ),
         Some(ok.clone())
     );
@@ -448,7 +446,7 @@ fn runs_each_guard_function_of_the_match_specification() {
                 head.clone(),
                 vec![guard],
                 vec![ok.clone()],
-                vec![Term::Integer(1), Term::Integer(2)]
+                &[Term::Integer(1), Term::Integer(2)]
             ),
             Some(ok.clone()),
             "{expected:?}"
@@ -472,7 +470,7 @@ fn runs_each_guard_function_of_the_match_specification() {
                 head.clone(),
                 vec![guard],
                 vec![ok.clone()],
-                vec![Term::Integer(1), Term::Integer(2)]
+                &[Term::Integer(1), Term::Integer(2)]
             ),
             None
         );
@@ -724,7 +722,7 @@ fn fails_each_guard_and_expression_like_the_match_program() {
                 head.clone(),
                 vec![guard.clone()],
                 vec![ok.clone()],
-                vec![value, Term::Integer(2)],
+                &[value, Term::Integer(2)],
             ),
             None,
             "{guard:?}"
@@ -793,7 +791,7 @@ fn fails_each_guard_and_expression_like_the_match_program() {
             head.clone(),
             vec![guard],
             vec![ok.clone()],
-            object(Term::Integer(1))
+            &object(Term::Integer(1))
         ),
         Some(ok.clone())
     );
@@ -812,7 +810,7 @@ fn fails_each_guard_and_expression_like_the_match_program() {
             head.clone(),
             vec![guard],
             vec![ok.clone()],
-            object(Term::Integer(1))
+            &object(Term::Integer(1))
         ),
         Some(ok.clone())
     );
@@ -832,7 +830,7 @@ fn fails_each_guard_and_expression_like_the_match_program() {
             head.clone(),
             vec![guard],
             vec![ok.clone()],
-            object(Term::Integer(1))
+            &object(Term::Integer(1))
         ),
         Some(ok.clone())
     );
@@ -850,7 +848,7 @@ fn fails_each_guard_and_expression_like_the_match_program() {
             head.clone(),
             vec![guard],
             vec![ok.clone()],
-            object(Term::Integer(1))
+            &object(Term::Integer(1))
         ),
         Some(ok.clone())
     );
@@ -1103,7 +1101,7 @@ fn tests_and_sizes_a_bitstring_with_tail_bits_like_the_match_program() {
     ] {
         let body = call(&atoms, name, vec![var1.clone()]);
         assert_eq!(
-            run(&atoms, head.clone(), vec![], vec![body], vec![value]),
+            run(&atoms, head.clone(), vec![], vec![body], &[value]),
             Some(Term::Integer(expected)),
             "{name}"
         );
@@ -1121,7 +1119,7 @@ fn tests_and_sizes_a_bitstring_with_tail_bits_like_the_match_program() {
                 head.clone(),
                 vec![guard.clone()],
                 vec![var1.clone()],
-                vec![value.clone()]
+                std::slice::from_ref(&value)
             ),
             passes.then_some(value)
         );

@@ -32,7 +32,7 @@ fn step_inserting(
     table: &Term,
     units: i64,
     mine: Option<ProcessId>,
-) -> Result<(i64, Option<Term>), BeamError> {
+) -> (i64, Option<Term>) {
     let scheduler = &mut *context.scheduler;
     let ets = scheduler.ets.shared();
     // The table of the caller has the list insert that it did not finish:
@@ -43,7 +43,7 @@ fn step_inserting(
     let Some(mut inserting) = (ets.id(&scheduler.atoms, table))
         .and_then(|id| ets.busy(&scheduler.atoms, &Term::Reference(id)))
     else {
-        return Ok((0, None));
+        return (0, None);
     };
     let owner = inserting
         .busy
@@ -54,7 +54,7 @@ fn step_inserting(
     // result: a later insert of the same table takes the table after the
     // call of the earlier one returned (`erl_db.c:2223-2253`).
     if mine.is_some_and(|caller| owner != caller) {
-        return Ok((0, None));
+        return (0, None);
     }
     let (used, result) = inserting.step_busy(&scheduler.atoms, units);
     if let Some(value) = result {
@@ -69,7 +69,7 @@ fn step_inserting(
             ets.put_result(owner, value);
         }
     }
-    Ok((used, None))
+    (used, None)
 }
 
 /// Return the result of a BIF that could not take its table: `badarg`, or
@@ -747,7 +747,7 @@ pub(super) fn insert_list(
             // the insert of the objects, one step for each object
             // (`erl_db.c:1927-1949`, `2091-2107`). The call traps between
             // the objects, and its next turn runs the steps that remain.
-            let (used, _) = step_inserting(&mut *context, &table, units.left, Some(caller))?;
+            let (used, _) = step_inserting(&mut *context, &table, units.left, Some(caller));
             done += used as usize;
             units.left -= used;
             match context.scheduler.ets.shared().take_result(caller) {
@@ -1224,6 +1224,10 @@ pub(super) fn lookup_element(
 /// assert!(matches!(result, BifResult::Value(objects) if objects.proper_list().is_some_and(|objects| objects.count() == 1)));
 /// assert!(matches!(lookup(&mut context, &test_atom("missing"), &test_atom("k")), BifResult::Raise { .. }));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn lookup(
     context: &mut BifContext<'_>,
     table: &Term,
@@ -1268,6 +1272,10 @@ pub(super) fn lookup(
 /// assert!(matches!(result, BifResult::Value(value) if value == test_atom("true")));
 /// assert!(matches!(member(&mut context, &Term::Integer(1), &test_atom("k")), BifResult::Raise { .. }));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn member(
     context: &mut BifContext<'_>,
     table: &Term,
@@ -1313,6 +1321,10 @@ pub(super) fn member(
 /// assert!(matches!(result, BifResult::Value(value) if value == test_atom("true")));
 /// assert!(matches!(delete(&mut context, &Term::nil(), &test_atom("k")), BifResult::Raise { .. }));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn delete(
     context: &mut BifContext<'_>,
     table: &Term,
@@ -1354,6 +1366,10 @@ pub(super) fn delete(
 /// let result = delete_object(&mut context, &table, &Term::tuple(vec![test_atom("k")]))?;
 /// assert!(matches!(result, BifResult::Value(value) if value == test_atom("true")));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn delete_object(
     context: &mut BifContext<'_>,
     table: &Term,
@@ -1401,6 +1417,10 @@ pub(super) fn delete_object(
 /// let result = take(&mut context, &table, &test_atom("k"))?;
 /// assert!(matches!(result, BifResult::Value(objects) if objects.proper_list().is_some_and(|objects| objects.count() == 1)));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn take(
     context: &mut BifContext<'_>,
     table: &Term,
@@ -1516,6 +1536,10 @@ pub(super) fn delete_table(
 /// # Errors
 ///
 /// None: each outcome is a value or an exception.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn give_away(
     context: &mut BifContext<'_>,
     table: &Term,
@@ -1598,6 +1622,10 @@ pub(super) fn give_away(
 /// # Errors
 ///
 /// None: each outcome is a value or an exception.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn setopts(
     context: &mut BifContext<'_>,
     table: &Term,
@@ -2312,7 +2340,7 @@ pub(super) fn select_continue(
 pub(super) fn select_delete_trap(
     context: &mut BifContext<'_>,
     arguments: &[Term],
-    (table, last, least, program, count): (&Term, &Term, &Term, Reference, i64),
+    (table, last, lower, program, count): (&Term, &Term, &Term, Reference, i64),
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
     let reds = context
@@ -2333,8 +2361,8 @@ pub(super) fn select_delete_trap(
         .program(program)
         .cloned()
         .expect("a trapped select delete keeps its program");
-    let (last, least) = (last.clone(), least.clone());
-    let turn = tree::select_delete_next(atoms, &mut taken, &compiled, last, least, count)?;
+    let lower = lower.clone();
+    let turn = tree::select_delete_next(atoms, &mut taken, &compiled, last, lower, count)?;
     drop(taken);
     drop(ets);
     tree::delete_finish(context, table, &compiled, Some(program), turn)
@@ -2610,6 +2638,10 @@ fn match_end(
 /// # Errors
 ///
 /// See [`crate::runtime::ets::EtsTables::read`] for a table that a list insert or a clear holds busy.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn safe_fixtable(
     context: &mut BifContext<'_>,
     table: &Term,
@@ -2695,7 +2727,7 @@ pub(super) fn walk(
         Err(lacking) => return Ok(retry(context, lacking, name, args)),
     };
     let found = match (table.table_type(), args.get(1)) {
-        (TableType::OrderedSet, None) => table.ordered_end(!backward)?,
+        (TableType::OrderedSet, None) => table.ordered_end(!backward),
         // A tree table rejects the end marker as a key
         // (`erl_db_tree.c:654-655`, `729-730`).
         (TableType::OrderedSet, Some(key)) if *key == Term::static_atom("$end_of_table") => {
@@ -2742,6 +2774,10 @@ pub(super) fn walk(
 /// let result = update_element(&mut context, &table, &key, &Term::tuple(vec![Term::Integer(2), Term::Integer(9)]), None)?;
 /// assert!(matches!(result, BifResult::Value(value) if value == Term::static_atom("true")));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn update_element(
     context: &mut BifContext<'_>,
     table: &Term,
@@ -2881,6 +2917,10 @@ fn update_specs(
 /// let result = update_counter(&mut context, &table, &key, &Term::Integer(1), None)?;
 /// assert!(matches!(result, BifResult::Value(Term::Integer(_))));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn update_counter(
     context: &mut BifContext<'_>,
     table: &Term,
@@ -3055,6 +3095,10 @@ fn counter_operations<'a>(
 /// # Errors
 ///
 /// Return a runtime error for the items `binary`, `data`, and `stats`.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn info_all(context: &mut BifContext<'_>, table: &Term) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
     let reds = context
@@ -3142,6 +3186,10 @@ fn access_name(access: Access) -> &'static str {
 /// let result = internal_delete_all(&mut context, &table, &Term::static_atom("undefined"))?;
 /// assert!(matches!(result, BifResult::Value(Term::Integer(_))));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn internal_delete_all(
     context: &mut BifContext<'_>,
     table: &Term,
@@ -3821,6 +3869,10 @@ pub(super) fn slot(
 /// (`insert_named_tab`, `erl_db.c:2516-2517`). A table that is not named
 /// only changes the name that `ets:info/2` gives, and the call returns
 /// `Table` (`erl_db.c:2523-2526`).
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn rename(
     context: &mut BifContext<'_>,
     table: &Term,

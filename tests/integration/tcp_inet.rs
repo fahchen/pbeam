@@ -1115,7 +1115,7 @@ fn runs_a_local_udp_inet_socket_as_pinned_erts() {
         format!("<<{}>>", bytes.join(","))
     };
     let [a, b, c] = names.each_ref().map(|name| bin(name));
-    let (hi, yo, zz, q, r) = (bin("hi"), bin("yo"), bin("zz"), bin("q"), bin("r"));
+    let (hi, yo, zz, qq, rr) = (bin("hi"), bin("yo"), bin("zz"), bin("q"), bin("r"));
     // Linux gives no address for the sender of an unbound socket, which
     // `inet_get_address` reads as `AF_UNSPEC` (inet_drv.c:4938-4941).
     let unbound = if cfg!(target_os = "linux") {
@@ -1124,7 +1124,7 @@ fn runs_a_local_udp_inet_socket_as_pinned_erts() {
         "{local,<<>>}"
     };
     let expected = format!(
-        "[{{ok,{{local,{a}}}}},ok,{{udp,{{local,{a}}},0,{hi}}},{{ok,{{{{local,{b}}},0,{yo}}}}},{{error,enotconn}},ok,{{ok,{{local,{a}}}}},{{ok,{{{{local,{c}}},0,{zz}}}}},{{ok,{{{{local,{a}}},0,[108,105]}}}},{{ok,{{local,<<>>}}}},{{ok,{{{unbound},0,{q}}}}},{{udp,{unbound},0,{r}}}]"
+        "[{{ok,{{local,{a}}}}},ok,{{udp,{{local,{a}}},0,{hi}}},{{ok,{{{{local,{b}}},0,{yo}}}}},{{error,enotconn}},ok,{{ok,{{local,{a}}}}},{{ok,{{{{local,{c}}},0,{zz}}}}},{{ok,{{{{local,{a}}},0,[108,105]}}}},{{ok,{{local,<<>>}}}},{{ok,{{{unbound},0,{qq}}}}},{{udp,{unbound},0,{rr}}}]"
     );
     assert_eq!(erts, expected, "ERTS");
     assert_eq!(pbeam, expected, "PBeam");

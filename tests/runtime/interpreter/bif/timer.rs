@@ -50,7 +50,7 @@ fn reads_and_cancels_an_active_timer_of_the_node() {
     use crate::runtime::timer::{Receiver, Timer};
     use crate::term::ProcessId;
     let mut scheduler = test_scheduler();
-    scheduler.start(frame(), vec![], vec![]).unwrap();
+    scheduler.start(frame(), vec![], vec![]);
     scheduler.schedule_next().unwrap();
     let unknown = scheduler.make_ref().unwrap();
     let mut context = BifContext {

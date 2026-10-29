@@ -60,7 +60,7 @@ pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Option<ExitCode> {
         &executable,
         &bytes,
         &env::temp_dir(),
-        arguments.into_iter().collect(),
+        &arguments.into_iter().collect::<Vec<_>>(),
     )
 }
 
@@ -99,7 +99,7 @@ fn run_bundle(
     executable: &Path,
     bytes: &[u8],
     base: &Path,
-    arguments: Vec<OsString>,
+    arguments: &[OsString],
 ) -> Option<ExitCode> {
     let bundle_bytes = match trailer(bytes) {
         Trailer::Absent => return None,
@@ -113,7 +113,7 @@ fn run_bundle(
         Ok(directory) => directory,
         Err(message) => return Some(failure(&message)),
     };
-    Some(start(executable, &bundle, &directory, &arguments))
+    Some(start(executable, &bundle, &directory, arguments))
 }
 
 /// Return the bundle that the trailer at the end of `bytes` names.

@@ -389,6 +389,10 @@ fn list_turn(
 /// let result = list_trap(&mut process, b"a".to_vec(), 1, &Term::list_from(vec![Term::Integer(98)]), false)?;
 /// assert!(matches!(result, BifResult::Value(list) if list.proper_list().is_some_and(|list| list.len() == 2)));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "trap export arm of `bif_trap`; every trap arm returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn list_trap(
     process: &mut ProcessState,
     bytes: Vec<u8>,
@@ -423,6 +427,10 @@ pub(super) fn list_trap(
 /// let result = analyze_turn(&mut process, b"hi", 0, 0)?;
 /// assert!(matches!(result, BifResult::Value(list) if list.proper_list().is_some_and(|list| list.len() == 2)));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "trap export arm of `bif_trap`; every trap arm returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn analyze_turn(
     process: &mut ProcessState,
     bytes: &[u8],
@@ -528,6 +536,10 @@ pub(super) fn finish_list(
 /// let result = finish_trap(&mut process, Term::nil(), 5, "characters_to_list_trap_2")?;
 /// assert!(matches!(result, BifResult::Value(_)));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "trap export arm of `bif_trap`; every trap arm returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn finish_trap(
     process: &mut ProcessState,
     result: Term,

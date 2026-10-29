@@ -931,7 +931,7 @@ impl BeamProgram {
     }
 
     /// Apply the outcome of one process turn, as each run loop does.
-    fn apply_outcome(&self, scheduler: &mut Scheduler, outcome: Outcome) -> Result<(), BeamError> {
+    fn apply_outcome(scheduler: &mut Scheduler, outcome: Outcome) -> Result<(), BeamError> {
         match outcome {
             Outcome::Wait => scheduler.park_current(),
             Outcome::Hibernate => scheduler.hibernate_current(),
@@ -958,7 +958,7 @@ impl BeamProgram {
                 let label = scheduler.code.entry_label(module, function, 0)?;
                 let frame = scheduler.code.frame(module, label, 0)?;
                 let id = scheduler.next_pid()?;
-                scheduler.start_with_id(id, slot, frame.into(), Vec::new(), Vec::new())?;
+                scheduler.start_with_id(id, slot, frame.into(), Vec::new(), Vec::new());
             }
             // The first process of the node is `<0.0.0>` and a system
             // process (`erl_init.c:2540`, `333-353`). It starts as
@@ -971,7 +971,7 @@ impl BeamProgram {
                 let frame = initial_start(scheduler, &module, &function, arguments.len())?;
                 let init = scheduler.next_pid()?;
                 scheduler.mark_system(init);
-                scheduler.start_with_id(init, slot, frame, arguments.to_vec(), Vec::new())?;
+                scheduler.start_with_id(init, slot, frame, arguments.to_vec(), Vec::new());
                 // ERTS then starts `erts_code_purger` as a system process
                 // with high priority (`erl_init.c:2550-2557`). `code_server`
                 // sends it each purge and the end of each `-on_load`
@@ -1004,7 +1004,7 @@ impl BeamProgram {
             match scheduler.schedule_next()? {
                 Turn::Run => {
                     let outcome = self.run(scheduler)?;
-                    self.apply_outcome(scheduler, outcome)?;
+                    Self::apply_outcome(scheduler, outcome)?;
                 }
                 Turn::Done => {}
                 Turn::Idle => idle_step(scheduler, &node)?,
@@ -1161,11 +1161,11 @@ impl BeamProgram {
         let frame = initial_start(scheduler, &module_atom, &function_atom, arguments.len())?;
         let mut root = match issuer {
             Issuer::Unchecked => {
-                scheduler.start(frame, arguments.to_vec(), Vec::new())?;
+                scheduler.start(frame, arguments.to_vec(), Vec::new());
                 None
             }
             Issuer::Host(policy) => {
-                scheduler.start(frame, arguments.to_vec(), policy.initial())?;
+                scheduler.start(frame, arguments.to_vec(), policy.initial());
                 None
             }
             Issuer::Module { policy, boot } => {
@@ -1191,7 +1191,7 @@ impl BeamProgram {
                     error(format!("the policy denied the root process: {cause}"))
                 })?;
                 match root.take() {
-                    Some(frame) => scheduler.start(frame, arguments.to_vec(), capabilities)?,
+                    Some(frame) => scheduler.start(frame, arguments.to_vec(), capabilities),
                     None => scheduler.enter_runtime(capabilities),
                 }
             }
@@ -1217,7 +1217,7 @@ impl BeamProgram {
                 Turn::Run => {
                     let outcome = self.run(scheduler)?;
                     let outcome = policy_turn(scheduler, outcome);
-                    self.apply_outcome(scheduler, outcome)?;
+                    Self::apply_outcome(scheduler, outcome)?;
                 }
                 Turn::Done => {}
                 Turn::Idle => {
@@ -1283,7 +1283,7 @@ impl BeamProgram {
                     Term::Atom(function),
                     Term::list_from(arguments),
                 ];
-                self.apply_error(scheduler, call, "system_limit", true)?
+                Self::apply_error(scheduler, call, "system_limit", true)?
             } else {
                 let arity = process.registers.len() as u32;
                 // The start of a process is a tail call of the MFA from the
@@ -1321,7 +1321,7 @@ impl BeamProgram {
                     let entry = (module.as_str(), name.as_str(), arguments, Term::nil());
                     raise_at_entry(scheduler, entry, class, reason)?
                 }
-                result => self.finish_bif(scheduler, result, true)?,
+                result => Self::finish_bif(scheduler, result, true)?,
             };
             if let Some(outcome) = outcome {
                 return Ok(outcome);
@@ -1350,7 +1350,7 @@ impl BeamProgram {
             // `328-334`).
             let target = matches!((module, function), ("erlang", "crc32" | "adler32"));
             let registers = (module == "lists" || target).then(|| arguments.clone());
-            let result = self.bif_trap(scheduler, module, function, arguments)?;
+            let result = Self::bif_trap(scheduler, module, function, arguments)?;
             let result = match origin {
                 Some(call)
                     if matches!(
@@ -1375,7 +1375,7 @@ impl BeamProgram {
                 }
                 _ => result,
             };
-            if let Some(outcome) = self.finish_bif(scheduler, result, tail)? {
+            if let Some(outcome) = Self::finish_bif(scheduler, result, tail)? {
                 return Ok(outcome);
             }
         }
@@ -1389,7 +1389,7 @@ impl BeamProgram {
             arity,
             tail,
         }) = scheduler.current_process_mut().pending_trap.take()
-            && let Some(outcome) = self.resume_trap(scheduler, module, function, arity, tail)?
+            && let Some(outcome) = Self::resume_trap(scheduler, module, function, arity, tail)?
         {
             return Ok(outcome);
         }
@@ -1575,7 +1575,7 @@ impl BeamProgram {
                         let call = vec![module, name, Term::list_from(arguments)];
                         let raised =
                             bif_error(scheduler, "erlang", "apply", call, BifResult::badarg(), 0)?;
-                        if let Some(outcome) = self.finish_bif(scheduler, raised, false)? {
+                        if let Some(outcome) = Self::finish_bif(scheduler, raised, false)? {
                             return Ok(outcome);
                         }
                         cursor.refresh(scheduler)?;
@@ -1659,7 +1659,7 @@ impl BeamProgram {
                         continue;
                     }
                     let result = if let Some(state) = process.length_trap.take() {
-                        self.bif_trap(scheduler, "erlang", "length", state)?
+                        Self::bif_trap(scheduler, "erlang", "length", state)?
                     } else if is_leaf(*bif) {
                         // The leaf read borrows the process, so the commit
                         // of the advanced position runs first. The commit
@@ -1689,7 +1689,7 @@ impl BeamProgram {
                             values.with(|terms| match_context_size(*bif, arguments, terms))?;
                         match size {
                             Some(size) => BifResult::Value(size),
-                            None => values.with(|terms| self.bif_slice(scheduler, *bif, terms))?,
+                            None => values.with(|terms| Self::bif_slice(scheduler, *bif, terms))?,
                         }
                     };
                     let process = scheduler.current_process_mut();
@@ -1722,7 +1722,7 @@ impl BeamProgram {
                             let (module_name, name, _) = mfa(*bif);
                             let raised =
                                 bif_error(scheduler, module_name, name, values, raised, 0)?;
-                            if let Some(outcome) = self.finish_bif(scheduler, raised, false)? {
+                            if let Some(outcome) = Self::finish_bif(scheduler, raised, false)? {
                                 return Ok(outcome);
                             }
                             cursor.refresh(scheduler)?;
@@ -2056,7 +2056,7 @@ impl BeamProgram {
                     // register keeps its value on a failure
                     // (`beam_common.c:2231-2253`, `erts_gc_update_map_exact`).
                     match update_owned(process, map, destination, |entries| {
-                        update_map_exact(entries, pairs, atoms)
+                        Ok(update_map_exact(entries, pairs, atoms))
                     })? {
                         Update::Written => {}
                         Update::Missing(value) => {
@@ -2747,7 +2747,7 @@ impl BeamProgram {
                     let to = read(process, &Operand::X(0))?;
                     let message = read(process, &Operand::X(1))?;
                     let result = send(scheduler, &to, message)?;
-                    if let Some(outcome) = self.finish_bif(scheduler, result, false)? {
+                    if let Some(outcome) = Self::finish_bif(scheduler, result, false)? {
                         return Ok(outcome);
                     }
                     cursor.refresh(scheduler)?;
@@ -2893,7 +2893,7 @@ impl BeamProgram {
                                 work,
                                 entry: (module.name.clone(), name.clone(), arguments),
                             })),
-                            result => self.finish_bif(scheduler, result, true),
+                            result => Self::finish_bif(scheduler, result, true),
                         };
                         if let Some(outcome) = outcome? {
                             return Ok(outcome);
@@ -3151,7 +3151,7 @@ impl BeamProgram {
                 let process = scheduler.current_process_mut();
                 let arguments = call_arguments(&process.registers, arity)?;
                 let result = bif_error(scheduler, module, name, arguments, result, 0)?;
-                self.finish_bif(scheduler, result, false)
+                Self::finish_bif(scheduler, result, false)
             }
             ImportKind::CallOnLoadFunction => {
                 let module = read_x_register(&process.registers, 0)?.clone();
@@ -3169,7 +3169,7 @@ impl BeamProgram {
                     let arguments = vec![module];
                     let badarg = BifResult::badarg();
                     let result = bif_error(scheduler, "erlang", name, arguments, badarg, 0)?;
-                    self.finish_bif(scheduler, result, false)
+                    Self::finish_bif(scheduler, result, false)
                 }
             }
             ImportKind::Bif { bif, heavy } => {
@@ -3177,13 +3177,13 @@ impl BeamProgram {
                     return Ok(Some(Outcome::Yield));
                 }
                 let arguments = call_arguments(&process.registers, arity)?;
-                let result = self.call_bif(scheduler, module, name, bif, &arguments)?;
+                let result = Self::call_bif(scheduler, module, name, bif, &arguments)?;
                 // The loader turns `call_ext_last` and `call_ext_only` of a
                 // BIF into a body call and a return
                 // (`jit/arm/ops.tab:709-714`), so the frame of the caller
                 // is in the stack trace.
                 let result = bif_error(scheduler, module, name, arguments, result, 0)?;
-                self.finish_bif(scheduler, result, false)
+                Self::finish_bif(scheduler, result, false)
             }
             ImportKind::ApplyFun => self.apply_fun(scheduler, tail),
             ImportKind::Apply => self.apply_mfa(scheduler, tail),
@@ -3201,7 +3201,7 @@ impl BeamProgram {
                         slot.set(Some(ExportTarget::of(&frame)));
                         enter_export(scheduler.current_process_mut(), frame, arity, tail)
                     }
-                    None => self.undefined_function(scheduler, module, name, arity, tail),
+                    None => Self::undefined_function(scheduler, module, name, arity, tail),
                 }
             }
         }
@@ -3256,7 +3256,7 @@ impl BeamProgram {
                 call_arguments(&process.registers, arity)?
             };
             let result = if let Some(id) = resolved {
-                self.bif_slice(scheduler, id, &arguments)?
+                Self::bif_slice(scheduler, id, &arguments)?
             } else {
                 let (module_name, name) = {
                     let atoms = &scheduler.atoms;
@@ -3265,7 +3265,7 @@ impl BeamProgram {
                         atoms.name_of(name).to_owned(),
                     )
                 };
-                self.named_bif(scheduler, &module_name, &name, &arguments)?
+                Self::named_bif(scheduler, &module_name, &name, &arguments)?
             };
             // A tail apply or a tail fun call removed the frame of the
             // caller in ERTS, so its return address is in the function
@@ -3288,7 +3288,7 @@ impl BeamProgram {
             } else {
                 result
             };
-            return self.finish_bif(scheduler, result, tail);
+            return Self::finish_bif(scheduler, result, tail);
         }
         // A name that PBeam does not resolve as a BIF reaches the export
         // lookup. The name of the atom term comes from the run table.
@@ -3333,7 +3333,7 @@ impl BeamProgram {
         }
         match scheduler.synced_code().export_frame(module, name, arity)? {
             Some(frame) => enter_export(scheduler.current_process_mut(), frame, arity, tail),
-            None => self.undefined_function(scheduler, module, name, arity, tail),
+            None => Self::undefined_function(scheduler, module, name, arity, tail),
         }
     }
 
@@ -3371,10 +3371,10 @@ impl BeamProgram {
     ///
     /// ```rust,ignore
     /// // `undef_handler:missing(m)` calls the handler with x0 = missing, x1 = [m].
-    /// assert!(program.undefined_function(&mut scheduler, "undef_handler", "missing", 1, false)?.is_none());
+    /// assert!(BeamProgram::undefined_function(&mut scheduler, "undef_handler", "missing", 1, false)?.is_none());
     /// // `undef_target:missing(a)` with no catch tag exits with
     /// // `{undef, [{undef_target, missing, [a], []}]}`.
-    /// let outcome = program.undefined_function(&mut scheduler, "undef_target", "missing", 1, false)?;
+    /// let outcome = BeamProgram::undefined_function(&mut scheduler, "undef_target", "missing", 1, false)?;
     /// assert!(matches!(outcome, Some(Outcome::Exit { result: None, .. })));
     /// ```
     ///
@@ -3384,7 +3384,6 @@ impl BeamProgram {
     /// hold is a runtime error. Each name comes from an import or an atom
     /// term of the program, so the table holds it.
     fn undefined_function(
-        &self,
         scheduler: &mut Scheduler,
         module: &str,
         function: &str,
@@ -3467,7 +3466,7 @@ impl BeamProgram {
     /// ```rust,ignore
     /// // A decoded fun of `no_such` with x0 = 1 calls the handler with
     /// // x0 = no_such, x1 = Fun, x2 = [1].
-    /// assert!(program.undefined_lambda(&mut scheduler, "no_such", module, fun, 1, false)?.is_none());
+    /// assert!(BeamProgram::undefined_lambda(&mut scheduler, "no_such", module, fun, 1, false)?.is_none());
     /// ```
     ///
     /// # Errors
@@ -3475,7 +3474,6 @@ impl BeamProgram {
     /// The default handler in a run with no code server and no init
     /// process is a runtime error.
     fn undefined_lambda(
-        &self,
         scheduler: &mut Scheduler,
         module: &str,
         module_atom: Term,
@@ -3540,15 +3538,15 @@ impl BeamProgram {
             let process = scheduler.current_process_mut();
             call_arguments(&process.registers, 3)?
         };
-        let start = self.is_start_apply(scheduler)?;
+        let start = Self::is_start_apply(scheduler)?;
         let (module, name, arguments, proper) = loop {
             // Each wrong form raises the same `badarg`, so one pattern checks
             // the function, the module, and the list.
             let [Term::Atom(module), Term::Atom(name), list] = &mut call[..] else {
-                return self.apply_error(scheduler, call, "badarg", start);
+                return Self::apply_error(scheduler, call, "badarg", start);
             };
             let Some((arguments, proper)) = list.list_elements() else {
-                return self.apply_error(scheduler, call, "badarg", start);
+                return Self::apply_error(scheduler, call, "badarg", start);
             };
             let is_apply = {
                 let atoms = &scheduler.atoms;
@@ -3560,10 +3558,10 @@ impl BeamProgram {
             call = arguments;
         };
         if arguments.len() > APPLY_MAX_ARGUMENTS {
-            return self.apply_error(scheduler, call, "system_limit", start);
+            return Self::apply_error(scheduler, call, "system_limit", start);
         }
         if !proper {
-            return self.apply_error(scheduler, call, "badarg", start);
+            return Self::apply_error(scheduler, call, "badarg", start);
         }
         let arity = arguments.len() as u32;
         let process = scheduler.current_process_mut();
@@ -3597,10 +3595,9 @@ impl BeamProgram {
     /// ```rust,ignore
     /// // `erlang:apply(1, f, [])` raises badarg with the first frame
     /// // {erlang, apply, [1, f, []], [{error_info, #{module => erl_erts_errors}}]}.
-    /// let outcome = program.apply_error(&mut scheduler, call, "badarg", false)?;
+    /// let outcome = BeamProgram::apply_error(&mut scheduler, call, "badarg", false)?;
     /// ```
     fn apply_error(
-        &self,
         scheduler: &mut Scheduler,
         call: Vec<Term>,
         reason: &'static str,
@@ -3613,10 +3610,10 @@ impl BeamProgram {
         scheduler.current_process_mut().start_apply = start;
         let raised = bif_error(scheduler, "erlang", "apply", call, raised, 0);
         scheduler.current_process_mut().start_apply = false;
-        self.finish_bif(scheduler, raised?, false)
+        Self::finish_bif(scheduler, raised?, false)
     }
 
-    fn is_start_apply(&self, scheduler: &mut Scheduler) -> Result<bool, BeamError> {
+    fn is_start_apply(scheduler: &mut Scheduler) -> Result<bool, BeamError> {
         let process = scheduler.current_process_mut();
         if let Some(frameless) = process.frameless_apply.replace(false) {
             return Ok(frameless);
@@ -3675,7 +3672,7 @@ impl BeamProgram {
                 reason: Term::static_atom(reason),
             };
             let raised = bif_error(scheduler, "erlang", "apply", call, raised, 0)?;
-            return self.finish_bif(scheduler, raised, false);
+            return Self::finish_bif(scheduler, raised, false);
         }
         let arity = arguments.len() as u32;
         // The arguments replace the fun in x0, so the call reads the fun first.
@@ -3747,7 +3744,7 @@ impl BeamProgram {
                 ) =>
             {
                 let function = function.clone();
-                return self.tail_call_error(scheduler, function, arity);
+                return self.tail_call_error(scheduler, &function, arity);
             }
             Target::External {
                 module, function, ..
@@ -3764,7 +3761,7 @@ impl BeamProgram {
             // has no such export (`beam_common.c:1708-1728`).
             if scheduler.code.waiting_or_loaded(&module).is_err() {
                 let module_atom = Term::Atom(lambda.module().clone());
-                return self.undefined_lambda(scheduler, &module, module_atom, fun, arity, tail);
+                return Self::undefined_lambda(scheduler, &module, module_atom, fun, arity, tail);
             }
             let process = scheduler.current_process_mut();
             let reason = Term::tuple(vec![Term::static_atom("badfun"), fun]);
@@ -3807,12 +3804,12 @@ impl BeamProgram {
     fn tail_call_error(
         &self,
         scheduler: &mut Scheduler,
-        function: Atom,
+        function: &Atom,
         arity: u32,
     ) -> Result<Option<Outcome>, BeamError> {
         // The guard of the call admits only `error/1,2,3`, `exit/1`, and
         // `throw/1`, so the class follows from the name.
-        let class = match scheduler.atoms.name_of(&function) {
+        let class = match scheduler.atoms.name_of(function) {
             "exit" => ExceptionClass::Exit,
             "throw" => ExceptionClass::Throw,
             _ => ExceptionClass::Error,
@@ -3821,7 +3818,7 @@ impl BeamProgram {
         process.frames.pop();
         if !process.frames.is_empty() {
             let module = Atom::from_static("erlang").expect("erlang is a static atom");
-            return self.call_mfa(scheduler, &module, &function, arity, false);
+            return self.call_mfa(scheduler, &module, function, arity, false);
         }
         let reason = read(process, &Operand::X(0))?;
         let location = if arity == 3 {
@@ -3863,14 +3860,13 @@ impl BeamProgram {
     ///
     /// ```rust,ignore
     /// // A value in a body call stays in the frame.
-    /// let outcome = program.finish_bif(&mut scheduler, BifResult::Value(Term::static_atom("ok")), false)?;
+    /// let outcome = BeamProgram::finish_bif(&mut scheduler, BifResult::Value(Term::static_atom("ok")), false)?;
     /// assert!(outcome.is_none());
     /// // `exit(normal)` with no catch tag exits the process.
     /// let raise = BifResult::Raise { class: ExceptionClass::Exit, reason: Term::static_atom("normal") };
-    /// assert!(matches!(program.finish_bif(&mut scheduler, raise, true)?, Some(Outcome::Exit { .. })));
+    /// assert!(matches!(BeamProgram::finish_bif(&mut scheduler, raise, true)?, Some(Outcome::Exit { .. })));
     /// ```
     fn finish_bif(
-        &self,
         scheduler: &mut Scheduler,
         result: BifResult,
         tail: bool,
@@ -4035,11 +4031,10 @@ impl BeamProgram {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let outcome = program.resume_trap(&mut scheduler, "re", "grun", 3, false)?;
+    /// let outcome = BeamProgram::resume_trap(&mut scheduler, "re", "grun", 3, false)?;
     /// assert!(outcome.is_none());
     /// ```
     fn resume_trap(
-        &self,
         scheduler: &mut Scheduler,
         module: &str,
         function: &str,
@@ -4054,7 +4049,7 @@ impl BeamProgram {
                 enter_frame(scheduler.current_process_mut(), frame, tail);
                 Ok(None)
             }
-            None => self.undefined_function(scheduler, module, function, arity, tail),
+            None => Self::undefined_function(scheduler, module, function, arity, tail),
         }
     }
 }
@@ -4498,7 +4493,7 @@ fn update_owned(
     update: impl FnOnce(&mut Map) -> Result<Option<Term>, BeamError>,
 ) -> Result<Update, BeamError> {
     let owned = match (register_of(map), register_of(destination)) {
-        (Some(source), Some(target)) if register_index(&source) == register_index(&target) => {
+        (Some(source), Some(target)) if register_index(source) == register_index(target) => {
             take_owned(process, target)
         }
         _ => None,
@@ -4568,25 +4563,20 @@ enum Update {
 /// let atoms = AtomTable::new();
 /// let mut entries = Map::from_pairs(vec![(Term::static_atom("output"), Term::static_atom("raw"))], &atoms)?;
 /// let cooked = vec![(Term::static_atom("output"), Term::static_atom("cooked"))];
-/// assert_eq!(update_map_exact(&mut entries, cooked, &atoms)?, None);
+/// assert_eq!(update_map_exact(&mut entries, cooked, &atoms), None);
 /// let missing = vec![(Term::static_atom("input"), Term::static_atom("cooked"))];
 /// assert_eq!(
-///     update_map_exact(&mut entries, missing, &atoms)?,
+///     update_map_exact(&mut entries, missing, &atoms),
 ///     Some(Term::tuple(vec![Term::static_atom("badkey"), Term::static_atom("input")]))
 /// );
 /// ```
-///
-/// # Errors
-///
-/// Return a runtime error when the key order depends on an alias reference
-/// (`Map::sort_pairs`).
 fn update_map_exact(
     entries: &mut Map,
     mut pairs: Vec<(Term, Term)>,
     atoms: &AtomTable,
-) -> Result<Option<Term>, BeamError> {
+) -> Option<Term> {
     Map::sort_pairs(&mut pairs, atoms);
-    Ok(entries
+    entries
         .update(
             pairs
                 .into_iter()
@@ -4595,7 +4585,7 @@ fn update_map_exact(
             atoms,
         )
         .err()
-        .map(|key| Term::tuple(vec![Term::static_atom("badkey"), key])))
+        .map(|key| Term::tuple(vec![Term::static_atom("badkey"), key]))
 }
 
 /// Give up ownership of the term of the register slot of `destination`, or
@@ -4643,19 +4633,20 @@ fn take_owned(process: &mut ProcessState, destination: Register) -> Option<Term>
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(register_index(&Register::X(1)), register_index(&Register::X(1)));
-/// assert_ne!(register_index(&Register::X(1)), register_index(&Register::Y(1)));
+/// assert_eq!(register_index(Register::X(1)), register_index(Register::X(1)));
+/// assert_ne!(register_index(Register::X(1)), register_index(Register::Y(1)));
 /// ```
-fn register_index(register: &Register) -> (bool, u32) {
+fn register_index(register: Register) -> (bool, u32) {
     match register {
-        Register::X(index) => (true, *index),
-        Register::Y(index) => (false, *index),
+        Register::X(index) => (true, index),
+        Register::Y(index) => (false, index),
     }
 }
 
 /// The register slot of a `put_map_assoc` or `put_map_exact` operand. Both
 /// the source and the destination of these instructions are a register, so
 /// the value cannot be a literal.
+#[derive(Clone, Copy)]
 enum Register {
     /// An X register at the index.
     X(u32),
@@ -6129,6 +6120,10 @@ fn integer_segment_bits(fixed: bool, size: &Term, unit: u64) -> Result<u64, &'st
 /// );
 /// assert!(shared_append_arrays(&[BinaryPart::Utf8(65)]).is_none());
 /// ```
+#[expect(
+    clippy::rc_buffer,
+    reason = "`Binary` shares byte arrays as `Arc<Vec<u8>>` because `append_in_place` grows the vector through `Arc::get_mut`; an `Arc<[u8]>` cannot grow"
+)]
 fn shared_append_arrays(parts: &[BinaryPart<'_>]) -> Option<Vec<(Arc<Vec<u8>>, usize)>> {
     let mut arrays = Vec::new();
     for part in parts {
@@ -6505,7 +6500,7 @@ fn create_binary(
         }
         return Ok(Ok(Term::Binary(Binary::concat_arrays(start, chunks))));
     }
-    let (bytes, bits) = match write_binary_parts(process, &parts)? {
+    let (bytes, bits) = match write_binary_parts(process, &parts) {
         Ok(written) => written,
         Err(failure) => return Ok(Err(failure)),
     };
@@ -6551,12 +6546,12 @@ fn utf_segment_code_point(value: &Term) -> Option<u32> {
 ///
 /// ```rust,ignore
 /// let parts = [BinaryPart::Utf8('a')];
-/// assert_eq!(write_binary_parts(&mut process, &parts)?, Ok((b"a".to_vec(), 8)));
+/// assert_eq!(write_binary_parts(&mut process, &parts), Ok((b"a".to_vec(), 8)));
 /// ```
 fn write_binary_parts(
     process: &mut ProcessState,
     parts: &[BinaryPart<'_>],
-) -> Result<Result<(Vec<u8>, u64), BinarySegmentFailure>, BeamError> {
+) -> Result<(Vec<u8>, u64), BinarySegmentFailure> {
     let mut writer = BitWriter::default();
     for (index, part) in parts.iter().enumerate() {
         match part {
@@ -6565,7 +6560,7 @@ fn write_binary_parts(
                 process.bump_reductions(i32::try_from(*reductions).unwrap_or(i32::MAX));
             }
             BinaryPart::Shared(..) if let Some(failure) = part.type_failure() => {
-                return Ok(Err(failure));
+                return Err(failure);
             }
             BinaryPart::Shared(binary, reductions, ..) => {
                 writer.push_binary(binary, binary.bit_size());
@@ -6583,9 +6578,9 @@ fn write_binary_parts(
                 process.bump_reductions(i32::try_from(reductions).unwrap_or(i32::MAX));
             }
             BinaryPart::Sized { .. } => {
-                return Ok(Err(part
+                return Err(part
                     .type_failure()
-                    .expect("a sized part that cannot be written has a failure")));
+                    .expect("a sized part that cannot be written has a failure"));
             }
             BinaryPart::Integer {
                 value: Term::Integer(value),
@@ -6602,7 +6597,7 @@ fn write_binary_parts(
                 little,
                 ..
             } => writer.push_bigint(value, *bits, *little),
-            BinaryPart::Integer { .. } => return Ok(Err(integer_type_failure(parts, index))),
+            BinaryPart::Integer { .. } => return Err(integer_type_failure(parts, index)),
             BinaryPart::Utf8(code_point) => {
                 writer.push_bytes(code_point.encode_utf8(&mut [0; 4]).as_bytes());
             }
@@ -6620,12 +6615,12 @@ fn write_binary_parts(
                     writer.push_integer(i64::from(0xDC00 | (value & 0x3FF)), 16, *little);
                 }
                 None => {
-                    return Ok(Err(BinarySegmentFailure::badarg(
+                    return Err(BinarySegmentFailure::badarg(
                         *segment,
                         "utf16",
                         "type",
                         value.clone(),
-                    )));
+                    ));
                 }
             },
             BinaryPart::Utf32 { code_point, little } => {
@@ -6636,13 +6631,10 @@ fn write_binary_parts(
                 value,
                 bits,
                 little,
-            } => match float_segment_bits(*segment, value, *bits) {
-                Ok(float) => writer.push_integer(float, *bits, *little),
-                Err(failure) => return Ok(Err(failure)),
-            },
+            } => writer.push_integer(float_segment_bits(*segment, value, *bits)?, *bits, *little),
         }
     }
-    Ok(Ok(writer.into_bytes()))
+    Ok(writer.into_bytes())
 }
 
 /// Return the part of a `binary` segment of a size, or the failure of its
@@ -6727,14 +6719,13 @@ fn bitstring(bytes: Vec<u8>, bits: u64) -> Binary {
 ///
 /// A term in `source` that is not a binary is a runtime invariant error,
 /// because the compiler gives this segment only a binary that
-/// `bs_init_writable` made or that an earlier `private_append` gave. The
-/// errors of `write_binary_parts` also apply.
+/// `bs_init_writable` made or that an earlier `private_append` gave.
 fn private_append(
     process: &mut ProcessState,
     source: &Operand,
     parts: &[BinaryPart<'_>],
 ) -> Result<Result<Term, BinarySegmentFailure>, BeamError> {
-    let (bytes, bits) = match write_binary_parts(process, parts)? {
+    let (bytes, bits) = match write_binary_parts(process, parts) {
         Ok(written) => written,
         Err(failure) => return Ok(Err(failure)),
     };

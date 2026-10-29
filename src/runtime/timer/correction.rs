@@ -285,6 +285,10 @@ impl Correction {
     /// time differs from the OS system time by more than `2 * small_diff`,
     /// the time offset becomes the OS system time minus the internal
     /// monotonic time. The next check is after 60 seconds.
+    #[expect(
+        clippy::similar_names,
+        reason = "the names `mtime`, `stime`, and `smtime_diff` are the names of `check_time_offset` in `erl_time_sup.c`"
+    )]
     fn check_time_offset(&mut self, (os_mtime, os_stime): (i64, i64)) -> (i64, i64) {
         let erl_mtime = self.monotonic_time(os_mtime);
         let sdiff = erl_mtime + self.offset - os_stime;
@@ -299,6 +303,10 @@ impl Correction {
     /// from the run start to now. A difference between the clocks of more
     /// than `drift_adj.error` plus 1 millisecond per second is a step of the
     /// OS system time, and the setup assumes no drift.
+    #[expect(
+        clippy::similar_names,
+        reason = "the names `mtime`, `stime`, and `smtime_diff` are the names of `init_check_time_correction` in `erl_time_sup.c`"
+    )]
     fn init_drift(&mut self, (mtime, stime): (i64, i64)) {
         let old = self.intervals[0];
         let mtime_diff = mtime - old.time_mon;
@@ -323,6 +331,10 @@ impl Correction {
     /// `check_time_correction` (`erl_time_sup.c:450-777`) for the
     /// `multi_time_warp` mode and an OS monotonic clock that the OS does not
     /// correct.
+    #[expect(
+        clippy::similar_names,
+        reason = "the names `mtime`, `stime`, and `smtime_diff` are the names of `check_time_correction` in `erl_time_sup.c`"
+    )]
     fn check_time_correction(&mut self, mut os_times: impl FnMut() -> (i64, i64)) -> (i64, i64) {
         let (os_mtime, os_stime) = os_times();
         let ci = self.curr;

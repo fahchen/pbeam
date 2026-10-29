@@ -270,7 +270,7 @@ const KINDS: [CapabilityKind; 8] = [
 /// Return a policy with a delegable capability of each kind: one of `kind`
 /// with `operations` and `constraint`, and one of each other kind with each
 /// operation and no constraint.
-fn grants(kind: CapabilityKind, operations: &[Operation], constraint: Constraint) -> Grants {
+fn grants(kind: CapabilityKind, operations: &[Operation], constraint: &Constraint) -> Grants {
     Grants(
         KINDS
             .into_iter()
@@ -295,7 +295,7 @@ fn without(denied: (CapabilityKind, Operation)) -> Grants {
         .copied()
         .filter(|&operation| operation != denied)
         .collect();
-    grants(kind, &operations, Constraint::Any)
+    grants(kind, &operations, &Constraint::Any)
 }
 
 /// Return the constraint that permits only `names`.
@@ -723,7 +723,7 @@ fn compares_the_native_bytes_of_an_environment_variable_name() {
     let policy = grants(
         CapabilityKind::Env,
         &[Operation::Read],
-        only(&["PBEAM_EFFECT_PROBE"]),
+        &only(&["PBEAM_EFFECT_PROBE"]),
     );
     assert_eq!(
         run(&program, "names", &policy),
@@ -737,7 +737,7 @@ fn compares_the_program_name_of_a_port_as_the_caller_gives_it() {
     let policy = grants(
         CapabilityKind::Port,
         CapabilityKind::Port.operations(),
-        only(&["/bin/cat"]),
+        &only(&["/bin/cat"]),
     );
     assert_eq!(
         run(&program, "executables", &policy),
@@ -766,7 +766,7 @@ fn needs_both_signal_operations_for_the_default_disposition() {
     let policy = grants(
         CapabilityKind::Signal,
         CapabilityKind::Signal.operations(),
-        only(&["sigusr2"]),
+        &only(&["sigusr2"]),
     );
     assert_eq!(
         run(&program, "signals", &policy),
@@ -785,7 +785,7 @@ fn compares_the_module_name_of_a_code_entry() {
     let policy = grants(
         CapabilityKind::Code,
         CapabilityKind::Code.operations(),
-        only(&["effect_probe"]),
+        &only(&["effect_probe"]),
     );
     assert_eq!(
         run(&program, "code_names", &policy),
@@ -865,7 +865,7 @@ fn gives_the_erts_results_of_the_permitted_runtime_operations() {
     let policy = grants(
         CapabilityKind::Runtime,
         &[Operation::SystemFlag, Operation::LoadNif],
-        Constraint::Any,
+        &Constraint::Any,
     );
     let reload = b"NIF library already loaded (reload disallowed since OTP 20).";
     let expected = Term::list_from(vec![
@@ -889,7 +889,11 @@ fn gives_the_erts_results_of_the_permitted_runtime_operations() {
             bytes.join(",")
         )
     );
-    let policy = grants(CapabilityKind::Runtime, &[Operation::Halt], Constraint::Any);
+    let policy = grants(
+        CapabilityKind::Runtime,
+        &[Operation::Halt],
+        &Constraint::Any,
+    );
     assert_eq!(
         program.execute_with_policy("effect_probe", "halt_run", &[], &policy),
         Err(BeamError::Halt(3))
@@ -912,7 +916,7 @@ fn gives_the_erts_results_of_the_permitted_runtime_operations() {
 #[test]
 fn checks_the_runtime_arguments_before_the_capability() {
     let program = program();
-    let policy = grants(CapabilityKind::Runtime, &[], Constraint::Any);
+    let policy = grants(CapabilityKind::Runtime, &[], &Constraint::Any);
     let badargs = Term::list_from(vec![atom(&program, "badarg"); 6]);
     assert_eq!(run(&program, "runtime_badargs", &policy), badargs);
     assert_eq!(
@@ -989,7 +993,7 @@ fn gives_the_erts_results_of_the_permitted_process_operations() {
 #[test]
 fn checks_the_process_arguments_before_the_capability() {
     let program = program();
-    let policy = grants(CapabilityKind::Process, &[], Constraint::Any);
+    let policy = grants(CapabilityKind::Process, &[], &Constraint::Any);
     let badargs = Term::list_from(vec![atom(&program, "badarg"); 9]);
     assert_eq!(run(&program, "process_badargs", &policy), badargs);
     assert_eq!(
@@ -1003,7 +1007,7 @@ fn checks_the_port_arguments_before_the_capability() {
     // `erlang:port_connect/2` checks the pid, and `erlang:port_info/2` the
     // item, before the `port` capability (erl_bif_port.c:438-595).
     let program = program();
-    let policy = grants(CapabilityKind::Port, &[Operation::Spawn], Constraint::Any);
+    let policy = grants(CapabilityKind::Port, &[Operation::Spawn], &Constraint::Any);
     let badargs = Term::list_from(vec![atom(&program, "badarg"); 3]);
     assert_eq!(run(&program, "port_badargs", &policy), badargs);
     assert_eq!(
@@ -1064,7 +1068,7 @@ fn sends_an_exit_signal_to_the_caller_without_exit_other() {
 /// Return the policy of [`grants`] with a `process` capability of
 /// `operations`.
 fn process_grants(operations: &[Operation]) -> Grants {
-    grants(CapabilityKind::Process, operations, Constraint::Any)
+    grants(CapabilityKind::Process, operations, &Constraint::Any)
 }
 
 #[test]
@@ -1150,7 +1154,7 @@ fn gives_the_erts_results_of_the_permitted_persistent_term_operations() {
     let policy = grants(
         CapabilityKind::PersistentTerm,
         &[Operation::Read, Operation::Write],
-        Constraint::Any,
+        &Constraint::Any,
     );
     assert_eq!(
         run(&program, "persistent_term_permitted", &policy),
@@ -1229,7 +1233,7 @@ fn gives_the_erts_results_of_the_permitted_terminal_setup_and_queries() {
     let policy = grants(
         CapabilityKind::Terminal,
         &[Operation::Setup, Operation::Query],
-        Constraint::Any,
+        &Constraint::Any,
     );
     let pbeam = run_text(&program, "terminal_permitted", &policy);
     assert_eq!(
@@ -1242,7 +1246,7 @@ fn gives_the_erts_results_of_the_permitted_terminal_setup_and_queries() {
 #[test]
 fn checks_the_terminal_fds_and_codes_before_the_capability() {
     let program = program();
-    let policy = grants(CapabilityKind::Terminal, &[], Constraint::Any);
+    let policy = grants(CapabilityKind::Terminal, &[], &Constraint::Any);
     let badargs = Term::list_from(vec![atom(&program, "badarg"); 5]);
     assert_eq!(run(&program, "terminal_badargs", &policy), badargs);
     assert_eq!(
@@ -1307,7 +1311,7 @@ fn gives_the_erts_results_of_the_permitted_port_information() {
     let policy = grants(
         CapabilityKind::Port,
         &[Operation::Spawn, Operation::Inspect],
-        only(&["/bin/cat"]),
+        &only(&["/bin/cat"]),
     );
     assert_eq!(run(&program, "inspect_permitted", &policy), expected);
     assert_eq!(

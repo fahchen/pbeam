@@ -626,7 +626,7 @@ impl Scheduler {
     /// that does not exist drops the message.
     pub(in crate::runtime) fn port_send(&mut self, target: ProcessId, term: Term) {
         match self.remote_owner(target) {
-            Some(index) if !self.processes.contains_key(&target) => {
+            Some(index) if !self.processes.contains_key(target) => {
                 self.node.send_message(index, None, term, target, None);
             }
             _ => self.deliver(target, term),

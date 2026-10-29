@@ -16,6 +16,10 @@ fn elements(term: &Term) -> &[Term] {
 }
 
 /// Return the array of a tuple term.
+#[expect(
+    clippy::rc_buffer,
+    reason = "`Tuple` shares its elements as `Arc<Vec<Term>>` because `Arc::make_mut` copies and writes them (`set_tuple_element`); an `Arc<[Term]>` cannot do that"
+)]
 fn array(term: &Term) -> &Arc<Vec<Term>> {
     let Term::Tuple(tuple) = term else {
         panic!("not a tuple: {term:?}");

@@ -1403,6 +1403,10 @@ fn prio_tos_trick(
 /// assert_eq!(priority(None), Some(0));
 /// ```
 #[cfg(not(target_os = "linux"))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "same signature as the Linux variant, which reads the socket option and can fail"
+)]
 fn priority(_socket: Option<&Socket>) -> Option<i32> {
     Some(0)
 }
@@ -1460,6 +1464,10 @@ impl Inet {
     /// `SO_PRIORITY`, as on macOS, it changes nothing
     /// (inet_drv.c:7389-7398).
     #[cfg(not(target_os = "linux"))]
+    #[expect(
+        clippy::unused_self,
+        reason = "same signature as the Linux variant, which sets `SO_PRIORITY` on the socket"
+    )]
     fn set_priority(&self, _value: i32) -> bool {
         true
     }

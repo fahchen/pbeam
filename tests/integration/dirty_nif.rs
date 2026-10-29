@@ -67,6 +67,10 @@ fn key(arguments: &[Term]) -> i64 {
 }
 
 /// Return the name of the current thread as a binary.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "NIF function pointer; every NIF returns `Result<NativeResult, BeamError>`"
+)]
 fn thread_name(_: &mut NifContext<'_>, _: &[Term]) -> Result<NativeResult, BeamError> {
     let name = thread::current()
         .name()
@@ -77,6 +81,10 @@ fn thread_name(_: &mut NifContext<'_>, _: &[Term]) -> Result<NativeResult, BeamE
 }
 
 /// Mark the key as started, wait until it is released, and return `ok`.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "NIF function pointer; every NIF returns `Result<NativeResult, BeamError>`"
+)]
 fn cpu_wait(_: &mut NifContext<'_>, arguments: &[Term]) -> Result<NativeResult, BeamError> {
     let key = key(arguments);
     update(key, |gate| gate.0 = true);
@@ -88,6 +96,10 @@ fn cpu_wait(_: &mut NifContext<'_>, arguments: &[Term]) -> Result<NativeResult, 
 }
 
 /// Return `true` when the call of the key started.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "NIF function pointer; every NIF returns `Result<NativeResult, BeamError>`"
+)]
 fn started(_: &mut NifContext<'_>, arguments: &[Term]) -> Result<NativeResult, BeamError> {
     let started = update(key(arguments), |_| {}).0;
     Ok(NativeResult::Value(static_atom(if started {
@@ -98,17 +110,29 @@ fn started(_: &mut NifContext<'_>, arguments: &[Term]) -> Result<NativeResult, B
 }
 
 /// Release the key.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "NIF function pointer; every NIF returns `Result<NativeResult, BeamError>`"
+)]
 fn release(_: &mut NifContext<'_>, arguments: &[Term]) -> Result<NativeResult, BeamError> {
     update(key(arguments), |gate| gate.1 = true);
     Ok(NativeResult::Value(static_atom("ok")))
 }
 
 /// Raise `error:badarg`.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "NIF function pointer; every NIF returns `Result<NativeResult, BeamError>`"
+)]
 fn cpu_raise(context: &mut NifContext<'_>, _: &[Term]) -> Result<NativeResult, BeamError> {
     Ok(context.badarg())
 }
 
 /// Return the next number of a counter of the test binary.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "NIF function pointer; every NIF returns `Result<NativeResult, BeamError>`"
+)]
 fn cpu_sequence(_: &mut NifContext<'_>, _: &[Term]) -> Result<NativeResult, BeamError> {
     static NEXT: AtomicI64 = AtomicI64::new(0);
     Ok(NativeResult::Value(Term::Integer(

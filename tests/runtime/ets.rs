@@ -881,7 +881,7 @@ fn compares_the_keys_of_an_ordered_set_by_the_arithmetic_order() {
     let atoms = Arc::new(AtomTable::new());
     let atom = |atoms: &AtomTable, name: &str| Term::Atom(atoms.put(name).unwrap());
     let (a, b, c) = (atom(&atoms, "a"), atom(&atoms, "b"), atom(&atoms, "c"));
-    let (t, l, v) = (atom(&atoms, "t"), atom(&atoms, "l"), atom(&atoms, "v"));
+    let (tagged, listed, value_atom) = (atom(&atoms, "t"), atom(&atoms, "l"), atom(&atoms, "v"));
     let mut table = Table::ordered(ProcessId(0), Access::Public, 1, Arc::clone(&atoms));
     let integer = Term::Integer(1);
     let float = Term::Float(1.0);
@@ -905,25 +905,25 @@ fn compares_the_keys_of_an_ordered_set_by_the_arithmetic_order() {
     );
     assert_eq!(table.object_count(), 1);
     // A tuple and a list compare element by element.
-    let tuple = Term::tuple(vec![integer.clone(), t.clone()]);
-    table.insert(&atoms, vec![tuple.clone(), v.clone()]);
+    let tuple = Term::tuple(vec![integer.clone(), tagged.clone()]);
+    table.insert(&atoms, vec![tuple.clone(), value_atom.clone()]);
     assert_eq!(
-        table.object(&atoms, &Term::tuple(vec![float.clone(), t])),
-        Some(&[tuple, v.clone()][..])
+        table.object(&atoms, &Term::tuple(vec![float.clone(), tagged])),
+        Some(&[tuple, value_atom.clone()][..])
     );
-    let list = Term::list_from([integer.clone(), l.clone()]);
-    table.insert(&atoms, vec![list.clone(), v.clone()]);
+    let list = Term::list_from([integer.clone(), listed.clone()]);
+    table.insert(&atoms, vec![list.clone(), value_atom.clone()]);
     assert_eq!(
-        table.object(&atoms, &Term::list_from([float.clone(), l])),
-        Some(&[list, v.clone()][..])
+        table.object(&atoms, &Term::list_from([float.clone(), listed])),
+        Some(&[list, value_atom.clone()][..])
     );
     // A map key compares its keys exactly and its values arithmetically.
     let map =
         |value| Term::Map(Map::from_pairs(vec![(a.clone(), value)], &AtomTable::new()).unwrap());
-    table.insert(&atoms, vec![map(integer.clone()), v.clone()]);
+    table.insert(&atoms, vec![map(integer.clone()), value_atom.clone()]);
     assert_eq!(
         table.object(&atoms, &map(float.clone())),
-        Some(&[map(integer.clone()), v][..])
+        Some(&[map(integer.clone()), value_atom][..])
     );
     assert_eq!(table.object_count(), 4);
     table.delete(&atoms, &float);

@@ -35,13 +35,13 @@ fn fills_one_buffer_for_a_receive_in_many_reads() {
     peer.write_all(&[63]).unwrap();
     let mut events = port.receive(0);
     let Some(Event::Received {
-        receiver: received,
+        receiver: from_port,
         result: Ok(data),
     }) = events.pop()
     else {
         panic!("the receive gives its data");
     };
-    assert_eq!((received, events), (receiver, Vec::new()));
+    assert_eq!((from_port, events), (receiver, Vec::new()));
     assert_eq!(data, (0..64).collect::<Vec<u8>>());
     assert_eq!(data.capacity(), 64);
     assert_eq!(port.stream.input.capacity(), 0);

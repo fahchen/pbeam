@@ -89,7 +89,7 @@ struct Options {
     /// The last `bsr_anycrlf` or `bsr_unicode` value, if any.
     bsr: Option<u32>,
     /// The `PCRE2_*` match bits, the `match` field of the ERTS struct.
-    match_options: u32,
+    match_bits: u32,
     /// The `PARSE_FLAG_*` bits.
     flags: i32,
     /// The `{offset, N}` value, or 0 without the option.
@@ -152,13 +152,13 @@ fn parse_options(atoms: &AtomTable, options: &Term) -> Option<Options> {
                 let name = atoms.name_of(atom);
                 if name == "anchored" {
                     parsed.compile |= pcre2::ANCHORED;
-                    parsed.match_options |= pcre2::ANCHORED;
+                    parsed.match_bits |= pcre2::ANCHORED;
                 } else if COMPILE_ONLY.contains(&name) {
                     parsed.compile |= lookup(&COMPILE_OPTIONS, name)?;
                     parsed.flags |= FLAG_UNIQUE_COMPILE_OPT;
                 } else if let Some(&(_, bit)) = MATCH_ONLY.iter().find(|&&(name_, _)| name_ == name)
                 {
-                    parsed.match_options |= bit;
+                    parsed.match_bits |= bit;
                     parsed.flags |= FLAG_UNIQUE_EXEC_OPT;
                 } else if name == "unicode" {
                     parsed.compile |= pcre2::UTF;
@@ -1042,7 +1042,7 @@ pub(super) fn run(
         return Ok(BifResult::badopt());
     }
     if !first {
-        parsed.match_options |= pcre2::NO_UTF_CHECK;
+        parsed.match_bits |= pcre2::NO_UTF_CHECK;
     }
     let unicode = parsed.flags & FLAG_UNICODE != 0;
     let global = parsed.flags & FLAG_GLOBAL != 0;
@@ -1202,7 +1202,7 @@ pub(super) fn run(
             match_context.as_ref(),
             &subject_bytes,
             start,
-            parsed.match_options,
+            parsed.match_bits,
         );
         (capture, rc)
     };

@@ -86,7 +86,7 @@ fn keeps_the_bif_timer_index_in_sync_with_the_queue() {
         Some(bif(0, Receiver::Process(ProcessId(0))))
     );
     assert_eq!(timers.cancel_bif(Reference(0)), None);
-    assert!(timers.bif_timers.is_empty());
+    assert!(timers.bif_by_reference.is_empty());
     assert!(!timers.active());
 }
 

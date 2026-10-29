@@ -274,7 +274,7 @@ fn prints_the_cost_of_a_binary_view() {
     // [#558]: https://github.com/fahchen/pbeam/issues/558
     // [#1237]: https://github.com/fahchen/pbeam/issues/1237
     assert_eq!(
-        binary.view_bytes(),
+        Binary::view_bytes(),
         8 * std::mem::size_of::<usize>(),
         "the view descriptor is eight words"
     );

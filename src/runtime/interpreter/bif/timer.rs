@@ -146,6 +146,10 @@ fn absolute_option(options: &Term) -> Option<bool> {
 /// # Errors
 ///
 /// This function gives no error.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn read_timer(
     context: &mut BifContext<'_>,
     reference: &Term,
@@ -171,6 +175,10 @@ pub(super) fn read_timer(
 /// # Errors
 ///
 /// This function gives no error.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn read_timer_2(
     context: &mut BifContext<'_>,
     reference: &Term,

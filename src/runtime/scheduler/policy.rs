@@ -348,7 +348,7 @@ impl Scheduler {
     pub(in crate::runtime) fn begin_policy_call(&mut self, frame: Frame, arguments: Vec<Term>) {
         let policy = self.policy.as_mut().expect("the run has a policy process");
         let id = policy.id;
-        let process = self.processes.get_mut(&id).expect("the process is alive");
+        let process = self.processes.get_mut(id).expect("the process is alive");
         process.frames = vec![frame];
         process.registers = arguments.into_iter().map(Some).collect();
         policy.start = process.reductions;

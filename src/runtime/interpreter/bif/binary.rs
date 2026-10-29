@@ -1186,6 +1186,10 @@ pub(super) fn matches_2(
 /// ```rust,ignore
 /// let result = find_first_turn(&mut process, &subject, &pattern, None, MATCH)?;
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "result of this helper is the tail of BIF entries that return `Result<BifResult, BeamError>` like every BIF"
+)]
 fn find_first_turn(
     process: &mut ProcessState,
     stored: Option<&CompiledPattern>,
@@ -1223,7 +1227,7 @@ fn find_first_turn(
         build: None,
     };
     Ok(
-        if let Some(parts) = find_turn(process, &compiled, &mut find, bytes)? {
+        if let Some(parts) = find_turn(process, &compiled, &mut find, bytes) {
             Value(parts)
         } else {
             process.bump_all_reductions();
@@ -1243,6 +1247,10 @@ fn find_first_turn(
 /// ```rust,ignore
 /// let result = find_trap(&mut process, &subject, b"a,b", &state, &pattern)?;
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "trap export arm of `bif_trap`; every trap arm returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn find_trap(
     process: &mut ProcessState,
     stored: Option<&CompiledPattern>,
@@ -1253,7 +1261,7 @@ pub(super) fn find_trap(
 ) -> Result<BifResult, BeamError> {
     let compiled = compile(pattern, stored).expect("the first call checked the pattern");
     let mut find = Find::from_term(state);
-    Ok(match find_turn(process, &compiled, &mut find, bytes)? {
+    Ok(match find_turn(process, &compiled, &mut find, bytes) {
         Some(parts) => Value(parts),
         None => find_trap_result(subject, &find, pattern),
     })
@@ -1285,14 +1293,14 @@ fn find_trap_result(subject: &Term, find: &Find, pattern: &Term) -> BifResult {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(find_turn(&mut process, &compiled, &mut find, b"a,b")?.is_some());
+/// assert!(find_turn(&mut process, &compiled, &mut find, b"a,b").is_some());
 /// ```
 fn find_turn(
     process: &mut ProcessState,
     pattern: &Pattern,
     find: &mut Find,
     subject: &Binary,
-) -> Result<Option<Term>, BeamError> {
+) -> Option<Term> {
     // `get_reds` reads the budget into a `Uint`, so a negative budget does
     // the whole search in the call (`erl_bif_binary.c:110-121`).
     let initial = process
@@ -1348,7 +1356,7 @@ fn find_turn(
         let used = initial.wrapping_sub(reds) / LOOP_FACTOR;
         process.bump_reductions(i32::try_from(used).unwrap_or(i32::MAX));
     }
-    Ok(parts)
+    parts
 }
 
 /// Run `binary:at/2` as ERTS `binary_at_2` does

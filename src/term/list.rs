@@ -84,10 +84,9 @@ impl ConsRef {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let cell = ConsRef::new(Term::Integer(1), Term::nil());
-    /// assert_eq!(cell.allocated_bytes(), std::mem::size_of::<Cons>());
+    /// assert_eq!(ConsRef::allocated_bytes(), std::mem::size_of::<Cons>());
     /// ```
-    pub(super) fn allocated_bytes(&self) -> usize {
+    pub(super) fn allocated_bytes() -> usize {
         std::mem::size_of::<Cons>()
     }
 

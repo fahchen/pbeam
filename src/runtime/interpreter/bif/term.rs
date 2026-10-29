@@ -1386,7 +1386,7 @@ impl Decoder<'_> {
         let compressed = &self.input[self.pos..];
         let mut decompress = Decompress::new(true);
         let mut out = Vec::new();
-        let mut chunk = [0u8; 64 * 1024];
+        let mut chunk = vec![0u8; 64 * 1024];
         loop {
             let (before_in, before_out) = (decompress.total_in(), decompress.total_out());
             let input = &compressed[before_in as usize..];
@@ -1693,7 +1693,7 @@ impl Decoder<'_> {
                         frame.remaining -= 1;
                         if frame.remaining == 0 {
                             let frame = frames.pop().expect("an export frame");
-                            term = self.complete_export(frame.items)?;
+                            term = self.complete_export(&frame.items)?;
                             continue;
                         }
                         break;
@@ -2145,7 +2145,7 @@ impl Decoder<'_> {
     /// Build the external fun of a decoded `EXPORT_EXT` as its case in
     /// `dec_term` (`external.c:5004-5047`) does. The `safe` option gives
     /// badarg, because PBeam does not check that the export is active.
-    fn complete_export(&mut self, items: Vec<Term>) -> Result<Term, DecodeError> {
+    fn complete_export(&mut self, items: &[Term]) -> Result<Term, DecodeError> {
         let Term::Atom(module) = &items[0] else {
             return Err(DecodeError::Badarg);
         };

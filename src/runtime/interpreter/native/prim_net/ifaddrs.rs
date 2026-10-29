@@ -323,7 +323,7 @@ fn link_address(storage: &nix::sys::socket::SockaddrStorage) -> Result<Address, 
         raw.sll_ifindex,
         raw.sll_hatype,
         raw.sll_pkttype,
-        &raw.sll_addr,
+        raw.sll_addr,
         raw.sll_halen,
     )
 }
@@ -345,7 +345,7 @@ pub(super) fn packet(
     ifindex: i32,
     hatype: u16,
     pkttype: u8,
-    sll_addr: &[u8; 8],
+    sll_addr: [u8; 8],
     halen: u8,
 ) -> Result<Address, Failure> {
     let addr = sll_addr

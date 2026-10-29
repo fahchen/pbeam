@@ -227,7 +227,7 @@ fn main() -> ExitCode {
     {
         let arguments = ErlCli::parse_from(words.into_iter().skip(1));
         let extracted = arguments.extracted_root.clone();
-        let status = exit_status(boot_erl(arguments));
+        let status = exit_status(boot_erl(&arguments));
         pbeam_runtime::embedded::remove_extraction(extracted);
         return status;
     }
@@ -376,7 +376,7 @@ fn run_end(result: Result<HostTerm, BeamError>) -> Result<(), Exit> {
 ///
 /// ```rust,ignore
 /// let arguments = ErlCli::parse_from(["pbeam erl", "--root", root, "--bindir", bindir, "--preloaded", ebin, "--", "-boot", "start_clean"]);
-/// boot_erl(arguments)?;
+/// boot_erl(&arguments)?;
 /// ```
 ///
 /// # Errors
@@ -387,7 +387,7 @@ fn run_end(result: Result<HostTerm, BeamError>) -> Result<(), Exit> {
 /// when it is empty, the errors of
 /// [`BeamProgram::load_preloaded`], and the errors of
 /// [`BeamProgram::boot`]. A halt of the run gives [`Exit::Halt`].
-fn boot_erl(arguments: ErlCli) -> Result<(), Exit> {
+fn boot_erl(arguments: &ErlCli) -> Result<(), Exit> {
     // An empty flag variable gives no flag (`erlexec.c:1762-1768`), but
     // `erlexec` gives `-epmd_port` for each value of `ERL_EPMD_PORT`, also
     // an empty one (`erlexec.c:1754-1760`).

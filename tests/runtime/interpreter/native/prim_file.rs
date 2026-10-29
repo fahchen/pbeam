@@ -35,9 +35,7 @@ fn run(scheduler: &mut Scheduler, result: Result<BifResult, BeamError>) -> BifRe
 /// Return a scheduler whose current process is a new root process.
 fn scheduler() -> Scheduler {
     let mut scheduler = Scheduler::new(AtomTable::new());
-    scheduler
-        .start(frame(), vec![], AllowAll.initial())
-        .unwrap();
+    scheduler.start(frame(), vec![], AllowAll.initial());
     scheduler.schedule_next().unwrap();
     scheduler
 }

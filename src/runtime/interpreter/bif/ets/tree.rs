@@ -608,7 +608,7 @@ pub(super) fn select_delete(
                 atoms,
                 table,
                 spec,
-                after,
+                after.as_ref(),
                 end.as_ref(),
                 end.clone().unwrap_or(Term::Nil),
                 0,
@@ -628,11 +628,11 @@ pub(super) fn select_delete_next(
     atoms: &AtomTable,
     table: &mut Table,
     spec: &MatchSpec,
-    last: Term,
-    least: Term,
+    last: &Term,
+    lower: Term,
     count: i64,
 ) -> Result<(DeleteTurn, i64), BeamError> {
-    delete_turn(atoms, table, spec, Some(last), None, least, count)
+    delete_turn(atoms, table, spec, Some(last), None, lower, count)
 }
 
 /// Return the result of a turn of a select delete: the number of deleted
@@ -655,9 +655,9 @@ pub(super) fn delete_finish(
         .scheduler
         .current_process_mut()
         .bump_reductions(i32::try_from(reductions).unwrap_or(i32::MAX));
-    let (last, least, count) = match turn {
+    let (last, lower, count) = match turn {
         DeleteTurn::Done(count) => return Ok(Value(Term::Integer(count))),
-        DeleteTurn::Trap(last, least, count) => (last, least, count),
+        DeleteTurn::Trap(last, lower, count) => (last, lower, count),
     };
     let program = if let Some(program) = program {
         program
@@ -672,7 +672,7 @@ pub(super) fn delete_finish(
         arguments: vec![Term::tuple(vec![
             table.clone(),
             last,
-            least,
+            lower,
             Term::Reference(program),
             Term::Integer(count),
         ])],
@@ -688,22 +688,22 @@ fn deletes(atoms: &AtomTable, spec: &MatchSpec, object: &[Term]) -> bool {
 /// result is `true`, as `doit_select_delete` does
 /// (`erl_db_tree.c:4220-4248`): stop below the end key `end`, or after 1000
 /// objects. A turn that read 1000 objects traps, unless its last key is
-/// below the least key `least`. Return the end of the turn and its
+/// below the lower key `lower`. Return the end of the turn and its
 /// reductions.
 fn delete_turn(
     atoms: &AtomTable,
     table: &mut Table,
     spec: &MatchSpec,
-    after: Option<Term>,
+    after: Option<&Term>,
     end: Option<&Term>,
-    least: Term,
+    lower: Term,
     count: i64,
 ) -> Result<(DeleteTurn, i64), BeamError> {
     let key = key_index(table);
     let mut max = TREE_ITERATIONS;
     let mut last = None;
     let mut doomed = Vec::new();
-    for object in table.ordered_walk(atoms, after.as_ref(), false)? {
+    for object in table.ordered_walk(atoms, after, false)? {
         last = Some(object[key].clone());
         if let Some(end) = end
             && cmp_partly_bound(atoms, end, &object[key])?.is_gt()
@@ -727,8 +727,8 @@ fn delete_turn(
         return Ok((DeleteTurn::Done(count), reductions));
     }
     let last = last.expect("a turn that read its objects has a last key");
-    if !least.is_nil() && cmp_partly_bound(atoms, &least, &last)?.is_gt() {
+    if !lower.is_nil() && cmp_partly_bound(atoms, &lower, &last)?.is_gt() {
         return Ok((DeleteTurn::Done(count), reductions));
     }
-    Ok((DeleteTurn::Trap(last, least, count), reductions))
+    Ok((DeleteTurn::Trap(last, lower, count), reductions))
 }

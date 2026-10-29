@@ -789,6 +789,10 @@ impl Mailbox {
     /// ```rust,ignore
     /// mailbox.end_walk(walk);
     /// ```
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "ending a pass consumes its cursor, so a caller cannot use the walk again"
+    )]
     pub(super) fn end_walk(&mut self, walk: Walk) {
         let mut link = walk.at;
         while link != self.received {

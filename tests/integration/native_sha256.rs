@@ -17,6 +17,10 @@ const SHA256_ABC: [u8; 32] = [
 
 /// Return the SHA-256 digest of a binary argument, and `badarg` for any
 /// other argument, as a NIF of the declaration does.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "NIF function pointer; every NIF returns `Result<NativeResult, BeamError>`"
+)]
 fn sha256(context: &mut NifContext<'_>, arguments: &[Term]) -> Result<NativeResult, BeamError> {
     match arguments.first() {
         Some(Term::Binary(data)) => Ok(NativeResult::Value(Term::binary(

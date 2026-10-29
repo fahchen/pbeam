@@ -463,7 +463,7 @@ fn run_with_a_full_stdout(command: &mut Command) -> Option<i32> {
     // reads no more, so the next write of the run waits.
     let probe = write_end.try_clone().unwrap();
     let filler = thread::spawn(move || {
-        let bytes = [b' '; 1 << 16];
+        let bytes = vec![b' '; 1 << 16];
         for _ in 0..16 {
             // SAFETY: `write` reads the bytes of `bytes`, which holds the
             // length that it gets.

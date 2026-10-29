@@ -255,8 +255,8 @@ const FIRST_LABEL_NUMBER: u32 = 1;
 /// table is full is an error, as in ERTS.
 pub(crate) fn parse(bytes: &[u8], atom_table: &AtomTable) -> Result<BeamModule, BeamError> {
     let chunks = read_chunks(bytes)?;
-    let atoms = parse_atoms(required_chunk(&chunks, b"AtU8")?, atom_table)?;
-    decode(&chunks, atoms, atom_table)
+    let atoms = parse_atoms(required_chunk(&chunks, *b"AtU8")?, atom_table)?;
+    decode(&chunks, &atoms, atom_table)
 }
 
 /// Why [`prepare`] gives no module.
@@ -309,13 +309,13 @@ pub(crate) fn prepare(
         return Err(PrepareError::BadFile);
     }
     let chunks = read_chunks(bytes).map_err(PrepareError::Unsupported)?;
-    let atoms = required_chunk(&chunks, b"AtU8")
+    let atoms = required_chunk(&chunks, *b"AtU8")
         .and_then(|data| parse_atoms(data, atom_table))
         .map_err(PrepareError::Unsupported)?;
     if atoms.first().map(|atom| atom_table.name_of(atom)) != Some(module) {
         return Err(PrepareError::BadFile);
     }
-    decode(&chunks, atoms, atom_table).map_err(PrepareError::Unsupported)
+    decode(&chunks, &atoms, atom_table).map_err(PrepareError::Unsupported)
 }
 
 /// Read the chunks of a BEAM container by chunk ID, as the grammar of
@@ -378,17 +378,17 @@ fn read_chunks(bytes: &[u8]) -> Result<HashMap<Vec<u8>, &[u8]>, BeamError> {
 ///
 /// ```rust,ignore
 /// let chunks = read_chunks(&beam_bytes)?;
-/// let atoms = parse_atoms(required_chunk(&chunks, b"AtU8")?, &mut table)?;
-/// assert_eq!(decode(&chunks, atoms, &mut table)?.name, "Elixir.Hello");
+/// let atoms = parse_atoms(required_chunk(&chunks, *b"AtU8")?, &mut table)?;
+/// assert_eq!(decode(&chunks, &atoms, &mut table)?.name, "Elixir.Hello");
 /// ```
 fn decode(
     chunks: &HashMap<Vec<u8>, &[u8]>,
-    atoms: Vec<Atom>,
+    atoms: &[Atom],
     atom_table: &AtomTable,
 ) -> Result<BeamModule, BeamError> {
-    let exports = parse_exports(required_chunk(chunks, b"ExpT")?, &atoms, atom_table)?;
+    let exports = parse_exports(required_chunk(chunks, *b"ExpT")?, atoms, atom_table)?;
     let md5 = module_md5(chunks);
-    let code = required_chunk(chunks, b"Code")?;
+    let code = required_chunk(chunks, *b"Code")?;
     let name = atom_table
         .name_of(
             atoms
@@ -398,7 +398,7 @@ fn decode(
         .to_owned();
     let imports = chunks
         .get(b"ImpT".as_slice())
-        .map(|data| parse_imports(data, &atoms, atom_table))
+        .map(|data| parse_imports(data, atoms, atom_table))
         .transpose()?
         .unwrap_or_default();
     let literals = chunks
@@ -409,13 +409,13 @@ fn decode(
     let lambdas = chunks
         .get(b"FunT".as_slice())
         .filter(|data| !data.is_empty())
-        .map(|data| parse_lambdas(data, &atoms, md5))
+        .map(|data| parse_lambdas(data, atoms, md5))
         .transpose()?
         .unwrap_or_default();
     let strings = chunks.get(b"StrT".as_slice()).copied().unwrap_or_default();
     let records = chunks
         .get(b"Recs".as_slice())
-        .map(|data| parse_records(data, &atoms, &literals, atom_table))
+        .map(|data| parse_records(data, atoms, &literals, atom_table))
         .transpose()?
         .unwrap_or_default();
     // ERTS reads a `Line` chunk that is not empty (`beam_file.c:1706-1711`).
@@ -426,7 +426,7 @@ fn decode(
         .transpose()?
         .unwrap_or_default();
     let (instructions, number_of_labels, on_load) = instruction::parse_code(
-        code, atom_table, &atoms, &imports, &literals, &lambdas, strings, &records, &mut lines,
+        code, atom_table, atoms, &imports, &literals, &lambdas, strings, &records, &mut lines,
     )?;
     if let Some(label) = exports
         .iter()
@@ -1239,16 +1239,16 @@ fn atom_at(atoms: &[Atom], index: usize) -> Result<&Atom, BeamError> {
 /// ```rust,ignore
 /// let payload = [0x03];
 /// let chunks = HashMap::from([(b"Code".to_vec(), &payload[..])]);
-/// assert_eq!(required_chunk(chunks, b"Code")?, &payload);
+/// assert_eq!(required_chunk(chunks, *b"Code")?, &payload);
 /// ```
 fn required_chunk<'a>(
     chunks: &HashMap<Vec<u8>, &'a [u8]>,
-    chunk_id: &[u8; WORD_SIZE],
+    chunk_id: [u8; WORD_SIZE],
 ) -> Result<&'a [u8], BeamError> {
     chunks.get(chunk_id.as_slice()).copied().ok_or_else(|| {
         error(format!(
             "missing {} chunk",
-            String::from_utf8_lossy(chunk_id)
+            String::from_utf8_lossy(&chunk_id)
         ))
     })
 }

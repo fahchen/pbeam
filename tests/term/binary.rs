@@ -4,6 +4,10 @@ use super::*;
 
 /// Return the shared array of bytes of a binary term. A sub-binary keeps the
 /// array of its source, so the test compares this array.
+#[expect(
+    clippy::rc_buffer,
+    reason = "`Binary` shares byte arrays as `Arc<Vec<u8>>` because `append_in_place` grows the vector through `Arc::get_mut`; an `Arc<[u8]>` cannot grow"
+)]
 fn array(term: &Term) -> &Arc<Vec<u8>> {
     let Term::Binary(bytes) = term else {
         panic!("not a binary: {term:?}");

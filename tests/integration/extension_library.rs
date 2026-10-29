@@ -47,6 +47,10 @@ const EXTENSION_TWICE: &[u8] = include_bytes!("../../fixtures/extension/extensio
 const EXTENSION_BARE: &[u8] = include_bytes!("../../fixtures/extension/extension_bare.beam");
 
 /// Return the sum of two integers, and `badarg` for any other argument.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "NIF function pointer; every NIF returns `Result<NativeResult, BeamError>`"
+)]
 fn add(context: &mut NifContext<'_>, arguments: &[Term]) -> Result<NativeResult, BeamError> {
     match arguments {
         [Term::Integer(left), Term::Integer(right)] => {

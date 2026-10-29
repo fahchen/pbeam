@@ -19,9 +19,9 @@ fn convert(chardata: &Term) -> (Vec<u8>, Term, bool, Vec<u8>) {
 }
 
 /// Convert valid chardata and return its bytes.
-fn valid(chardata: Term) -> Vec<u8> {
-    assert!(utf8_need(&chardata, false).is_some(), "{chardata:?}");
-    let (bytes, rest, error, leftover) = convert(&chardata);
+fn valid(chardata: &Term) -> Vec<u8> {
+    assert!(utf8_need(chardata, false).is_some(), "{chardata:?}");
+    let (bytes, rest, error, leftover) = convert(chardata);
     assert_eq!((rest, error, leftover), (Term::nil(), false, Vec::new()));
     bytes
 }
@@ -30,17 +30,17 @@ fn valid(chardata: Term) -> Vec<u8> {
 fn converts_binaries_code_points_and_nested_lists_as_erts() {
     // Each expected value is the result of unicode:characters_to_binary/2
     // with the `unicode` encoding on ERTS 29.1.1.
-    assert_eq!(valid(binary(b"Hello, world!\n")), b"Hello, world!\n");
+    assert_eq!(valid(&binary(b"Hello, world!\n")), b"Hello, world!\n");
     assert_eq!(
-        valid(Term::list_from(vec![
+        valid(&Term::list_from(vec![
             binary(b"Hello, world!"),
             Term::Integer(10)
         ])),
         b"Hello, world!\n"
     );
-    assert_eq!(valid(Term::nil()), b"");
+    assert_eq!(valid(&Term::nil()), b"");
     assert_eq!(
-        valid(Term::list_from(vec![
+        valid(&Term::list_from(vec![
             Term::list_from(vec![binary(b""), Term::list_from(vec![Term::Integer(104)])]),
             Term::Integer(105),
         ])),
@@ -53,14 +53,14 @@ fn converts_binaries_code_points_and_nested_lists_as_erts() {
         (1_114_111, &[244, 143, 191, 191]),
     ] {
         assert_eq!(
-            valid(Term::list_from(vec![Term::Integer(code_point)])),
+            valid(&Term::list_from(vec![Term::Integer(code_point)])),
             expected
         );
     }
     // A UTF-8 sequence can continue in the next binary, also across
     // nested and empty lists and empty binaries.
     assert_eq!(
-        valid(Term::list_from(vec![
+        valid(&Term::list_from(vec![
             binary(&[226]),
             Term::list_from(vec![binary(&[130]), Term::nil()]),
             binary(b""),
@@ -73,11 +73,11 @@ fn converts_binaries_code_points_and_nested_lists_as_erts() {
     // [97|<<"b">>] and <<"é"/utf8>> for [[<<195>>|<<169>>]].
     let improper = |elements: Vec<Term>, tail: Term| Term::list_with_tail(elements, tail);
     assert_eq!(
-        valid(improper(vec![Term::Integer(97)], binary(b"b"))),
+        valid(&improper(vec![Term::Integer(97)], binary(b"b"))),
         b"ab"
     );
     assert_eq!(
-        valid(Term::list_from(vec![improper(
+        valid(&Term::list_from(vec![improper(
             vec![binary(&[195])],
             binary(&[169])
         )])),
@@ -100,7 +100,7 @@ fn converts_deeply_nested_lists_without_recursion() {
         chardata = Term::list_from(vec![chardata]);
     }
     assert_eq!(utf8_need(&chardata, false), Some(1));
-    assert_eq!(valid(chardata), b"a");
+    assert_eq!(valid(&chardata), b"a");
 }
 
 #[test]

@@ -193,6 +193,10 @@ fn key_search(
 /// ERTS keeps the budget in an `int` and traps when `--max_iter < 0`, before
 /// the first element (`erl_bif_lists.c:1114-1130`), so a negative budget
 /// traps at once as a budget of 0 does.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn member(
     process: &mut ProcessState,
     element: &Term,
@@ -266,6 +270,10 @@ pub(super) fn member(
 /// takes no element and its `BUMP_REDS` sets the budget to 0
 /// (`erl_bif_lists.c:1215-1230`, `bif.h:71-78`), so `lists_reverse_alloc`
 /// reads 0, takes no element, and traps (`erl_bif_lists.c:1158-1191`).
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn reverse(
     process: &mut ProcessState,
     list: &Term,

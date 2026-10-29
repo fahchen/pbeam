@@ -162,9 +162,9 @@ fn records_the_peak_live_bytes_of_one_terra_scene() {
     let before = rss_kilobytes();
     let sampler = RssSampler::start();
     let (_first_result, first) = run(&program);
-    let sampled = sampler.stop();
+    let peak_sample = sampler.stop();
     let after = rss_kilobytes();
-    let rss_peak = before.max(after).max(sampled);
+    let rss_peak = before.max(after).max(peak_sample);
     // A second run of the same revision gives the spread of the number.
     let (_second_result, second) = run(&program);
 

@@ -207,8 +207,8 @@ fn encodes_each_interface_address_form_as_prim_net_nif() {
         ifaddrs::Entry {
             name: b"p0".to_vec(),
             flags: 0,
-            addr: ifaddrs::packet(3, 2, 1, 0, &[9; 8], 6).ok(),
-            netmask: ifaddrs::packet(3, 2, 999, 200, &[9; 8], 8).ok(),
+            addr: ifaddrs::packet(3, 2, 1, 0, [9; 8], 6).ok(),
+            netmask: ifaddrs::packet(3, 2, 999, 200, [9; 8], 8).ok(),
             extra: None,
         },
     ];
@@ -228,7 +228,7 @@ fn encodes_each_interface_address_form_as_prim_net_nif() {
         assert!(text.contains(&atom(name)), "{name}");
     }
     assert!(text.contains("Integer(999)") && text.contains("Integer(200)"));
-    assert!(ifaddrs::packet(3, 2, 1, 0, &[9; 8], 9).is_err());
+    assert!(ifaddrs::packet(3, 2, 1, 0, [9; 8], 9).is_err());
     let errno = ifaddrs::result(&atoms, Err(ifaddrs::Failure::Errno(libc::EPERM))).unwrap();
     assert!(format!("{errno:?}").contains(&atom("eperm")));
     let replaced = InterfaceAddress {

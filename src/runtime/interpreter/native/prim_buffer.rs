@@ -148,6 +148,10 @@ fn new_nif(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
 ///
 /// A new result atom in a full atom table gives the error of
 /// `AtomTable::put`.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "entry of the native function table, whose `run` returns `Result<BifResult, BeamError>`"
+)]
 fn size_nif(scheduler: &mut Scheduler, buffer: &Term) -> Result<BifResult, BeamError> {
     let Some(buffer) = buffer_argument(scheduler, buffer) else {
         return Ok(BifResult::badarg());
@@ -179,6 +183,10 @@ fn size_nif(scheduler: &mut Scheduler, buffer: &Term) -> Result<BifResult, BeamE
 ///
 /// A new result atom in a full atom table gives the error of
 /// `AtomTable::put`.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "entry of the native function table, whose `run` returns `Result<BifResult, BeamError>`"
+)]
 fn peek_head_nif(scheduler: &mut Scheduler, buffer: &Term) -> Result<BifResult, BeamError> {
     let Some(buffer) = buffer_argument(scheduler, buffer) else {
         return Ok(BifResult::badarg());
@@ -208,6 +216,10 @@ fn peek_head_nif(scheduler: &mut Scheduler, buffer: &Term) -> Result<BifResult, 
 ///
 /// A new result atom in a full atom table gives the error of
 /// `AtomTable::put`.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "entry of the native function table, whose `run` returns `Result<BifResult, BeamError>`"
+)]
 fn copying_read_nif(
     scheduler: &mut Scheduler,
     buffer: &Term,
@@ -305,6 +317,10 @@ fn write_nif(
 ///
 /// A new result atom in a full atom table gives the error of
 /// `AtomTable::put`.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "entry of the native function table, whose `run` returns `Result<BifResult, BeamError>`"
+)]
 fn skip_nif(scheduler: &mut Scheduler, buffer: &Term, size: &Term) -> Result<BifResult, BeamError> {
     let Some(size) = unsigned(size) else {
         return Ok(BifResult::badarg());

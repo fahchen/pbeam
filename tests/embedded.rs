@@ -89,20 +89,17 @@ fn a_run_bundle_stops_at_an_invalid_trailer_or_bundle() {
     invalid.extend_from_slice(MAGIC);
     invalid.extend_from_slice(&100_u64.to_le_bytes());
     assert_eq!(
-        run_bundle(executable, &invalid, &directory, Vec::new()),
+        run_bundle(executable, &invalid, &directory, &[]),
         Some(ExitCode::FAILURE)
     );
     let mut garbage = b"garbage!".to_vec();
     garbage.extend_from_slice(MAGIC);
     garbage.extend_from_slice(&8_u64.to_le_bytes());
     assert_eq!(
-        run_bundle(executable, &garbage, &directory, Vec::new()),
+        run_bundle(executable, &garbage, &directory, &[]),
         Some(ExitCode::FAILURE)
     );
-    assert_eq!(
-        run_bundle(executable, b"plain", &directory, Vec::new()),
-        None
-    );
+    assert_eq!(run_bundle(executable, b"plain", &directory, &[]), None);
     fs::remove_dir_all(&directory).unwrap();
 }
 
@@ -116,7 +113,7 @@ fn a_run_bundle_reports_a_base_that_fails() {
             Path::new("/nonexistent/pbeam"),
             &image(&startable()),
             &file,
-            Vec::new()
+            &[]
         ),
         Some(ExitCode::FAILURE)
     );
@@ -131,7 +128,7 @@ fn a_run_bundle_that_cannot_start_removes_its_directory() {
             Path::new("/nonexistent/pbeam"),
             &image(&startable()),
             &base,
-            Vec::new()
+            &[]
         ),
         Some(ExitCode::FAILURE)
     );

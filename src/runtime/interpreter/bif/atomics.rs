@@ -97,6 +97,10 @@ pub(super) fn new(
 /// # Errors
 ///
 /// A full atom table gives the error of [`Term::from_bigint`].
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn get(
     scheduler: &mut Scheduler,
     reference: &Term,
@@ -127,6 +131,10 @@ pub(super) fn get(
 /// let result = put(&mut scheduler, &reference, &Term::Integer(1), &Term::Integer(-1))?;
 /// assert!(matches!(result, BifResult::Value(Term::Atom(_))));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn put(
     scheduler: &mut Scheduler,
     reference: &Term,
@@ -162,6 +170,10 @@ pub(super) fn put(
 /// let result = add(&mut scheduler, &reference, &Term::Integer(1), &Term::Integer(1))?;
 /// assert!(matches!(result, BifResult::Value(Term::Atom(_))));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn add(
     scheduler: &mut Scheduler,
     reference: &Term,
@@ -186,6 +198,10 @@ pub(super) fn add(
 /// (`erl_bif_atomics.c:187-198`) does. The checks and the `badarg` cases
 /// are those of [`add`], and the value has the form of [`get`]
 /// (`bld_atomic`, `erl_bif_atomics.c:125-146`).
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn add_get(
     scheduler: &mut Scheduler,
     reference: &Term,
@@ -208,6 +224,10 @@ pub(super) fn add_get(
 /// at the index and return the old value, as `atomics_exchange_3`
 /// (`erl_bif_atomics.c:200-212`) does. The checks and the `badarg` cases
 /// are those of [`put`], and the value has the form of [`get`].
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn exchange(
     scheduler: &mut Scheduler,
     reference: &Term,
@@ -232,6 +252,10 @@ pub(super) fn exchange(
 /// write gives `ok`, and a miss gives the value of the atomic in the form
 /// of [`get`]. `Expected` and `Desired` take the range of the array, as in
 /// [`put`], and each failed check raises `badarg`.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn compare_exchange(
     scheduler: &mut Scheduler,
     reference: &Term,
@@ -271,6 +295,10 @@ pub(super) fn compare_exchange(
 /// // `#{max => 9223372036854775807, memory => 48, min => -9223372036854775808, size => 1}`.
 /// assert!(matches!(info(&mut scheduler, &reference)?, BifResult::Value(Term::Map(_))));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn info(scheduler: &mut Scheduler, reference: &Term) -> Result<BifResult, BeamError> {
     let Some(array) = scheduler.node().atomics.array(reference) else {
         return Ok(BifResult::badarg());
@@ -362,6 +390,10 @@ pub(super) fn counters_new(scheduler: &mut Scheduler, size: &Term) -> Result<Bif
 /// ```rust,ignore
 /// assert_eq!(counters_get(&mut scheduler, &reference, &Term::Integer(1))?, BifResult::Value(Term::Integer(0)));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn counters_get(
     scheduler: &mut Scheduler,
     reference: &Term,
@@ -385,6 +417,10 @@ pub(super) fn counters_get(
 /// let result = counters_add(&mut scheduler, &reference, &Term::Integer(1), &Term::Integer(1))?;
 /// assert!(matches!(result, BifResult::Value(Term::Atom(_))));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn counters_add(
     scheduler: &mut Scheduler,
     reference: &Term,
@@ -413,6 +449,10 @@ pub(super) fn counters_add(
 /// let result = counters_put(&mut scheduler, &reference, &Term::Integer(1), &Term::Integer(-1))?;
 /// assert!(matches!(result, BifResult::Value(Term::Atom(_))));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn counters_put(
     scheduler: &mut Scheduler,
     reference: &Term,
@@ -442,6 +482,10 @@ pub(super) fn counters_put(
 /// // One counter on one scheduler holds `#{memory => 160, size => 1}`.
 /// assert!(matches!(counters_info(&mut scheduler, &reference)?, BifResult::Value(Term::Map(_))));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn counters_info(
     scheduler: &mut Scheduler,
     reference: &Term,

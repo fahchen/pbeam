@@ -816,8 +816,8 @@ fn identity(keys: Vec<Term>) -> Map {
 }
 
 /// Return the keys of the pairs of a chunk.
-fn chunk_keys(map: &Map, path: Term, direction: Direction) -> (Vec<Term>, Option<i64>) {
-    let chunk = map.chunk(&path, 1000, direction).unwrap().unwrap();
+fn chunk_keys(map: &Map, path: &Term, direction: Direction) -> (Vec<Term>, Option<i64>) {
+    let chunk = map.chunk(path, 1000, direction).unwrap().unwrap();
     let keys = chunk.pairs.iter().map(|(key, _)| (*key).clone()).collect();
     (keys, chunk.next)
 }
@@ -840,20 +840,20 @@ fn takes_a_whole_collision_node_in_a_chunk() {
     // ERTS 29.1.1 in a new process: map_next(0, Map, iterator) gives 33
     // pairs, because the 32nd pair starts the collision node, and the path 369.
     assert_eq!(
-        chunk_keys(&map, Term::Integer(0), Direction::Forward),
+        chunk_keys(&map, &Term::Integer(0), Direction::Forward),
         (keys[..33].to_vec(), Some(369))
     );
     // map_next(113, Map, iterator) selects the collision node at depth
     // 16, after the 16 elements of the path digit.
     assert_eq!(
-        chunk_keys(&map, Term::Integer(113), Direction::Forward),
+        chunk_keys(&map, &Term::Integer(113), Direction::Forward),
         (keys[31..].to_vec(), None)
     );
     // A path other than 0 has no limit of 32 pairs: -(2^59) reads as
     // 2^59, and 2^59 is a bignum. A leaf above the last element ends the path.
     for path in [-(1 << 59), 1 << 59] {
         assert_eq!(
-            chunk_keys(&map, Term::Integer(path), Direction::Forward),
+            chunk_keys(&map, &Term::Integer(path), Direction::Forward),
             (keys.clone(), None)
         );
     }
@@ -873,7 +873,7 @@ fn takes_a_whole_collision_node_in_a_chunk() {
     keys.extend(list(&after));
     let map = identity(keys.clone());
     assert_eq!(
-        chunk_keys(&map, Term::Integer(0), Direction::Backward),
+        chunk_keys(&map, &Term::Integer(0), Direction::Backward),
         (keys[3..].to_vec(), Some(97))
     );
     // A flatmap needs a small integer path.
@@ -917,7 +917,7 @@ fn fails_for_a_path_that_erts_returns_as_a_bignum_not_in_normal_form() {
     );
     // ERTS 29.1.1: map_next(1152921504606846994, Map, iterator) gives the last two pairs.
     assert_eq!(
-        chunk_keys(&map, Term::Integer((1 << 60) + 18), Direction::Forward),
+        chunk_keys(&map, &Term::Integer((1 << 60) + 18), Direction::Forward),
         (keys[32..].to_vec(), None)
     );
     let after = [
@@ -932,18 +932,18 @@ fn fails_for_a_path_that_erts_returns_as_a_bignum_not_in_normal_form() {
     );
     // ERTS 29.1.1: map_next(1152921504606847762, Map, []) gives the first four pairs.
     assert_eq!(
-        chunk_keys(&map, Term::Integer((1 << 60) + 786), Direction::Backward),
+        chunk_keys(&map, &Term::Integer((1 << 60) + 786), Direction::Backward),
         (keys[..4].to_vec(), None)
     );
     // A path of 15 elements is a bignum of one digit, in normal form only above 2^59 - 1.
     let mut elements = vec![0; 14];
-    assert_eq!(encode_path(elements.clone()), Ok(0));
+    assert_eq!(encode_path(&elements), Ok(0));
     elements.push(8);
-    assert_eq!(encode_path(elements.clone()), Ok(1 << 59));
+    assert_eq!(encode_path(&elements), Ok(1 << 59));
     *elements.last_mut().unwrap() = 7;
-    assert!(encode_path(elements.clone()).is_err());
+    assert!(encode_path(&elements).is_err());
     elements.extend([1, 1]);
-    assert!(encode_path(elements).is_err());
+    assert!(encode_path(&elements).is_err());
 }
 
 #[test]

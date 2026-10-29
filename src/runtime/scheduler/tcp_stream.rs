@@ -243,7 +243,7 @@ impl Scheduler {
                         }
                         Err(name) => error_status(Term::Atom(self.atoms.put(&name)?)),
                     };
-                    let message = self.async_message(port, receiver.id, status);
+                    let message = Self::async_message(port, receiver.id, status);
                     vec![(receiver.caller, message)]
                 }
                 Event::Datagram {
@@ -261,7 +261,7 @@ impl Scheduler {
                     let status = Term::tuple(vec![Term::static_atom("ok"), packet]);
                     vec![(
                         receiver.caller,
-                        self.async_message(port, receiver.id, status),
+                        Self::async_message(port, receiver.id, status),
                     )]
                 }
                 Event::ActiveDatagram { address, data } => {
@@ -321,7 +321,7 @@ impl Scheduler {
                     };
                     vec![(
                         connector.caller,
-                        self.async_message(port, connector.id, status),
+                        Self::async_message(port, connector.id, status),
                     )]
                 }
                 Event::Replied { sender, result } => {

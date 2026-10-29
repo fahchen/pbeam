@@ -97,7 +97,7 @@ impl Reader {
             && self
                 .chunks
                 .get(cix)
-                .is_none_or(|(_, interval)| entry.deleted < *interval)
+                .is_none_or(|(_, interval)| entry.removed < *interval)
     }
 }
 
@@ -111,7 +111,7 @@ struct Deleted {
     /// The interval when the process entered the table.
     inserted: u64,
     /// The interval when the process left the table.
-    deleted: u64,
+    removed: u64,
 }
 
 /// Return the index of the pid `id` in the ERTS process table.
@@ -361,7 +361,7 @@ impl ProcessTable {
             listing.deleted.push_back(Deleted {
                 id,
                 inserted: entry.inserted,
-                deleted,
+                removed: deleted,
             });
         }
         listing.prune_deleted();

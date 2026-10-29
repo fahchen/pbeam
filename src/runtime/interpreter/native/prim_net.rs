@@ -306,6 +306,10 @@ fn failure(atoms: &AtomTable, reason: &str) -> Result<BifResult, BeamError> {
 }
 
 /// Give `{ok, Value}`.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "builds the tail value of NIF functions that return `Result<BifResult, BeamError>` and mix it with fallible arms"
+)]
 fn success(value: Term) -> Result<BifResult, BeamError> {
     Ok(BifResult::Value(Term::tuple(vec![
         Term::static_atom("ok"),
@@ -398,7 +402,7 @@ fn sockaddr(atoms: &AtomTable, term: &Term) -> Result<Option<Vec<u8>>, BeamError
         return Ok(None);
     };
     Ok(if family == atom("inet")? {
-        inet(get("port")?, get("addr")?, atoms)?
+        inet(get("port")?.as_ref(), get("addr")?.as_ref(), atoms)
     } else if family == atom("inet6")? {
         let fields = [
             get("port")?,
@@ -421,40 +425,29 @@ fn sockaddr(atoms: &AtomTable, term: &Term) -> Result<Option<Vec<u8>>, BeamError
 /// Decode an IPv4 socket address, as `esock_decode_sockaddr_in` does
 /// (`socket_util.c:1118-1166`): `htons` truncates the port to 16 bits.
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn inet(
-    port: Option<Term>,
-    address: Option<Term>,
-    atoms: &AtomTable,
-) -> Result<Option<Vec<u8>>, BeamError> {
-    let Some(port) = port.as_ref().and_then(int) else {
-        return Ok(None);
-    };
-    let Some(address) = address else {
-        return Ok(None);
-    };
-    let Some(address) = in_addr(&address, atoms)? else {
-        return Ok(None);
-    };
+fn inet(port: Option<&Term>, address: Option<&Term>, atoms: &AtomTable) -> Option<Vec<u8>> {
+    let port = port.and_then(int)?;
+    let address = in_addr(address?, atoms)?;
     let mut bytes = header(16, libc::AF_INET);
     bytes.extend_from_slice(&(port as u16).to_be_bytes());
     bytes.extend_from_slice(&address);
     bytes.extend_from_slice(&[0; 8]);
-    Ok(Some(bytes))
+    Some(bytes)
 }
 
 /// Decode an IPv4 address, as `esock_decode_in_addr` does
 /// (`socket_util.c:1781-1843`).
-fn in_addr(term: &Term, atoms: &AtomTable) -> Result<Option<[u8; 4]>, BeamError> {
+fn in_addr(term: &Term, atoms: &AtomTable) -> Option<[u8; 4]> {
     if let Term::Atom(atom) = term {
         let name = Some(atoms.name_of(atom));
-        return Ok(match name {
+        return match name {
             Some("loopback") => Some([127, 0, 0, 1]),
             Some("any") => Some([0; 4]),
             Some("broadcast") => Some([255; 4]),
             _ => None,
-        });
+        };
     }
-    Ok(match term.tuple_elements() {
+    match term.tuple_elements() {
         Some(elements) if elements.len() == 4 => {
             let bytes: Option<Vec<u8>> = elements
                 .iter()
@@ -463,7 +456,7 @@ fn in_addr(term: &Term, atoms: &AtomTable) -> Result<Option<[u8; 4]>, BeamError>
             bytes.map(|bytes| [bytes[0], bytes[1], bytes[2], bytes[3]])
         }
         _ => None,
-    })
+    }
 }
 
 /// Decode an IPv6 socket address from its port, flow info, scope id, and
@@ -626,6 +619,10 @@ fn nameinfo_error(code: c_int, errno: c_int) -> String {
 /// Read a host or a service of `nif_getaddrinfo/3`, as
 /// `decode_addrinfo_string` does (`prim_net_nif.c:4667-4691`): `undefined`
 /// gives NULL, and each other atom does not decode.
+#[expect(
+    clippy::option_option,
+    reason = "three results of `decode_addrinfo_string`: does not decode, NULL, and a name"
+)]
 fn addrinfo_string(atoms: &AtomTable, term: &Term) -> Result<Option<Option<CString>>, BeamError> {
     if let Term::Atom(_) = term {
         return Ok((*term == Term::Atom(atoms.put("undefined")?)).then_some(None));

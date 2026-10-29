@@ -277,7 +277,7 @@ fn reads_nested_literals_and_marks_unsupported_tags_at_any_depth() {
     large.push(1);
     assert_eq!(read(&atoms, &large).unwrap(), Some(big(1, 2048)));
     let mut huge = vec![131, 111, 0, 8, 0, 1, 0];
-    huge.extend([0; 524_288]);
+    huge.extend(vec![0; 524_288]);
     huge.push(1);
     assert!(read(&atoms, &huge).is_err());
     // NEW_PID_EXT (88) inside a tuple, inside a list, and as a list tail.

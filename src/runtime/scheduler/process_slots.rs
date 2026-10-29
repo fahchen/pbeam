@@ -54,7 +54,7 @@ impl ProcessSlots {
     ///
     /// ```rust,ignore
     /// table.insert(ProcessState::new(ProcessId(1), Start::Entry(frame), vec![]));
-    /// assert!(table.contains_key(&ProcessId(1)));
+    /// assert!(table.contains_key(ProcessId(1)));
     /// ```
     pub(super) fn insert(&mut self, process: ProcessState) {
         let id = process.id;
@@ -80,11 +80,11 @@ impl ProcessSlots {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let process = table.remove(&ProcessId(1)).unwrap();
-    /// assert!(!table.contains_key(&ProcessId(1)));
+    /// let process = table.remove(ProcessId(1)).unwrap();
+    /// assert!(!table.contains_key(ProcessId(1)));
     /// ```
-    pub(super) fn remove(&mut self, id: &ProcessId) -> Option<ProcessState> {
-        let slot = self.index.remove(id)?;
+    pub(super) fn remove(&mut self, id: ProcessId) -> Option<ProcessState> {
+        let slot = self.index.remove(&id)?;
         assert_ne!(
             self.current,
             Some(slot),
@@ -99,10 +99,10 @@ impl ProcessSlots {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(table.get(&ProcessId(1)).map(|process| process.id), Some(ProcessId(1)));
+    /// assert_eq!(table.get(ProcessId(1)).map(|process| process.id), Some(ProcessId(1)));
     /// ```
-    pub(super) fn get(&self, id: &ProcessId) -> Option<&ProcessState> {
-        let slot = *self.index.get(id)?;
+    pub(super) fn get(&self, id: ProcessId) -> Option<&ProcessState> {
+        let slot = *self.index.get(&id)?;
         self.slots[slot].as_ref()
     }
 
@@ -112,10 +112,10 @@ impl ProcessSlots {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// table.get_mut(&ProcessId(1)).unwrap().waiting = true;
+    /// table.get_mut(ProcessId(1)).unwrap().waiting = true;
     /// ```
-    pub(super) fn get_mut(&mut self, id: &ProcessId) -> Option<&mut ProcessState> {
-        let slot = *self.index.get(id)?;
+    pub(super) fn get_mut(&mut self, id: ProcessId) -> Option<&mut ProcessState> {
+        let slot = *self.index.get(&id)?;
         self.slots[slot].as_mut()
     }
 
@@ -124,10 +124,10 @@ impl ProcessSlots {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert!(!table.contains_key(&ProcessId(99)));
+    /// assert!(!table.contains_key(ProcessId(99)));
     /// ```
-    pub(super) fn contains_key(&self, id: &ProcessId) -> bool {
-        self.index.contains_key(id)
+    pub(super) fn contains_key(&self, id: ProcessId) -> bool {
+        self.index.contains_key(&id)
     }
 
     /// Return each process of the table, in no given order.
@@ -239,7 +239,7 @@ impl Index<&ProcessId> for ProcessSlots {
     /// assert!(!table[&ProcessId(1)].waiting);
     /// ```
     fn index(&self, id: &ProcessId) -> &ProcessState {
-        self.get(id).expect("the process is alive")
+        self.get(*id).expect("the process is alive")
     }
 }
 

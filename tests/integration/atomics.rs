@@ -56,7 +56,7 @@ impl Expected<'_> {
         Term::Atom(self.program.atom(name).unwrap())
     }
 
-    fn big(&self, value: impl Into<BigInt>) -> Term {
+    fn big(value: impl Into<BigInt>) -> Term {
         Term::BigInt(Arc::new(value.into()))
     }
 
@@ -172,15 +172,15 @@ fn runs_the_counters_calls_of_the_elixir_logger_start_as_pinned_erts() {
         ),
         expected.pair(
             "info_unsigned",
-            expected.info(expected.big(u64::MAX), Term::Integer(0), 2),
+            expected.info(Expected::big(u64::MAX), Term::Integer(0), 2),
         ),
         expected.pair("get_signed", Term::Integer(-1)),
-        expected.pair("get_unsigned", expected.big(u64::MAX)),
+        expected.pair("get_unsigned", Expected::big(u64::MAX)),
         expected.pair("add_signed", Term::Integer(2)),
         expected.pair("add_wrap", Term::Integer(i64::MIN)),
         expected.pair("add_unsigned_wrap", Term::Integer(0)),
         expected.pair("put_signed", expected.atom("ok")),
-        expected.pair("put_unsigned", expected.big(1u128 << 63)),
+        expected.pair("put_unsigned", Expected::big(1u128 << 63)),
         expected.pair(
             "get_not_a_reference",
             atomics("get", vec![Term::Integer(5), Term::Integer(1)]),
@@ -216,7 +216,7 @@ fn runs_the_counters_calls_of_the_elixir_logger_start_as_pinned_erts() {
                 vec![
                     expected.atom("reference"),
                     Term::Integer(1),
-                    expected.big(1u128 << 63),
+                    Expected::big(1u128 << 63),
                 ],
             ),
         ),
@@ -238,7 +238,7 @@ fn runs_the_counters_calls_of_the_elixir_logger_start_as_pinned_erts() {
                 vec![
                     expected.atom("reference"),
                     Term::Integer(1),
-                    expected.big(1u128 << 64),
+                    Expected::big(1u128 << 64),
                 ],
             ),
         ),
@@ -249,7 +249,7 @@ fn runs_the_counters_calls_of_the_elixir_logger_start_as_pinned_erts() {
                 vec![
                     expected.atom("reference"),
                     Term::Integer(1),
-                    expected.big(1u128 << 70),
+                    Expected::big(1u128 << 70),
                 ],
             ),
         ),
@@ -288,7 +288,7 @@ fn runs_the_counters_calls_of_the_elixir_logger_start_as_pinned_erts() {
             "size_negative_above_i64",
             counter(
                 "new",
-                vec![expected.big(-(1i128 << 70)), Term::nil()],
+                vec![Expected::big(-(1i128 << 70)), Term::nil()],
                 error_info(),
             ),
         ),
@@ -298,7 +298,7 @@ fn runs_the_counters_calls_of_the_elixir_logger_start_as_pinned_erts() {
                 "system_limit",
                 "counters",
                 "new",
-                vec![expected.big(1u128 << 64), Term::nil()],
+                vec![Expected::big(1u128 << 64), Term::nil()],
                 error_info(),
             ),
         ),
@@ -358,7 +358,7 @@ fn runs_the_counters_calls_of_the_elixir_logger_start_as_pinned_erts() {
                 "system_limit",
                 "erts_internal",
                 "atomics_new",
-                vec![Term::Integer(1), expected.big(1u128 << 64)],
+                vec![Term::Integer(1), Expected::big(1u128 << 64)],
                 error_info(),
             ),
         ),

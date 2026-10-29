@@ -329,7 +329,7 @@ fn install_nothing(_process: &mut ProcessState, _build: fn() -> Term) {}
 /// queue_signal(&mut scheduler, ProcessId(0));
 /// ```
 fn queue_signal(scheduler: &mut Scheduler, id: ProcessId) {
-    let Some(process) = scheduler.processes.get_mut(&id) else {
+    let Some(process) = scheduler.processes.get_mut(id) else {
         return;
     };
     process.mailbox.push_signal(Signal::Exit {
@@ -459,18 +459,17 @@ fn allow_all() -> Vec<Capability> {
 /// ```
 fn scheduler_with(shape: &Shape) -> Scheduler {
     let mut scheduler = test_scheduler();
-    scheduler
-        .start(frame(), vec![], allow_all())
-        .expect("the root process starts");
+    scheduler.start(frame(), vec![], allow_all());
     let process = scheduler
         .processes
-        .get_mut(&ProcessId(0))
+        .get_mut(ProcessId(0))
         .expect("the root process is in the table");
     (shape.install)(process, shape.build);
     scheduler
 }
 
 /// What the release work list of one run held at a step boundary.
+#[derive(Clone, Copy)]
 struct Peak {
     /// The largest number of items that the list owned.
     items: usize,
@@ -679,9 +678,7 @@ fn exit_measurement(shape: &Shape) -> Measurement {
 fn shared_last_release_measurement(shape: &Shape) -> Measurement {
     let graph = (shape.build)();
     let mut scheduler = test_scheduler();
-    scheduler
-        .start(frame(), vec![graph.clone()], allow_all())
-        .expect("the root process starts");
+    scheduler.start(frame(), vec![graph.clone()], allow_all());
     assert_eq!(
         scheduler.schedule_next().expect("the step runs"),
         Turn::Run,

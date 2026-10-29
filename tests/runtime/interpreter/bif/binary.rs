@@ -5,6 +5,10 @@ use std::sync::Arc;
 use super::*;
 
 /// Return the bytes of a part and the array of its binary.
+#[expect(
+    clippy::rc_buffer,
+    reason = "`Binary` shares byte arrays as `Arc<Vec<u8>>` because `append_in_place` grows the vector through `Arc::get_mut`; an `Arc<[u8]>` cannot grow"
+)]
 fn bytes(term: &Term) -> (&[u8], &Arc<Vec<u8>>) {
     let Term::Binary(binary) = term else {
         panic!("not a binary: {term:?}");
