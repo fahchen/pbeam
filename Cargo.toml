@@ -63,6 +63,10 @@ name = "nif_bcrypt"
 path = "tests/feature/nif_bcrypt.rs"
 
 [[test]]
+name = "nif_exqlite"
+path = "tests/feature/nif_exqlite.rs"
+
+[[test]]
 name = "diagnostics_feature"
 path = "tests/feature/diagnostics.rs"
 
