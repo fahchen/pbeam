@@ -83,7 +83,8 @@ fn boots_init_with_a_fixed_boot_script_as_pinned_erts() {
     // exit of the boot process, and displays the registered name of `init`,
     // the steps, and the status `{started, started}` of the main loop of
     // `init` (init.erl:700-704). The names include `erts_code_purger`, which
-    // the emulator starts after `init` (erl_init.c:2550-2557). It then halts
+    // the emulator starts after `init` with high priority and the group leader
+    // of `init` (erl_init.c:402-418, 2550-2557). It then halts
     // with status 0.
     let reference = Command::new("erl")
         .args(["-noshell", "-boot", BOOT_FILE, "-pa", "fixtures/boot"])
@@ -95,7 +96,8 @@ fn boots_init_with_a_fixed_boot_script_as_pinned_erts() {
         recorder_linked_to_init,true,\
         steps,[{first,{starting,init_kernel_started}},{second,{starting,applications_loaded}}],\
         names,[{init,true},{erl_prim_loader,true},{init__boot__on_load_handler,true},\
-        {init_boot_probe_recorder,true},{erts_code_purger,true}],alive,true}\r\n";
+        {init_boot_probe_recorder,true},{erts_code_purger,true}],\
+        purger,[{priority,high},{group_leader,<0.0.0>}],alive,true}\r\n";
     assert_eq!(
         (
             String::from_utf8_lossy(&reference.stdout).as_ref(),

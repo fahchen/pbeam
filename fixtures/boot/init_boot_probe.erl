@@ -55,6 +55,8 @@ watch(Boot) ->
                                         init__boot__on_load_handler,
                                         init_boot_probe_recorder,
                                         erts_code_purger]],
+                    purger, [process_info(whereis(erts_code_purger), Item)
+                             || Item <- [priority, group_leader]],
                     alive, is_process_alive(Init)}),
     halt().
 

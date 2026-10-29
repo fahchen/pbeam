@@ -935,17 +935,18 @@ impl BeamProgram {
                 let module = scheduler.atoms.put("erl_init")?;
                 let function = scheduler.atoms.put("start")?;
                 let frame = initial_start(scheduler, &module, &function, arguments.len())?;
-                let id = scheduler.next_pid()?;
-                scheduler.mark_system(id);
-                scheduler.start_with_id(id, slot, frame, arguments.to_vec(), Vec::new())?;
+                let init = scheduler.next_pid()?;
+                scheduler.mark_system(init);
+                scheduler.start_with_id(init, slot, frame, arguments.to_vec(), Vec::new())?;
                 // ERTS then starts `erts_code_purger` as a system process
                 // with high priority (`erl_init.c:2550-2557`). `code_server`
                 // sends it each purge and the end of each `-on_load`
-                // function (`erts_code_purger.erl:112-118`, `158-164`).
+                // function (`erts_code_purger.erl:112-118`, `158-164`). Its
+                // parent is the first process (`erl_init.c:402-418`).
                 let module = scheduler.atoms.put("erts_code_purger")?;
                 let frame = initial_start(scheduler, &module, &function, 0)?;
                 let id = scheduler.next_pid()?;
-                scheduler.start_system(id, frame, Priority::High);
+                scheduler.start_system(id, init, frame, Priority::High);
             }
             None => {}
         }

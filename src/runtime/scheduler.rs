@@ -680,19 +680,31 @@ impl Scheduler {
 
     /// Create the system process `id` that starts at `start` with the
     /// priority `priority` and no arguments, as `erl_system_process_otp`
-    /// creates a system process of the boot (`erl_init.c:401-434`). The
+    /// creates a system process of the boot (`erl_init.c:401-434`): the
+    /// parent is `parent`, the group leader is the group leader of
+    /// `parent`, and the message queue is off heap (`SPO_OFF_HEAP_MSGQ`;
+    /// `erl_process.c:12474-12475`, `12759`). The
     /// process is not a root, and its exit stops the run, as for each
     /// system process.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.start_system(pid, frame, Priority::High);
+    /// scheduler.start_system(pid, init, frame, Priority::High);
     /// assert!(scheduler.is_system(pid));
     /// ```
-    pub(super) fn start_system(&mut self, id: ProcessId, start: Start, priority: Priority) {
+    pub(super) fn start_system(
+        &mut self,
+        id: ProcessId,
+        parent: ProcessId,
+        start: Start,
+        priority: Priority,
+    ) {
         let mut process = ProcessState::new(id, start, Vec::new());
         process.priority = priority;
+        process.parent = Some(parent);
+        process.group_leader = self.process(parent).map_or(parent, |p| p.group_leader);
+        process.off_heap_message_queue = true;
         self.mark_system(id);
         self.insert(process);
     }
