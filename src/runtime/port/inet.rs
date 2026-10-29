@@ -51,7 +51,14 @@ mod connect;
 mod datagram;
 mod stream;
 
-use std::{collections::VecDeque, ffi::c_int, io, os::fd::AsRawFd, time::Duration};
+use std::{
+    collections::VecDeque,
+    ffi::c_int,
+    io,
+    net::{Ipv4Addr, Ipv6Addr},
+    os::fd::AsRawFd,
+    time::Duration,
+};
 
 use nix::sys::socket::{getsockopt, setsockopt, sockopt};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
@@ -614,7 +621,7 @@ impl Inet {
     /// assert_eq!(port.address(&[9, 0]), Err(b"\0eafnosupport".to_vec()));
     /// ```
     fn address(&self, request: &[u8]) -> Result<SockAddr, Vec<u8>> {
-        use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
+        use std::net::{SocketAddrV4, SocketAddrV6};
         let (&tag, address) = request.split_first().expect("a request of 2 bytes");
         let address: SockAddr = match (tag, address) {
             (AF_INET, &[p1, p0, a, b, c, d, ..]) => {
@@ -676,6 +683,13 @@ impl Inet {
     /// `broadcast`, `sndbuf`, `recbuf`, `multicast_ttl`, and
     /// `multicast_loop` does not fail the request (inet_drv.c:7293-7360,
     /// 7571-7587, 7923-7942).
+    ///
+    /// `multicast_if`, `add_membership`, and `drop_membership` on a `local`
+    /// socket, and a membership whose family is not the family of the
+    /// socket, give `einval`. A membership takes 12 more bytes on IPv4 and
+    /// 20 more bytes on IPv6, and fewer bytes give a runtime error. A failed
+    /// `setsockopt` of these options does not fail the request
+    /// (inet_drv.c:7589-7802).
     fn set_options(
         &mut self,
         mut request: &[u8],
@@ -760,6 +774,61 @@ impl Inet {
                 13 => self.set_socket(libc::IP_MULTICAST_LOOP, false, |socket| {
                     socket.set_multicast_loop_v4(value != 0)
                 }),
+                11 => match self.family {
+                    AF_INET => self.set_socket(libc::IP_MULTICAST_IF, false, |socket| {
+                        socket.set_multicast_if_v4(&Ipv4Addr::from(value as u32))
+                    }),
+                    // ERTS gives the index in network byte order
+                    // (`sock_htonl`, inet_drv.c:7608).
+                    AF_INET6 => self.set_socket(libc::IPV6_MULTICAST_IF, false, |socket| {
+                        socket.set_multicast_if_v6((value as u32).to_be())
+                    }),
+                    _ => false,
+                },
+                14 | 15 => {
+                    let add = *option == 14;
+                    match (value, self.family) {
+                        (1, AF_INET) => {
+                            let Some((head, rest)) = request.split_first_chunk::<12>() else {
+                                return Err(self
+                                    .unsupported("option membership with", "fewer than 12 bytes"));
+                            };
+                            request = rest;
+                            let [i3, i2, i1, i0, g3, g2, g1, g0, a3, a2, a1, a0] = *head;
+                            let index = u32::from_be_bytes([i3, i2, i1, i0]);
+                            let group = Ipv4Addr::new(g3, g2, g1, g0);
+                            let interface = Ipv4Addr::new(a3, a2, a1, a0);
+                            let kind = if add {
+                                libc::IP_ADD_MEMBERSHIP
+                            } else {
+                                libc::IP_DROP_MEMBERSHIP
+                            };
+                            self.set_socket(kind, false, |socket| {
+                                membership_v4(socket, add, group, index, interface)
+                            })
+                        }
+                        (2, AF_INET6) => {
+                            let Some((head, _)) = request.split_first_chunk::<20>() else {
+                                return Err(self
+                                    .unsupported("option membership with", "fewer than 20 bytes"));
+                            };
+                            // The driver skips the options after it
+                            // (`len -= len`, inet_drv.c:7780).
+                            request = &[];
+                            let [i3, i2, i1, i0, ref group @ ..] = *head;
+                            let index = u32::from_be_bytes([i3, i2, i1, i0]);
+                            let group = Ipv6Addr::from(*group);
+                            self.set_socket(IPV6_MEMBERSHIP[usize::from(add)], false, |socket| {
+                                if add {
+                                    socket.join_multicast_v6(&group, index)
+                                } else {
+                                    socket.leave_multicast_v6(&group, index)
+                                }
+                            })
+                        }
+                        _ => false,
+                    }
+                }
                 0 => self.set_socket(libc::SO_REUSEADDR, false, |socket| {
                     socket.set_reuse_address(value != 0)
                 }),
@@ -920,6 +989,21 @@ impl Inet {
                 7 => size(Socket::recv_buffer_size),
                 12 => integer(Socket::multicast_ttl_v4),
                 13 => flag(Socket::multicast_loop_v4, 1),
+                // The driver writes the family after 4 bytes that it does
+                // not write, and the interface after the end of the reply
+                // (inet_drv.c:9497-9528). PBeam gives 0 for the 4 bytes.
+                11 => {
+                    if !matches!(self.family, AF_INET | AF_INET6) {
+                        return Ok(error_reply("einval"));
+                    }
+                    if reply.len() + 9 > MAX_OPT_BUFFER {
+                        return Ok(error_reply("einval"));
+                    }
+                    reply.push(option);
+                    reply.extend([0; 4]);
+                    reply.extend(i32::from(self.family).to_be_bytes());
+                    continue;
+                }
                 30 => self.has_stream_socket().then_some(self.send_timeout),
                 35 => self.has_stream_socket().then_some(self.send_timeout_close),
                 31 => self
@@ -1040,6 +1124,57 @@ fn linger_time(on: i32, seconds: u32) -> Result<Option<Duration>, BeamError> {
     (on != 0 || seconds == 0)
         .then_some(time)
         .ok_or_else(|| error(LINGER_TIME))
+}
+
+/// The socket constants of `add_membership` and `drop_membership` on an
+/// IPv6 socket, by `add` (`INET_ADD_MEMBERSHIP` and `INET_DROP_MEMBERSHIP`,
+/// inet_drv.c:1126-1137).
+#[cfg(target_os = "linux")]
+const IPV6_MEMBERSHIP: [c_int; 2] = [libc::IPV6_DROP_MEMBERSHIP, libc::IPV6_ADD_MEMBERSHIP];
+#[cfg(not(target_os = "linux"))]
+const IPV6_MEMBERSHIP: [c_int; 2] = [libc::IPV6_LEAVE_GROUP, libc::IPV6_JOIN_GROUP];
+
+/// Join (`add`) or leave the IPv4 group `group` with `ip_mreqn`, as
+/// `inet_set_opts` does on Linux (inet_drv.c:7696-7711). The kernel finds
+/// the device by the index `index` when it is not 0, else by the address
+/// `interface` (`ip_mc_find_dev`), so the call gives only one of them.
+#[cfg(target_os = "linux")]
+fn membership_v4(
+    socket: &Socket,
+    add: bool,
+    group: Ipv4Addr,
+    index: u32,
+    interface: Ipv4Addr,
+) -> io::Result<()> {
+    use socket2::InterfaceIndexOrAddress;
+    let interface = if index == 0 {
+        InterfaceIndexOrAddress::Address(interface)
+    } else {
+        InterfaceIndexOrAddress::Index(index)
+    };
+    if add {
+        socket.join_multicast_v4_n(&group, &interface)
+    } else {
+        socket.leave_multicast_v4_n(&group, &interface)
+    }
+}
+
+/// Join (`add`) or leave the IPv4 group `group` with `ip_mreq`, which has
+/// no index, as `inet_set_opts` does without `ip_mreqn`
+/// (inet_drv.c:7728-7742).
+#[cfg(not(target_os = "linux"))]
+fn membership_v4(
+    socket: &Socket,
+    add: bool,
+    group: Ipv4Addr,
+    _index: u32,
+    interface: Ipv4Addr,
+) -> io::Result<()> {
+    if add {
+        socket.join_multicast_v4(&group, &interface)
+    } else {
+        socket.leave_multicast_v4(&group, &interface)
+    }
 }
 
 /// Set an option with `set`, as `inet_setopt` does without `SO_PRIORITY`

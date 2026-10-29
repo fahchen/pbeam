@@ -1,5 +1,5 @@
 -module(udp_probe).
--export([active/0, active_options/0, connect/0, host_name/0, inet6/0, open/0, options/0, stream_buffer/0, passive/0, port_zero/0, reconnect/0, active_waiter/0, refused_active/0, refused_passive/0, truncate/0, unsupported/1]).
+-export([active/0, active_options/0, connect/0, multicast/0, multicast_if/0, host_name/0, inet6/0, open/0, options/0, stream_buffer/0, passive/0, port_zero/0, reconnect/0, active_waiter/0, refused_active/0, refused_passive/0, truncate/0, unsupported/1]).
 
 %% The requests of the udp_inet driver that inet_config:set_hostname/0
 %% sends through inet_udp:open(0, []), inet:gethostname/1, and
@@ -118,6 +118,12 @@ unsupported(ancillary) ->
 unsupported(short_count) ->
     {ok, S} = udp(),
     control(S, 7, [22, 0, 0, 0, 3]);
+unsupported(short_membership) ->
+    {ok, S} = udp(),
+    control(S, 7, [14, 0, 0, 0, 1, 0, 0, 0, 0, 239, 1, 2, 3]);
+unsupported(short_membership6) ->
+    {ok, S} = prim_inet:open(udp, inet6, dgram),
+    control(S, 7, [15, 0, 0, 0, 2, 0, 0, 0, 0, 16#ff, 16#15]);
 unsupported(disconnect) ->
     {ok, S} = udp(),
     control(S, 3, []);
@@ -357,3 +363,63 @@ stream_buffer() ->
     B = buffers(S, [{buffer, 100}, {recbuf, 200000}]),
     prim_inet:close(S),
     {A, B}.
+
+%% The multicast options (inet_drv.c:7589-7802, 9497-9528) and a send to
+%% a group that a socket joined on the loopback interface. A failed
+%% setsockopt of these options gives ok: the second add, the drop of a
+%% group that the socket left, and the add of an address that is not a
+%% group. An IPv6 membership skips the options after it, which
+%% prim_inet:setopts/2 gives before it in the list (it sends the options in
+%% the reverse order, prim_inet.erl:2398-2440). A membership
+%% with the other family, a domain that is not 1 or 2, and a local socket
+%% give einval. GETOPTS of multicast_if gives 4 bytes that the driver does
+%% not write, so the result gives only the form of the value, and the
+%% option takes 9 reply bytes at the reply limit of 64 KiB.
+multicast() ->
+    Group = {239, 1, 2, 3},
+    Lo = {127, 0, 0, 1},
+    {ok, R} = udp(),
+    {ok, {_, P}} = prim_inet:sockname(R),
+    {ok, S} = udp(),
+    {ok, {_, Sp}} = prim_inet:sockname(S),
+    Set = [prim_inet:setopts(R, [{add_membership, {Group, Lo}}]),
+           prim_inet:setopts(S, [{multicast_if, Lo}])],
+    Sent = prim_inet:sendto(S, Group, P, <<"m">>),
+    Got = sender(prim_inet:recvfrom(R, 0, 1000), Sp),
+    Drop = prim_inet:setopts(R, [{drop_membership, {Group, Lo}}]),
+    ok = prim_inet:sendto(S, Group, P, <<"n">>),
+    Gone = prim_inet:recvfrom(R, 0, 200),
+    Ignored = prim_inet:setopts(R, [{drop_membership, {Group, any}},
+                                    {add_membership, {{10, 0, 0, 1}, Lo}},
+                                    {add_membership, {Group, any, 1}},
+                                    {add_membership, {Group, any, 1}},
+                                    {drop_membership, {Group, Lo, 1}},
+                                    {multicast_if, 0}, {buffer, 100}]),
+    {ok, [{multicast_if, {_, _, _, _}}, {buffer, Buffer}]} =
+        prim_inet:getopts(R, [multicast_if, buffer]),
+    G6 = {16#ff15, 0, 0, 0, 0, 0, 0, 16#1234},
+    {ok, S6} = prim_inet:open(udp, inet6, dgram),
+    Six = [prim_inet:setopts(S6, [{multicast_if, 1}]),
+           prim_inet:setopts(S6, [{add_membership, {Group, Lo}}]),
+           prim_inet:setopts(S6, [{buffer, 100}, {add_membership, {G6, 0}}]),
+           prim_inet:setopts(S6, [{buffer, 200}, {drop_membership, {G6, 0}}]),
+           prim_inet:getopts(S6, [buffer]),
+           prim_inet:setopts(R, [{add_membership, {G6, 0}}]),
+           control(R, 7, [14, 0, 0, 0, 3, 0, 0, 0, 0])],
+    {ok, [{multicast_if, Index}]} = prim_inet:getopts(S6, [multicast_if]),
+    {ok, L} = prim_inet:open(udp, local, dgram),
+    Local = [prim_inet:setopts(L, [{multicast_if, Lo}]),
+             prim_inet:setopts(L, [{add_membership, {Group, Lo}}]),
+             prim_inet:getopts(L, [multicast_if])],
+    Limit = [case control(R, 8, lists:duplicate(N, 24) ++ [11]) of
+                 [0 | Error] -> Error;
+                 Reply -> length(Reply)
+             end || N <- [13106, 13105]],
+    {Set, Sent, Got, Drop, Gone, Ignored, Buffer, Six, is_integer(Index), Local, Limit}.
+
+%% The GETOPTS reply of multicast_if on an IPv4 and an IPv6 socket, which
+%% gives 4 bytes that the driver does not write (inet_drv.c:9497-9528).
+multicast_if() ->
+    {ok, S} = udp(),
+    {ok, S6} = prim_inet:open(udp, inet6, dgram),
+    {prim_inet:getopts(S, [multicast_if]), prim_inet:getopts(S6, [multicast_if])}.
