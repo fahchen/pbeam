@@ -4,7 +4,10 @@
 use std::{
     ffi::{OsStr, OsString},
     fs,
-    os::unix::ffi::{OsStrExt, OsStringExt},
+    os::unix::{
+        ffi::{OsStrExt, OsStringExt},
+        process::CommandExt,
+    },
     path::PathBuf,
     process::ExitCode,
 };
@@ -12,7 +15,7 @@ use std::{
 use clap::Parser;
 use pbeam_runtime::{
     BeamError, BeamProgram, HostTerm, RootAuthority, Schedulers, Term, add_erlexec_path,
-    install_start_dispositions,
+    erlexec_command, install_start_dispositions,
 };
 
 #[derive(Parser)]
@@ -126,18 +129,16 @@ struct ErlCli {
 
 /// The options that `erlexec` reads before it starts the emulator, so that
 /// they change the start or the arguments of the emulator
-/// (`erts/etc/common/erlexec.c:661-861`, `2122-2140`). PBeam has no
-/// `erlexec` for them, and `-name` and `-sname` start the distribution,
-/// which PBeam does not have, as `-proto_dist` and `-start_epmd` configure
-/// it. `-emu_type` and `-emu_flavor` select the emulator, the `-smp`
-/// options are checked by `erlexec` (`-smp disable` and `-smpdisable` stop
-/// it), `-no_epmd` needs `-proto_dist` (`erlexec.c:499-534`, `1118-1123`),
-/// and `-S` makes `erlexec` rewrite the later arguments and add `-noshell`
+/// (`erts/etc/common/erlexec.c:661-861`, `2122-2140`), and that PBeam has
+/// no `erlexec` part for. `-emu_type` and `-emu_flavor` select the
+/// emulator, the `-smp` options are checked by `erlexec` (`-smp disable`
+/// and `-smpdisable` stop it) (`erlexec.c:499-534`), and `-S` makes
+/// `erlexec` rewrite the later arguments and add `-noshell`
 /// (`erlexec.c:1084-1090`, `2222-2238`). `pbeam erl` rejects each of them
-/// before `-extra`. Each `erlexec` option with an operand is in the list,
-/// so the first `-extra` is the one that `erlexec` reads as an option
-/// (`erlexec.c:708-712`).
-const ERLEXEC_OPTIONS: [&str; 27] = [
+/// before `-extra`. [`erlexec_options`] reads the distribution options
+/// `-name`, `-sname`, `-proto_dist`, `-start_epmd`, `-no_epmd`, and
+/// `-epmd` as `erlexec` does.
+const ERLEXEC_OPTIONS: [&str; 21] = [
     "-S",
     "-args_file",
     "-compile",
@@ -150,20 +151,14 @@ const ERLEXEC_OPTIONS: [&str; 27] = [
     "-emu_qouted_cmd_exit",
     "-emu_type",
     "-env",
-    "-epmd",
     "-keep_window",
     "-make",
     "-man",
-    "-name",
-    "-no_epmd",
     "-noinput",
-    "-proto_dist",
     "-smp",
     "-smpauto",
     "-smpdisable",
     "-smpenable",
-    "-sname",
-    "-start_epmd",
     "-version",
 ];
 
@@ -373,9 +368,13 @@ fn run_end(result: Result<HostTerm, BeamError>) -> Result<(), Exit> {
 /// with the arguments that `erlexec` gives the emulator for these `erl`
 /// arguments: `-root Root -bindir Bindir -progname erl -- -home Home --`
 /// and then the `erl` arguments with the flags of the flag variables (see
-/// [`erlexec_arguments`]), without the `+S` flags
+/// [`erlexec_arguments`]), without the `+S` flags and `-epmd`
 /// (`erts/etc/common/erlexec.c:625-640`, `1151-1161`). Without the
-/// variable `HOME`, the arguments have no `-home`, as in `erlexec`.
+/// variable `HOME`, the arguments have no `-home`, as in `erlexec`. The
+/// variable `ERL_EPMD_PORT` adds `-epmd_port Port` after `-home`, also
+/// with an empty value (`erlexec.c:633`, `1754-1760`). Before the boot,
+/// [`start_epmd`] starts epmd for `-name` or `-sname`, unless the options
+/// turn it off (see [`erlexec_options`]).
 ///
 /// # Examples
 ///
@@ -388,28 +387,20 @@ fn run_end(result: Result<HostTerm, BeamError>) -> Result<(), Exit> {
 ///
 /// An `erl` option of [`ERLEXEC_OPTIONS`] or an emulator flag (an
 /// argument that starts with `+`) before `-extra`, also one that a flag
-/// variable gives (see [`erlexec_arguments`]), the variable
-/// `ERL_EPMD_PORT`, the errors of
+/// variable gives (see [`erlexec_arguments`]), the errors of
+/// [`erlexec_options`] and [`start_epmd`], the errors of
 /// [`BeamProgram::load_preloaded`], and the errors of
 /// [`BeamProgram::boot`]. A halt of the run gives [`Exit::Halt`].
 fn boot_erl(arguments: &ErlCli) -> Result<(), Exit> {
-    // `erlexec` gives `-epmd_port` for each value of `ERL_EPMD_PORT`, also
-    // an empty one (`erlexec.c:633`, `1754-1760`), which only the
-    // distribution reads.
-    if std::env::var_os("ERL_EPMD_PORT").is_some() {
-        return Err(
-            "the environment variable ERL_EPMD_PORT of erl is not supported: \
-             see \"Release boot\" in docs/erts-differences.md"
-                .to_owned()
-                .into(),
-        );
-    }
     let erl_arguments = erlexec_arguments(&arguments.arguments);
-    let (schedulers, erl_arguments) = scheduler_flags(&erl_arguments)?;
+    let options = erlexec_options(&erl_arguments)?;
     install_start_dispositions();
     // `erlexec` puts `bindir` and `rootdir/bin` first in `PATH` before it
     // starts the emulator (`erlexec.c:556-620`).
     add_erlexec_path(arguments.bindir.as_bytes(), arguments.root.as_bytes());
+    if options.start_epmd {
+        start_epmd(options.epmd_program)?;
+    }
     let program = BeamProgram::load_preloaded(&arguments.preloaded)
         .map_err(|load_error| format!("cannot load the preloaded modules: {load_error}"))?;
     let home = std::env::var_os("HOME");
@@ -425,9 +416,13 @@ fn boot_erl(arguments: &ErlCli) -> Result<(), Exit> {
     if let Some(home) = &home {
         boot.extend([&b"-home"[..], home.as_bytes()]);
     }
+    let epmd_port = std::env::var_os("ERL_EPMD_PORT");
+    if let Some(port) = &epmd_port {
+        boot.extend([&b"-epmd_port"[..], port.as_bytes()]);
+    }
     boot.push(b"--");
-    boot.extend(erl_arguments);
-    run_end(Err(program.boot(&boot, schedulers)))
+    boot.extend(options.arguments);
+    run_end(Err(program.boot(&boot, options.schedulers)))
 }
 
 /// Return the `erl` arguments of `command_line` with the flags of the
@@ -440,7 +435,7 @@ fn boot_erl(arguments: &ErlCli) -> Result<(), Exit> {
 /// first `-extra` go to the end after one `-extra`, and `--` takes the place
 /// of the rest of the part (`erlexec.c:2216-2221`, `2255-2260`). The
 /// function does not read `-args_file` and `-S` (`erlexec.c:2210-2213`,
-/// `2222-2239`): they stay in their place, and [`scheduler_flags`] rejects
+/// `2222-2239`): they stay in their place, and [`erlexec_options`] rejects
 /// them before `-extra`.
 ///
 /// # Examples
@@ -516,28 +511,57 @@ fn erlexec_words(value: &[u8]) -> Vec<OsString> {
     }
 }
 
-/// Take the `+S` flags out of the `erl` arguments `arguments` before
-/// `-extra`, as `erlexec` gives them to the emulator and not to `init`
-/// (`erlexec.c:943-966`, `1097-1100`). Return the scheduler counts that the
-/// emulator sets for them (see [`Schedulers::apply_flag`]) and the other
-/// arguments. The value of a flag is the rest of `+S<Value>`, or the next
-/// argument of `+S`.
+/// The `erl` arguments after the options that `erlexec` reads (see
+/// [`erlexec_options`]).
+struct ErlexecOptions<'a> {
+    /// The scheduler counts of the `+S` flags.
+    schedulers: Schedulers,
+    /// The arguments that `init` gets.
+    arguments: Vec<&'a [u8]>,
+    /// Whether the boot starts epmd (see [`start_epmd`]).
+    start_epmd: bool,
+    /// The command of `-epmd Program`.
+    epmd_program: Option<&'a [u8]>,
+}
+
+/// Read the options of `erlexec` in the `erl` arguments `arguments` before
+/// `-extra` (`erlexec.c:637-640`). Take the `+S` flags out, as `erlexec`
+/// gives them to the emulator and not to `init` (`erlexec.c:943-966`,
+/// `1097-1100`), and return the scheduler counts that the emulator sets for
+/// them (see [`Schedulers::apply_flag`]). The value of a flag is the rest
+/// of `+S<Value>`, or the next argument of `+S`. Read the distribution
+/// options as `erlexec` does: `-name Name`, `-sname Name`, `-proto_dist
+/// Proto`, and `-start_epmd true|false` stay in the arguments, `-no_epmd`
+/// stays and turns the epmd start off, and `-epmd Program` leaves the
+/// arguments and gives the command of the epmd start
+/// (`erlexec.c:728-731`, `774-805`, `812-851`). With `-name` or `-sname`
+/// and the epmd start on, the result asks for the start of epmd
+/// (`erlexec.c:1131-1132`).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let (schedulers, rest) = scheduler_flags(&["+S".into(), "4:2".into(), "-noshell".into()])?;
-/// assert_eq!((schedulers.total(), schedulers.online(), rest), (4, 2, vec![&b"-noshell"[..]]));
+/// let options = erlexec_options(&["+S".into(), "4:2".into(), "-sname".into(), "a".into()])?;
+/// assert_eq!((options.schedulers.total(), options.arguments, options.start_epmd), (4, vec![&b"-sname"[..], b"a"], true));
 /// ```
 ///
 /// # Errors
 ///
 /// An `erl` option of [`ERLEXEC_OPTIONS`], an emulator flag (an argument
 /// that starts with `+`) other than `+S`, `+S` without a value, and the
-/// errors of [`Schedulers::apply_flag`].
-fn scheduler_flags(arguments: &[OsString]) -> Result<(Schedulers, Vec<&[u8]>), Exit> {
+/// errors of [`Schedulers::apply_flag`]. A distribution option without its
+/// value (at the end or before `--`), a value of `-start_epmd` other than
+/// `true` and `false`, and `-no_epmd` without `-proto_dist` give the error
+/// text of `erlexec` without its usage text (`erlexec.c:412-418`,
+/// `838-846`, `1118-1123`, `1303-1308`).
+fn erlexec_options(arguments: &[OsString]) -> Result<ErlexecOptions<'_>, Exit> {
     let mut schedulers = Schedulers::host();
     let mut rest = Vec::with_capacity(arguments.len());
+    let (mut distributed, mut no_epmd, mut proto_dist, mut start) = (false, false, false, true);
+    let mut epmd_program = None;
+    // The emulator reads the `+S` flags after `erlexec` has read its
+    // options, so an `erlexec` error comes first.
+    let mut scheduler_values = Vec::new();
     let mut options = arguments.iter().map(|argument| argument.as_bytes());
     while let Some(option) = options.next() {
         if option == b"-extra" {
@@ -545,13 +569,53 @@ fn scheduler_flags(arguments: &[OsString]) -> Result<(Schedulers, Vec<&[u8]>), E
             rest.extend(options);
             break;
         }
+        if matches!(
+            option,
+            b"-name" | b"-sname" | b"-proto_dist" | b"-start_epmd" | b"-epmd"
+        ) {
+            let value = options
+                .next()
+                .filter(|value| *value != b"--")
+                .ok_or_else(|| {
+                    format!(
+                        "Missing argument(s) for '{}'.",
+                        String::from_utf8_lossy(option)
+                    )
+                })?;
+            match option {
+                b"-epmd" => {
+                    epmd_program = Some(value);
+                    continue;
+                }
+                b"-start_epmd" => {
+                    start = match value {
+                        b"true" => true,
+                        b"false" => false,
+                        _ => {
+                            return Err("Expected boolean argument for '-start_epmd'."
+                                .to_owned()
+                                .into());
+                        }
+                    };
+                }
+                b"-proto_dist" => proto_dist = true,
+                _ => distributed = true,
+            }
+            rest.extend([option, value]);
+            continue;
+        }
+        if option == b"-no_epmd" {
+            (no_epmd, start) = (true, false);
+            rest.push(option);
+            continue;
+        }
         let value = match option.strip_prefix(b"+S") {
             Some(b"") => options.next().filter(|value| *value != b"--"),
             Some(value) if !value.starts_with(b"P") && !value.starts_with(b"D") => Some(value),
             _ => None,
         };
         if let Some(value) = value {
-            schedulers.apply_flag(value)?;
+            scheduler_values.push(value);
         } else if option.starts_with(b"+")
             || ERLEXEC_OPTIONS.iter().any(|name| name.as_bytes() == option)
         {
@@ -565,7 +629,68 @@ fn scheduler_flags(arguments: &[OsString]) -> Result<(Schedulers, Vec<&[u8]>), E
             rest.push(option);
         }
     }
-    Ok((schedulers, rest))
+    if no_epmd && !proto_dist {
+        return Err("Missing -proto_dist option, expected when using -no_epmd."
+            .to_owned()
+            .into());
+    }
+    for value in scheduler_values {
+        schedulers.apply_flag(value)?;
+    }
+    Ok(ErlexecOptions {
+        schedulers,
+        arguments: rest,
+        start_epmd: distributed && start,
+        epmd_program,
+    })
+}
+
+/// Start epmd before the boot of a node with `-name` or `-sname`, as
+/// `start_epmd_daemon` of `erlexec` does with `system(3)`
+/// (`erlexec.c:1327-1372`): run the command `program` of `-epmd` with
+/// `sh -c` of `/bin/sh`, or, without `-epmd`, run `epmd -daemon`. `erlexec` runs
+/// `$BINDIR/epmd`; PBeam finds `epmd` in the `PATH` of the environment copy
+/// of the run, which has the bin directory first (see
+/// [`add_erlexec_path`]), so a release bundle without `epmd` uses the
+/// `epmd` of the host. The command gets the environment copy of the run,
+/// as `erlexec` sets `PATH` in its own environment. As in `erlexec`, the
+/// exit status of the command does not stop the boot.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// start_epmd(None)?; // runs `epmd -daemon`
+/// start_epmd(Some(b"true"))?; // runs `/bin/sh -c true`
+/// ```
+///
+/// # Errors
+///
+/// A command that does not start, such as `epmd -daemon` without an `epmd`
+/// executable in `PATH`. `erlexec` stops only when `system(3)` cannot fork
+/// (`erlexec.c:1368-1371`), and its shell writes an error for a missing
+/// `$BINDIR/epmd`.
+fn start_epmd(program: Option<&[u8]>) -> Result<(), Exit> {
+    // `system(3)` runs `/bin/sh` with `sh` as its first argument.
+    let (path, command): (&[u8], Vec<&[u8]>) = match program {
+        Some(program) => (b"/bin/sh", vec![b"sh", b"-c", program]),
+        None => (b"epmd", vec![b"epmd", b"-daemon"]),
+    };
+    erlexec_command(OsStr::from_bytes(path))
+        .arg0(OsStr::from_bytes(command[0]))
+        .args(
+            command[1..]
+                .iter()
+                .map(|argument| OsStr::from_bytes(argument)),
+        )
+        .status()
+        .map_err(|start_error| {
+            format!(
+                "cannot start {}: {start_error}: see \"Distribution\" in \
+                 docs/erts-differences.md",
+                String::from_utf8_lossy(&command.join(&b' '))
+            )
+        })?;
+    Ok(())
 }
 
 /// The version of the pinned `erts` (erts/vsn.mk:23), which the `erl`

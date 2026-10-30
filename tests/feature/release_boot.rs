@@ -7,8 +7,9 @@
 )]
 
 use std::{
-    os::unix::process::ExitStatusExt,
-    path::PathBuf,
+    fs,
+    os::unix::{fs::PermissionsExt, process::ExitStatusExt},
+    path::{Path, PathBuf},
     process::{Command, Output, Stdio},
 };
 
@@ -92,10 +93,24 @@ fn isolate(command: &mut Command) -> &mut Command {
 /// directory of the pinned install, and the `erl` arguments `arguments`.
 fn pbeam_erl(arguments: &[&str], environment: &[(&str, &str)]) -> Output {
     let (root, bindir) = emulator_flags();
+    pbeam_erl_in(&root, Path::new(&bindir), arguments, environment)
+}
+
+/// Run `pbeam erl` with the root `root`, the bin directory `bindir`, the
+/// preloaded directory of the pinned install, and the `erl` arguments
+/// `arguments`.
+fn pbeam_erl_in(
+    root: &str,
+    bindir: &Path,
+    arguments: &[&str],
+    environment: &[(&str, &str)],
+) -> Output {
     let preloaded = preloaded_directory();
     let mut command = Command::new(env!("CARGO_BIN_EXE_pbeam"));
     command
-        .args(["erl", "--root", &root, "--bindir", &bindir, "--preloaded"])
+        .args(["erl", "--root", root, "--bindir"])
+        .arg(bindir)
+        .arg("--preloaded")
         .arg(preloaded)
         .arg("--")
         .args(arguments);
@@ -214,10 +229,9 @@ type Rejected = (
 #[test]
 fn rejects_the_options_and_variables_of_erlexec() {
     // `erlexec` reads these options before it starts the emulator
-    // (erlexec.c:661-861, 869-964, 2122-2140), and `ERL_EPMD_PORT`.
-    // `pbeam erl` has no `erlexec` part for them, and no distribution for
-    // `-sname` and `ERL_EPMD_PORT`.
-    let cases: [Rejected; 10] = [
+    // (erlexec.c:661-861, 869-964, 2122-2140). `pbeam erl` has no
+    // `erlexec` part for them.
+    let cases: [Rejected; 7] = [
         (
             &["-S", "release_boot_probe", "main", "--", "x"],
             &[],
@@ -234,21 +248,11 @@ fn rejects_the_options_and_variables_of_erlexec() {
             "the erl option -smp is not supported",
         ),
         (
-            &["-sname", "node", "-extra", "-sname"],
-            &[],
-            "the erl option -sname is not supported",
-        ),
-        (
             &["-args_file", "vm.args"],
             &[],
             "the erl option -args_file is not supported",
         ),
         (&["+SP", "50"], &[], "the erl option +SP is not supported"),
-        (
-            &["-proto_dist", "-extra", "-sname", "node"],
-            &[],
-            "the erl option -proto_dist is not supported",
-        ),
         // A flag of a flag variable gives the error of the same flag on
         // the command line.
         (
@@ -260,11 +264,6 @@ fn rejects_the_options_and_variables_of_erlexec() {
             &["-noshell", "-extra", "plain"],
             &[("ERL_ZFLAGS", "+SP 50")],
             "the erl option +SP is not supported",
-        ),
-        (
-            &["-noshell"],
-            &[("ERL_EPMD_PORT", "")],
-            "the environment variable ERL_EPMD_PORT of erl is not supported",
         ),
     ];
     for (arguments, environment, message) in cases {
@@ -280,6 +279,232 @@ fn rejects_the_options_and_variables_of_erlexec() {
             ),
             "{arguments:?}"
         );
+    }
+}
+
+/// The distribution options of `erl`. `-kernel start_distribution false`
+/// keeps the kernel from the start of `net_kernel`
+/// (kernel.erl:206-208), and `-start_epmd false` keeps `erlexec` from the
+/// start of epmd. `-epmd` leaves the arguments of `init`.
+const DISTRIBUTION_ARGUMENTS: [&str; 33] = [
+    "-noshell",
+    "-sname",
+    "a",
+    "-name",
+    "b@host",
+    "-setcookie",
+    "c",
+    "-hidden",
+    "-connect_all",
+    "false",
+    "-proto_dist",
+    "inet_tcp",
+    "-no_epmd",
+    "-epmd_module",
+    "m",
+    "-epmd",
+    "unused",
+    "-start_epmd",
+    "false",
+    "-dist_listen",
+    "false",
+    "-kernel",
+    "start_distribution",
+    "false",
+    "-kernel",
+    "inet_dist_listen_min",
+    "9100",
+    "-kernel",
+    "inet_dist_listen_max",
+    "9200",
+    "-eval",
+    "io:format(\"~p~n\", [init:get_arguments()]), halt().",
+    "-extra",
+];
+
+/// Return the standard output, the standard error, and the exit status of
+/// `output`.
+fn result(output: &Output) -> (String, String, Option<i32>) {
+    (
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+        output.status.code(),
+    )
+}
+
+#[test]
+fn gives_the_distribution_options_to_init_as_pinned_erts() {
+    // `erlexec` gives `-name`, `-sname`, `-proto_dist`, `-no_epmd`, and
+    // `-start_epmd` to `init`, keeps `-epmd` for itself
+    // (erlexec.c:728-731, 774-805, 812-851), and gives `-epmd_port` of
+    // `ERL_EPMD_PORT` after `-home` (erlexec.c:625-635, 1754-1760). The
+    // other options go to `init` unchanged.
+    let environment = [("ERL_EPMD_PORT", "4370")];
+    let mut reference = Command::new("erl");
+    reference.args(DISTRIBUTION_ARGUMENTS);
+    let reference = isolate(&mut reference).envs(environment).output().unwrap();
+    let (stdout, stderr, status) = result(&reference);
+    assert_eq!((stderr.as_str(), status), ("", Some(0)), "ERTS: {stdout}");
+    assert!(
+        stdout.contains(
+            " {home,[\"fixtures/boot/no_home\"]},\n {epmd_port,[\"4370\"]},\n {noshell,[]},\n \
+             {sname,[\"a\"]},\n {name,[\"b@host\"]},\n {setcookie,[\"c\"]},\n {hidden,[]},\n \
+             {connect_all,[\"false\"]},\n {proto_dist,[\"inet_tcp\"]},\n {no_epmd,[]},\n \
+             {epmd_module,[\"m\"]},\n {start_epmd,[\"false\"]},\n"
+        ),
+        "ERTS: {stdout}"
+    );
+    assert_eq!(
+        result(&pbeam_erl(&DISTRIBUTION_ARGUMENTS, &environment)),
+        (stdout, stderr, status),
+        "PBeam"
+    );
+}
+
+/// Return a new empty directory of the test temporary directory.
+fn empty_directory(name: &str) -> PathBuf {
+    let directory = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("release-boot-{name}"));
+    let _ = fs::remove_dir_all(&directory);
+    fs::create_dir_all(&directory).unwrap();
+    directory
+}
+
+#[test]
+fn starts_the_epmd_program_as_pinned_erts() {
+    // With `-sname` and without `-start_epmd false`, `erlexec` runs the
+    // command of `-epmd` with `system(3)` before the emulator starts
+    // (erlexec.c:1131-1132, 1327-1372).
+    let directory = empty_directory("epmd-program");
+    let mark = directory.join("started");
+    let program = format!("printf %s \"$0\" > {}", mark.display());
+    let arguments = [
+        "-noshell",
+        "-sname",
+        "a",
+        "-epmd",
+        &program,
+        "-kernel",
+        "start_distribution",
+        "false",
+        "-eval",
+        "halt().",
+    ];
+    let mut reference = Command::new("erl");
+    reference.args(arguments);
+    let reference = isolate(&mut reference).output().unwrap();
+    assert_eq!(result(&reference), (String::new(), String::new(), Some(0)));
+    assert_eq!(fs::read_to_string(&mark).unwrap(), "sh", "ERTS");
+    fs::remove_file(&mark).unwrap();
+    assert_eq!(
+        result(&pbeam_erl(&arguments, &[])),
+        (String::new(), String::new(), Some(0)),
+        "PBeam"
+    );
+    assert_eq!(fs::read_to_string(&mark).unwrap(), "sh", "PBeam");
+}
+
+#[test]
+fn starts_epmd_of_the_path_for_a_distributed_node() {
+    // `erlexec` runs `$BINDIR/epmd -daemon` (erlexec.c:1336-1343). `pbeam
+    // erl` runs `epmd -daemon` of `PATH`, which has the bin directory
+    // first (erlexec.c:556-620). A fake `epmd` in the bin directory writes
+    // its arguments. `-start_epmd false` and `-no_epmd` turn the start off
+    // (erlexec.c:791-794, 835-846).
+    let (root, _) = emulator_flags();
+    let bindir = empty_directory("epmd-bindir");
+    let mark = bindir.join("arguments");
+    let epmd = bindir.join("epmd");
+    fs::write(
+        &epmd,
+        format!("#!/bin/sh\nprintf %s \"$*\" > {}\n", mark.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&epmd, fs::Permissions::from_mode(0o755)).unwrap();
+    let start = |options: &[&str]| {
+        let mut arguments = vec!["-noshell"];
+        arguments.extend(options);
+        arguments.extend(["-kernel", "start_distribution", "false", "-eval", "halt()."]);
+        let output = pbeam_erl_in(&root, &bindir, &arguments, &[]);
+        assert_eq!(result(&output), (String::new(), String::new(), Some(0)));
+        fs::read_to_string(&mark).ok()
+    };
+    assert_eq!(start(&["-name", "a@host"]).as_deref(), Some("-daemon"));
+    fs::remove_file(&mark).unwrap();
+    assert_eq!(start(&["-sname", "a", "-start_epmd", "false"]), None);
+    assert_eq!(
+        start(&["-sname", "a", "-no_epmd", "-proto_dist", "inet_tcp"]),
+        None
+    );
+    assert_eq!(start(&["-start_epmd", "true"]), None);
+}
+
+#[test]
+fn stops_without_an_epmd_executable() {
+    // PBeam needs `epmd` in `PATH` for `-sname` (row "Distribution" of
+    // docs/erts-differences.md). The error comes before the boot.
+    let output = pbeam_erl_in(
+        "/nonexistent",
+        Path::new("/nonexistent/bin"),
+        &["-sname", "a"],
+        &[("PATH", "/nonexistent")],
+    );
+    assert_eq!(
+        result(&output),
+        (
+            String::new(),
+            "pbeam: cannot start epmd -daemon: No such file or directory (os error 2): see \
+             \"Distribution\" in docs/erts-differences.md\n"
+                .to_owned(),
+            Some(1)
+        )
+    );
+}
+
+#[test]
+fn rejects_a_bad_distribution_option_as_pinned_erts() {
+    // erlexec.c:412-418 and 1303-1308 write `Missing argument(s) for
+    // '<Option>'.` and the usage text, erlexec.c:838-846 the error of
+    // `-start_epmd`, and erlexec.c:1118-1123 the error of `-no_epmd`
+    // without `-proto_dist`, and exit with status 1.
+    let cases: [(&[&str], &str); 9] = [
+        (&["-sname"], "Missing argument(s) for '-sname'."),
+        // `erlexec` reads its options before the emulator reads `+S`.
+        (
+            &["+S", "9999", "-sname"],
+            "Missing argument(s) for '-sname'.",
+        ),
+        (
+            &["+S", "9999", "-no_epmd"],
+            "Missing -proto_dist option, expected when using -no_epmd.",
+        ),
+        (&["-name", "--", "a"], "Missing argument(s) for '-name'."),
+        (&["-proto_dist"], "Missing argument(s) for '-proto_dist'."),
+        (&["-epmd"], "Missing argument(s) for '-epmd'."),
+        (&["-start_epmd"], "Missing argument(s) for '-start_epmd'."),
+        (
+            &["-start_epmd", "yes"],
+            "Expected boolean argument for '-start_epmd'.",
+        ),
+        (
+            &["-no_epmd", "-eval", "halt()."],
+            "Missing -proto_dist option, expected when using -no_epmd.",
+        ),
+    ];
+    for (arguments, expected) in cases {
+        let mut reference = Command::new("erl");
+        reference.args(arguments);
+        let reference = isolate(&mut reference).output().unwrap();
+        for output in [&reference, &pbeam_erl(arguments, &[])] {
+            assert_eq!(output.status.code(), Some(1), "{output:?}");
+            // PBeam writes its `pbeam: ` prefix and no usage text, and
+            // ERTS writes `erlexec: ` before the error of `-no_epmd`.
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let first = stderr.lines().next().map(|line| {
+                line.trim_start_matches("pbeam: ")
+                    .trim_start_matches("erlexec: ")
+            });
+            assert_eq!(first, Some(expected), "{arguments:?}: {output:?}");
+        }
     }
 }
 
