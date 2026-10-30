@@ -448,7 +448,7 @@ fn decodes_each_identifier_tag_and_checks_the_node() {
     other_pid.extend(with_words(&[], &[5, 0, 1]));
     assert!(matches!(
         decode_with(&atoms, &other_pid, AtomPolicy::Create),
-        Err(DecodeError::Unsupported(_))
+        Ok(Term::External(_))
     ));
 }
 
@@ -456,21 +456,21 @@ fn decodes_each_identifier_tag_and_checks_the_node() {
 fn decodes_the_identifier_tags_of_another_node() {
     let atoms = AtomTable::new();
     // A port and a reference of another node, and an old reference of
-    // another node, give the runtime error of the missing term.
+    // another node, give the identifiers of another node.
     let foo = vec![119, 3, 102, 111, 111];
     let mut other_port = vec![120];
     other_port.extend(foo.clone());
     other_port.extend(with_words(&[], &[0, 5, 1]));
     assert!(matches!(
         decode_with(&atoms, &other_port, AtomPolicy::Create),
-        Err(DecodeError::Unsupported(_))
+        Ok(Term::External(_))
     ));
     let mut other_ref = vec![90, 0, 3];
     other_ref.extend(foo.clone());
     other_ref.extend(with_words(&[], &[1, 5, 1, 0]));
     assert!(matches!(
         decode_with(&atoms, &other_ref, AtomPolicy::Create),
-        Err(DecodeError::Unsupported(_))
+        Ok(Term::External(_))
     ));
     let mut other_old_ref = vec![101];
     other_old_ref.extend(foo);
@@ -478,7 +478,7 @@ fn decodes_the_identifier_tags_of_another_node() {
     other_old_ref.push(0);
     assert!(matches!(
         decode_with(&atoms, &other_old_ref, AtomPolicy::Create),
-        Err(DecodeError::Unsupported(_))
+        Ok(Term::External(_))
     ));
     // An old reference whose number is 2^18 or more raises badarg.
     let mut big_old_ref = vec![101];
@@ -497,7 +497,7 @@ fn decodes_the_identifier_tags_of_another_node() {
         tagged.extend(with_words(&[], &[5, 0, 0]));
         assert!(matches!(
             decode_with(&atoms, &tagged, AtomPolicy::Create),
-            Err(DecodeError::Unsupported(_))
+            Ok(Term::External(_))
         ));
     }
 }

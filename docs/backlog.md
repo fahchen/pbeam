@@ -518,11 +518,10 @@ The owner opened [m13] Foundation seams ([#908](https://github.com/fahchen/pbeam
 
 ### Support Erlang distribution
 
-- **Reason:** owner decision of 2026-10-22: PBeam will support Erlang distribution later.
-- **Evidence:** ERTS connects nodes through the distribution layer (`erts/emulator/beam/dist.c`, `dist.h`) and the `erl_dist` protocol, which `net_kernel` and the distribution carriers drive. PBeam has no distribution: `erlang:setnode/2` and the `erlang:dist_ctrl_*` BIFs are `unsupported` BIF table entries (`src/runtime/interpreter/bif/table.rs:141-146`, `302`), and `erlang:node/1` returns `nonode@nohost` (row "Node of a term" of `docs/erts-differences.md`).
-- **Order:** after M21 (entry "M21: Accuracy and performance").
-- **Trigger:** the owner opens the milestone.
-- **Source:** owner decision of 2026-10-22 (Suikou review 01a160b6).
+- **Now:** milestone [m24] ([#1390](https://github.com/fahchen/pbeam/issues/1390)) adds Erlang distribution. Row "Distribution" of `docs/erts-differences.md` lists each distribution feature that PBeam does not have yet.
+- **Left out of M24:** capability security (M6) for distribution (scope limits of #1390).
+- **Trigger:** the owner opens M6.
+- **Source:** owner decision of 2026-10-22 (Suikou review 01a160b6); owner decision of 2026-10-30 (#1390).
 
 ### Add a JIT
 

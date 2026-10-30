@@ -13,8 +13,14 @@
 
 use super::{
     Term,
+    external_id::ExternalData,
     map::{Child, Node, Repr},
 };
+
+/// The words of a pid or a port of another node: a header, a next pointer,
+/// a node pointer, and one data word (`EXTERNAL_PID_HEAP_SIZE`,
+/// `EXTERNAL_PORT_HEAP_SIZE`, `erl_term.h:1150-1230`).
+const EXTERNAL_WORDS: usize = 4;
 
 /// The words of a float: a header and one data word (`FLOAT_SIZE_OBJECT`,
 /// `erl_term.h:526`).
@@ -68,6 +74,14 @@ pub(crate) fn flat_size(term: &Term) -> usize {
             Term::Float(_) => FLOAT_WORDS,
             Term::Reference(reference) if reference.is_pid_reference() => PID_REFERENCE_WORDS,
             Term::Reference(_) | Term::Resource(_) => REFERENCE_WORDS,
+            // The header, the next pointer, the node, and the data words:
+            // one for a pid or a port, and the 32-bit count and the numbers
+            // of a reference in 64-bit words (`EXTERNAL_THING_HEAD_SIZE`,
+            // `erl_term.h:1150-1230`, `external.c:4859-4866`).
+            Term::External(id) => match &id.data {
+                ExternalData::Pid { .. } | ExternalData::Port(_) => EXTERNAL_WORDS,
+                ExternalData::Reference(numbers) => EXTERNAL_WORDS + numbers.len() / 2,
+            },
             Term::Binary(binary) => binary_words(binary.bit_size()),
             Term::Cons(cell) => {
                 pending.push(&cell.head);

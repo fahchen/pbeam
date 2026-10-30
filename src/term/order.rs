@@ -50,6 +50,7 @@ use std::cmp::Ordering;
 use num_bigint::{BigInt, Sign};
 use num_traits::FromPrimitive;
 
+use super::external_id::{self, ExternalData, LOCAL_NODE};
 use super::{AtomTable, Reference, Term, match_context::MATCH_CONTEXT_ESCAPE};
 use crate::error::BeamError;
 
@@ -228,6 +229,12 @@ fn compare_pair<'a>(
     if let Some((left, right)) = left.reference().zip(right.reference()) {
         return reference_order(left, right);
     }
+    if matches!(left, Term::External(_)) || matches!(right, Term::External(_)) {
+        let rank = type_rank(left);
+        if rank == type_rank(right) {
+            return id_order(left, right, rank, atoms);
+        }
+    }
     match (left, right) {
         (Term::Cons(left), Term::Cons(right)) => {
             // The tails go on the stack first, so the heads compare first.
@@ -309,6 +316,58 @@ fn compare_pair<'a>(
             order
         }
         _ => type_rank(left).cmp(&type_rank(right)),
+    }
+}
+
+/// The type rank of a reference.
+const REFERENCE_RANK: u8 = 2;
+/// The type rank of a port.
+const PORT_RANK: u8 = 4;
+
+/// Compare two pids, two ports, or two references of the type rank `rank`,
+/// of which one or both are of another node, as `erts_cmp_compound` does
+/// (`utils.c:1749-1806`, `2212-2310`). The node compares by its name, then
+/// by its creation (`CMP_NODES`, `utils.c:1715-1723`); the local node is
+/// `nonode@nohost` with the creation 0. A pid compares its serial, its
+/// number, then its node. A port compares its node, then its number. A
+/// reference compares its node, then its numbers from the high number, and
+/// a high number that is 0 does not count.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // <0.7.0> < <N.7.0>: the same serial and number, and nonode@nohost < b@host
+/// assert_eq!(id_order(&local, &remote, 5, &atoms), Ordering::Less);
+/// ```
+fn id_order(left: &Term, right: &Term, rank: u8, atoms: &AtomTable) -> Ordering {
+    let node = |term: &Term| {
+        external_id::node_of(term).map_or((LOCAL_NODE, 0), |(node, creation)| {
+            (atoms.name_of(node), creation)
+        })
+    };
+    let nodes = node(left).cmp(&node(right));
+    match rank {
+        REFERENCE_RANK => {
+            let (left, right) = (
+                external_id::reference_numbers(left).unwrap_or_default(),
+                external_id::reference_numbers(right).unwrap_or_default(),
+            );
+            let (left, right) = (
+                external_id::significant(&left),
+                external_id::significant(&right),
+            );
+            nodes
+                .then(left.len().cmp(&right.len()))
+                .then_with(|| left.iter().rev().cmp(right.iter().rev()))
+        }
+        PORT_RANK => {
+            nodes.then(external_id::port_number(left).cmp(&external_id::port_number(right)))
+        }
+        _ => {
+            let parts =
+                |term: &Term| external_id::pid_parts(term).map(|(number, serial)| (serial, number));
+            parts(left).cmp(&parts(right)).then(nodes)
+        }
     }
 }
 
@@ -441,10 +500,15 @@ fn type_rank(term: &Term) -> u8 {
     match term {
         Term::Integer(_) | Term::BigInt(_) | Term::Float(_) => 0,
         Term::Atom(_) => 1,
-        Term::Reference(_) | Term::Resource(_) => 2,
+        Term::Reference(_) | Term::Resource(_) => REFERENCE_RANK,
         Term::Fun(_) => 3,
-        Term::Port(_) => 4,
+        Term::Port(_) => PORT_RANK,
         Term::Pid(_) => 5,
+        Term::External(id) => match id.data {
+            ExternalData::Reference(_) => REFERENCE_RANK,
+            ExternalData::Port(_) => PORT_RANK,
+            ExternalData::Pid { .. } => 5,
+        },
         Term::Tuple(_) => 6,
         Term::Record(_) => 7,
         Term::Map(_) => 8,

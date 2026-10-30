@@ -30,6 +30,7 @@ use num_bigint::Sign;
 
 use super::{
     Atom, AtomTable, Binary, Fun, Map, PortId, ProcessId, Record, Reference, Target, Term,
+    external_id::{ExternalData, ExternalId, pid_parts, port_number, reference_numbers},
     map::{Child, Form, Node},
     match_context::MATCH_CONTEXT_ESCAPE,
 };
@@ -75,6 +76,11 @@ const TYPE_EXTERNAL_FUN: u64 = 14;
 const TYPE_NEG_BIGNUM: u64 = 15;
 const TYPE_POS_BIGNUM: u64 = 16;
 const TYPE_LOCAL_REF: u64 = 17;
+/// `IHASH_TYPE_EXTERNAL_REF`, `IHASH_TYPE_EXTERNAL_PID`, and
+/// `IHASH_TYPE_EXTERNAL_PORT` (`erl_term_hashing.c:1654-1656`).
+const TYPE_EXTERNAL_REF: u64 = 18;
+const TYPE_EXTERNAL_PID: u64 = 19;
+const TYPE_EXTERNAL_PORT: u64 = 20;
 /// `IHASH_TYPE_FLOAT`, after the three external types 18 to 20
 /// (`erl_term_hashing.c:1653-1657`).
 const TYPE_FLOAT: u64 = 21;
@@ -128,6 +134,8 @@ enum Shape<'a> {
     /// The bits of a float.
     Float(u64),
     Reference(Reference),
+    /// A pid, a port, or a reference of another node.
+    External(&'a ExternalId),
     Fun(&'a Fun),
 }
 
@@ -171,6 +179,7 @@ fn shape(term: &Term) -> Shape<'_> {
         Term::Binary(bytes) => Shape::Binary(bytes),
         Term::Reference(reference) => Shape::Reference(*reference),
         Term::Resource(resource) => Shape::Reference(resource.reference()),
+        Term::External(id) => Shape::External(id),
         Term::Fun(fun) => Shape::Fun(fun),
         Term::MatchContext(_) => unreachable!("{MATCH_CONTEXT_ESCAPE}"),
     }
@@ -247,6 +256,21 @@ fn mix64(mut hash: u64) -> u64 {
     hash ^= hash >> 33;
     hash = hash.wrapping_mul(0xC4CE_B9FE_1A85_EC53);
     hash ^ (hash >> 33)
+}
+
+/// Return the first reference number of a local or a remote reference:
+/// 0 for a remote reference without numbers, whose first number word ERTS
+/// sets to 0 (`external.c:4876-4890`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(first_reference_number(&Term::Reference(Reference(1))), 1);
+/// ```
+fn first_reference_number(term: &Term) -> u32 {
+    reference_numbers(term)
+        .and_then(|numbers| numbers.first().copied())
+        .unwrap_or_default()
 }
 
 /// Join two 32-bit fields into one word, as `IHASH_MIX_*_2F32` does.
@@ -619,6 +643,35 @@ impl State {
                 self.mix_alpha(pair(TYPE_LOCAL_REF, number_0));
                 self.mix_beta(pair(number_1, number_2));
             }
+            // ERTS mixes the address of the node entry, which PBeam does not
+            // have; PBeam mixes the atom index of the node name and the
+            // creation in its place (`erl_term_hashing.c:2148-2189`).
+            Shape::External(id) => {
+                let node = pair(u64::from(id.node.index()), u64::from(id.creation));
+                match &id.data {
+                    ExternalData::Reference(numbers) => {
+                        self.mix_alpha(pair(TYPE_EXTERNAL_REF, wide(numbers.len())));
+                        let (pairs, rest) = numbers.as_chunks::<2>();
+                        for [low, high] in pairs {
+                            self.mix_beta(pair(u64::from(*low), u64::from(*high)));
+                        }
+                        if let [last] = rest {
+                            self.mix_beta(u64::from(*last));
+                        }
+                        self.mix_alpha(node);
+                    }
+                    ExternalData::Pid { number, serial } => {
+                        self.mix_alpha(TYPE_EXTERNAL_PID);
+                        self.mix_beta(node);
+                        self.mix_alpha(pair(u64::from(*number), u64::from(*serial)));
+                    }
+                    ExternalData::Port(number) => {
+                        self.mix_alpha(TYPE_EXTERNAL_PORT);
+                        self.mix_beta(node);
+                        self.mix_alpha(*number);
+                    }
+                }
+            }
             Shape::Fun(fun) => match fun.target() {
                 Target::Local(lambda) => {
                     let free = fun.free();
@@ -831,10 +884,6 @@ const HCONST_23: u32 = 0x36fb_ef9f;
 /// (`erl_term.h:1442-1443`).
 const NIL_DEF: u32 = 2;
 
-/// The mask of the pid number in the ERTS pid data word, below the serial
-/// bits (`_PID_NUM_SIZE`, `erl_term.h:645-656`).
-const PID_NUMBER_MASK: u64 = (1 << 28) - 1;
-
 /// Return true for a cons cell, as the ERTS C check `is_list` does
 /// (`erl_term.h:1260-1261`): `[]` is not a cons. The Erlang guard
 /// `is_list/1` of [`Term::is_list`] also accepts `[]`.
@@ -949,25 +998,26 @@ pub(crate) fn make_hash(atoms: &AtomTable, term: &Term) -> u32 {
                         .wrapping_add((bits as u32) ^ ((bits >> 32) as u32));
                 }
                 Term::Binary(bytes) => hash = binary_hash(hash, bytes),
-                Term::Pid(pid) => {
-                    // ERTS hashes the pid number only, not its serial
-                    // (`internal_pid_number`, `erl_term.h:645-656`).
-                    let number = pid.0 & PID_NUMBER_MASK;
-                    hash = uint32_step(hash, number, FUNNY_5).wrapping_mul(FUNNY_6);
-                }
-                Term::Port(port) => {
-                    let (low, high) = (port.0 as u32, (port.0 >> 32) as u32);
-                    if high != 0 {
-                        hash = uint32_step(hash, u64::from(high), FUNNY_11);
+                // ERTS hashes the pid number only, not its serial and not
+                // its node (`internal_pid_number`, `erl_term.h:645-656`,
+                // `erl_term_hashing.c:273-291`).
+                Term::Pid(_)
+                | Term::Port(_)
+                | Term::Reference(_)
+                | Term::Resource(_)
+                | Term::External(_) => {
+                    if let Some((number, _)) = pid_parts(term) {
+                        hash = uint32_step(hash, number, FUNNY_5).wrapping_mul(FUNNY_6);
+                    } else if let Some(number) = port_number(term) {
+                        let (low, high) = (number as u32, (number >> 32) as u32);
+                        if high != 0 {
+                            hash = uint32_step(hash, u64::from(high), FUNNY_11);
+                        }
+                        hash = uint32_step(hash, u64::from(low), FUNNY_9).wrapping_mul(FUNNY_10);
+                    } else {
+                        let number = u64::from(first_reference_number(term));
+                        hash = uint32_step(hash, number, FUNNY_9).wrapping_mul(FUNNY_10);
                     }
-                    hash = uint32_step(hash, u64::from(low), FUNNY_9).wrapping_mul(FUNNY_10);
-                }
-                Term::Reference(_) | Term::Resource(_) => {
-                    let number = term
-                        .reference()
-                        .map_or(0, |reference| reference.numbers()[0]);
-                    let number = u64::from(number);
-                    hash = uint32_step(hash, number, FUNNY_9).wrapping_mul(FUNNY_10);
                 }
                 Term::Tuple(elements) => stack.push(HashStep::Tuple { elements, index: 0 }),
                 Term::Record(record) => stack.push(HashStep::Record { record, index: 0 }),
@@ -1664,17 +1714,21 @@ pub(crate) fn make_hash2(atoms: &AtomTable, term: &Term) -> (u32, u64) {
                     }
                 }
             }
-            // ERTS hashes the pid number only, not its serial
-            // (`internal_pid_number`, `erl_term.h:645-656`).
-            Term::Pid(pid) => hash = hash_with(hash, (pid.0 & PID_NUMBER_MASK) as u32, HCONST_5),
-            Term::Port(port) => {
-                hash = hash2_with(hash, port.0 as u32, (port.0 >> 32) as u32, HCONST_6);
-            }
-            Term::Reference(_) | Term::Resource(_) => {
-                let number = term
-                    .reference()
-                    .map_or(0, |reference| reference.numbers()[0]);
-                hash = hash_with(hash, number, HCONST_7);
+            // ERTS hashes the pid number only, not its serial and not its
+            // node (`internal_pid_number`, `erl_term.h:645-656`,
+            // `erl_term_hashing.c:1459-1474`).
+            Term::Pid(_)
+            | Term::Port(_)
+            | Term::Reference(_)
+            | Term::Resource(_)
+            | Term::External(_) => {
+                hash = if let Some((number, _)) = pid_parts(term) {
+                    hash_with(hash, number as u32, HCONST_5)
+                } else if let Some(number) = port_number(term) {
+                    hash2_with(hash, number as u32, (number >> 32) as u32, HCONST_6)
+                } else {
+                    hash_with(hash, first_reference_number(term), HCONST_7)
+                };
             }
             Term::Tuple(elements) => {
                 let arity = elements.len() as u32;

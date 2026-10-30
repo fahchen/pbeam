@@ -7,7 +7,7 @@ use std::cmp::Ordering;
 
 use super::pattern::{MatchSpec, fully_bound, is_skip, variable};
 use crate::error::BeamError;
-use crate::term::{AtomTable, Term};
+use crate::term::{AtomTable, Term, external_id::ExternalData};
 
 /// The keys that a match specification can match, as the
 /// `ms_key_boundness` of `analyze_pattern` gives them
@@ -227,6 +227,11 @@ fn tag(term: &Term) -> u8 {
         Term::Fun(_) => 5,
         Term::Port(_) => 6,
         Term::Pid(_) => 7,
+        Term::External(id) => match id.data {
+            ExternalData::Pid { .. } => 14,
+            ExternalData::Port(_) => 15,
+            ExternalData::Reference(_) => 16,
+        },
         Term::Tuple(_) => 8,
         Term::Nil => 9,
         Term::Cons(_) => 10,
