@@ -26,8 +26,24 @@ const ALIAS: u64 = 0x8 << 32;
 /// `DFLAG_ALTACT_SIG` (`dist.h:69`).
 const ALTACT_SIG: u64 = 0x20 << 32;
 
+/// `ERTS_DOP_ALTACT_SIG_FLG_PRIO` (`dist.h:188`).
+const ALTACT_SIG_PRIO: i64 = 1;
+
 /// `ERTS_DOP_ALTACT_SIG_FLG_ALIAS` (`dist.h:190`).
 const ALTACT_SIG_ALIAS: i64 = 1 << 2;
+
+/// `ERTS_DOP_ALTACT_SIG_FLG_NAME` (`dist.h:191`).
+const ALTACT_SIG_NAME: i64 = 1 << 3;
+
+/// Whether a send has the option `priority` of `erlang:send/3`
+/// (`bif.c:2718-2719`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::runtime) enum SendPriority {
+    /// An ordinary send.
+    Normal,
+    /// A send with the option `priority`.
+    Priority,
+}
 
 impl Scheduler {
     /// Send `message` from the current process to `to`, a pid, a reference,
@@ -36,10 +52,12 @@ impl Scheduler {
     /// `false` when the node has no connection, for the caller to drop the
     /// message.
     ///
-    /// The control message is `REG_SEND` for a name, `ALIAS_SEND` or
-    /// `ALTACT_SIG_SEND` for a reference, and `SEND_SENDER` or `SEND` for a
-    /// pid, as the flags of the connection permit
-    /// (`erts_dsig_send_msg`, `dist.c:1640-1702`). A connection without
+    /// The control message is `ALTACT_SIG_SEND` for a reference or for the
+    /// send with `SendPriority::Priority` (the option `priority` of `erlang:send/3`,
+    /// `bif.c:2718-2719`) on a connection with `DFLAG_ALTACT_SIG`, else
+    /// `REG_SEND` for a name, `ALIAS_SEND` for a reference, and
+    /// `SEND_SENDER` or `SEND` for a pid, as the flags of the connection
+    /// permit (`erts_dsig_send_msg`, `dist.c:1640-1702`). A connection without
     /// `DFLAG_ALIAS` drops a message to a reference (`bif.c:2406-2414`). A
     /// process controller gets the packet in its output queue, and a port
     /// controller writes it.
@@ -47,7 +65,7 @@ impl Scheduler {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert!(scheduler.dist_send(&node, &Term::External(pid), &message)?);
+    /// assert!(scheduler.dist_send(&node, &Term::External(pid), &message, SendPriority::Normal)?);
     /// ```
     ///
     /// # Errors
@@ -59,6 +77,7 @@ impl Scheduler {
         node: &Atom,
         to: &Term,
         message: &Term,
+        priority: SendPriority,
     ) -> Result<bool, BeamError> {
         let node_ref = Arc::clone(&self.node);
         let mut dist = node_ref.dist();
@@ -67,30 +86,37 @@ impl Scheduler {
         };
         let caller = self.current_process().id;
         let from = Term::Pid(caller);
-        let control = match to {
-            Term::Tuple(items) => Term::tuple(vec![
-                Term::Integer(6),
-                from,
-                Term::static_atom(""),
-                items[0].clone(),
-            ]),
-            Term::External(id) if matches!(id.data, ExternalData::Reference(_)) => {
-                if flags & ALIAS == 0 {
-                    return Ok(true);
-                }
-                if flags & ALTACT_SIG == 0 {
-                    Term::tuple(vec![Term::Integer(33), from, to.clone()])
-                } else {
-                    Term::tuple(vec![
-                        Term::Integer(37),
-                        Term::Integer(ALTACT_SIG_ALIAS),
-                        from,
-                        to.clone(),
-                    ])
-                }
+        let alias =
+            matches!(to, Term::External(id) if matches!(id.data, ExternalData::Reference(_)));
+        if alias && flags & ALIAS == 0 {
+            return Ok(true);
+        }
+        // `erts_dsig_send_msg` takes the name of `{Name, Node}` (`bif.c:2662`).
+        let (name, remote) = match to {
+            Term::Tuple(items) => (true, items[0].clone()),
+            _ => (false, to.clone()),
+        };
+        let prio = priority == SendPriority::Priority;
+        let control = if (prio || alias) && flags & ALTACT_SIG != 0 {
+            let mut fs = if alias {
+                ALTACT_SIG_ALIAS
+            } else if name {
+                ALTACT_SIG_NAME
+            } else {
+                0
+            };
+            if prio {
+                fs |= ALTACT_SIG_PRIO;
             }
-            _ if flags & SEND_SENDER != 0 => Term::tuple(vec![Term::Integer(22), from, to.clone()]),
-            _ => Term::tuple(vec![Term::Integer(2), Term::static_atom(""), to.clone()]),
+            Term::tuple(vec![Term::Integer(37), Term::Integer(fs), from, remote])
+        } else if name {
+            Term::tuple(vec![Term::Integer(6), from, Term::static_atom(""), remote])
+        } else if alias {
+            Term::tuple(vec![Term::Integer(33), from, remote])
+        } else if flags & SEND_SENDER != 0 {
+            Term::tuple(vec![Term::Integer(22), from, remote])
+        } else {
+            Term::tuple(vec![Term::Integer(2), Term::static_atom(""), remote])
         };
         let mut elements = vec![Binary::from(vec![PASS_THROUGH])];
         elements.extend(encode_dist(self, &control)?);

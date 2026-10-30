@@ -308,8 +308,9 @@ output() ->
     receive {'DOWN', CtrlRef, _, _, _} -> ok end,
     show(down, [erlang:dist_get_stat(VH), remote_pid(vv@nohost) ! dropped, nodes(hidden)]).
 
-%% The packets of a send to a pid, a name, and an alias on a connection
-%% with the flags Flags, which a new controller takes.
+%% The packets of a send and a priority send to a pid, a name, and an
+%% alias on a connection with the flags Flags, which a new controller
+%% takes (dist.c:1646-1700).
 flags_output(Node, Flags) ->
     Parent = self(),
     Ctrl = spawn(fun() -> receive {go, D} -> Parent ! {self(), get_all(D)} end end),
@@ -319,6 +320,9 @@ flags_output(Node, Flags) ->
     remote_pid(Node) ! pid,
     {nm, Node} ! name,
     remote_ref(Node) ! alias,
+    [erlang:send(To, Tag, [priority])
+     || {To, Tag} <- [{remote_pid(Node), prio_pid}, {{nm, Node}, prio_name},
+                      {remote_ref(Node), prio_alias}]],
     Ctrl ! {go, DH},
     receive {Ctrl, Packets} -> Packets end.
 
