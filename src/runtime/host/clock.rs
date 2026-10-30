@@ -3,6 +3,11 @@
 
 use std::{sync::LazyLock, time::Instant};
 
+use nix::sys::{
+    resource::{UsageWho, getrusage},
+    time::TimeValLike,
+};
+
 use crate::runtime::time::DateTime;
 
 /// The start of the performance counter of the process, which the first
@@ -81,6 +86,25 @@ unsafe extern "C" {
 /// ```
 pub(crate) fn perf_counter() -> i64 {
     i64::try_from(PERF_COUNTER_START.elapsed().as_nanos()).unwrap_or(i64::MAX)
+}
+
+/// Return the user CPU time of the OS process in milliseconds, as
+/// `erts_runtime_elapsed_both` reads it with `getrusage(RUSAGE_SELF, _)`
+/// (`erl_time_sup.c:1430-1447`): the seconds and the microseconds of
+/// `ru_utime` in microseconds, divided by 1000 toward zero.
+///
+/// ERTS aborts the emulator when `getrusage` fails, which needs a `who`
+/// value or a pointer that is not valid. `RUSAGE_SELF` and the result
+/// struct of `nix` are valid, so the call does not fail.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(user_cpu_milliseconds() >= 0);
+/// ```
+pub(crate) fn user_cpu_milliseconds() -> i64 {
+    let usage = getrusage(UsageWho::RUSAGE_SELF).expect("getrusage(RUSAGE_SELF) does not fail");
+    usage.user_time().num_microseconds() / 1000
 }
 
 /// Return the local date and time of `clock`, a POSIX time, in the host

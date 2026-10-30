@@ -272,6 +272,7 @@ fn reports_ml_kem_encapsulation_as_unsupported() {
 const CRYPTO_PROBE: &str = "fixtures/code_server/crypto_probe";
 const CRYPTO_SIGN_PROBE: &str = "fixtures/code_server/crypto_sign_probe";
 const REMOTE_ID_PROBE: &str = "fixtures/code_server/remote_id_probe";
+const STATISTICS_PROBE: &str = "fixtures/code_server/statistics_probe";
 const CRYPTO_CRYPT_PROBE: &str = "fixtures/code_server/crypto_crypt_probe";
 const CRYPTO_KEYGEN_PROBE: &str = "fixtures/code_server/crypto_keygen_probe";
 const CRYPTO_BN_PROBE: &str = "fixtures/code_server/crypto_bn_probe";
@@ -1401,6 +1402,63 @@ fn stops_with_a_runtime_error_for_each_signal_to_another_node() {
         assert!(
             !output.status.success() && stderr.contains(expected),
             "{function}: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn gives_each_statistics_item_as_pinned_erts() {
+    // erlang:statistics/1 (erl_bif_info.c:4160-4325): the form of each
+    // item, counters that do not go down, the differences since the last
+    // call (erl_process.c:12103-12137, erl_time_sup.c:1424-1513), and
+    // badarg.
+    let erts = run(&mut erts_probe(
+        STATISTICS_PROBE,
+        "statistics_probe",
+        "main",
+        &[],
+    ));
+    assert!(erts.contains("undefined"), "{erts}");
+    assert_eq!(
+        run(&mut pbeam_probe(
+            STATISTICS_PROBE,
+            "statistics_probe",
+            "main",
+            &[]
+        )),
+        erts
+    );
+}
+
+#[test]
+fn stops_with_a_runtime_error_for_each_statistics_item_that_pbeam_does_not_count() {
+    // The run queue, microstate accounting, and I/O items
+    // (erl_bif_info.c:4175-4229, 4297-4323).
+    for item in [
+        "total_active_tasks",
+        "total_run_queue_lengths",
+        "total_active_tasks_all",
+        "total_run_queue_lengths_all",
+        "active_tasks",
+        "run_queue_lengths",
+        "active_tasks_all",
+        "run_queue_lengths_all",
+        "microstate_accounting",
+        "run_queue",
+        "io",
+        "run_queues",
+    ] {
+        let output = pbeam_probe(STATISTICS_PROBE, "statistics_probe", "unsupported", &[])
+            .env("STATISTICS_ITEM", item)
+            .env("TERM", "dumb")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            !output.status.success()
+                && stderr.contains(&format!("unsupported erlang:statistics/1 argument {item}")),
+            "{item}: {stderr}"
         );
     }
 }
