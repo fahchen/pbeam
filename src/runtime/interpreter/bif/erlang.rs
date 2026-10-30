@@ -28,6 +28,7 @@ use crate::runtime::process::{Flush, Origin, Priority};
 use crate::runtime::process::{InitialCall, OTHER_PROCESS_INFO_ITEMS};
 use crate::runtime::process::{LinkId, ProcessState};
 use crate::runtime::scheduler::PTAB_SIZE;
+use crate::runtime::scheduler::dist_output::SendPriority;
 use crate::runtime::scheduler::dist_table::NodeInfo;
 use crate::runtime::scheduler::node::Named;
 use crate::runtime::scheduler::{
@@ -5005,11 +5006,13 @@ pub(in crate::runtime::interpreter) fn send(
     to: &Term,
     message: Term,
 ) -> Result<BifResult, BeamError> {
-    Ok(match deliver_to(scheduler, to, message.clone())? {
-        Ok(Sent::Local) => local_send_result(scheduler, message),
-        Ok(Sent::NoConnect) => Value(message),
-        Err(raise) => raise,
-    })
+    Ok(
+        match deliver_to(scheduler, to, message.clone(), SendPriority::Normal)? {
+            Ok(Sent::Local) => local_send_result(scheduler, message),
+            Ok(Sent::NoConnect) => Value(message),
+            Err(raise) => raise,
+        },
+    )
 }
 
 /// Run `erlang:send(To, Message, Options)` as ERTS `send_3`
@@ -5023,12 +5026,13 @@ pub(in crate::runtime::interpreter) fn send(
 /// reductions, and can return `ok` after a switch (see
 /// [`local_send_result`]).
 ///
-/// PBeam has no distribution and sends no message to a port, so
-/// `nosuspend` changes nothing.
+/// PBeam has no busy port and no busy connection, so `nosuspend` changes
+/// nothing.
 /// A `priority` message is an ordinary message unless its receiver gets it
 /// through a priority alias (`erl_proc_sig_queue.c:6021-6045`). Only
-/// `erlang:alias/1` makes a priority alias, so `priority` also changes
-/// nothing. ERTS gives the `badarg` of an option the `error_info` cause
+/// `erlang:alias/1` makes a priority alias, so `priority` changes nothing
+/// for a local receiver; a connection with `DFLAG_ALTACT_SIG` sends it as
+/// `ALTACT_SIG_SEND` (see `Scheduler::dist_send`). ERTS gives the `badarg` of an option the `error_info` cause
 /// `badopt`, which PBeam does not model.
 ///
 /// # Examples
@@ -5058,20 +5062,23 @@ pub(super) fn send3(
     let Some(options) = options.proper_list() else {
         return Ok(BifResult::badopt());
     };
-    let mut connect = true;
+    let (mut connect, mut priority) = (true, SendPriority::Normal);
     for option in options {
         match option {
             Term::Atom(option) if option.is_static("noconnect") => connect = false,
-            Term::Atom(option) if option.is_one_of(&["nosuspend", "priority"]) => {}
+            Term::Atom(option) if option.is_static("priority") => priority = SendPriority::Priority,
+            Term::Atom(option) if option.is_static("nosuspend") => {}
             _ => return Ok(BifResult::badopt()),
         }
     }
-    Ok(match deliver_to(scheduler, to, message.clone())? {
-        Ok(Sent::Local) => local_send_result(scheduler, Term::static_atom("ok")),
-        Ok(Sent::NoConnect) if !connect => Value(Term::static_atom("noconnect")),
-        Ok(Sent::NoConnect) => Value(Term::static_atom("ok")),
-        Err(raise) => raise,
-    })
+    Ok(
+        match deliver_to(scheduler, to, message.clone(), priority)? {
+            Ok(Sent::Local) => local_send_result(scheduler, Term::static_atom("ok")),
+            Ok(Sent::NoConnect) if !connect => Value(Term::static_atom("noconnect")),
+            Ok(Sent::NoConnect) => Value(Term::static_atom("ok")),
+            Err(raise) => raise,
+        },
+    )
 }
 
 /// The reductions of a local send: `erl_send` and `send_3` use them with
@@ -5200,7 +5207,8 @@ fn destination<'a>(to: &'a Term, atoms: &AtomTable) -> Option<Destination<'a>> {
 }
 
 /// Give `message` to the process that `to` names, as ERTS `do_send`
-/// (`bif.c:2458-2695`) does.
+/// (`bif.c:2458-2695`) does. `priority` tells a send with the option
+/// `priority` of `erlang:send/3`.
 /// This is the one send path of the `send` instruction, `erlang:send/2`,
 /// and `erlang:send/3`. Return `Err` with the exception to raise.
 ///
@@ -5227,7 +5235,9 @@ fn destination<'a>(to: &'a Term, atoms: &AtomTable) -> Option<Destination<'a>> {
 /// - An atom gives the message to its registered process. A name that no
 ///   process has raises `badarg`. PBeam registers no port.
 /// - `{Name, Node}` with the local node gives the message to the registered
-///   process, or drops it when no process has the name. Another node drops
+///   process, or drops it when no process has the name.
+/// - A pid, a reference, or `{Name, Node}` of a connected node goes to the
+///   connection (see `Scheduler::dist_send`). Another node drops
 ///   the message and gives [`Sent::NoConnect`], as ERTS does on a node that
 ///   is not alive (`remote_send`, `bif.c:2397-2400`). The send finds or
 ///   makes the not connected dist entry of the node first
@@ -5237,21 +5247,23 @@ fn destination<'a>(to: &'a Term, atoms: &AtomTable) -> Option<Destination<'a>> {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(matches!(deliver_to(scheduler, &Term::Pid(pid), ok.clone())?, Ok(Sent::Local)));
+/// assert!(matches!(deliver_to(scheduler, &Term::Pid(pid), ok.clone(), SendPriority::Normal)?, Ok(Sent::Local)));
 /// let remote = Term::tuple(vec![Term::static_atom("name"), Term::static_atom("a@b")]);
-/// assert!(matches!(deliver_to(scheduler, &remote, ok.clone())?, Ok(Sent::NoConnect)));
-/// assert!(deliver_to(scheduler, &Term::static_atom("nobody"), ok)?.is_err());
+/// assert!(matches!(deliver_to(scheduler, &remote, ok.clone(), SendPriority::Normal)?, Ok(Sent::NoConnect)));
+/// assert!(deliver_to(scheduler, &Term::static_atom("nobody"), ok, SendPriority::Normal)?.is_err());
 /// ```
 ///
 /// # Errors
 ///
-/// A port signal gives the errors of [`erts_internal::port_bang`]. A new
+/// A port signal gives the errors of [`erts_internal::port_bang`], and a
+/// send to a connection the errors of `Scheduler::dist_send`. A new
 /// `capability_denied` atom in a full atom table gives the error of
 /// `AtomTable::put`.
 fn deliver_to(
     scheduler: &mut Scheduler,
     to: &Term,
     message: Term,
+    priority: SendPriority,
 ) -> Result<Result<Sent, BifResult>, BeamError> {
     let Some(destination) = destination(to, &scheduler.atoms) else {
         return Ok(Err(BifResult::badarg()));
@@ -5278,6 +5290,9 @@ fn deliver_to(
             None => None,
         },
         Destination::Remote(node) => {
+            if scheduler.dist_send(node, to, &message, priority)? {
+                return Ok(Ok(Sent::Local));
+            }
             scheduler.send_to_remote_node(node);
             return Ok(Ok(Sent::NoConnect));
         }

@@ -475,9 +475,9 @@ fn controlled_entry(context: &BifContext<'_>, handle: &Term) -> Result<Atom, Bif
 
 /// Run `erlang:dist_ctrl_get_data_notification(DHandle)` as
 /// `dist_ctrl_get_data_notification_1` does (`dist.c:4272-4330`), and
-/// return `ok`. ERTS sends `dist_data` to the controller when the output
-/// queue of the connection has data; PBeam sends no data to another node
-/// yet (#1407), so the queue stays empty and no notification comes.
+/// return `ok`. The controller gets `dist_data` now when the output queue
+/// of the connection has a packet, and else when the next packet comes
+/// (see `DistTable::enqueue`).
 ///
 /// # Examples
 ///
@@ -488,16 +488,22 @@ pub(super) fn dist_ctrl_get_data_notification(
     context: &mut BifContext<'_>,
     handle: &Term,
 ) -> BifResult {
-    match controlled_entry(context, handle) {
-        Ok(_) => BifResult::Value(Term::static_atom("ok")),
-        Err(error) => error,
+    let name = match controlled_entry(context, handle) {
+        Ok(name) => name,
+        Err(error) => return error,
+    };
+    let scheduler = &mut *context.scheduler;
+    if scheduler.node().dist().notify(&name) {
+        let caller = scheduler.current_process().id;
+        scheduler.send_message(caller, caller, Term::static_atom("dist_data"));
     }
+    BifResult::Value(Term::static_atom("ok"))
 }
 
 /// Run `erlang:dist_ctrl_get_data(DHandle)` as `dist_ctrl_get_data_1`
-/// does (`dist.c:4558-4630`): return `none` for an empty output queue.
-/// PBeam sends no data to another node yet (#1407), so the queue stays
-/// empty.
+/// does (`dist.c:4558-4746`): take the first packet of the output queue
+/// and return it as a list of binaries, or `{Size, Data}` with its bytes
+/// with the option `get_size`, or return `none` for an empty queue.
 ///
 /// # Examples
 ///
@@ -505,10 +511,21 @@ pub(super) fn dist_ctrl_get_data_notification(
 /// assert_eq!(dist_ctrl_get_data(context, &handle), BifResult::Value(Term::static_atom("none")));
 /// ```
 pub(super) fn dist_ctrl_get_data(context: &mut BifContext<'_>, handle: &Term) -> BifResult {
-    match controlled_entry(context, handle) {
-        Ok(_) => BifResult::Value(Term::static_atom("none")),
-        Err(error) => error,
+    let name = match controlled_entry(context, handle) {
+        Ok(name) => name,
+        Err(error) => return error,
+    };
+    let mut dist = context.scheduler.node().dist();
+    let Some(elements) = dist.dequeue(&name) else {
+        return BifResult::Value(Term::static_atom("none"));
+    };
+    let size: usize = elements.iter().map(|element| element.bit_size() / 8).sum();
+    let data = Term::list_from(elements.into_iter().map(Term::Binary).collect::<Vec<_>>());
+    if !dist.get_size(&name) {
+        return BifResult::Value(data);
     }
+    let size = Term::from_bigint(BigInt::from(size));
+    BifResult::Value(Term::tuple(vec![size, data]))
 }
 
 /// Run `erlang:dist_ctrl_get_opt(DHandle, get_size)` as
@@ -616,8 +633,8 @@ pub(super) fn dist_ctrl_input_handler(
 /// check the connection id here.
 ///
 /// An empty packet is a tick, which only counts in the input count of
-/// `erlang:dist_get_stat/1`. A packet with data stops the run with a
-/// runtime error: PBeam does not take distribution messages yet (#1407).
+/// `erlang:dist_get_stat/1`. A packet with data goes to its target (see
+/// `Scheduler::net_message`).
 ///
 /// # Examples
 ///
@@ -668,11 +685,10 @@ pub(super) fn dist_ctrl_put_data(
 
 /// Run `erlang:dist_get_stat(DHandle)` as `dist_get_stat_1` does
 /// (`dist.c:4488-4530`): return `{ok, Read, Write, Pending}`, the count of
-/// `erlang:dist_ctrl_put_data/2` calls, the count of the packets that
-/// `erlang:dist_ctrl_get_data/1` gave, and the bytes of the output queue.
-/// PBeam sends no data yet (#1407), so the two last are 0. `badarg` comes
-/// for a term that is not a dist handle and for a handle of another
-/// connection.
+/// `erlang:dist_ctrl_put_data/2` calls, the count of the packets that the
+/// controller took or wrote, and the queue size of the output queue (see
+/// `DistTable::output`). `badarg` comes for a term that is not a dist
+/// handle and for a handle of another connection.
 ///
 /// # Examples
 ///
@@ -684,12 +700,13 @@ pub(super) fn dist_get_stat(context: &mut BifContext<'_>, handle: &Term) -> BifR
     let dist = context.scheduler.node().dist();
     match dist.lookup(handle) {
         Some((name, id)) if id == dist.connection_id(&name) => {
-            let input = Term::from_bigint(BigInt::from(dist.input(&name)));
+            let count = |count: u64| Term::from_bigint(BigInt::from(count));
+            let (out, queue_size) = dist.output(&name);
             BifResult::Value(Term::tuple(vec![
                 Term::static_atom("ok"),
-                input,
-                Term::Integer(0),
-                Term::Integer(0),
+                count(dist.input(&name)),
+                count(out),
+                count(queue_size),
             ]))
         }
         _ => BifResult::badarg(),

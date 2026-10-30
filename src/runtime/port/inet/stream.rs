@@ -964,6 +964,45 @@ impl Inet {
         reply(Ok(()))
     }
 
+    /// Run the send of the packet `data` of the distribution of the node on
+    /// the connected port controller, as `dist_port_commandv` does
+    /// (`dist.c:3844-3921`), and return its messages. ERTS sets no caller
+    /// (`dist.c:3912`), so the command has no header and gets no
+    /// `inet_reply` (`init_caller_iov`, `inet_drv.c:1836-1839`;
+    /// `inet_reply_am`, `inet_drv.c:2675`): a port that is not connected
+    /// only clears the closed state of its last failed send
+    /// (`inet_drv.c:12681-12693`), and a port that waits to shut down fails
+    /// as for another send (`inet_drv.c:12695-12696`).
+    ///
+    /// The bytes join the queue or go to the socket as for another send.
+    /// PBeam writes them at once also with `delay_send`, which only delays
+    /// the write in ERTS, and a queue that reaches the high watermark does
+    /// not make the port busy: see row "Distribution" of
+    /// `docs/erts-differences.md`.
+    pub(in crate::runtime) fn send_dist(&mut self, data: &[u8]) -> Vec<Event> {
+        if self.stream.pending_shutdown.is_some() {
+            return self.send_failed(None);
+        }
+        if self.state != State::Connected {
+            self.stream.closed_send = false;
+            return Vec::new();
+        }
+        let header = self.header_length();
+        let length = to_u64(data.len()).to_be_bytes();
+        let framed = [&length[8 - header..], data].concat();
+        self.stream.statistics.output(to_u64(framed.len()));
+        if self.stream.output.is_empty() {
+            let socket = self.socket.as_ref().expect("a connected port has a socket");
+            match socket.send(&framed) {
+                Err(failure) if !blocked(&failure) => return self.send_failed(None),
+                result => self.stream.output.extend(&framed[result.unwrap_or(0)..]),
+            }
+        } else {
+            self.stream.output.extend(&framed);
+        }
+        Vec::new()
+    }
+
     /// Write the queue while the socket takes bytes, as `tcp_inet_output`
     /// does (inet_drv.c:14234-14370), and return the messages: the reply of
     /// the send that waits when the queue holds 4096 bytes or fewer, then

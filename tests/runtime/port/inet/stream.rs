@@ -622,3 +622,32 @@ fn ends_the_busy_send_and_its_waiters_at_a_failed_write() {
     );
     assert!(!port.stream.closed_send);
 }
+
+/// A packet of the distribution joins the queue that holds bytes, with its
+/// packet header and no reply (`dist_port_commandv`, dist.c:3912;
+/// `init_caller_iov`, inet_drv.c:1836-1839).
+#[test]
+fn queues_a_distribution_packet_after_the_bytes_of_the_queue() {
+    let (local, _peer) = Socket::pair(Domain::UNIX, Type::STREAM, None).unwrap();
+    let mut port = Inet::new(SocketType::Stream).copy(local);
+    port.packet = 3;
+    port.stream.output.extend([1, 2, 3]);
+    assert_eq!(port.send_dist(b"p"), Vec::new());
+    assert_eq!(
+        port.stream.output.iter().copied().collect::<Vec<u8>>(),
+        [1, 2, 3, 0, 0, 0, 1, b'p']
+    );
+}
+
+/// A packet of the distribution to a socket that waits to shut down fails
+/// as another send does, with no reply (inet_drv.c:12695-12696).
+#[test]
+fn fails_a_distribution_packet_after_a_shutdown_that_waits_for_the_queue() {
+    let (local, _peer) = Socket::pair(Domain::UNIX, Type::STREAM, None).unwrap();
+    let mut port = Inet::new(SocketType::Stream).copy(local);
+    port.stream.output.extend([1]);
+    port.stream.pending_shutdown = Some(1);
+    assert_eq!(port.send_dist(b"p"), Vec::new());
+    assert!(port.stream.closed_send);
+    assert!(port.stream.output.is_empty());
+}

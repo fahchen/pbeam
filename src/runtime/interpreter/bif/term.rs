@@ -270,6 +270,17 @@ pub(super) fn term_to_iovec_2(
         return Ok(result);
     }
     let bytes = binary.bytes().unwrap_or_default();
+    let seed = context.scheduler.local_node_hash();
+    let elements = iovec_elements(bytes, refs, seed);
+    Ok(Value(Term::list_from(
+        elements.into_iter().map(Term::Binary).collect::<Vec<_>>(),
+    )))
+}
+
+/// Return the elements of the iovec of the external term `bytes` with the
+/// payloads `refs` (see [`term_to_iovec_2`]). `seed` is the seed of the
+/// block hash of `LOCAL_EXT`.
+fn iovec_elements(bytes: &[u8], refs: Vec<(Range<usize>, Binary)>, seed: u32) -> Vec<Binary> {
     // Each element: its byte range in `bytes`, and the source bitstring of
     // a payload, which the element refers to as ERTS does
     // (`external.c:3958`). The other elements refer to one binary of the
@@ -305,28 +316,54 @@ pub(super) fn term_to_iovec_2(
     }
     if local {
         let last = pieces.last().map_or(0, |(range, _)| range.len());
-        let seed = context.scheduler.local_node_hash();
         let hash = external::iov_block_hash(&bytes[6..], last, seed);
         common[2..6].copy_from_slice(&hash.to_be_bytes());
     }
     let common = Binary::from(common);
     let mut offset = 0;
-    let elements: Vec<Term> = pieces
+    pieces
         .into_iter()
         .map(|(range, source)| {
             if let Some(source) = source {
-                Term::Binary(source.off_heap())
+                source.off_heap()
             } else {
                 offset += range.len();
-                Term::Binary(
-                    common
-                        .bits((offset - range.len()) * 8, offset * 8)
-                        .off_heap(),
-                )
+                common
+                    .bits((offset - range.len()) * 8, offset * 8)
+                    .off_heap()
             }
         })
+        .collect()
+}
+
+/// Return the elements of the external term of `term` in a distribution
+/// message on a connection without the atom cache, as `erts_encode_dist_ext`
+/// writes them (`external.c:496-512`, `dist.c:3475-3510`): `VERSION_MAGIC`
+/// and the encoded term with the default options, split as
+/// [`term_to_iovec_2`] splits it.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let elements = encode_dist(scheduler, &Term::Integer(1))?;
+/// assert_eq!(elements.len(), 1);
+/// ```
+///
+/// # Errors
+///
+/// A term that PBeam does not encode yet gives a runtime error.
+pub(in crate::runtime) fn encode_dist(
+    scheduler: &crate::runtime::scheduler::Scheduler,
+    term: &Term,
+) -> Result<Vec<Binary>, BeamError> {
+    let mut refs = Vec::new();
+    let body = encode_parts(term, &scheduler.atoms, &Options::default(), &mut refs)?;
+    let bytes = compress_term(&body, 0);
+    let refs = refs
+        .into_iter()
+        .map(|(range, source)| (range.start + 1..range.end + 1, source))
         .collect();
-    Ok(Value(Term::list_from(elements)))
+    Ok(iovec_elements(&bytes, refs, 0))
 }
 
 /// Return the result of [`term_to_binary_2`], and put in `refs` the byte
