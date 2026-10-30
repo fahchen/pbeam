@@ -1548,7 +1548,7 @@ const MAC_ALGORITHMS: [&str; 3] = ["cmac", "hmac", "poly1305"];
 
 /// The curves that `curve_algorithms/0` gives: the curves over a prime
 /// field of `init_curves` (`algorithms.c:286-622`) in its order, then the
-/// curves of EdDSA and of X25519 and X448 (`algorithms.c:624-637`). The
+/// curves of `EdDSA` and of X25519 and X448 (`algorithms.c:624-637`). The
 /// static OpenSSL generates a key on each of these curves, as `valid_curve`
 /// (`algorithms.c:653-704`) checks. PBeam does not list the curves over a
 /// characteristic-two field, which its ECDSA and ECDH stop on.
