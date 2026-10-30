@@ -4,7 +4,7 @@
 -compile(nowarn_deprecated_catch).
 -export([main/0, net_kernel_exit/0, port_channel/0, no_mandatory/0, message/0,
          port_message/0, deliver_port/0, deliver_udp/0, input/0, reject/1,
-         trace_token/0, link_op/0, atom_cache/0]).
+         trace_token/0, link_op/0, atom_cache/0, output/0, port_output/0]).
 
 main() ->
     %% net_kernel reports the dist_ctrlr message of a connection that it
@@ -265,6 +265,104 @@ input() ->
     timer:sleep(200),
     show(port, [flush(), erlang:dist_get_stat(PH)]).
 
+%% Messages to a pid, a name, and an alias of a connected node go to the
+%% output queue of a process controller with the control message that the
+%% flags permit (dist.c:1640-1702, 3646-3683, 4272-4746).
+output() ->
+    logger:set_primary_config(level, none),
+    M = mandatory(),
+    erts_internal:new_connection(zz@nohost),
+    {ok, DH} = erts_internal:create_dist_channel(zz@nohost, self(), {M, 1}),
+    P = remote_pid(zz@nohost),
+    R = remote_ref(zz@nohost),
+    show(empty, [erlang:dist_get_stat(DH), erlang:dist_ctrl_get_data(DH),
+                 erlang:dist_ctrl_get_data_notification(DH),
+                 erlang:dist_ctrl_get_data_notification(DH), flush()]),
+    {nm, zz@nohost} ! hello,
+    show(name, [erlang:dist_get_stat(DH), flush()]),
+    P ! {a, <<1, 2, 3>>},
+    R ! alias,
+    P ! {big, binary:copy(<<7>>, 100)},
+    show(sent, [erlang:dist_get_stat(DH), erlang:send(P, x, [noconnect]),
+                erlang:send({nm, zz@nohost}, y, [nosuspend]), erlang:send(R, z),
+                erlang:dist_ctrl_get_data_notification(DH), flush()]),
+    show(get, [pkt(erlang:dist_ctrl_get_data(DH)), erlang:dist_get_stat(DH),
+               erlang:dist_ctrl_set_opt(DH, get_size, true)]),
+    Packets = [pkt(erlang:dist_ctrl_get_data(DH)) || _ <- lists:seq(1, 5)],
+    show(get_size, Packets ++ [erlang:dist_get_stat(DH),
+                    erlang:dist_ctrl_get_data_notification(DH), flush()]),
+    P ! [1.5, fun lists:map/2, self(), make_ref(), #{a => 1}, <<1:3>>, -1, 1 bsl 70, "abc", {}],
+    show(term, [flush(), pkt(erlang:dist_ctrl_get_data(DH)), erlang:dist_get_stat(DH)]),
+    %% The flags of the other connections permit SEND_SENDER, ALIAS, and
+    %% ALTACT_SIG.
+    Flags = [{yy@nohost, M bor 16#80000}, {xx@nohost, M bor (1 bsl 35)},
+             {ww@nohost, M bor (1 bsl 35) bor (1 bsl 37)}],
+    show(flags, [flags_output(Node, F) || {Node, F} <- Flags]),
+    Ctrl = spawn(fun() -> receive stop -> ok end end),
+    erts_internal:new_connection(vv@nohost),
+    {message, Reply} = erts_internal:create_dist_channel(vv@nohost, Ctrl, {M, 1}),
+    VH = receive {Reply, VR} -> VR end,
+    remote_pid(vv@nohost) ! queued,
+    CtrlRef = monitor(process, Ctrl),
+    Ctrl ! stop,
+    receive {'DOWN', CtrlRef, _, _, _} -> ok end,
+    show(down, [erlang:dist_get_stat(VH), remote_pid(vv@nohost) ! dropped, nodes(hidden)]).
+
+%% The packets of a send to a pid, a name, and an alias on a connection
+%% with the flags Flags, which a new controller takes.
+flags_output(Node, Flags) ->
+    Parent = self(),
+    Ctrl = spawn(fun() -> receive {go, D} -> Parent ! {self(), get_all(D)} end end),
+    erts_internal:new_connection(Node),
+    {message, Reply} = erts_internal:create_dist_channel(Node, Ctrl, {Flags, 1}),
+    DH = receive {Reply, R} -> R end,
+    remote_pid(Node) ! pid,
+    {nm, Node} ! name,
+    remote_ref(Node) ! alias,
+    Ctrl ! {go, DH},
+    receive {Ctrl, Packets} -> Packets end.
+
+get_all(DH) ->
+    case erlang:dist_ctrl_get_data(DH) of
+        none -> [];
+        Data -> [pkt(Data) | get_all(DH)]
+    end.
+
+%% A tcp_inet port controller writes each packet with its packet header
+%% and gives no inet_reply; a write that fails closes the socket, and a
+%% send to the closed socket clears its failed send
+%% (dist.c:3844-3921, inet_drv.c:12660-12698).
+port_output() ->
+    logger:set_primary_config(level, none),
+    M = mandatory(),
+    {ok, L} = gen_tcp:listen(0, [binary, {active, false}]),
+    {ok, LPort} = inet:port(L),
+    Connect = fun(Node, Options) ->
+                      {ok, C} = gen_tcp:connect({127, 0, 0, 1}, LPort, [binary, {active, false} | Options]),
+                      {ok, A} = gen_tcp:accept(L),
+                      erts_internal:new_connection(Node),
+                      {ok, DH} = erts_internal:create_dist_channel(Node, A, {M, 1}),
+                      {C, A, DH}
+              end,
+    {C1, A1, DH1} = Connect(zz@nohost, [{packet, 4}]),
+    ok = inet:setopts(A1, [{packet, 4}]),
+    P1 = remote_pid(zz@nohost),
+    P1 ! one,
+    {nm, zz@nohost} ! two,
+    timer:sleep(100),
+    show(written, [pkt(gen_tcp:recv(C1, 0, 1000)), pkt(gen_tcp:recv(C1, 0, 1000)),
+                   erlang:dist_get_stat(DH1), flush()]),
+    %% The first write to a socket that the other side closed makes the
+    %% other side reset it, so the next write fails and closes the socket;
+    %% the send after it finds no connection.
+    {C3, A3, DH3} = Connect(xx@nohost, []),
+    ok = gen_tcp:close(C3),
+    timer:sleep(100),
+    P3 = remote_pid(xx@nohost),
+    [begin P3 ! Tag, timer:sleep(100) end || Tag <- [first, reset, closed]],
+    show(reset, [erlang:dist_get_stat(DH3), gen_tcp:send(A3, <<"x">>), gen_tcp:recv(A3, 0, 100),
+                 flush()]).
+
 %% Packets that ERTS rejects and ends the connection.
 reject(N) ->
     erts_internal:new_connection(zz@nohost),
@@ -315,6 +413,32 @@ link_op() ->
 remote_pid(Node) ->
     Name = atom_to_binary(Node),
     binary_to_term(<<131, 88, 118, (byte_size(Name)):16, Name/binary, 1:32, 0:32, 1:32>>).
+
+%% The element sizes, the control message, and the message of a packet,
+%% with the pid of the caller as self, each local reference as ref, and
+%% the node of each other pid and reference, which ERTS prints with the
+%% index of its node.
+pkt(none) -> none;
+pkt({ok, Packet}) -> {ok, pkt(Packet)};
+pkt({Size, Data}) -> {Size, pkt(Data)};
+pkt(Data) when is_list(Data) -> {[byte_size(E) || E <- Data], pkt(iolist_to_binary(Data))};
+pkt(<<112, Rest/binary>>) ->
+    {Control, Used} = binary_to_term(Rest, [used]),
+    <<_:Used/binary, Message/binary>> = Rest,
+    {anon(Control), anon(binary_to_term(Message))}.
+
+anon(Pid) when Pid =:= self() -> self;
+anon(Pid) when is_pid(Pid) -> {pid, node(Pid)};
+anon(Ref) when is_reference(Ref), node(Ref) =:= node() -> ref;
+anon(Ref) when is_reference(Ref) -> {ref, node(Ref)};
+anon(Tuple) when is_tuple(Tuple) -> list_to_tuple(anon(tuple_to_list(Tuple)));
+anon([Head | Tail]) -> [anon(Head) | anon(Tail)];
+anon(Term) -> Term.
+
+%% A reference of the node Node.
+remote_ref(Node) ->
+    Name = atom_to_binary(Node),
+    binary_to_term(<<131, 90, 0, 3, 118, (byte_size(Name)):16, Name/binary, 1:32, 1:32, 2:32, 3:32>>).
 
 packet(Control, Message) ->
     <<(packet_only(Control))/binary, (term_to_binary(Message))/binary>>.

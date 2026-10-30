@@ -15,15 +15,26 @@
 //! `node_tab_delete_delay` (`erl_node_tables.c:429-537`): see row
 //! "Distribution" of `docs/erts-differences.md`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
-use crate::term::{Atom, PortId, ProcessId, Reference, Term};
+use crate::term::{Atom, Binary, PortId, ProcessId, Reference, Term};
 
 /// The mask of a connection id (`ERTS_DIST_CON_ID_MASK`, `external.h:137`).
 const CONNECTION_ID_MASK: u32 = 0x00ff_ffff;
 
 /// `DFLAG_PUBLISHED` (`dist.h:30`): the other node is a visible node.
 const PUBLISHED: u64 = 0x01;
+
+/// The bytes that the queue size of a connection counts for each packet
+/// besides its data on a 64-bit host: `sizeof(ErtsDistOutputBuf)` and
+/// `sizeof(ErlIOVec)` (`size_obuf`, `dist.c:1255-1270`).
+const PACKET_OVERHEAD: u64 = 64;
+
+/// The bytes that the queue size of a connection counts for each element
+/// of the iovec of a packet on a 64-bit host: `sizeof(SysIOVec)` and
+/// `sizeof(ErlDrvBinary *)` (`size_obuf`, `dist.c:1267-1268`). The iovec
+/// has an empty first element (`dist.c:4670-4672`).
+const ELEMENT_OVERHEAD: u64 = 24;
 
 /// The distribution controller of a connection (`dep->cid`): a process or
 /// a port.
@@ -74,6 +85,17 @@ struct Entry {
     /// The option `get_size` of `erlang:dist_ctrl_set_opt/3`
     /// (`ERTS_DIST_CTRL_OPT_GET_SIZE`).
     get_size: bool,
+    /// The packets that wait for `erlang:dist_ctrl_get_data/1`, each as the
+    /// binaries of its iovec (`dep->out_queue`).
+    output: VecDeque<Vec<Binary>>,
+    /// The queue size of the packets in `output` (`dep->total_qsize`, see
+    /// [`PACKET_OVERHEAD`]).
+    queue_size: u64,
+    /// The count of the packets that the controller took (`dep->out`).
+    out: u64,
+    /// Whether `erlang:dist_ctrl_get_data_notification/1` asked for the
+    /// `dist_data` message of the next packet (`dep->notify`).
+    notify: bool,
     /// The order of the entry in its list of idle, pending, or connected
     /// entries: ERTS puts an entry that changes its state at the head of
     /// the list of the new state (`erl_node_tables.c:216-227`, `678-684`,
@@ -143,6 +165,10 @@ impl DistTable {
                 input_handler: None,
                 input: 0,
                 get_size: false,
+                output: VecDeque::new(),
+                queue_size: 0,
+                out: 0,
+                notify: false,
                 order,
             }
         });
@@ -309,6 +335,8 @@ impl DistTable {
             Controller::Port(_) => None,
         };
         entry.input = 0;
+        // erl_node_tables.c:771.
+        entry.out = 0;
         entry.order = order;
         let connection_id = entry.connection_id;
         self.next_order += 1;
@@ -372,6 +400,64 @@ impl DistTable {
         self.entries[&name.index()].input
     }
 
+    /// Return the flags and the controller of the entry of `name` when it
+    /// is connected (`ERTS_DSIG_PREP_CONNECTED`, `dist.c:3250-3251`).
+    pub(in crate::runtime) fn connected(&self, name: &Atom) -> Option<(u64, Controller)> {
+        let entry = self.entries.get(&name.index())?;
+        if entry.state != State::Connected {
+            return None;
+        }
+        Some((entry.flags, entry.controller?))
+    }
+
+    /// Put the packet `elements` at the end of the output queue of the
+    /// connected entry of `name`, as `erts_dsig_send` does
+    /// (`dist.c:3646-3683`), and return whether the controller gets the
+    /// `dist_data` message: once after
+    /// `erlang:dist_ctrl_get_data_notification/1` asked for it
+    /// (`dist.c:3655-3667`).
+    pub(in crate::runtime) fn enqueue(&mut self, name: &Atom, elements: Vec<Binary>) -> bool {
+        let entry = self.entry_mut(name);
+        entry.queue_size += queue_size(&elements);
+        entry.output.push_back(elements);
+        std::mem::take(&mut entry.notify)
+    }
+
+    /// Take the first packet of the output queue of the entry of `name` and
+    /// count it, as `erlang:dist_ctrl_get_data/1` does
+    /// (`dist.c:4612-4713`), or return `None` for an empty queue.
+    pub(in crate::runtime) fn dequeue(&mut self, name: &Atom) -> Option<Vec<Binary>> {
+        let entry = self.entry_mut(name);
+        let elements = entry.output.pop_front()?;
+        entry.queue_size -= queue_size(&elements);
+        entry.out += 1;
+        Some(elements)
+    }
+
+    /// Count a packet that the port controller of the entry of `name`
+    /// wrote, as `erts_dist_command` does (`dist.c:4058`, `4133`).
+    pub(in crate::runtime) fn count_output(&mut self, name: &Atom) {
+        self.entry_mut(name).out += 1;
+    }
+
+    /// Ask for the `dist_data` message of the next packet of the entry of
+    /// `name`, as `erlang:dist_ctrl_get_data_notification/1` does
+    /// (`dist.c:4301-4322`), and return whether the queue has a packet, so
+    /// that the controller gets the message now.
+    pub(in crate::runtime) fn notify(&mut self, name: &Atom) -> bool {
+        // A queue with a packet has no request: `Self::enqueue` takes it.
+        let entry = self.entry_mut(name);
+        entry.notify = entry.output.is_empty();
+        !entry.notify
+    }
+
+    /// Return the output count and the queue size of the entry of `name`
+    /// (`dep->out` and `dep->total_qsize`, `dist.c:4507-4508`).
+    pub(in crate::runtime) fn output(&self, name: &Atom) -> (u64, u64) {
+        let entry = &self.entries[&name.index()];
+        (entry.out, entry.queue_size)
+    }
+
     /// Return the entry of `name`, which [`Self::insert`] made.
     fn entry_mut(&mut self, name: &Atom) -> &mut Entry {
         self.entries
@@ -390,6 +476,8 @@ impl DistTable {
         {
             entry.set_idle(self.next_order);
             entry.input = 0;
+            // dist.c:1081.
+            entry.out = 0;
             entry.input_handler = None;
             self.next_order += 1;
         }
@@ -461,9 +549,23 @@ impl Entry {
         self.state = State::Idle;
         self.flags = 0;
         self.get_size = false;
+        self.output.clear();
+        self.queue_size = 0;
+        self.notify = false;
         self.controller = None;
         self.order = order;
     }
+}
+
+/// Return the queue size of the packet `elements` (`size_obuf`,
+/// `dist.c:1255-1270`): its bytes, [`PACKET_OVERHEAD`], and
+/// [`ELEMENT_OVERHEAD`] for each element and the empty first element.
+fn queue_size(elements: &[Binary]) -> u64 {
+    let bytes: usize = elements.iter().map(|element| element.bit_size() / 8).sum();
+    let count = elements.len() + 1;
+    PACKET_OVERHEAD
+        + u64::try_from(bytes).expect("a packet size fits in u64")
+        + ELEMENT_OVERHEAD * u64::try_from(count).expect("an element count fits in u64")
 }
 
 #[cfg(test)]

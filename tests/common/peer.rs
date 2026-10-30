@@ -100,7 +100,18 @@ impl ErtsNode {
     /// assert!(node.line().starts_with("a@"));
     /// ```
     pub(crate) fn start(epmd: &Epmd, arguments: &[&str], expression: &str) -> ErtsNode {
-        let mut child = Command::new("erl")
+        ErtsNode::start_command(Command::new("erl"), epmd, arguments, expression)
+    }
+
+    /// Start `command`, an `erl` command of ERTS or of PBeam, as
+    /// [`ErtsNode::start`] starts `erl`.
+    pub(crate) fn start_command(
+        mut command: Command,
+        epmd: &Epmd,
+        arguments: &[&str],
+        expression: &str,
+    ) -> ErtsNode {
+        let mut child = command
             .arg("-noshell")
             .args(arguments)
             .args(["-eval", expression])

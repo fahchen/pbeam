@@ -38,7 +38,7 @@ impl Scheduler {
     /// process or to a name that no process has is dropped without a decode
     /// (`dist.c:2489-2507`, `2544-2551`). PBeam does not offer
     /// `DFLAG_ALIAS`, so another node sends no `ALIAS_SEND` (33), and it is
-    /// another operation here (#1453).
+    /// another operation here (#1455).
     ///
     /// # Examples
     ///

@@ -5227,7 +5227,9 @@ fn destination<'a>(to: &'a Term, atoms: &AtomTable) -> Option<Destination<'a>> {
 /// - An atom gives the message to its registered process. A name that no
 ///   process has raises `badarg`. PBeam registers no port.
 /// - `{Name, Node}` with the local node gives the message to the registered
-///   process, or drops it when no process has the name. Another node drops
+///   process, or drops it when no process has the name.
+/// - A pid, a reference, or `{Name, Node}` of a connected node goes to the
+///   connection (see `Scheduler::dist_send`). Another node drops
 ///   the message and gives [`Sent::NoConnect`], as ERTS does on a node that
 ///   is not alive (`remote_send`, `bif.c:2397-2400`). The send finds or
 ///   makes the not connected dist entry of the node first
@@ -5245,7 +5247,8 @@ fn destination<'a>(to: &'a Term, atoms: &AtomTable) -> Option<Destination<'a>> {
 ///
 /// # Errors
 ///
-/// A port signal gives the errors of [`erts_internal::port_bang`]. A new
+/// A port signal gives the errors of [`erts_internal::port_bang`], and a
+/// send to a connection the errors of `Scheduler::dist_send`. A new
 /// `capability_denied` atom in a full atom table gives the error of
 /// `AtomTable::put`.
 fn deliver_to(
@@ -5278,6 +5281,9 @@ fn deliver_to(
             None => None,
         },
         Destination::Remote(node) => {
+            if scheduler.dist_send(node, to, &message)? {
+                return Ok(Ok(Sent::Local));
+            }
             scheduler.send_to_remote_node(node);
             return Ok(Ok(Sent::NoConnect));
         }

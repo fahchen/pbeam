@@ -61,6 +61,21 @@ fn pbeam_erl<S: AsRef<OsStr>>(epmd: &Epmd, arguments: &[S]) -> Output {
         .unwrap()
 }
 
+/// Start a node of `pbeam erl` with the `epmd` of `epmd`, the arguments
+/// `arguments`, and the expression `expression`.
+fn pbeam_node(epmd: &Epmd, arguments: &[&str], expression: &str) -> ErtsNode {
+    let (root, bindir) = emulator_flags();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_pbeam"));
+    command
+        .args(["erl", "--root", &root, "--bindir"])
+        .arg(&bindir)
+        .arg("--preloaded")
+        .arg(pinned_beam_path("erlang").parent().unwrap())
+        .arg("--")
+        .args(["-start_epmd", "false"]);
+    ErtsNode::start_command(command, epmd, arguments, expression)
+}
+
 /// Run `erl` of the pinned ERTS with the `epmd` of `epmd` and the
 /// arguments `arguments`.
 fn erts_erl<S: AsRef<OsStr>>(epmd: &Epmd, arguments: &[S]) -> Output {
@@ -146,6 +161,24 @@ fn runs_the_bifs_of_a_process_controller_as_pinned_erts() {
         "{erts}"
     );
     assert_eq!(stdout(&pbeam_erl(&epmd, &exit)), erts);
+}
+
+#[test]
+fn queues_and_writes_the_messages_to_a_connection_as_pinned_erts() {
+    // A send to a pid, a name, and an alias of a connected node puts the
+    // packet of erts_dsig_send_msg in the output queue of a process
+    // controller (dist.c:1640-1702, 3646-3683, 4272-4746), and a tcp_inet
+    // port controller writes it with no inet_reply (dist.c:3844-3921,
+    // inet_drv.c:12660-12698).
+    let epmd = Epmd::start();
+    let name = format!("dout{}", std::process::id());
+    for function in ["output", "port_output"] {
+        let expression = format!("dist_channel_probe:{function}(), halt().");
+        let arguments = probe(&["-sname", &name], &expression);
+        let erts = stdout(&erts_erl(&epmd, &arguments));
+        assert!(erts.contains("[{ok,0,"), "{erts}");
+        assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), erts, "{function}");
+    }
 }
 
 #[test]
@@ -361,6 +394,54 @@ fn connects_over_a_tcp_inet_port_as_pinned_erts() {
             format!("[{}]", atom_text(&format!("{pbeam}@{host}")))
         );
         assert_eq!(node.line(), "[]");
+    }
+}
+
+#[test]
+fn sends_messages_between_erts_and_pbeam_nodes_in_order() {
+    // A client sends 100 REG_SEND messages to the name decho of a server
+    // node, and then 100 SEND messages to the pid of the server, which
+    // replies to each with SEND (dist.c:1668-1700). The echoes come in the
+    // order of the sends. Each pair of ERTS and PBeam nodes runs over the
+    // prim_socket carrier and over the tcp_inet port controller.
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let server = "io:format(\"~s~n\", [node()]), register(decho, self()), \
+                  L = fun L() -> receive {From, Tag, N} -> From ! {echo, self(), Tag, N}, L() end end, L().";
+    for (server_pbeam, socket) in [(false, true), (false, false), (true, true), (true, false)] {
+        let name = format!("dssrv{server_pbeam}{socket}{id}");
+        let mut arguments = vec!["-sname", &name, "-setcookie", "ck"];
+        if socket {
+            arguments.extend(SOCKET_CARRIER);
+        }
+        let node = if server_pbeam {
+            pbeam_node(&epmd, &arguments, server)
+        } else {
+            ErtsNode::start(&epmd, &arguments, server)
+        };
+        let server = node.line();
+        let expression = format!(
+            "true = net_kernel:connect_node('{server}'), Seq = lists:seq(1, 100), \
+             Echo = fun() -> receive {{echo, P, T, N}} -> {{P, T, N}} end end, \
+             [{{decho, '{server}'}} ! {{self(), name, N}} || N <- Seq], \
+             Names = [Echo() || _ <- Seq], [{{Pid, _, _}} | _] = Names, \
+             [Pid ! {{self(), pid, N}} || N <- Seq], Pids = [Echo() || _ <- Seq], \
+             io:format(\"~p~n\", [{{node(Pid), [{{T, N}} || {{_, T, N}} <- Names ++ Pids] =:= \
+             [{{name, N}} || N <- Seq] ++ [{{pid, N}} || N <- Seq]}}]), halt()."
+        );
+        let client = |name: &str| {
+            let mut arguments = vec!["-sname", name, "-setcookie", "ck", "-hidden"];
+            if socket {
+                arguments.extend(SOCKET_CARRIER);
+            }
+            arguments.extend(["-noshell", "-eval", &expression]);
+            arguments.into_iter().map(str::to_owned).collect::<Vec<_>>()
+        };
+        let echoed = format!("{{{},true}}\n", atom_text(&server));
+        let erts = format!("dserts{server_pbeam}{socket}{id}");
+        assert_eq!(stdout(&erts_erl(&epmd, &client(&erts))), echoed);
+        let pbeam = format!("dspb{server_pbeam}{socket}{id}");
+        assert_eq!(stdout(&pbeam_erl(&epmd, &client(&pbeam))), echoed);
     }
 }
 
