@@ -1,10 +1,11 @@
 use super::{KeyRange, can_match, cmp_partly_bound, key_range, tag};
 use crate::runtime::ets::pattern::MatchSpec;
+use crate::term::external_id::{ExternalData, ExternalId};
 use crate::term::{
     AtomTable, Binary, Fun, Map, PortId, ProcessId, Reference, Term, test_atom_table,
 };
 use num_bigint::BigInt;
-use std::cmp::Ordering;
+use std::{cmp::Ordering, sync::Arc};
 
 fn atom(atoms: &AtomTable, name: &str) -> Term {
     Term::Atom(atoms.put(name).unwrap())
@@ -211,4 +212,25 @@ fn classifies_the_terms_as_tag_val_def() {
     .collect::<Vec<_>>();
     assert_eq!(tags, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
     assert_eq!(tag(&Term::from_bigint(BigInt::from(1) << 70)), 1);
+    // EXTERNAL_PID_DEF, EXTERNAL_PORT_DEF, and EXTERNAL_REF_DEF
+    // (`erl_term.h`).
+    let external = |data| {
+        Term::External(Arc::new(ExternalId {
+            node: atoms.put("b@host").unwrap(),
+            creation: 1,
+            data,
+        }))
+    };
+    let tags = [
+        external(ExternalData::Pid {
+            number: 1,
+            serial: 0,
+        }),
+        external(ExternalData::Port(1)),
+        external(ExternalData::Reference(Box::new([1]))),
+    ]
+    .iter()
+    .map(tag)
+    .collect::<Vec<_>>();
+    assert_eq!(tags, [14, 15, 16]);
 }

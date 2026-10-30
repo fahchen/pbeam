@@ -491,3 +491,17 @@ fn walks_compares_and_formats_a_native_record() {
         )
     );
 }
+
+#[test]
+fn prints_an_identifier_of_another_node_with_its_parts() {
+    use crate::term::external_id::{ExternalData, ExternalId};
+    let atoms = test_atom_table();
+    let id = Term::External(Arc::new(ExternalId {
+        node: atoms.put("b@host").unwrap(),
+        creation: 3,
+        data: ExternalData::Port(9),
+    }));
+    let text = debug_term(&id, &atoms);
+    assert!(text.starts_with("External(ExternalId { node: "), "{text}");
+    assert!(text.ends_with("creation: 3, data: Port(9) })"), "{text}");
+}

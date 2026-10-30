@@ -153,13 +153,11 @@ pub(crate) fn is_reference(term: &Term) -> bool {
 /// The reference numbers, the low number first, of a local or a remote
 /// reference term.
 pub(crate) fn reference_numbers(term: &Term) -> Option<Vec<u32>> {
-    match term {
-        Term::External(id) => match &id.data {
-            ExternalData::Reference(numbers) => Some(numbers.to_vec()),
-            _ => None,
-        },
-        _ => term
-            .reference()
-            .map(|reference: Reference| reference.numbers().to_vec()),
+    if let Term::External(id) = term
+        && let ExternalData::Reference(numbers) = &id.data
+    {
+        return Some(numbers.to_vec());
     }
+    term.reference()
+        .map(|reference: Reference| reference.numbers().to_vec())
 }
