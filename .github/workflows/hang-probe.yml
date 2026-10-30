@@ -31,8 +31,6 @@ jobs:
         run: |
           sudo apt-get install -y -qq gdb >/dev/null
           cat /proc/sys/kernel/yama/ptrace_scope || true
-          export CARGO_LLVM_COV_TARGET_DIR=target/llvm-cov-target
-          mise exec -- cargo llvm-cov nextest --no-report --locked --workspace --all-features --no-run
       - name: Loop
         run: bash scripts/hang_probe.sh
       - if: always()
