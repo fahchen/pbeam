@@ -53,10 +53,6 @@ run = '''mix run --no-start -e 'for module <- [Hello, HelloVariant] do path = :c
 description = "Disassemble the constant-return BEAM fixture"
 run = '''erl -noshell -eval 'io:format("~p~n", [beam_disasm:file("fixtures/beam/constant.beam")]), halt().' '''
 
-[tasks.blaze-check]
-description = "Check the workspace with blaze of .github/blaze-version, installed when missing; not a gate yet (docs/blaze.md)"
-run = "bash scripts/blaze.sh"
-
 [tasks.check-brief]
 description = "Run all required checks and print only the result; the full log goes to target/check.log"
 quiet = true
