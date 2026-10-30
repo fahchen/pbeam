@@ -1,0 +1,43 @@
+name: Hang probe
+
+on:
+  push:
+    branches: [hang-probe]
+
+env:
+  MISE_AUTO_INSTALL: "0"
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 80
+    strategy:
+      fail-fast: false
+      matrix:
+        job: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: jdx/mise-action@v5.1.1
+        with:
+          version: 2026.10.7
+          install: true
+      - run: mise run setup
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: checks
+          save-if: false
+      - name: Build
+        run: |
+          sudo apt-get install -y -qq gdb >/dev/null
+          cat /proc/sys/kernel/yama/ptrace_scope || true
+          export CARGO_LLVM_COV_TARGET_DIR=target/llvm-cov-target
+          mise exec -- cargo llvm-cov nextest --no-report --locked --workspace --all-features --no-run
+      - name: Loop
+        run: bash scripts/hang_probe.sh
+      - if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: dumps-${{ matrix.job }}
+          path: /tmp/dumps
+          if-no-files-found: ignore
