@@ -270,11 +270,11 @@ impl ReleaseStack {
 pub(super) enum MonitorTarget {
     /// The `process` type with a pid.
     Process(ProcessId),
-    /// The `process` type with a registered name, or with
-    /// `{Name, nonode@nohost}`.
+    /// The `process` type with a registered name, or with `{Name, Node}`
+    /// and the local node.
     ProcessName(Atom),
-    /// The `port` type with a registered name, or with
-    /// `{Name, nonode@nohost}`.
+    /// The `port` type with a registered name, or with `{Name, Node}` and
+    /// the local node.
     PortName(Atom),
     /// The `port` type with a port.
     Port(PortId),
@@ -3403,7 +3403,7 @@ impl Scheduler {
     /// has, and each port name, give a monitor down signal `noproc` to the
     /// current process at once: PBeam registers no port, so the port lookup
     /// always fails (`bif.c:907-914`). The `DOWN` message gives the pid as
-    /// its item, or `{Name, nonode@nohost}` for a name.
+    /// its item, or `{Name, Node}` with the local node for a name.
     ///
     /// With an alias option, the reference is also an alias of the current
     /// process, and the alias mode goes into the monitor tree.
@@ -3445,9 +3445,9 @@ impl Scheduler {
             MonitorTarget::Process(id) => ("process", Some(id), Term::Pid(id)),
             MonitorTarget::ProcessName(name) => {
                 let id = self.whereis(self.atoms.name_of(&name));
-                ("process", id, named_item(&name))
+                ("process", id, named_item(&name, &self.atoms))
             }
-            MonitorTarget::PortName(name) => ("port", None, named_item(&name)),
+            MonitorTarget::PortName(name) => ("port", None, named_item(&name, &self.atoms)),
             MonitorTarget::Port(port) => ("port", None, Term::Port(port)),
         };
         if id == Some(watcher) {
@@ -3761,8 +3761,9 @@ impl Scheduler {
     /// [Pid, Reason], Metadata}` (`utils.c:770-858`, `1011`). The metadata
     /// holds the group leader, the pid, the OS system time in microseconds
     /// (`utils.c:792`), and `error_logger => #{emulator => true, tag =>
-    /// error}`. PBeam is never alive (no distribution), so the format has no
-    /// `on node ~p`. The system logger gets the message as
+    /// error}`. When the node is alive, the format has `on node ~p` and the
+    /// arguments have the name of the local node after the pid
+    /// (`beam_common.c:697-717`). The system logger gets the message as
     /// `sys_msg_dispatcher_func` gives it (`erl_trace.c:2780-2824`): a live
     /// pid gets it; a pid that does not exist makes `logger` the system
     /// logger again; `logger` sends it to the process registered as
@@ -3773,7 +3774,13 @@ impl Scheduler {
     /// logger process removed its name, so PBeam writes that message to
     /// stderr too (measured on the pinned ERTS).
     fn send_exit_report(&mut self, id: ProcessId, reason: &Term) -> Result<(), BeamError> {
-        let format = "Error in process ~p with exit value:~n~p~n";
+        let (node, _) = self.atoms.this_node();
+        let alive = !node.is_static("nonode@nohost");
+        let format = if alive {
+            "Error in process ~p on node ~p with exit value:~n~p~n"
+        } else {
+            "Error in process ~p with exit value:~n~p~n"
+        };
         // `gl` is not a static atom; ERTS makes it at its first use
         // (`ERTS_MAKE_AM`, utils.c:846). A full atom table fails the run.
         let gl = self.atoms.put("gl")?;
@@ -3807,7 +3814,11 @@ impl Scheduler {
             Term::static_atom("log"),
             Term::static_atom("error"),
             Term::list_from(format.bytes().map(|byte| Term::Integer(byte.into()))),
-            Term::list_from(vec![Term::Pid(id), reason.clone()]),
+            Term::list_from(if alive {
+                vec![Term::Pid(id), Term::Atom(node), reason.clone()]
+            } else {
+                vec![Term::Pid(id), reason.clone()]
+            }),
             Term::Map(metadata),
         ]);
         // The dispatcher runs after the exit of the sender, so the sender is
@@ -4016,6 +4027,7 @@ impl Scheduler {
             .expect("the exiting process is alive");
         debug_assert!(!process.in_run_queue, "only the current process exits");
         self.node.remove_process(id);
+        self.node.net_exits(id, &self.atoms);
         self.delegations
             .release(std::mem::take(&mut process.security));
         self.policy_exited(id, &reason);
@@ -4226,16 +4238,18 @@ impl Scheduler {
     }
 }
 
-/// Return the `DOWN` item of a monitor by name: `{Name, nonode@nohost}`, as
-/// ERTS builds it for a local name (`erl_proc_sig_queue.c:4942-4955`).
+/// Return the `DOWN` item of a monitor by name: `{Name, Node}` with the
+/// local node of the run that owns `atoms`, as ERTS builds it for a local
+/// name (`erl_proc_sig_queue.c:4942-4955`). PBeam builds it when the
+/// monitor starts, and ERTS when the monitor fires.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(named_item(&name), Term::tuple(vec![Term::Atom(name.clone()), local_node()]));
+/// assert_eq!(named_item(&name, &atoms), Term::tuple(vec![Term::Atom(name.clone()), local_node(&atoms)]));
 /// ```
-fn named_item(name: &Atom) -> Term {
-    Term::tuple(vec![Term::Atom(name.clone()), local_node()])
+fn named_item(name: &Atom, atoms: &AtomTable) -> Term {
+    Term::tuple(vec![Term::Atom(name.clone()), local_node(atoms)])
 }
 
 mod code;

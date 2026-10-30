@@ -50,7 +50,7 @@ use std::cmp::Ordering;
 use num_bigint::{BigInt, Sign};
 use num_traits::FromPrimitive;
 
-use super::external_id::{self, ExternalData, LOCAL_NODE};
+use super::external_id::{self, ExternalData};
 use super::{AtomTable, Reference, Term, match_context::MATCH_CONTEXT_ESCAPE};
 use crate::error::BeamError;
 
@@ -327,8 +327,8 @@ const PORT_RANK: u8 = 4;
 /// Compare two pids, two ports, or two references of the type rank `rank`,
 /// of which one or both are of another node, as `erts_cmp_compound` does
 /// (`utils.c:1749-1806`, `2212-2310`). The node compares by its name, then
-/// by its creation (`CMP_NODES`, `utils.c:1715-1723`); the local node is
-/// `nonode@nohost` with the creation 0. A pid compares its serial, its
+/// by its creation (`CMP_NODES`, `utils.c:1715-1723`); a local identifier
+/// has the name and the creation of the local node of the run. A pid compares its serial, its
 /// number, then its node. A port compares its node, then its number. A
 /// reference compares its node, then its numbers from the high number, and
 /// a high number that is 0 does not count.
@@ -341,9 +341,13 @@ const PORT_RANK: u8 = 4;
 /// ```
 fn id_order(left: &Term, right: &Term, rank: u8, atoms: &AtomTable) -> Ordering {
     let node = |term: &Term| {
-        external_id::node_of(term).map_or((LOCAL_NODE, 0), |(node, creation)| {
-            (atoms.name_of(node), creation)
-        })
+        external_id::node_of(term).map_or_else(
+            || {
+                let (node, creation) = atoms.this_node();
+                (atoms.name_of(&node), creation)
+            },
+            |(node, creation)| (atoms.name_of(node), creation),
+        )
     };
     let nodes = node(left).cmp(&node(right));
     match rank {

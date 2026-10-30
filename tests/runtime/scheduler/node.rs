@@ -34,6 +34,29 @@ fn an_exiting_process_has_no_live_owner() {
     assert_eq!(node.live_owner(ProcessId(7)), None);
 }
 
+/// `setnode/2` gives `badarg` for a `net_kernel` that exits, as
+/// `setnode_2` checks `ERTS_PROC_IS_EXITING` (`dist.c:5020-5021`). Only a
+/// race between the name lookup and the exit reaches this check, so the
+/// test marks the process as exiting directly. The exit of the owner gives
+/// the node its name back, and the exit of another process does not.
+#[test]
+fn a_net_kernel_that_exits_gets_no_node_name() {
+    let atoms = crate::term::AtomTable::new();
+    let name = atoms.put("a@host").unwrap();
+    let nonode = (crate::term::Atom::from_static("nonode@nohost").unwrap(), 0);
+    let (node, _readers) = Node::new(1).unwrap();
+    node.register(ProcessId(7), 0);
+    node.set_exiting(ProcessId(7));
+    assert!(!node.set_this_node(&atoms, ProcessId(7), &name, 4));
+    assert_eq!(atoms.this_node(), nonode);
+    node.register(ProcessId(8), 0);
+    assert!(node.set_this_node(&atoms, ProcessId(8), &name, 4));
+    node.net_exits(ProcessId(7), &atoms);
+    assert_eq!(atoms.this_node(), (name, 4));
+    node.net_exits(ProcessId(8), &atoms);
+    assert_eq!(atoms.this_node(), nonode);
+}
+
 /// The node counts its roots: the run ends after the exit of the last root
 /// completes, and each result keeps the slot of its root.
 #[test]

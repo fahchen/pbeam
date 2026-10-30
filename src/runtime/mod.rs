@@ -42,17 +42,16 @@ pub use schedulers::Schedulers;
 
 use crate::term::Term;
 
-/// Return the name of the local node.
-///
-/// PBeam is a local node that is not distributed, so every pid, registered
-/// name, and port name is local and its node is `nonode@nohost`, as on ERTS
-/// (`dist.c`).
+/// Return the name of the local node of the run that owns `atoms`: the
+/// node of each local pid, port, reference, registered name, and port name
+/// (`erts_this_dist_entry->sysname`). It is `nonode@nohost` until
+/// `erlang:setnode/2` gives the node a name (`dist.c:4978-5071`).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(local_node(), Term::static_atom("nonode@nohost"));
+/// assert_eq!(local_node(&AtomTable::new()), Term::static_atom("nonode@nohost"));
 /// ```
-fn local_node() -> Term {
-    Term::static_atom("nonode@nohost")
+fn local_node(atoms: &crate::term::AtomTable) -> Term {
+    Term::Atom(atoms.this_node().0)
 }

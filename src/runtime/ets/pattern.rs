@@ -938,10 +938,10 @@ fn call(atoms: &AtomTable, function: Guard, arguments: &[Term]) -> Option<Term> 
             Term::Tuple(elements) => Some(Term::Integer(i64::try_from(elements.len()).ok()?)),
             _ => None,
         },
-        Guard::Node0 => Some(Term::static_atom("nonode@nohost")),
+        Guard::Node0 => Some(Term::Atom(atoms.this_node().0)),
         Guard::Node1 => match &arguments[0] {
             Term::Pid(_) | Term::Port(_) | Term::Reference(_) | Term::Resource(_) => {
-                Some(Term::static_atom("nonode@nohost"))
+                Some(Term::Atom(atoms.this_node().0))
             }
             Term::External(id) => Some(Term::Atom(id.node.clone())),
             _ => None,

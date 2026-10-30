@@ -272,6 +272,7 @@ fn reports_ml_kem_encapsulation_as_unsupported() {
 const CRYPTO_PROBE: &str = "fixtures/code_server/crypto_probe";
 const CRYPTO_SIGN_PROBE: &str = "fixtures/code_server/crypto_sign_probe";
 const REMOTE_ID_PROBE: &str = "fixtures/code_server/remote_id_probe";
+const SETNODE_PROBE: &str = "fixtures/code_server/setnode_probe";
 const STATISTICS_PROBE: &str = "fixtures/code_server/statistics_probe";
 const CRYPTO_CRYPT_PROBE: &str = "fixtures/code_server/crypto_crypt_probe";
 const CRYPTO_KEYGEN_PROBE: &str = "fixtures/code_server/crypto_keygen_probe";
@@ -1339,6 +1340,48 @@ fn gives_the_pids_ports_and_references_of_another_node_as_pinned_erts() {
             &[]
         )),
         erts
+    );
+}
+
+#[test]
+fn sets_the_name_and_the_creation_of_the_local_node_as_pinned_erts() {
+    // erlang:setnode/2 checks the creation, the name, the alive state, and
+    // the net_kernel name, raises a creation below 4 to 4, and gives the
+    // name and the creation to node/0,1, the external term format, the
+    // text, the term order, and names with a node (dist.c:4978-5071,
+    // external.c:2967-2996, 3123-3129). The exit of net_kernel gives the
+    // node nonode@nohost and the creation 0 back (dist.c:853-872, 922-1117).
+    for function in ["main", "stop"] {
+        let erts = run(&mut erts_probe(
+            SETNODE_PROBE,
+            "setnode_probe",
+            function,
+            &[],
+        ));
+        assert!(erts.contains("true"), "{erts}");
+        assert_eq!(
+            run(&mut pbeam_probe(
+                SETNODE_PROBE,
+                "setnode_probe",
+                function,
+                &[]
+            )),
+            erts,
+            "{function}"
+        );
+    }
+    // An alive node monitors a name of another node on that node
+    // (bif.c:875-893), which PBeam does not have yet.
+    let output = pbeam_probe(SETNODE_PROBE, "setnode_probe", "remote_monitor", &[])
+        .env("TERM", "dumb")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        !output.status.success()
+            && stderr.contains("unsupported erlang:monitor/2,3 of a name of another node"),
+        "{stderr}"
     );
 }
 

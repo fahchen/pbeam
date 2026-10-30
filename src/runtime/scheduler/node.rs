@@ -268,6 +268,14 @@ pub(in crate::runtime) struct Node {
     /// (`local_node_hash`, external.c:134). The first call on any scheduler
     /// computes it, and each scheduler reads the same value.
     local_node_hash: OnceLock<u32>,
+    /// The process that `erlang:setnode/2` made the owner of the
+    /// distribution of the alive node: `net_kernel`, which ERTS marks with
+    /// `F_DISTRIBUTION` (`dist.c:5044-5054`). Its exit gives the node the
+    /// name `nonode@nohost` and the creation 0 again (see
+    /// [`Node::net_exits`]). The lock also orders the `setnode/2` calls of
+    /// the schedulers, as the thread progress block of ERTS does
+    /// (`dist.c:5018-5058`).
+    net_kernel: Mutex<Option<ProcessId>>,
     /// The ETS tables of the node, which each scheduler shares, as ERTS
     /// keeps one table store for the node (`erl_db.c:420-433`).
     pub(super) ets: Arc<NodeTables>,
@@ -368,6 +376,7 @@ impl Node {
                 statistics: Statistics::default(),
                 dirty: Pools::new(count),
                 local_node_hash: OnceLock::new(),
+                net_kernel: Mutex::new(None),
                 ets: Arc::default(),
                 code: super::code::NodeCode::default(),
                 atomics: crate::runtime::atomics::AtomicArrays::default(),
@@ -407,6 +416,70 @@ impl Node {
     /// Return the counters of `erlang:statistics/1`.
     pub(in crate::runtime) fn statistics(&self) -> &Statistics {
         &self.statistics
+    }
+
+    /// Give the local node of the run that owns `atoms` the name `name` and
+    /// the creation `creation`, and make `net_kernel` the owner of the
+    /// distribution, as `setnode_2` does (`dist.c:5018-5058`). Return
+    /// `false` and change nothing when the node is alive or when
+    /// `net_kernel` is not a live process that does not exit.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(node.set_this_node(&atoms, net_kernel, &name, 4));
+    /// assert!(!node.set_this_node(&atoms, net_kernel, &name, 4));
+    /// ```
+    pub(in crate::runtime) fn set_this_node(
+        &self,
+        atoms: &crate::term::AtomTable,
+        net_kernel: ProcessId,
+        name: &crate::term::Atom,
+        creation: u32,
+    ) -> bool {
+        let mut owner = self
+            .net_kernel
+            .lock()
+            .expect("the net_kernel lock is not poisoned");
+        if owner.is_some() || self.live_owner(net_kernel).is_none() {
+            return false;
+        }
+        atoms.set_this_node(name, creation);
+        *owner = Some(net_kernel);
+        true
+    }
+
+    /// Run the cleanup of the exit of the process `id` that ERTS runs for a
+    /// process with `F_DISTRIBUTION` (`erl_process.c:14471-14506`): when
+    /// `id` owns the distribution, give the local node of the run that owns
+    /// `atoms` the name `nonode@nohost` and the creation 0 again, as
+    /// `erts_do_net_exits` and `set_node_not_alive` do for a node with no
+    /// connection (`dist.c:922-1117`, `853-872`). ERTS does the last step in
+    /// the aux work of a scheduler soon after the exit, and PBeam does it in
+    /// the exit. The process must have left the process table, so that a
+    /// later `setnode/2` does not find it.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// node.net_exits(net_kernel, &atoms);
+    /// assert_eq!(atoms.this_node(), (Atom::from_static("nonode@nohost").unwrap(), 0));
+    /// ```
+    pub(in crate::runtime) fn net_exits(&self, id: ProcessId, atoms: &crate::term::AtomTable) {
+        // A node that is not alive has no owner, so most exits skip the lock.
+        if atoms.this_node().0.is_static("nonode@nohost") {
+            return;
+        }
+        let mut owner = self
+            .net_kernel
+            .lock()
+            .expect("the net_kernel lock is not poisoned");
+        if *owner == Some(id) {
+            *owner = None;
+            let nonode = crate::term::Atom::from_static("nonode@nohost")
+                .expect("nonode@nohost is a static atom");
+            atoms.set_this_node(&nonode, 0);
+        }
     }
 
     /// Return the seed of the local node hash. `compute` runs at the first
@@ -463,6 +536,7 @@ impl Node {
             dirty: Pools::new(1),
             statistics: Statistics::default(),
             local_node_hash: OnceLock::new(),
+            net_kernel: Mutex::new(None),
             ets: Arc::default(),
             code: super::code::NodeCode::default(),
             atomics: crate::runtime::atomics::AtomicArrays::default(),

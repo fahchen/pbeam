@@ -75,8 +75,8 @@ pub(in crate::runtime::interpreter) fn remote_unsupported(operation: &str) -> Be
 /// assert!(old_incarnation(&old_pid));
 /// assert!(!old_incarnation(&Term::Pid(ProcessId(1))));
 /// ```
-pub(in crate::runtime::interpreter) fn old_incarnation(term: &Term) -> bool {
-    matches!(term, Term::External(id) if Term::Atom(id.node.clone()) == local_node())
+pub(in crate::runtime::interpreter) fn old_incarnation(term: &Term, atoms: &AtomTable) -> bool {
+    matches!(term, Term::External(id) if id.node == atoms.this_node().0)
 }
 
 /// Run `erlang:node/1`: return the node of a pid, a port, or a reference,
@@ -89,10 +89,10 @@ pub(in crate::runtime::interpreter) fn old_incarnation(term: &Term) -> bool {
 /// assert!(matches!(node(&Term::Pid(pid)), BifResult::Value(Term::Atom(atom)) if atom.is_static("nonode@nohost")));
 /// assert!(matches!(node(&Term::Integer(1)), BifResult::Raise { .. }));
 /// ```
-pub(super) fn node(term: &Term) -> BifResult {
+pub(super) fn node(term: &Term, atoms: &AtomTable) -> BifResult {
     match term {
         Term::Pid(_) | Term::Port(_) | Term::Reference(_) | Term::Resource(_) => {
-            Value(local_node())
+            Value(local_node(atoms))
         }
         Term::External(id) => Value(Term::Atom(id.node.clone())),
         _ => BifResult::badarg(),
@@ -100,11 +100,11 @@ pub(super) fn node(term: &Term) -> BifResult {
 }
 
 /// Run `erlang:nodes(NodeTypes)` and `erlang:nodes(NodeTypes, Options)` as
-/// ERTS `nodes` does (`dist.c:6261-6476`) on a node that is not alive.
+/// ERTS `nodes` does (`dist.c:6261-6476`) on a node with no connection.
 /// `NodeTypes` is one node type or a proper list of them: `visible`,
 /// `hidden`, `connected`, `this`, and `known`. PBeam has no connection, so
 /// `visible`, `hidden`, and `connected` give no node. `this` and `known`
-/// give the local node `nonode@nohost` last. Before it, `known` gives the
+/// give the local node last. Before it, `known` gives the
 /// not connected entry of each node that a send used, from the oldest to
 /// the newest (see `Scheduler::known_nodes`). `Options` (`None` for
 /// `nodes/1`) is a map of the keys `connection_id` and `node_type`, each
@@ -172,7 +172,7 @@ pub(super) fn nodes(
         );
     }
     if this {
-        names.push((local_node(), "this"));
+        names.push((local_node(&scheduler.atoms), "this"));
     }
     // ERTS charges one reduction for each 10 nodes of a result of more than
     // 10 nodes (`dist.c:6465-6468`).
@@ -1332,7 +1332,9 @@ pub(super) fn link(scheduler: &mut Scheduler, target: &Term) -> Result<BifResult
     let linked_id = match *target {
         Term::Pid(pid) => Some(LinkId::Process(pid)),
         Term::Port(port) => Some(LinkId::Port(port)),
-        Term::External(_) if old_incarnation(target) && !is_reference(target) => None,
+        Term::External(_) if old_incarnation(target, &scheduler.atoms) && !is_reference(target) => {
+            None
+        }
         _ if matches!(target, Term::External(_)) && pid_parts(target).is_some() => {
             return Err(remote_unsupported("erlang:link/1"));
         }
@@ -1494,7 +1496,7 @@ fn send_exit(
         (Term::Port(_), _) => (None, None),
         // An old incarnation of the local node takes no signal
         // (`bif.c:1804-1808`, `bif.c:1857-1861`).
-        (Term::External(_), _) if old_incarnation(id) => {
+        (Term::External(_), _) if old_incarnation(id, &scheduler.atoms) => {
             return Ok(Value(Term::static_atom("true")));
         }
         (Term::External(_), _) if port_number(id).is_none() => {
@@ -1595,7 +1597,9 @@ pub(super) fn demonitor(
     // (`bif.c:443-449`).
     let demonitored = match reference.reference() {
         Some(id) => context.scheduler.demonitor(id),
-        None if old_incarnation(reference) && is_reference(reference) => false,
+        None if old_incarnation(reference, &context.scheduler.atoms) && is_reference(reference) => {
+            false
+        }
         None => return BifResult::badarg(),
     };
     if demonitored {
@@ -1616,10 +1620,11 @@ pub(super) fn demonitor(
 /// (`bif.c:988-997`) and `monitor` (`bif.c:758-981`) do;
 /// `erlang:monitor/2` passes `[]` as `monitor_2` (`bif.c:983-986`) does.
 /// The options come first (see [`monitor_options`]). The type `process`
-/// accepts a pid, a registered name, and `{Name, nonode@nohost}`; the type
-/// `port` accepts a registered name and `{Name, nonode@nohost}`. PBeam is a
-/// node that is not alive, so `{Name, Node}` with another node raises
-/// `badarg` (`bif.c:881-882`). Each other target, and each other type,
+/// accepts a pid, a registered name, and `{Name, Node}` with the local node; the type
+/// `port` accepts a registered name and `{Name, Node}` with the local node.
+/// On a node that is not alive, `{Name, Node}` with another node raises
+/// `badarg` (`bif.c:881-882`); on an alive node, the type `process` with
+/// another node stops the run with a runtime error. Each other target, and each other type,
 /// raises `badarg`. A monitor of the caller creates no monitor and no
 /// alias, and each port name gives the `noproc` `DOWN` message (see
 /// [`Scheduler::monitor`]). PBeam registers no port.
@@ -1666,24 +1671,40 @@ pub(super) fn monitor(
     }
     // An `Err` is the runtime error of a valid target that PBeam does not
     // support. It comes after the capability check.
+    let (this, _) = context.scheduler.atoms.this_node();
     let target = match (context.scheduler.atoms.name_of(kind), target) {
         ("process", Term::Pid(id)) => Some(Ok(MonitorTarget::Process(*id))),
         // ERTS sends a `DOWN` message with `noproc` at once for an old
         // incarnation of the local node (`bif.c:811-825`, `bif.c:925-935`).
         ("process", Term::External(_))
-            if old_incarnation(target) && pid_parts(target).is_some() =>
+            if old_incarnation(target, &context.scheduler.atoms) && pid_parts(target).is_some() =>
         {
             Some(Err(old_monitor_unsupported()))
         }
-        ("port", Term::External(_)) if old_incarnation(target) && port_number(target).is_some() => {
+        ("port", Term::External(_))
+            if old_incarnation(target, &context.scheduler.atoms)
+                && port_number(target).is_some() =>
+        {
             Some(Err(old_monitor_unsupported()))
         }
         ("process", Term::External(_)) if pid_parts(target).is_some() => {
             Some(Err(remote_unsupported("erlang:monitor/2,3")))
         }
-        ("process", target) => local_name(target).map(|name| Ok(MonitorTarget::ProcessName(name))),
+        // An alive node monitors `{Name, Node}` with another node on that
+        // node (`bif.c:875-893`).
+        ("process", Term::Tuple(pair))
+            if !this.is_static("nonode@nohost")
+                && matches!(pair.as_ref(), [Term::Atom(_), Term::Atom(node)] if *node != this) =>
+        {
+            Some(Err(error(
+                "unsupported erlang:monitor/2,3 of a name of another node: see \"Distribution\" in docs/erts-differences.md",
+            )))
+        }
+        ("process", target) => local_name(target, &context.scheduler.atoms)
+            .map(|name| Ok(MonitorTarget::ProcessName(name))),
         ("port", Term::Port(port)) => Some(Ok(MonitorTarget::Port(*port))),
-        ("port", target) => local_name(target).map(|name| Ok(MonitorTarget::PortName(name))),
+        ("port", target) => local_name(target, &context.scheduler.atoms)
+            .map(|name| Ok(MonitorTarget::PortName(name))),
         ("time_offset", Term::Atom(service)) if service.is_static("clock_service") => {
             // ponytail: no time offset service yet; add it when a measured path monitors it.
             Some(Err(error("unsupported time_offset monitor")))
@@ -1772,11 +1793,11 @@ fn monitor_options(options: &Term) -> Option<MonitorOptions> {
 /// assert_eq!(local_name(&Term::tuple(vec![name.clone(), local_node()])), Some(atom));
 /// assert_eq!(local_name(&Term::Integer(1)), None);
 /// ```
-fn local_name(target: &Term) -> Option<Atom> {
+fn local_name(target: &Term, atoms: &AtomTable) -> Option<Atom> {
     match target {
         Term::Atom(name) => Some(name.clone()),
         Term::Tuple(pair) => match pair.as_ref() {
-            [Term::Atom(name), node] if *node == local_node() => Some(name.clone()),
+            [Term::Atom(name), node] if *node == local_node(atoms) => Some(name.clone()),
             _ => None,
         },
         _ => None,
@@ -3618,9 +3639,11 @@ pub(super) fn system_info(scheduler: &mut Scheduler, item: &Term) -> Result<BifR
         Term::Atom(atom) if atoms.name_of(atom) == "start_time" => {
             Ok(Value(Term::Integer(time::MONOTONIC_TIME_START_EXTERNAL)))
         }
-        // PBeam does not start distribution, so the node has the creation 0
-        // of a node that is not alive (`erl_bif_info.c:3179-3183`).
-        Term::Atom(atom) if atom.is_static("creation") => Ok(Value(Term::Integer(0))),
+        // The creation of the local node, 0 when it is not alive
+        // (`erl_bif_info.c:3179-3183`).
+        Term::Atom(atom) if atom.is_static("creation") => {
+            Ok(Value(Term::Integer(i64::from(atoms.this_node().1))))
+        }
         // PBeam rejects the `+B` emulator flag, so `ignore_break` keeps its
         // default 0 (`erl_init.c:824`, `erl_bif_info.c:3184-3190`).
         Term::Atom(atom) if atoms.name_of(atom) == "break_ignored" => {
@@ -5091,7 +5114,8 @@ enum Destination<'a> {
 /// assert!(matches!(destination(&remote), Some(Destination::Remote(_))));
 /// assert!(destination(&Term::Integer(1)).is_none());
 /// ```
-fn destination(to: &Term) -> Option<Destination<'_>> {
+fn destination<'a>(to: &'a Term, atoms: &AtomTable) -> Option<Destination<'a>> {
+    let (this, _) = atoms.this_node();
     Some(match to {
         Term::Pid(pid) => Destination::Pid(*pid),
         Term::Reference(reference) => Destination::Alias(*reference),
@@ -5099,15 +5123,11 @@ fn destination(to: &Term) -> Option<Destination<'_>> {
         Term::Resource(resource) => Destination::Alias(resource.reference()),
         Term::Atom(name) => Destination::Name(name),
         Term::Port(id) => Destination::Port(*id),
-        Term::External(id) if Term::Atom(id.node.clone()) == local_node() => {
-            Destination::OldIncarnation
-        }
+        Term::External(id) if id.node == this => Destination::OldIncarnation,
         // A port of another node raises `badarg` (`bif.c:2537-2695`).
         Term::External(id) if port_number(to).is_none() => Destination::Remote(&id.node),
         Term::Tuple(elements) => match elements.as_ref() {
-            [Term::Atom(name), node @ Term::Atom(_)] if *node == local_node() => {
-                Destination::NodeName(name)
-            }
+            [Term::Atom(name), Term::Atom(node)] if *node == this => Destination::NodeName(name),
             [Term::Atom(_), Term::Atom(node)] => Destination::Remote(node),
             _ => return None,
         },
@@ -5169,7 +5189,7 @@ fn deliver_to(
     to: &Term,
     message: Term,
 ) -> Result<Result<Sent, BifResult>, BeamError> {
-    let Some(destination) = destination(to) else {
+    let Some(destination) = destination(to, &scheduler.atoms) else {
         return Ok(Err(BifResult::badarg()));
     };
     if let Some(denied) = denial(scheduler, CapabilityKind::Process, Operation::Send, None)? {
@@ -5463,7 +5483,7 @@ pub(super) fn process_info(
         // A pid of an old incarnation of the local node is not alive
         // (`erl_bif_info.c:1364-1368`).
         return Ok(
-            if valid && old_incarnation(process) && pid_parts(process).is_some() {
+            if valid && old_incarnation(process, atoms) && pid_parts(process).is_some() {
                 Value(Term::static_atom("undefined"))
             } else {
                 BifResult::badarg()
@@ -5741,11 +5761,13 @@ pub(super) fn is_process_alive(
     let Term::Pid(id) = pid else {
         // A pid of an old incarnation of the local node is not alive
         // (`erl_bif_info.c:4106-4109`).
-        return Ok(if old_incarnation(pid) && pid_parts(pid).is_some() {
-            Value(Term::static_atom("false"))
-        } else {
-            BifResult::badarg()
-        });
+        return Ok(
+            if old_incarnation(pid, &context.scheduler.atoms) && pid_parts(pid).is_some() {
+                Value(Term::static_atom("false"))
+            } else {
+                BifResult::badarg()
+            },
+        );
     };
     let scheduler = &mut *context.scheduler;
     if *id == scheduler.current_process_mut().id {
@@ -6161,7 +6183,7 @@ pub(super) fn process_info_1(
     let Term::Pid(id) = process else {
         // `erl_bif_info.c:1364-1368`.
         return Ok(
-            if old_incarnation(process) && pid_parts(process).is_some() {
+            if old_incarnation(process, &context.scheduler.atoms) && pid_parts(process).is_some() {
                 Value(Term::static_atom("undefined"))
             } else {
                 BifResult::badarg()
