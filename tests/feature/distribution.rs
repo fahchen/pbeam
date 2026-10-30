@@ -155,6 +155,15 @@ fn runs_the_bifs_of_a_process_controller_as_pinned_erts() {
     let erts = stdout(&erts_erl(&epmd, &input));
     assert!(erts.contains("[{process,alias},"), "{erts}");
     assert_eq!(stdout(&pbeam_erl(&epmd, &input)), erts);
+    // EXIT2 and PAYLOAD_EXIT2 packets give an exit signal to a local
+    // process, or are dropped (dist.c:2806-2870).
+    let exit_input = probe(
+        &["-sname", &name],
+        "dist_channel_probe:exit_input(), halt().",
+    );
+    let erts = stdout(&erts_erl(&epmd, &exit_input));
+    assert!(erts.contains("[ok,{down,killed}]"), "{erts}");
+    assert_eq!(stdout(&pbeam_erl(&epmd, &exit_input)), erts);
     let exit = probe(&[], "dist_channel_probe:net_kernel_exit(), halt().");
     let erts = stdout(&erts_erl(&epmd, &exit));
     assert!(
@@ -183,10 +192,10 @@ fn queues_and_writes_the_messages_to_a_connection_as_pinned_erts() {
 }
 
 #[test]
-fn offers_the_mandatory_distribution_flags_and_alias() {
-    // PBeam offers DFLAG_DIST_MANDATORY (dist.h:80-98) and DFLAG_ALIAS
-    // (dist.h:67, 113-123), with the rejectable and the strict order flags
-    // of ERTS (dist.h:129-135).
+fn offers_the_mandatory_distribution_flags_exit_payload_and_alias() {
+    // PBeam offers DFLAG_DIST_MANDATORY (dist.h:80-98), DFLAG_EXIT_PAYLOAD,
+    // and DFLAG_ALIAS (dist.h:52, 67, 113-123), with the rejectable and the
+    // strict order flags of ERTS (dist.h:129-135).
     let epmd = Epmd::start();
     let output = pbeam_erl(
         &epmd,
@@ -198,7 +207,7 @@ fn offers_the_mandatory_distribution_flags_and_alias() {
     );
     assert_eq!(
         stdout(&output),
-        "{erts_dflags,51590401940,17230663572,51590401940,8396866,8192}\n"
+        "{erts_dflags,51594596244,17230663572,51594596244,8396866,8192}\n"
     );
 }
 
@@ -252,7 +261,10 @@ fn stops_at_a_part_of_a_channel_that_pbeam_does_not_have() {
         ("deliver_port()".to_owned(), deliver),
         ("deliver_udp()".to_owned(), deliver),
     ];
-    cases.extend([1, 2, 3, 4, 5, 6, 7, 8, 10, 11].map(|n| (format!("reject({n})"), rejected)));
+    cases.extend(
+        [1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15]
+            .map(|n| (format!("reject({n})"), rejected)),
+    );
     cases.push((
         "atom_cache()".to_owned(),
         "unsupported distribution message on a connection with the atom cache or fragments",
@@ -577,5 +589,60 @@ fn sends_messages_to_an_alias_between_erts_and_pbeam_nodes() {
             stdout(&pbeam_erl(&epmd, &client(&pbeam_name, &pbeam))),
             replied
         );
+    }
+}
+
+#[test]
+fn sends_exit_signals_between_erts_and_pbeam_nodes() {
+    // A client sends exit/2 with normal, kill, and another reason to a
+    // process of a server node that traps exits or not, as EXIT2 or
+    // PAYLOAD_EXIT2 (dist.c:1788-1828, 2806-2870). The process forwards
+    // its messages, and a local monitor of the server reports its exit.
+    // Each pair of ERTS and PBeam nodes runs over the prim_socket carrier
+    // and over the tcp_inet port controller.
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let server = "io:format(\"~s~n\", [node()]), register(dexit, self()), \
+                  L = fun L() -> receive {Trap, From} -> \
+                  V = spawn(fun() -> process_flag(trap_exit, Trap), receive go -> ok end, \
+                  From ! {victim, self()}, F = fun F() -> receive M -> From ! {got, M}, F() end end, F() end), \
+                  spawn(fun() -> R = monitor(process, V), V ! go, \
+                  receive {'DOWN', R, _, _, W} -> From ! {down, W} end end), L() end end, L().";
+    let cases = "[{T, R} || T <- [false, true], R <- [normal, kill, boom]]";
+    for (server_pbeam, socket) in [(false, true), (false, false), (true, true), (true, false)] {
+        let name = format!("desrv{server_pbeam}{socket}{id}");
+        let mut arguments = vec!["-sname", &name, "-setcookie", "ck"];
+        if socket {
+            arguments.extend(SOCKET_CARRIER);
+        }
+        let node = if server_pbeam {
+            pbeam_node(&epmd, &arguments, server)
+        } else {
+            ErtsNode::start(&epmd, &arguments, server)
+        };
+        let server = node.line();
+        let expression = format!(
+            "true = net_kernel:connect_node('{server}'), \
+             Collect = fun C() -> receive {{got, ping}} -> [alive]; {{down, W}} -> [{{down, W}}]; \
+             {{got, {{'EXIT', P, W}}}} -> [{{'EXIT', P =:= self(), W}} | C()] after 5000 -> [timeout] end end, \
+             Run = fun({{T, R}}) -> {{dexit, '{server}'}} ! {{T, self()}}, \
+             V = receive {{victim, Pid}} -> Pid end, true = exit(V, R), V ! ping, {{T, R, Collect()}} end, \
+             io:format(\"~p~n\", [[Run(C) || C <- {cases}]]), halt()."
+        );
+        let client = |name: &str| {
+            let mut arguments = vec!["-sname", name, "-setcookie", "ck", "-hidden"];
+            if socket {
+                arguments.extend(SOCKET_CARRIER);
+            }
+            arguments.extend(["-noshell", "-eval", &expression]);
+            arguments.into_iter().map(str::to_owned).collect::<Vec<_>>()
+        };
+        let expected = "[{false,normal,[alive]},\n {false,kill,[{down,killed}]},\n {false,boom,[{down,boom}]},\n \
+                        {true,normal,[{'EXIT',true,normal},alive]},\n {true,kill,[{down,killed}]},\n \
+                        {true,boom,[{'EXIT',true,boom},alive]}]\n";
+        let erts = format!("deerts{server_pbeam}{socket}{id}");
+        assert_eq!(stdout(&erts_erl(&epmd, &client(&erts))), expected);
+        let pbeam = format!("depb{server_pbeam}{socket}{id}");
+        assert_eq!(stdout(&pbeam_erl(&epmd, &client(&pbeam))), expected);
     }
 }

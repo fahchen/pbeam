@@ -5,7 +5,7 @@
 -export([main/0, net_kernel_exit/0, port_channel/0, no_mandatory/0, message/0,
          port_message/0, deliver_port/0, deliver_udp/0, input/0, reject/1,
          trace_token/0, link_op/0, atom_cache/0, output/0, port_output/0,
-         alias_ext/0, dead_alias/0]).
+         alias_ext/0, dead_alias/0, exit_input/0]).
 
 main() ->
     %% net_kernel reports the dist_ctrlr message of a connection that it
@@ -309,7 +309,7 @@ output() ->
     %% The flags of the other connections permit SEND_SENDER, ALIAS, and
     %% ALTACT_SIG.
     Flags = [{yy@nohost, M bor 16#80000}, {xx@nohost, M bor (1 bsl 35)},
-             {ww@nohost, M bor (1 bsl 35) bor (1 bsl 37)}],
+             {ww@nohost, M bor (1 bsl 35) bor (1 bsl 37)}, {uu@nohost, M bor 16#400000}],
     show(flags, [flags_output(Node, F) || {Node, F} <- Flags]),
     Ctrl = spawn(fun() -> receive stop -> ok end end),
     erts_internal:new_connection(vv@nohost),
@@ -336,6 +336,9 @@ flags_output(Node, Flags) ->
     [erlang:send(To, Tag, [priority])
      || {To, Tag} <- [{remote_pid(Node), prio_pid}, {{nm, Node}, prio_name},
                       {remote_ref(Node), prio_alias}]],
+    true = exit(remote_pid(Node), boom),
+    true = exit(remote_ref(Node), alias_boom),
+    true = erlang:exit(remote_pid(Node), prio_boom, [priority]),
     Ctrl ! {go, DH},
     receive {Ctrl, Packets} -> Packets end.
 
@@ -396,7 +399,11 @@ reject(N) ->
                  8 -> packet_only({});
                  9 -> pid_reference_packet();
                  10 -> packet_only({-1, '', self()});
-                 11 -> packet_only({33, From, foo})
+                 11 -> packet_only({33, From, foo});
+                 12 -> packet_only({8, self(), self(), x});
+                 13 -> packet_only({8, remote_pid(yy@nohost), self(), x});
+                 14 -> packet_only({8, From, foo, x});
+                 15 -> packet_only({26, From})
              end,
     erlang:dist_ctrl_put_data(DH, Packet).
 
@@ -479,8 +486,10 @@ pkt({Size, Data}) -> {Size, pkt(Data)};
 pkt(Data) when is_list(Data) -> {[byte_size(E) || E <- Data], pkt(iolist_to_binary(Data))};
 pkt(<<112, Rest/binary>>) ->
     {Control, Used} = binary_to_term(Rest, [used]),
-    <<_:Used/binary, Message/binary>> = Rest,
-    {anon(Control), anon(binary_to_term(Message))}.
+    case Rest of
+        <<_:Used/binary>> -> {anon(Control)};
+        <<_:Used/binary, Message/binary>> -> {anon(Control), anon(binary_to_term(Message))}
+    end.
 
 anon(Pid) when Pid =:= self() -> self;
 anon(Pid) when is_pid(Pid) -> {pid, node(Pid)};
@@ -518,3 +527,49 @@ strip({'EXIT', {Reason, [{M, F, A, _} | _]}}) when is_list(A) -> {'EXIT', Reason
 strip({'EXIT', {Reason, [{M, F, A, _} | _]}}) -> {'EXIT', Reason, M, F, A};
 strip({'EXIT', Reason}) -> {'EXIT', Reason};
 strip(Value) -> Value.
+
+%% EXIT2 and PAYLOAD_EXIT2 packets give the exit signal of a pid of the
+%% node of the connection to a local process (dist.c:2806-2870): a process
+%% that traps exits gets {'EXIT', From, Reason}, kill kills, normal is
+%% ignored, and a process that is not alive or a pid of an old incarnation
+%% drops the signal without a decode of the reason.
+exit_input() ->
+    logger:set_primary_config(level, none),
+    M = mandatory(),
+    erts_internal:new_connection(zz@nohost),
+    {ok, DH} = erts_internal:create_dist_channel(zz@nohost, self(), {M, 1}),
+    From = remote_pid(zz@nohost),
+    Self = self(),
+    Case = fun(Trap, Packet) ->
+                   V = spawn(fun() ->
+                                     process_flag(trap_exit, Trap),
+                                     Self ! {ready, self()},
+                                     Loop = fun L() -> receive Msg -> Self ! {got, self(), anon(Msg)}, L() end end,
+                                     Loop()
+                             end),
+                   receive {ready, V} -> ok end,
+                   Ref = monitor(process, V),
+                   Put = erlang:dist_ctrl_put_data(DH, Packet(V)),
+                   V ! ping,
+                   Events = fun E() ->
+                                    receive
+                                        {got, V, ping} -> [alive];
+                                        {got, V, Msg} -> [Msg | E()];
+                                        {'DOWN', Ref, _, _, Why} -> [{down, Why}]
+                                    end
+                            end,
+                   [Put | Events()]
+           end,
+    Results = [Case(true, fun(V) -> packet({26, From, V}, boom) end),
+               Case(true, fun(V) -> packet_only({8, From, V, normal}) end),
+               Case(true, fun(V) -> packet_only({8, From, V, kill}) end),
+               Case(false, fun(V) -> packet_only({8, From, V, normal}) end),
+               Case(false, fun(V) -> packet({26, From, V}, x) end),
+               Case(false, fun(V) -> packet_only({8, From, V, kill}) end)],
+    {Dead, DeadRef} = spawn_monitor(fun() -> ok end),
+    receive {'DOWN', DeadRef, _, _, _} -> ok end,
+    Name = atom_to_binary(node()),
+    Old = binary_to_term(<<131, 88, 119, (byte_size(Name)), Name/binary, 1:32, 0:32, 99:32>>),
+    Drops = [erlang:dist_ctrl_put_data(DH, packet_only({26, From, Dead})),
+             erlang:dist_ctrl_put_data(DH, packet_only({8, From, Old, x}))],
+    show(exit, [Results, Drops, flush(), erlang:dist_get_stat(DH)]).

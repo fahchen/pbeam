@@ -1413,9 +1413,8 @@ fn encodes_and_decodes_the_pids_ports_and_references_as_pinned_erts() {
 
 #[test]
 fn stops_with_a_runtime_error_for_each_signal_to_another_node() {
-    // A link, a monitor, an exit signal, and a group leader of a pid of
-    // another node, and an exit signal to an alias of another node, need a
-    // connection (bif.c:263-300, 811-830, 1809-1850, 4942-4964); a monitor
+    // A link, a monitor, and a group leader of a pid of another node need
+    // a connection (bif.c:263-300, 811-830, 4942-4964); a monitor
     // of an old incarnation of the local node and a group leader of another
     // node need state that PBeam does not keep (bif.c:811-825, 925-935,
     // 4935); a send to an old incarnation of the local node logs an error
@@ -1436,14 +1435,6 @@ fn stops_with_a_runtime_error_for_each_signal_to_another_node() {
         (
             "old_process_monitor",
             "unsupported erlang:monitor/2,3 of a pid or a port of an old incarnation",
-        ),
-        (
-            "exit",
-            "unsupported erlang:exit/2,3 with a pid or an alias of another node",
-        ),
-        (
-            "exit_alias",
-            "unsupported erlang:exit/2,3 with a pid or an alias of another node",
         ),
         (
             "group_leader",

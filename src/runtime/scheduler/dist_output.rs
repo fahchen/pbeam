@@ -35,6 +35,12 @@ const ALTACT_SIG_ALIAS: i64 = 1 << 2;
 /// `ERTS_DOP_ALTACT_SIG_FLG_NAME` (`dist.h:191`).
 const ALTACT_SIG_NAME: i64 = 1 << 3;
 
+/// `ERTS_DOP_ALTACT_SIG_FLG_EXIT` (`dist.h:192`).
+const ALTACT_SIG_EXIT: i64 = 1 << 4;
+
+/// `DFLAG_EXIT_PAYLOAD` (`dist.h:52`).
+const EXIT_PAYLOAD: u64 = 0x40_0000;
+
 /// Whether a send has the option `priority` of `erlang:send/3`
 /// (`bif.c:2718-2719`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,48 +85,101 @@ impl Scheduler {
         message: &Term,
         priority: SendPriority,
     ) -> Result<bool, BeamError> {
+        let from = Term::Pid(self.current_process().id);
+        self.dist_output(node, |flags| {
+            if is_remote_reference(to) && flags & ALIAS == 0 {
+                return None;
+            }
+            Some((
+                send_control(flags, from, to, priority),
+                Some(message.clone()),
+            ))
+        })
+    }
+
+    /// Send the exit signal of `erlang:exit/2,3` from the current process
+    /// to the pid or the alias `to` of the node `node` with the reason
+    /// `reason`, as `erts_dsig_send_exit2` does (`dist.c:1788-1828`), and
+    /// return `true`; return `false` when the node has no connection. The
+    /// control message is `ALTACT_SIG_SEND` with the exit flag for an alias
+    /// or with `priority` on a connection with `DFLAG_ALTACT_SIG`, else
+    /// `PAYLOAD_EXIT2` with the reason as the message on a connection with
+    /// `DFLAG_EXIT_PAYLOAD`, else `EXIT2`. A connection without
+    /// `DFLAG_ALTACT_SIG` drops an exit signal to an alias.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(scheduler.dist_exit(&node, &Term::External(pid), &reason, SendPriority::Normal)?);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`Self::dist_send`].
+    pub(in crate::runtime) fn dist_exit(
+        &mut self,
+        node: &Atom,
+        to: &Term,
+        reason: &Term,
+        priority: SendPriority,
+    ) -> Result<bool, BeamError> {
+        let from = Term::Pid(self.current_process().id);
+        let alias = is_remote_reference(to);
+        let prio = priority == SendPriority::Priority;
+        self.dist_output(node, |flags| {
+            if (prio || alias) && flags & ALTACT_SIG != 0 {
+                let mut fs = ALTACT_SIG_EXIT;
+                if alias {
+                    fs |= ALTACT_SIG_ALIAS;
+                }
+                if prio {
+                    fs |= ALTACT_SIG_PRIO;
+                }
+                let control =
+                    Term::tuple(vec![Term::Integer(37), Term::Integer(fs), from, to.clone()]);
+                return Some((control, Some(reason.clone())));
+            }
+            if alias {
+                return None;
+            }
+            if flags & EXIT_PAYLOAD != 0 {
+                let control = Term::tuple(vec![Term::Integer(26), from, to.clone()]);
+                return Some((control, Some(reason.clone())));
+            }
+            let control = Term::tuple(vec![Term::Integer(8), from, to.clone(), reason.clone()]);
+            Some((control, None))
+        })
+    }
+
+    /// Put the packet of the control message and the message that `build`
+    /// gives for the flags of the connection of `node` in the output of the
+    /// connection, and return `true`; `build` gives `None` for a signal that
+    /// the connection drops. Return `false` when the node has no
+    /// connection. A process controller gets the packet in its output
+    /// queue, and a port controller writes it.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`Self::dist_send`].
+    fn dist_output(
+        &mut self,
+        node: &Atom,
+        build: impl FnOnce(u64) -> Option<(Term, Option<Term>)>,
+    ) -> Result<bool, BeamError> {
         let node_ref = Arc::clone(&self.node);
         let mut dist = node_ref.dist();
         let Some((flags, controller)) = dist.connected(node) else {
             return Ok(false);
         };
-        let caller = self.current_process().id;
-        let from = Term::Pid(caller);
-        let alias =
-            matches!(to, Term::External(id) if matches!(id.data, ExternalData::Reference(_)));
-        if alias && flags & ALIAS == 0 {
+        let Some((control, message)) = build(flags) else {
             return Ok(true);
-        }
-        // `erts_dsig_send_msg` takes the name of `{Name, Node}` (`bif.c:2662`).
-        let (name, remote) = match to {
-            Term::Tuple(items) => (true, items[0].clone()),
-            _ => (false, to.clone()),
         };
-        let prio = priority == SendPriority::Priority;
-        let control = if (prio || alias) && flags & ALTACT_SIG != 0 {
-            let mut fs = if alias {
-                ALTACT_SIG_ALIAS
-            } else if name {
-                ALTACT_SIG_NAME
-            } else {
-                0
-            };
-            if prio {
-                fs |= ALTACT_SIG_PRIO;
-            }
-            Term::tuple(vec![Term::Integer(37), Term::Integer(fs), from, remote])
-        } else if name {
-            Term::tuple(vec![Term::Integer(6), from, Term::static_atom(""), remote])
-        } else if alias {
-            Term::tuple(vec![Term::Integer(33), from, remote])
-        } else if flags & SEND_SENDER != 0 {
-            Term::tuple(vec![Term::Integer(22), from, remote])
-        } else {
-            Term::tuple(vec![Term::Integer(2), Term::static_atom(""), remote])
-        };
+        let caller = self.current_process().id;
         let mut elements = vec![Binary::from(vec![PASS_THROUGH])];
         elements.extend(encode_dist(self, &control)?);
-        elements.extend(encode_dist(self, message)?);
+        if let Some(message) = message {
+            elements.extend(encode_dist(self, &message)?);
+        }
         match controller {
             Controller::Process(process) => {
                 if dist.enqueue(node, elements) {
@@ -163,4 +222,43 @@ impl Scheduler {
         }
         Ok(())
     }
+}
+
+/// Return the control message of `erts_dsig_send_msg` (`dist.c:1640-1702`)
+/// for a send from `from` to `to` on a connection with the flags `flags`
+/// (see [`Scheduler::dist_send`]).
+fn send_control(flags: u64, from: Term, to: &Term, priority: SendPriority) -> Term {
+    let alias = is_remote_reference(to);
+    // `erts_dsig_send_msg` takes the name of `{Name, Node}` (`bif.c:2662`).
+    let (name, remote) = match to {
+        Term::Tuple(items) => (true, items[0].clone()),
+        _ => (false, to.clone()),
+    };
+    let prio = priority == SendPriority::Priority;
+    if (prio || alias) && flags & ALTACT_SIG != 0 {
+        let mut fs = if alias {
+            ALTACT_SIG_ALIAS
+        } else if name {
+            ALTACT_SIG_NAME
+        } else {
+            0
+        };
+        if prio {
+            fs |= ALTACT_SIG_PRIO;
+        }
+        Term::tuple(vec![Term::Integer(37), Term::Integer(fs), from, remote])
+    } else if name {
+        Term::tuple(vec![Term::Integer(6), from, Term::static_atom(""), remote])
+    } else if alias {
+        Term::tuple(vec![Term::Integer(33), from, remote])
+    } else if flags & SEND_SENDER != 0 {
+        Term::tuple(vec![Term::Integer(22), from, remote])
+    } else {
+        Term::tuple(vec![Term::Integer(2), Term::static_atom(""), remote])
+    }
+}
+
+/// Return whether `to` is a reference of another node: an alias.
+fn is_remote_reference(to: &Term) -> bool {
+    matches!(to, Term::External(id) if matches!(id.data, ExternalData::Reference(_)))
 }
