@@ -66,7 +66,7 @@ use openssl::{
     pkey::{Id, PKey},
     sign::Signer,
 };
-use pkey::{pkey_crypt_nif, pkey_sign_nif, pkey_verify_nif};
+use pkey::{PKEY_TYPES, pkey_crypt_nif, pkey_sign_nif, pkey_verify_nif};
 use rand::{rand_seed_nif, rand_uniform_nif, strong_rand_bytes_nif, strong_rand_range_nif};
 use std::collections::HashMap;
 
@@ -210,7 +210,7 @@ pub(super) const BINDINGS: &[Binding] = &[
         name: "curve_algorithms",
         arity: 0,
         job: Job::Normal,
-        run: |_, _| Ok(BifResult::Value(Term::Nil)),
+        run: |scheduler, _| atom_list(scheduler, &CURVE_ALGORITHMS),
     },
     Binding {
         name: "decapsulate_key_nif",
@@ -557,7 +557,7 @@ pub(super) const BINDINGS: &[Binding] = &[
         name: "pubkey_algorithms",
         arity: 0,
         job: Job::Normal,
-        run: |_, _| Ok(BifResult::Value(Term::Nil)),
+        run: |scheduler, _| pubkey_algorithms(scheduler),
     },
     Binding {
         name: "rand_seed_nif",
@@ -1562,8 +1562,87 @@ const HASH_ALGORITHMS: [&str; 18] = [
 /// (`mac.c:60-102`, `mac.c:139-158`).
 const MAC_ALGORITHMS: [&str; 3] = ["cmac", "hmac", "poly1305"];
 
-/// Return the list of the atoms of `names`, which `hash_algorithms/0` and
-/// `mac_algorithms/0` give.
+/// The curves that `curve_algorithms/0` gives: the curves over a prime
+/// field of `init_curves` (`algorithms.c:286-622`) in its order, then the
+/// curves of `EdDSA` and of X25519 and X448 (`algorithms.c:624-637`). The
+/// static OpenSSL generates a key on each of these curves, as `valid_curve`
+/// (`algorithms.c:653-704`) checks. PBeam does not list the curves over a
+/// characteristic-two field, which its ECDSA and ECDH stop on.
+const CURVE_ALGORITHMS: [&str; 45] = [
+    "secp160k1",
+    "secp160r1",
+    "secp160r2",
+    "secp192k1",
+    "secp224k1",
+    "secp224r1",
+    "secp256k1",
+    "secp384r1",
+    "secp521r1",
+    "secp192r1",
+    "prime192v1",
+    "prime192v2",
+    "prime192v3",
+    "prime239v1",
+    "prime239v2",
+    "prime239v3",
+    "secp256r1",
+    "prime256v1",
+    "wtls7",
+    "wtls9",
+    "wtls12",
+    "brainpoolP160r1",
+    "brainpoolP160t1",
+    "brainpoolP192r1",
+    "brainpoolP192t1",
+    "brainpoolP224r1",
+    "brainpoolP224t1",
+    "brainpoolP256r1",
+    "brainpoolP256t1",
+    "brainpoolP320r1",
+    "brainpoolP320t1",
+    "brainpoolP384r1",
+    "brainpoolP384t1",
+    "brainpoolP512r1",
+    "brainpoolP512t1",
+    "secp112r1",
+    "secp112r2",
+    "secp128r1",
+    "secp128r2",
+    "wtls6",
+    "wtls8",
+    "ed25519",
+    "ed448",
+    "x25519",
+    "x448",
+];
+
+/// The public key algorithms of `init_pubkey_types` (`algorithms.c:174-202`)
+/// in its order, without `ec_gf2m`: PBeam stops on a curve over a
+/// characteristic-two field.
+const PUBKEY_ALGORITHMS: [&str; 8] = ["rsa", "dss", "dh", "ecdsa", "ecdh", "eddsa", "eddh", "srp"];
+
+/// Return the list of `pubkey_algorithms/0` (`algorithms.c:162-172`):
+/// `build_pkey_type_list` (`pkey.c:201-210`) puts each algorithm of
+/// `pkey_types` in front of `PUBKEY_ALGORITHMS`, so they come in reverse.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // [slh_dsa_sha2_256f, ..., mldsa44, rsa, dss, dh, ecdsa, ecdh, eddsa, eddh, srp]
+/// assert!(matches!(pubkey_algorithms(&mut scheduler)?, BifResult::Value(Term::List(_))));
+/// ```
+fn pubkey_algorithms(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
+    let names: Vec<&str> = PKEY_TYPES
+        .iter()
+        .rev()
+        .chain(&PUBKEY_ALGORITHMS)
+        .copied()
+        .collect();
+    atom_list(scheduler, &names)
+}
+
+/// Return the list of the atoms of `names`, which `hash_algorithms/0`,
+/// `mac_algorithms/0`, and `curve_algorithms/0` give.
 ///
 /// # Examples
 ///
