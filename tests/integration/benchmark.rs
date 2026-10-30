@@ -1,17 +1,17 @@
 //! The comparison of the PBeam runtime with the pinned ERTS on the five
 //! scenarios of `benchmark/`.
 //!
-//! Run `mise run bench-compare`, or `bash benchmark/run.sh`. The test
+//! Run `mise run bench-compare` or `bash benchmark/run.sh`. The test
 //! compiles `benchmark/*.erl` with the pinned `erlc` into
 //! `target/benchmark/beams/`, runs each scenario on PBeam through the library
 //! API and on one scheduler of the pinned ERTS with `erl +S 1 -noshell`, and
 //! prints the table of the minimum of [`RUNS`] runs of each scenario.
 //!
-//! The two runs measure the same guest work: the ERTS run times the call in
-//! the guest with `erlang:monotonic_time/1`, and this test times the call of
-//! the runtime from the host. The start of the runtime and the start of ERTS
-//! are part of neither number, so the ratio is the cost of the work and not
-//! the cost of the boot.
+//! The two runs measure the same guest work in the same way: on each runtime,
+//! `bench_run:measure/4` runs the scenario [`RUNS`] times in one process and
+//! times each run in the guest with `erlang:monotonic_time(nanosecond)`. The
+//! start of the runtime, of ERTS, and of the process is part of neither
+//! number, so the ratio is the cost of the work and not the cost of the boot.
 //!
 //! The check gate runs the test with [`RUNS`] and [`Scenario::count`] scaled
 //! down, as `tests/integration/dispatch_baseline.rs` scales its probes, so the
@@ -25,10 +25,8 @@
 use std::{
     ffi::OsStr,
     fmt::Write as _,
-    hint::black_box,
     path::{Path, PathBuf},
     process::Command,
-    time::{Duration, Instant},
 };
 
 use pbeam_runtime::{AtomTable, BeamProgram, HostTerm, Term};
@@ -125,7 +123,7 @@ fn beam_directory() -> PathBuf {
 }
 
 /// Compile every `benchmark/*.erl` source with the pinned `erlc` into
-/// `directory`. The runner does not compile the sources, so the beam files
+/// `directory`. The test compiles the sources on each run, so the beam files
 /// always come from the sources of the current commit.
 ///
 /// # Examples
@@ -175,19 +173,34 @@ fn read_beam(directory: &Path, module: &str) -> Vec<u8> {
     std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
 }
 
-/// Return the arguments of one scenario for the PBeam run: the iteration
-/// count as an integer term.
+/// The module and function of the timing driver of `benchmark/bench_run.erl`.
+const DRIVER: (&str, &str) = ("bench_run", "measure");
+
+/// Return the arguments of `bench_run:measure/4` for one scenario on PBeam:
+/// the module and function atoms, the iteration count, and [`RUNS`].
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let program = BeamProgram::load(&[&read_beam(&beam_directory(), "bench_arith")]).unwrap();
-/// assert_eq!(arguments(&program, &SCENARIOS[0]).len(), 1);
+/// assert_eq!(arguments(&program, &SCENARIOS[0]).len(), 4);
 /// ```
 fn arguments(program: &BeamProgram, scenario: &Scenario) -> Vec<HostTerm> {
-    vec![program.host_term(Term::Integer(
-        i64::try_from(scenario.count()).expect("the scenario count fits in i64"),
-    ))]
+    let atom = |name: &str| {
+        program.host_term(Term::Atom(
+            program.atom(name).expect("a loaded module holds the atom"),
+        ))
+    };
+    let integer = |value: usize| {
+        program.host_term(Term::Integer(
+            i64::try_from(value).expect("the count fits in i64"),
+        ))
+    };
+    vec![
+        atom(scenario.module),
+        atom(scenario.function),
+        integer(scenario.count()),
+        integer(RUNS),
+    ]
 }
 
 /// Return a result term as `io:format("~w")` prints it, for the integers and
@@ -207,62 +220,48 @@ fn text(term: &Term, atoms: &AtomTable) -> String {
     }
 }
 
-/// Run one scenario once and return its result as [`text`] prints it.
+/// Run `bench_run:measure/4` for one scenario on PBeam and return the result
+/// of the scenario as [`text`] prints it and the minimum nanoseconds of one
+/// run.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(result_text(&program, &SCENARIOS[1]), "ok");
+/// let (result, nanos) = measure_pbeam(&program, &SCENARIOS[1]);
+/// assert_eq!(result, "ok");
 /// ```
-fn result_text(program: &BeamProgram, scenario: &Scenario) -> String {
-    let arguments = arguments(program, scenario);
-    let result = program
-        .execute(scenario.module, scenario.function, &arguments)
+fn measure_pbeam(program: &BeamProgram, scenario: &Scenario) -> (String, u128) {
+    let (module, function) = DRIVER;
+    let measured = program
+        .execute(module, function, &arguments(program, scenario))
         .unwrap();
-    text(&result.term, result.atoms())
-}
-
-/// Measure one scenario on PBeam and return the minimum of [`RUNS`] runs.
-/// Each result goes to [`black_box`], so the compiler cannot remove the work
-/// that the timer measures.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert!(measure_pbeam(&program, &SCENARIOS[0]) > Duration::ZERO);
-/// ```
-fn measure_pbeam(program: &BeamProgram, scenario: &Scenario) -> Duration {
-    let arguments = arguments(program, scenario);
-    let mut best = Duration::MAX;
-    for _ in 0..RUNS {
-        let start = Instant::now();
-        let result = program
-            .execute(scenario.module, scenario.function, &arguments)
-            .unwrap();
-        let elapsed = start.elapsed();
-        black_box(&result);
-        best = best.min(elapsed);
-    }
-    best
+    let Some([result, Term::Integer(nanos)]) = measured.term.tuple_elements() else {
+        panic!("bench_run:measure/4 returned {:?}", measured.term);
+    };
+    (
+        text(result, measured.atoms()),
+        u128::try_from(*nanos).expect("a run time is not negative"),
+    )
 }
 
 /// Return the Erlang expression of the ERTS reference run. It loads the
-/// scenario modules, prints the ERTS version and flavor, runs each scenario
-/// once for its result, then times it [`RUNS`] times inside the guest, and
-/// prints one `result <module> <value>` line and one `time <module> <ns>`
-/// line for each scenario.
+/// scenario modules, prints the ERTS version and flavor, and prints one
+/// `measure <module> <result> <ns>` line for each scenario from
+/// `bench_run:measure/4`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(erts_expression().contains("bench_arith:loop("));
+/// assert!(erts_expression().contains("P(bench_arith, loop, "));
 /// ```
 fn erts_expression() -> String {
+    let (module, function) = DRIVER;
     let mut expression = String::from(
         "io:format(\"erts OTP ~s, ERTS ~s, ~s, schedulers ~b~n\", \
          [erlang:system_info(otp_release), erlang:system_info(version), \
           erlang:system_info(emu_flavor), erlang:system_info(schedulers)]), ",
     );
+    let _ = write!(expression, "{{module, _}} = code:ensure_loaded({module}), ");
     for scenario in SCENARIOS {
         let _ = write!(
             expression,
@@ -272,25 +271,13 @@ fn erts_expression() -> String {
     }
     let _ = write!(
         expression,
-        "Run = fun(F) -> lists:min([begin \
-         S = erlang:monotonic_time(nanosecond), _ = F(), \
-         erlang:monotonic_time(nanosecond) - S end || _ <- lists:seq(1, {RUNS})]) end, "
+        "P = fun(M, F, C) -> {{R, T}} = {module}:{function}(M, F, C, {RUNS}), \
+         io:format(\"measure ~s ~w ~b~n\", [M, R, T]) end, "
     );
     for scenario in SCENARIOS {
         let _ = write!(
             expression,
-            "io:format(\"result {} ~w~n\", [{}:{}({})]), ",
-            scenario.module,
-            scenario.module,
-            scenario.function,
-            scenario.count()
-        );
-    }
-    for scenario in SCENARIOS {
-        let _ = write!(
-            expression,
-            "io:format(\"time {} ~b~n\", [Run(fun() -> {}:{}({}) end)]), ",
-            scenario.module,
+            "P({}, {}, {}), ",
             scenario.module,
             scenario.function,
             scenario.count()
@@ -308,7 +295,7 @@ fn erts_expression() -> String {
 ///
 /// ```rust,ignore
 /// let lines = run_erts(&beam_directory());
-/// assert!(lines.iter().any(|line| line.starts_with("time bench_arith ")));
+/// assert!(lines.iter().any(|line| line.starts_with("measure bench_arith ")));
 /// ```
 fn run_erts(directory: &Path) -> Vec<String> {
     let output = Command::new("erl")
@@ -329,39 +316,24 @@ fn run_erts(directory: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Return the number of nanoseconds of the `time <module> <ns>` line of one
-/// scenario in the ERTS output.
+/// Return the result and the minimum nanoseconds of the
+/// `measure <module> <result> <ns>` line of one scenario in the ERTS output.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// let lines = run_erts(&beam_directory());
-/// assert!(erts_nanos(&lines, "bench_arith") > 0);
+/// assert!(erts_measure(&lines, "bench_arith").1 > 0);
 /// ```
-fn erts_nanos(lines: &[String], module: &str) -> u128 {
-    lines
+fn erts_measure(lines: &[String], module: &str) -> (String, u128) {
+    let line = lines
         .iter()
-        .find_map(|line| line.strip_prefix(&format!("time {module} ")))
-        .unwrap_or_else(|| panic!("the ERTS run has no time for {module}"))
-        .parse()
-        .unwrap()
-}
-
-/// Return the result of the `result <module> <value>` line of one scenario in
-/// the ERTS output.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let lines = run_erts(&beam_directory());
-/// assert!(!erts_result(&lines, "bench_arith").is_empty());
-/// ```
-fn erts_result(lines: &[String], module: &str) -> String {
-    lines
-        .iter()
-        .find_map(|line| line.strip_prefix(&format!("result {module} ")))
-        .unwrap_or_else(|| panic!("the ERTS run has no result for {module}"))
-        .to_owned()
+        .find_map(|line| line.strip_prefix(&format!("measure {module} ")))
+        .unwrap_or_else(|| panic!("the ERTS run has no measure line for {module}"));
+    let (result, nanos) = line
+        .rsplit_once(' ')
+        .unwrap_or_else(|| panic!("the ERTS measure line of {module} has no time"));
+    (result.to_owned(), nanos.parse().unwrap())
 }
 
 /// Compile the scenarios, run each of them on PBeam and on the pinned ERTS,
@@ -375,16 +347,18 @@ fn erts_result(lines: &[String], module: &str) -> String {
 fn compares_the_runtime_with_the_pinned_erts() {
     let directory = beam_directory();
     let modules = compile_scenarios(&directory);
-    for scenario in SCENARIOS {
+    let names = std::iter::once(DRIVER.0)
+        .chain(SCENARIOS.iter().map(|scenario| scenario.module))
+        .collect::<Vec<_>>();
+    for name in &names {
         assert!(
-            modules.contains(&scenario.module.to_owned()),
-            "benchmark/ has no source for {}",
-            scenario.module
+            modules.iter().any(|module| module == name),
+            "benchmark/ has no source for {name}"
         );
     }
-    let beams = SCENARIOS
+    let beams = names
         .iter()
-        .map(|scenario| read_beam(&directory, scenario.module))
+        .map(|name| read_beam(&directory, name))
         .collect::<Vec<_>>();
     let slices = beams.iter().map(Vec::as_slice).collect::<Vec<_>>();
     let program = BeamProgram::load(&slices).unwrap();
@@ -393,7 +367,7 @@ fn compares_the_runtime_with_the_pinned_erts() {
     for line in lines.iter().filter(|line| line.starts_with("erts ")) {
         println!("{line}");
     }
-    println!("Minimum of {RUNS} runs of each scenario.");
+    println!("Minimum of {RUNS} runs of each scenario, timed in the guest.");
     println!();
     println!(
         "| scenario | count | unit | ERTS ns for each unit | PBeam ns for each unit | PBeam / ERTS | ERTS ns for the run | PBeam ns for the run |"
@@ -401,15 +375,13 @@ fn compares_the_runtime_with_the_pinned_erts() {
     println!("| --- | --- | --- | --- | --- | --- | --- | --- |");
 
     for scenario in SCENARIOS {
-        let pbeam_result = result_text(&program, &scenario);
+        let (pbeam_result, pbeam) = measure_pbeam(&program, &scenario);
+        let (erts_result, erts) = erts_measure(&lines, scenario.module);
         assert_eq!(
-            pbeam_result,
-            erts_result(&lines, scenario.module),
+            pbeam_result, erts_result,
             "PBeam and ERTS differ for {}",
             scenario.title
         );
-        let pbeam = measure_pbeam(&program, &scenario).as_nanos();
-        let erts = erts_nanos(&lines, scenario.module);
         let units = scenario.count() as f64;
         println!(
             "| {} | {} | {} | {:.3} | {:.3} | {:.2} | {} | {} |",

@@ -5,7 +5,7 @@
 %% work, so one unit holds the allocation of the cell and its later read.
 -module(bench_list).
 
--export([build_sum/1, build/2, sum/2]).
+-export([build_sum/1]).
 
 build_sum(N) ->
     sum(build(N, []), 0).
