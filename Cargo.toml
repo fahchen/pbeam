@@ -140,6 +140,10 @@ name = "release_boot"
 path = "tests/feature/release_boot.rs"
 
 [[test]]
+name = "distribution"
+path = "tests/feature/distribution.rs"
+
+[[test]]
 name = "run_end"
 path = "tests/feature/run_end.rs"
 

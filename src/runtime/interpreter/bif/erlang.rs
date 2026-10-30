@@ -28,6 +28,7 @@ use crate::runtime::process::{Flush, Origin, Priority};
 use crate::runtime::process::{InitialCall, OTHER_PROCESS_INFO_ITEMS};
 use crate::runtime::process::{LinkId, ProcessState};
 use crate::runtime::scheduler::PTAB_SIZE;
+use crate::runtime::scheduler::dist_table::NodeInfo;
 use crate::runtime::scheduler::node::Named;
 use crate::runtime::scheduler::{
     AliasMode, CONTEXT_REDS, Flushed, MonitorOptions, MonitorTarget, UniqueRange,
@@ -134,12 +135,16 @@ pub(super) fn nodes(
     let Some(node_types) = node_types.proper_list() else {
         return BifResult::badarg();
     };
-    let (mut this, mut known) = (false, false);
+    let (mut this, mut known, mut visible, mut hidden) = (false, false, false, false);
     for node_type in node_types {
         match node_type {
             Term::Atom(name) if name.is_static("this") => this = true,
-            Term::Atom(name) if name.is_static("known") => (this, known) = (true, true),
-            Term::Atom(name) if name.is_one_of(&["visible", "hidden", "connected"]) => {}
+            Term::Atom(name) if name.is_static("known") => {
+                (this, known, visible, hidden) = (true, true, true, true);
+            }
+            Term::Atom(name) if name.is_static("visible") => visible = true,
+            Term::Atom(name) if name.is_static("hidden") => hidden = true,
+            Term::Atom(name) if name.is_static("connected") => (visible, hidden) = (true, true),
             _ => return BifResult::badarg(),
         }
     }
@@ -162,17 +167,19 @@ pub(super) fn nodes(
         }
         Some(_) => return BifResult::badarg(),
     }
-    let mut names: Vec<(Term, &str)> = Vec::new();
+    let mut kinds = Vec::new();
     if known {
-        names.extend(
-            scheduler
-                .known_nodes()
-                .into_iter()
-                .map(|name| (Term::Atom(name), "known")),
-        );
+        kinds.push("known");
     }
+    if hidden {
+        kinds.push("hidden");
+    }
+    if visible {
+        kinds.push("visible");
+    }
+    let mut names = remote_nodes(scheduler, &kinds);
     if this {
-        names.push((local_node(&scheduler.atoms), "this"));
+        names.push((local_node(&scheduler.atoms), "this", None));
     }
     // ERTS charges one reduction for each 10 nodes of a result of more than
     // 10 nodes (`dist.c:6465-6468`).
@@ -182,24 +189,81 @@ pub(super) fn nodes(
         );
     }
     let atoms = &scheduler.atoms;
-    Value(Term::list_from(names.into_iter().map(|(name, kind)| {
-        if options.is_none() {
-            return name;
-        }
-        let mut info = Vec::new();
-        if connection_id {
-            info.push((
-                Term::static_atom("connection_id"),
-                Term::static_atom("undefined"),
-            ));
-        }
-        if node_type {
-            info.push((Term::static_atom("node_type"), Term::static_atom(kind)));
-        }
-        // ponytail: each key is an atom, so `from_pairs` cannot fail.
-        let info = Map::from_pairs(info, atoms).expect("atom keys fit each map form");
-        Term::tuple(vec![name, Term::Map(info)])
-    })))
+    Value(Term::list_from(names.into_iter().map(
+        |(name, kind, id)| {
+            if options.is_none() {
+                return name;
+            }
+            let mut info = Vec::new();
+            if connection_id {
+                info.push((
+                    Term::static_atom("connection_id"),
+                    id.map_or(Term::static_atom("undefined"), |id| {
+                        Term::Integer(i64::from(id))
+                    }),
+                ));
+            }
+            if node_type {
+                info.push((Term::static_atom("node_type"), Term::static_atom(kind)));
+            }
+            // ponytail: each key is an atom, so `from_pairs` cannot fail.
+            let info = Map::from_pairs(info, atoms).expect("atom keys fit each map form");
+            Term::tuple(vec![name, Term::Map(info)])
+        },
+    )))
+}
+
+/// Return the other nodes of the node types `kinds` (`known`, `hidden`,
+/// `visible`) in the order of ERTS (`dist.c:6356-6411`): the pending
+/// entries, the not connected entries, the hidden entries, and the visible
+/// entries, each with its node type and its connection id. PBeam gives the
+/// not connected entries of the dist table before those of a send. ERTS
+/// keeps the entry of the local node in its list of not connected entries
+/// and skips it (`dist.c:6384-6392`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // A hidden connection to a@h.
+/// assert_eq!(remote_nodes(scheduler, &["hidden"]), vec![(a, "hidden", Some(7))]);
+/// ```
+fn remote_nodes(
+    scheduler: &mut Scheduler,
+    kinds: &[&str],
+) -> Vec<(Term, &'static str, Option<u32>)> {
+    let local = scheduler.atoms.this_node().0;
+    let connections: Vec<NodeInfo> = scheduler
+        .node()
+        .dist()
+        .nodes()
+        .into_iter()
+        .filter(|info| info.name != local)
+        .collect();
+    let connection =
+        |info: &NodeInfo| (Term::Atom(info.name.clone()), info.kind, info.connection_id);
+    let mut names: Vec<_> = connections
+        .iter()
+        .filter(|info| info.kind == "known" && kinds.contains(&"known"))
+        .map(connection)
+        .collect();
+    if kinds.contains(&"known") {
+        // A send makes the other entries of the not connected list.
+        let dist_names: Vec<&Atom> = connections.iter().map(|info| &info.name).collect();
+        names.extend(
+            scheduler
+                .known_nodes()
+                .into_iter()
+                .filter(|name| !dist_names.contains(&name))
+                .map(|name| (Term::Atom(name), "known", None)),
+        );
+    }
+    names.extend(
+        connections
+            .iter()
+            .filter(|info| info.kind != "known" && kinds.contains(&info.kind))
+            .map(connection),
+    );
+    names
 }
 
 /// The flags of ERTS `process_flag_2` (`bif.c:2028-2237`) that need a
