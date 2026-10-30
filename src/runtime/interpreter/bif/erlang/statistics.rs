@@ -5,7 +5,6 @@ use num_bigint::BigInt;
 use super::{BeamError, BifResult, Scheduler, Term, error};
 use crate::runtime::host::clock::user_cpu_milliseconds;
 use crate::runtime::time::{MONOTONIC_BEGIN, TIME_UNIT};
-use crate::term::debug_term;
 
 /// The native time units of one millisecond, as `ERTS_MONOTONIC_TO_MSEC`
 /// divides by them (`erl_time.h`).
@@ -105,8 +104,7 @@ pub(in crate::runtime::interpreter::bif) fn statistics(
         "scheduler_wall_time" | "scheduler_wall_time_all" => Term::static_atom("undefined"),
         _ if UNSUPPORTED_ITEMS.contains(&name) => {
             return Err(error(format!(
-                "unsupported erlang:statistics/1 argument {}: see \"Statistics\" in docs/erts-differences.md",
-                debug_term(item, &scheduler.atoms)
+                "unsupported erlang:statistics/1 argument {name}: see \"Statistics\" in docs/erts-differences.md"
             )));
         }
         _ => return Ok(BifResult::badarg()),
