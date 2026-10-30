@@ -38,7 +38,8 @@ jobs:
         uses: actions/cache@v6.1.0
         with:
           path: |
-            ~/.cargo/bin/blaze
+            ~/.cargo/bin/blaze*
+            ~/.cargo/bin/ra-jit*
             ~/.blaze
             ~/.cache/blaze
           key: blaze-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/blaze-version') }}
