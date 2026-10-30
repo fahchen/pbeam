@@ -118,6 +118,8 @@ jobs:
           name: coverage-${{ matrix.partition }}
           path: target/coverage.xml
           if-no-files-found: error
+          # A re-run of the jobs uploads the report again under the same name.
+          overwrite: true
           retention-days: 1
 
   checks:
