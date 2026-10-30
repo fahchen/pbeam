@@ -16,10 +16,12 @@ fn fun(index: i32, free: Vec<Term>) -> Term {
 }
 
 fn deep(levels: usize) -> Term {
+    // All levels use one copy of the test atom table. A copy for each map level took about 90 µs, and the deep terms of 1,000,000 levels took minutes to build.
+    let atoms = test_atom_table();
     (0..levels).fold(Term::nil(), |inner, level| match level % 4 {
         0 => Term::tuple(vec![inner]),
         1 => Term::list_from(vec![Term::Integer(1), inner]),
-        2 => map(vec![(atom("k"), inner)]),
+        2 => Term::Map(Map::from_pairs(vec![(atom("k"), inner)], &atoms).unwrap()),
         _ => fun(0, vec![inner]),
     })
 }
