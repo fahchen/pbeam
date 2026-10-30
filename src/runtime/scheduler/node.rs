@@ -22,7 +22,7 @@ use std::{
     },
 };
 
-use super::{Signal, process_table::ProcessTable};
+use super::{Signal, process_table::ProcessTable, statistics::Statistics};
 use crate::runtime::{
     heap_flags::HeapFlags,
     persistent_term::PersistentTermStore,
@@ -259,6 +259,8 @@ pub(in crate::runtime) struct Node {
     /// correction state. Each scheduler builds its timer service on it, so
     /// the time of every scheduler agrees.
     clock: NodeClock,
+    /// The counters of `erlang:statistics/1` that each scheduler adds to.
+    statistics: Statistics,
     /// The dirty CPU pool and the dirty IO pool, which each scheduler of
     /// the node uses.
     dirty: Pools,
@@ -363,6 +365,7 @@ impl Node {
                 hungry: (0..count).map(|_| AtomicBool::new(false)).collect(),
                 shutdown: AtomicBool::new(false),
                 clock: NodeClock::new(),
+                statistics: Statistics::default(),
                 dirty: Pools::new(count),
                 local_node_hash: OnceLock::new(),
                 ets: Arc::default(),
@@ -399,6 +402,11 @@ impl Node {
     /// Return the time support of the node.
     pub(in crate::runtime) fn clock(&self) -> NodeClock {
         self.clock.clone()
+    }
+
+    /// Return the counters of `erlang:statistics/1`.
+    pub(in crate::runtime) fn statistics(&self) -> &Statistics {
+        &self.statistics
     }
 
     /// Return the seed of the local node hash. `compute` runs at the first
@@ -453,6 +461,7 @@ impl Node {
             shutdown: AtomicBool::new(false),
             clock: NodeClock::new(),
             dirty: Pools::new(1),
+            statistics: Statistics::default(),
             local_node_hash: OnceLock::new(),
             ets: Arc::default(),
             code: super::code::NodeCode::default(),

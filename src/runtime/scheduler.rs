@@ -1188,6 +1188,7 @@ impl Scheduler {
             self.handle_dirty_signals(id)?;
             return Ok(Turn::Done);
         }
+        self.node.statistics().count_context_switch();
         let process = self.processes.set_current(id);
         process.in_run_queue = false;
         process.fcalls = CONTEXT_REDS;
@@ -2488,6 +2489,7 @@ impl Scheduler {
         self.virtual_reductions = 0;
         self.timers
             .add_reductions(i32::try_from(used).unwrap_or(i32::MAX));
+        self.node.statistics().add_reductions(used);
         let process = self.current_process_mut();
         process.reductions += used;
         process.fcalls = CONTEXT_REDS;
@@ -2507,6 +2509,7 @@ impl Scheduler {
         self.virtual_reductions = 0;
         self.timers
             .add_reductions(i32::try_from(used).unwrap_or(i32::MAX));
+        self.node.statistics().add_reductions(used);
         let process = self
             .processes
             .take_current()
@@ -4245,6 +4248,7 @@ mod process_slots;
 mod process_table;
 pub(super) mod run_queue;
 mod signals;
+pub(super) mod statistics;
 mod steal;
 mod tcp_inet;
 pub(in crate::runtime) use tcp_inet::Accept;
