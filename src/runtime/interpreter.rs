@@ -7363,19 +7363,20 @@ fn frame_function<'a>(
 /// gives the error of `AtomTable::put`.
 fn mfa_stacktrace(scheduler: &mut Scheduler, skip: usize) -> Result<Vec<Term>, BeamError> {
     let (process, code, atoms) = scheduler.current_process_code_and_atoms();
-    process_stacktrace(code, atoms, process, skip, false)
+    process_stacktrace(code, atoms, process, skip, 1)
 }
 
-/// Return the stack trace frames of `process` as [`mfa_stacktrace`] does.
-/// With `current`, the newest frame is the instruction where the process
-/// continues, which ERTS looks up at `p->i` itself
-/// (`erts_build_stacktrace` with `include_i`, `erl_bif_info.c:2407-2430`),
-/// not one byte before it.
+/// Return the stack trace frames of `process` as [`mfa_stacktrace`] does,
+/// with the location of the newest frame `newest_back` instructions before
+/// its next instruction. A newest frame that is the instruction where the
+/// process continues gives 0, as ERTS looks up `p->i` itself
+/// (`erts_build_stacktrace` with `include_i`, `erl_bif_info.c:2407-2430`);
+/// a return address gives 1.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let frames = process_stacktrace(&code, &atoms, &process, 0, true)?;
+/// let frames = process_stacktrace(&code, &atoms, &process, 0, 0)?;
 /// ```
 ///
 /// # Errors
@@ -7386,7 +7387,7 @@ pub(super) fn process_stacktrace(
     atoms: &AtomTable,
     process: &ProcessState,
     skip: usize,
-    current: bool,
+    newest_back: usize,
 ) -> Result<Vec<Term>, BeamError> {
     let mut frames: Vec<Frame> = process.frames.iter().rev().skip(skip).cloned().collect();
     // ERTS records one frame for each run of equal continuation pointers,
@@ -7406,11 +7407,8 @@ pub(super) fn process_stacktrace(
         if index + 1 == count && process.start_apply {
             continue;
         }
-        let position = if current && index == 0 {
-            frame.next_instruction
-        } else {
-            frame.next_instruction - 1
-        };
+        let back = if index == 0 { newest_back } else { 1 };
+        let position = frame.next_instruction - back;
         stacktrace.push(Term::tuple(vec![
             Term::Atom(atoms.put(&module.name)?),
             Term::Atom(atoms.put(function)?),

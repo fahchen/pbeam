@@ -237,10 +237,31 @@ fn gives_the_links_of_a_process_as_process_info_2() {
         messages: 0,
         reader: crate::runtime::interpreter::bif::erlang::InfoReader::Other,
         registered_name: None,
+        backtrace_depth: 8,
     };
     assert_eq!(
         request.item(&process, &Term::static_atom("links")).unwrap(),
         Some(Term::tuple(vec![Term::static_atom("links"), Term::nil()]))
+    );
+    // A list gives the results in its order, `{registered_name, []}` for a
+    // process without a name, and no result when PBeam does not read one
+    // item (`erl_bif_info.c:1134-1145`, `1616-1625`).
+    let list = |names: &[&str]| Term::list_from(names.iter().map(|name| Term::static_atom(name)));
+    let empty = |name: &str| Term::tuple(vec![Term::static_atom(name), Term::nil()]);
+    assert_eq!(
+        request
+            .item(&process, &list(&["links", "registered_name"]))
+            .unwrap(),
+        Some(Term::list_from(vec![
+            empty("links"),
+            empty("registered_name")
+        ]))
+    );
+    assert_eq!(
+        request
+            .item(&process, &list(&["links", "backtrace"]))
+            .unwrap(),
+        None
     );
     process.links.insert(LinkId::Process(ProcessId(1)), 0);
     process.links.insert(LinkId::Process(ProcessId(2)), 0);
@@ -287,6 +308,7 @@ fn reads_each_item_of_another_process_that_a_remote_request_carries() {
         messages: 0,
         reader: crate::runtime::interpreter::bif::erlang::InfoReader::Other,
         registered_name: None,
+        backtrace_depth: 8,
     };
     for name in super::OTHER_PROCESS_INFO_ITEMS {
         let item = Term::static_atom(name);
@@ -312,6 +334,7 @@ fn reads_the_current_function_and_the_error_handler_of_another_process() {
         messages: 0,
         reader: crate::runtime::interpreter::bif::erlang::InfoReader::Other,
         registered_name: None,
+        backtrace_depth: 8,
     };
     let item = |process: &ProcessState, name: &'static str| {
         request.item(process, &Term::static_atom(name))

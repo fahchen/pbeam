@@ -5502,7 +5502,6 @@ pub(super) fn process_info(
                 // is `process_info/2`: at most `backtrace_depth` frames
                 // (`erl_bif_info.c:2397-2460`).
                 let stacktrace = caller_stacktrace(scheduler, item)?;
-                let backtrace_depth = scheduler.node().backtrace_depth();
                 let (caller, code, atoms) = scheduler.current_process_code_and_atoms();
                 let messages = caller.mailbox.message_count();
                 let request = ProcessInfoRequest {
@@ -5512,7 +5511,7 @@ pub(super) fn process_info(
                     messages,
                     reader: InfoReader::Caller,
                     registered_name: registered,
-                    backtrace_depth,
+                    backtrace_depth: 0,
                 };
                 let info = match stacktrace {
                     Some(stacktrace) => stacktrace,
@@ -5549,15 +5548,13 @@ pub(super) fn process_info(
         }
         return Ok(Value(Term::static_atom("undefined")));
     };
-    let messages = target.mailbox.message_count();
-    let registered = scheduler.registered_name_of(*id);
     let request = ProcessInfoRequest {
         code: &scheduler.code,
         atoms: &scheduler.atoms,
         current: 0,
-        messages,
+        messages: target.mailbox.message_count(),
         reader: InfoReader::Other,
-        registered_name: registered,
+        registered_name: scheduler.registered_name_of(*id),
         backtrace_depth: scheduler.node().backtrace_depth(),
     };
     let info = request
@@ -5570,18 +5567,7 @@ pub(super) fn process_info(
     // ERTS always sends a request for `memory` and `total_heap_size` of
     // another process (`ERTS_PI_FLAG_FORCE_SIG_SEND`,
     // `erl_bif_info.c:828,839,1381`) and discards the cost of the request.
-    // `current_stacktrace` is a frame of the target when it handles the
-    // request (`ERTS_PI_FLAG_FORCE_SIG_SEND`, `erl_bif_info.c:845`). An
-    // item of a list forces the request for the list
-    // (`erl_bif_info.c:1335-1336`).
-    let force = |item: &Term| {
-        matches!(item, Term::Atom(name)
-            if matches!(scheduler.atoms.name_of(name), "memory" | "total_heap_size" | "current_stacktrace"))
-    };
-    let forced = match item.proper_list() {
-        Some(mut items) => items.any(force),
-        None => force(item),
-    };
+    let forced = forces_request(&scheduler.atoms, item);
     if forced || target.exiting.is_some() || target.mailbox.has_incoming() {
         let (caller, reference, request) = process_info_request(scheduler, item)?;
         scheduler
@@ -5594,6 +5580,24 @@ pub(super) fn process_info(
     let extra = super::item_reductions(item, &info, 0, MessageQueue::OffHeap);
     scheduler.current_process_mut().bump_reductions(1 + extra);
     Ok(signals_return(scheduler, process, info))
+}
+
+/// Return whether a read of `item` of another process always sends the
+/// process-info request. ERTS forces it for many items
+/// (`ERTS_PI_FLAG_FORCE_SIG_SEND`, `erl_bif_info.c:810-855`, `1381-1382`);
+/// PBeam forces it for `memory` and `total_heap_size`, whose cost ERTS
+/// discards, and for `current_stacktrace`, a frame of the target when it
+/// handles the request. An item of a list forces the request for the list
+/// (`erl_bif_info.c:1335-1336`).
+fn forces_request(atoms: &AtomTable, item: &Term) -> bool {
+    let force = |item: &Term| {
+        matches!(item, Term::Atom(name)
+            if matches!(atoms.name_of(name), "memory" | "total_heap_size" | "current_stacktrace"))
+    };
+    match item.proper_list() {
+        Some(mut items) => items.any(force),
+        None => force(item),
+    }
 }
 
 /// The `current_stacktrace` item of the calling process: the frames of the
@@ -6372,7 +6376,8 @@ pub(in crate::runtime) struct ProcessInfoRequest<'a> {
     /// The registered name of the process.
     pub(in crate::runtime) registered_name: Option<Atom>,
     /// The `backtrace_depth` system flag, the most frames of
-    /// `current_stacktrace`.
+    /// `current_stacktrace` of another process. The caller reads its own
+    /// frames with `caller_stacktrace`, so its request gives 0.
     pub(in crate::runtime) backtrace_depth: usize,
 }
 
@@ -6406,7 +6411,7 @@ impl ProcessInfoRequest<'_> {
         // Another process gives the frame where it continues first
         // (`current_stacktrace`, `erl_bif_info.c:2396-2405`).
         if self.reader == InfoReader::Other && item == &Term::static_atom("current_stacktrace") {
-            let mut frames = process_stacktrace(self.code, self.atoms, process, 0, true)?;
+            let mut frames = process_stacktrace(self.code, self.atoms, process, 0, 0)?;
             frames.truncate(self.backtrace_depth);
             return Ok(Some(Term::tuple(vec![
                 item.clone(),

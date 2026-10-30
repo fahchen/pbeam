@@ -178,6 +178,8 @@ unreg_taker() ->
 info_watch() ->
     Pid = wait_for(info_name, 100000),
     {registered_name, info_name} = process_info(Pid, registered_name),
+    [{current_stacktrace, [{ping_pong, info_hold, 0, []}]}, {registered_name, info_name}] =
+        process_info(Pid, [current_stacktrace, registered_name]),
     true = is_process_alive(Pid),
     Pid ! stop,
     ok.
@@ -191,7 +193,7 @@ info_hold() ->
 %% yet. The run stops with the unsupported error.
 info_item() ->
     Pid = wait_for(info_name, 100000),
-    _ = process_info(Pid, current_stacktrace),
+    _ = process_info(Pid, backtrace),
     Pid ! stop,
     ok.
 

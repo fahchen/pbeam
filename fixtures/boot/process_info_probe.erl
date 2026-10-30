@@ -73,6 +73,12 @@ stacktrace() ->
     timer:sleep(50),
     Busy = spawn(process_info_probe, nested, []),
     Busy ! hello,
+    %% Two clients of OTP code with line numbers: one in timer:sleep/1 and
+    %% one in gen_server:call/3 to a server that does not reply.
+    Server = spawn(process_info_probe, wait, []),
+    Sleeper = spawn(timer, sleep, [10000]),
+    Client = spawn(gen_server, call, [Server, request, infinity]),
+    timer:sleep(50),
     [io:format("~p~n", [Result]) || Result <- [
         process_info(Child, current_stacktrace),
         process_info(Child, [current_stacktrace, registered_name]),
@@ -80,9 +86,11 @@ stacktrace() ->
         process_info(Named, [current_function, registered_name]),
         process_info(Dead, [current_stacktrace, registered_name]),
         process_info(Busy, [current_stacktrace, registered_name]),
+        process_info(Sleeper, [current_stacktrace, registered_name]),
+        process_info(Client, [current_stacktrace, registered_name]),
         receive {self, Own} -> Own end
     ]],
-    [exit(P, kill) || P <- [Child, Named, Busy, Self]].
+    [exit(P, kill) || P <- [Child, Named, Busy, Self, Server, Sleeper, Client]].
 
 %% Read the own frames three calls deep.
 own(0) ->
