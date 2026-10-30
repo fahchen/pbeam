@@ -27,7 +27,7 @@ pub(crate) use external_id::ExternalId;
 pub(crate) use flat_size::flat_size;
 pub(crate) use fun::Fun;
 pub(crate) use fun::{Lambda, Target, debug_target};
-pub(crate) use hash::{atom_hash, internal_hash, make_hash, make_hash2};
+pub(crate) use hash::{atom_hash, internal_hash, make_hash, make_hash2, pid_word};
 pub(crate) use integer::{Division, MAX_BIG_DIGITS, ShiftDirection, fits_big_arity};
 use list::{Cons, ConsRef};
 pub(crate) use live_bytes::LiveBytes;

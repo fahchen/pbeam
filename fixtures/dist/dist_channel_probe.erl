@@ -4,7 +4,8 @@
 -compile(nowarn_deprecated_catch).
 -export([main/0, net_kernel_exit/0, port_channel/0, no_mandatory/0, message/0,
          port_message/0, deliver_port/0, deliver_udp/0, input/0, reject/1,
-         trace_token/0, link_op/0, atom_cache/0, output/0, port_output/0]).
+         trace_token/0, link_op/0, atom_cache/0, output/0, port_output/0,
+         alias_ext/0, dead_alias/0]).
 
 main() ->
     %% net_kernel reports the dist_ctrlr message of a connection that it
@@ -246,8 +247,17 @@ input() ->
     erts_internal:new_connection(zz@nohost),
     {ok, DH} = erts_internal:create_dist_channel(zz@nohost, self(), {M, 1}),
     From = remote_pid(zz@nohost),
+    Alias = alias(),
+    Old = alias(),
+    unalias(Old),
+    DeadAlias = #{Tag => dead_alias_packet(From, Tag) || Tag <- [process, port]},
     Packets = fun(Tag) ->
-                      [packet({2, '', self()}, {Tag, send}),
+                      [packet({33, From, Alias}, {Tag, alias}),
+                       packet({33, From, Old}, {Tag, unaliased}),
+                       packet({33, From, make_ref()}, {Tag, plain}),
+                       packet({33, From, remote_ref(zz@nohost)}, {Tag, remote_alias}),
+                       maps:get(Tag, DeadAlias),
+                       packet({2, '', self()}, {Tag, send}),
                        packet({22, From, self()}, {Tag, send_sender}),
                        packet({6, From, '', dinput}, {Tag, reg_send}),
                        packet({6, From, '', nobody}, {Tag, nobody}),
@@ -385,18 +395,56 @@ reject(N) ->
                  7 -> <<(packet_only({22, From, self()}))/binary, 131, 97>>;
                  8 -> packet_only({});
                  9 -> pid_reference_packet();
-                 10 -> packet_only({-1, '', self()})
+                 10 -> packet_only({-1, '', self()});
+                 11 -> packet_only({33, From, foo})
              end,
     erlang:dist_ctrl_put_data(DH, Packet).
 
-%% A message with a reference of the local node that has the pid marker
-%% bit (erl_bif_unique.h:106-109), which PBeam cannot hold.
+%% A message with a reference of three numbers of the local node that has
+%% the pid marker bit (erl_bif_unique.h:106-109): ERTS makes an ordinary
+%% reference with the marker (external.c:4844-4848), which PBeam cannot
+%% hold.
 pid_reference_packet() ->
     <<131, 90, Rest/binary>> = term_to_binary(make_ref()),
     Size = byte_size(Rest) - 12,
     <<Head:Size/binary, N0:32, N1:32, N2:32>> = Rest,
     <<(packet_only({2, '', self()}))/binary,
-      131, 90, Head/binary, N0:32, (N1 bor (1 bsl 30)):32, N2:32>>.
+      131, 90, Head/binary, N0:32, (N1 bor (1 bsl 16)):32, N2:32>>.
+
+%% An ALIAS_SEND packet to an alias of a process that exited.
+dead_alias_packet(From, Tag) ->
+    Parent = self(),
+    {Pid, Ref} = spawn_monitor(fun() -> Parent ! {self(), packet({33, From, alias()}, {Tag, dead_alias})} end),
+    receive {'DOWN', Ref, _, _, _} -> ok end,
+    receive {Pid, Packet} -> Packet end.
+
+%% The external term of an alias: five reference numbers, the pid marker
+%% bit in the second, and the pid word of the owner in the last two
+%% (external.c:3642-3668, erl_bif_unique.h:259-277). A pid word without
+%% the pid tag is not valid (external.c:4833-4843).
+alias_ext() ->
+    A = alias(),
+    B = term_to_binary(A),
+    <<131, 90, C:16, _/binary>> = B,
+    [_, N1, _, P0, P1] = [W || <<W:32>> <= binary:part(B, byte_size(B) - 4 * C, 4 * C)],
+    [_, PN, _] = string:lexemes(pid_to_list(self()) -- "<>", "."),
+    Bad = <<(binary:part(B, 0, byte_size(B) - 8))/binary, 0:64>>,
+    Monitor = monitor(process, self(), [{alias, demonitor}]),
+    unalias(A),
+    show(alias, [C, N1 band 16#30000, P0 =:= (list_to_integer(PN) bsl 7) bor 3, P1,
+                 binary_to_term(B) =:= A, erlang:external_size(A) =:= byte_size(B),
+                 strip(catch binary_to_term(Bad)), binary_to_term(term_to_binary(A)) =:= A,
+                 binary_to_term(term_to_binary(Monitor)) =:= Monitor,
+                 binary_to_term(term_to_binary({A, Monitor}, [local])) =:= {A, Monitor}]).
+
+%% The external term of an alias of a process that exited, which holds
+%% the pid of the owner in ERTS and which PBeam does not keep.
+dead_alias() ->
+    Parent = self(),
+    {Pid, Ref} = spawn_monitor(fun() -> Parent ! {self(), alias()} end),
+    receive {'DOWN', Ref, _, _, _} -> ok end,
+    A = receive {Pid, Alias} -> Alias end,
+    term_to_binary(A).
 
 %% A packet on a connection with DFLAG_DIST_HDR_ATOM_CACHE.
 atom_cache() ->

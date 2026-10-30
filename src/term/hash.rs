@@ -151,9 +151,7 @@ enum Shape<'a> {
 fn shape(term: &Term) -> Shape<'_> {
     match term {
         Term::Atom(atom) => Shape::Immediate(atom_word(atom.index())),
-        Term::Pid(ProcessId(number)) => {
-            Shape::Immediate((pixdata(*number, PROCESS_TABLE_BITS) << IMMED1_TAG_BITS) | PID_TAG)
-        }
+        Term::Pid(id) => Shape::Immediate(pid_word(*id)),
         Term::Port(PortId(number)) => {
             Shape::Immediate((pixdata(*number, PORT_TABLE_BITS) << IMMED1_TAG_BITS) | PORT_TAG)
         }
@@ -212,6 +210,20 @@ fn pixdata(number: u64, bits: u32) -> u64 {
     (number & !((1 << bits) - 1))
         | ((number & ((1 << cli_shift) - 1)) << 3)
         | ((number >> cli_shift) & 7)
+}
+
+/// Return the ERTS word of the local pid `id`: `(pixdata(number) << 4) |
+/// 0x3` (`erts_ptab_make_id`, `erl_ptab.h:320-326`). An ERTS pid reference
+/// holds this word in its last two reference numbers
+/// (`erts_pid_ref_lookup`, `erl_bif_unique.h:259-277`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(pid_word(ProcessId(10)), 1283);
+/// ```
+pub(crate) fn pid_word(ProcessId(number): ProcessId) -> u64 {
+    (pixdata(number, PROCESS_TABLE_BITS) << IMMED1_TAG_BITS) | PID_TAG
 }
 
 /// Return the ERTS word of the atom with an atom-table index.

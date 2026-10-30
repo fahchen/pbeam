@@ -148,11 +148,12 @@ fn runs_the_bifs_of_a_process_controller_as_pinned_erts() {
         "{erts}"
     );
     assert_eq!(stdout(&pbeam_erl(&epmd, &port)), erts);
-    // Packets with data on a process and a port controller go to a pid
-    // and a name, or are dropped (dist.c:2463-2553).
+    // Packets with data on a process and a port controller go to a pid,
+    // a name, and an active alias, or are dropped (dist.c:2463-2578,
+    // erl_proc_sig_queue.c:2314-2331).
     let input = probe(&["-sname", &name], "dist_channel_probe:input(), halt().");
     let erts = stdout(&erts_erl(&epmd, &input));
-    assert!(erts.contains("{process,send_sender},"), "{erts}");
+    assert!(erts.contains("[{process,alias},"), "{erts}");
     assert_eq!(stdout(&pbeam_erl(&epmd, &input)), erts);
     let exit = probe(&[], "dist_channel_probe:net_kernel_exit(), halt().");
     let erts = stdout(&erts_erl(&epmd, &exit));
@@ -182,9 +183,10 @@ fn queues_and_writes_the_messages_to_a_connection_as_pinned_erts() {
 }
 
 #[test]
-fn offers_the_mandatory_distribution_flags() {
-    // PBeam offers only DFLAG_DIST_MANDATORY (dist.h:80-98), with the
-    // rejectable and the strict order flags of ERTS (dist.h:129-135).
+fn offers_the_mandatory_distribution_flags_and_alias() {
+    // PBeam offers DFLAG_DIST_MANDATORY (dist.h:80-98) and DFLAG_ALIAS
+    // (dist.h:67, 113-123), with the rejectable and the strict order flags
+    // of ERTS (dist.h:129-135).
     let epmd = Epmd::start();
     let output = pbeam_erl(
         &epmd,
@@ -196,8 +198,27 @@ fn offers_the_mandatory_distribution_flags() {
     );
     assert_eq!(
         stdout(&output),
-        "{erts_dflags,17230663572,17230663572,17230663572,8396866,8192}\n"
+        "{erts_dflags,51590401940,17230663572,51590401940,8396866,8192}\n"
     );
+}
+
+#[test]
+fn encodes_an_alias_as_a_pid_reference_as_pinned_erts() {
+    // An alias has five reference numbers: the pid marker bit in the
+    // second, and the pid word of its owner in the last two
+    // (external.c:3642-3668, 4821-4856, erl_bif_unique.h:259-277).
+    let epmd = Epmd::start();
+    let name = format!("dalext{}", std::process::id());
+    let arguments = probe(
+        &["-sname", &name],
+        "dist_channel_probe:alias_ext(), halt().",
+    );
+    let erts = stdout(&erts_erl(&epmd, &arguments));
+    assert!(
+        erts.starts_with("alias: [5,65536,true,0,true,true,"),
+        "{erts}"
+    );
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), erts);
 }
 
 #[test]
@@ -231,14 +252,18 @@ fn stops_at_a_part_of_a_channel_that_pbeam_does_not_have() {
         ("deliver_port()".to_owned(), deliver),
         ("deliver_udp()".to_owned(), deliver),
     ];
-    cases.extend([1, 2, 3, 4, 5, 6, 7, 8, 10].map(|n| (format!("reject({n})"), rejected)));
+    cases.extend([1, 2, 3, 4, 5, 6, 7, 8, 10, 11].map(|n| (format!("reject({n})"), rejected)));
     cases.push((
         "atom_cache()".to_owned(),
         "unsupported distribution message on a connection with the atom cache or fragments",
     ));
     cases.push((
         "reject(9)".to_owned(),
-        "unsupported distribution message of a pid reference",
+        "unsupported distribution message of a pid reference that is not of five numbers",
+    ));
+    cases.push((
+        "dead_alias()".to_owned(),
+        "unsupported external term of a pid reference whose owner exited",
     ));
     for (call, error) in cases {
         let expression = format!("dist_channel_probe:{call}, halt().");
@@ -491,5 +516,66 @@ fn receives_a_message_from_an_erts_node_as_pinned_erts() {
         assert_eq!(stdout(&erts_erl(&epmd, &client(&erts, socket))), hello);
         let pbeam = format!("drpb{socket}{id}");
         assert_eq!(stdout(&pbeam_erl(&epmd, &client(&pbeam, socket))), hello);
+    }
+}
+
+#[test]
+fn sends_messages_to_an_alias_between_erts_and_pbeam_nodes() {
+    // A client sends an alias to a server node, which replies to it with
+    // ALIAS_SEND (dist.c:1640-1666, 2556-2578). After unalias/1 the owner
+    // drops the next reply (erl_proc_sig_queue.c:2314-2331), and the SEND
+    // after it comes. Each pair of ERTS and PBeam nodes runs over the
+    // prim_socket carrier and over the tcp_inet port controller. An ERTS
+    // client also gets the reply of gen_server:call/2 to net_kernel of the
+    // server through an alias (gen.erl, net_kernel.erl).
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let server = "io:format(\"~s~n\", [node()]), register(dalias, self()), \
+                  L = fun L() -> receive {A, From} -> A ! {reply, node()}, From ! sync, L(); \
+                  {late, A, From} -> A ! late, From ! done, L() end end, L().";
+    for (server_pbeam, socket) in [(false, true), (false, false), (true, true), (true, false)] {
+        let name = format!("dasrv{server_pbeam}{socket}{id}");
+        let mut arguments = vec!["-sname", &name, "-setcookie", "ck"];
+        if socket {
+            arguments.extend(SOCKET_CARRIER);
+        }
+        let node = if server_pbeam {
+            pbeam_node(&epmd, &arguments, server)
+        } else {
+            ErtsNode::start(&epmd, &arguments, server)
+        };
+        let server = node.line();
+        let alias = format!(
+            "true = net_kernel:connect_node('{server}'), A = alias(), \
+             {{dalias, '{server}'}} ! {{A, self()}}, \
+             R = receive {{reply, N}} -> N after 5000 -> timeout end, \
+             receive sync -> ok end, unalias(A), {{dalias, '{server}'}} ! {{late, A, self()}}, \
+             receive done -> ok end, Late = receive late -> late after 0 -> none end"
+        );
+        let client = |name: &str, expression: &str| {
+            let mut arguments = vec!["-sname", name, "-setcookie", "ck", "-hidden"];
+            if socket {
+                arguments.extend(SOCKET_CARRIER);
+            }
+            arguments.extend(["-noshell", "-eval", expression]);
+            arguments.into_iter().map(str::to_owned).collect::<Vec<_>>()
+        };
+        let erts = format!(
+            "{alias}, Yes = gen_server:call({{net_kernel, '{server}'}}, {{is_auth, node()}}), \
+             io:format(\"~p~n\", [{{R, Late, Yes}}]), halt()."
+        );
+        let replied = format!("{{{},none,yes}}\n", atom_text(&server));
+        let erts_name = format!("daerts{server_pbeam}{socket}{id}");
+        assert_eq!(
+            stdout(&erts_erl(&epmd, &client(&erts_name, &erts))),
+            replied
+        );
+        let pbeam = format!("{alias}, io:format(\"~p~n\", [{{R, Late}}]), halt().");
+        let replied = format!("{{{},none}}\n", atom_text(&server));
+        let pbeam_name = format!("dapb{server_pbeam}{socket}{id}");
+        assert_eq!(
+            stdout(&pbeam_erl(&epmd, &client(&pbeam_name, &pbeam))),
+            replied
+        );
     }
 }

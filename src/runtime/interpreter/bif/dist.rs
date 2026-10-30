@@ -144,6 +144,11 @@ const MANDATORY_FLAGS: u64 = 0x0004 // DFLAG_EXTENDED_REFERENCES
     | (0x4 << 32) // DFLAG_V4_NC
     | 0x0200_0000; // DFLAG_UNLINK_ID
 
+/// The default distribution flags of PBeam: the mandatory flags and
+/// `DFLAG_ALIAS` (`dist.h:67`), which ERTS offers in `DFLAG_DIST_DEFAULT`
+/// (`dist.h:113-123`).
+const DEFAULT_FLAGS: u64 = MANDATORY_FLAGS | (0x8 << 32);
+
 /// The flags that a local distribution module can reject
 /// (`DFLAG_DIST_REJECTABLE`, `dist.h:129-132`): `DFLAG_DIST_HDR_ATOM_CACHE`,
 /// `DFLAG_HIDDEN_ATOM_CACHE`, `DFLAG_FRAGMENTS`, and `DFLAG_ATOM_CACHE`.
@@ -167,16 +172,17 @@ fn node_name_atom<'a>(context: &BifContext<'_>, name: &'a Term) -> Option<&'a At
 /// Run `erts_internal:get_dflags/0` (`dist.c:5543-5569`): return
 /// `{erts_dflags, Default, Mandatory, Addable, Rejectable, StrictOrder}`.
 ///
-/// PBeam offers only the mandatory flags as its default flags, and a
-/// distribution module can add only those (`DFLAG_DIST_ADDABLE` is the
-/// default, `dist.h:126`); ERTS also offers the flags of `dist.h:105-123`.
+/// PBeam offers the mandatory flags and `DFLAG_ALIAS` as its default
+/// flags, and a distribution module can add only those
+/// (`DFLAG_DIST_ADDABLE` is the default, `dist.h:126`); ERTS also offers
+/// the other flags of `dist.h:105-123`.
 /// The rejectable and the strict order flags are those of ERTS. See row
 /// "Distribution" of `docs/erts-differences.md`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// // {erts_dflags,17230663572,17230663572,17230663572,8396866,8192}
+/// // {erts_dflags,51590401940,17230663572,51590401940,8396866,8192}
 /// let Term::Tuple(record) = get_dflags() else { unreachable!() };
 /// assert_eq!(record.len(), 6);
 /// ```
@@ -184,9 +190,9 @@ pub(super) fn get_dflags() -> Term {
     let flags = |flags: u64| Term::from_bigint(BigInt::from(flags));
     Term::tuple(vec![
         Term::static_atom("erts_dflags"),
+        flags(DEFAULT_FLAGS),
         flags(MANDATORY_FLAGS),
-        flags(MANDATORY_FLAGS),
-        flags(MANDATORY_FLAGS),
+        flags(DEFAULT_FLAGS),
         flags(REJECTABLE_FLAGS),
         flags(STRICT_ORDER_FLAGS),
     ])
