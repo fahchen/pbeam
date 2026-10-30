@@ -2116,10 +2116,8 @@ pub(super) fn parse_code(
     }
     let number_of_labels =
         read_u32(&data[CODE_LABEL_COUNT_OFFSET..CODE_LABEL_COUNT_OFFSET + WORD_SIZE])?;
-    let declared_function_count = usize::try_from(read_u32(
-        &data[CODE_FUNCTION_COUNT_OFFSET..CODE_HEADER_SIZE],
-    )?)
-    .expect("a u32 fits in usize");
+    let declared = read_u32(&data[CODE_FUNCTION_COUNT_OFFSET..CODE_HEADER_SIZE])?;
+    let declared_function_count = usize::try_from(declared).expect("a u32 fits in usize");
     let mut cursor = CODE_HEADER_SIZE;
     let mut instructions = Vec::new();
     let mut function_info_count = 0;

@@ -507,6 +507,16 @@ pub(super) enum UniqueRange {
     Positive,
 }
 
+impl From<bool> for UniqueRange {
+    fn from(positive: bool) -> Self {
+        if positive {
+            Self::Positive
+        } else {
+            Self::Signed
+        }
+    }
+}
+
 impl Scheduler {
     /// Return a scheduler with no processes and the atom table of the run.
     /// The table is a copy of the table of the loaded program, so each atom

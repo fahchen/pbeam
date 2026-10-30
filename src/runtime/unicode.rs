@@ -26,6 +26,13 @@ pub(super) enum CharEncoding {
     Latin1,
 }
 
+impl From<bool> for CharEncoding {
+    /// Return `Latin1` for `true` and `Unicode` for `false`.
+    fn from(latin1: bool) -> Self {
+        if latin1 { Self::Latin1 } else { Self::Unicode }
+    }
+}
+
 /// The UTF-8 output of a chardata walk, as the target buffer of
 /// `do_build_utf8` keeps it (`erl_unicode.c:508-749`).
 #[derive(Debug, Default)]

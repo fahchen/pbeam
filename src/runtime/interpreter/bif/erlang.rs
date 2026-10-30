@@ -5561,14 +5561,8 @@ fn caller_info_list(
     let messages = caller.mailbox.message_count();
     let off_heap = caller.off_heap_message_queue;
     let registered = scheduler.registered_name_of(caller.id);
-    let values = process_info_values(
-        &scheduler.code,
-        caller,
-        current,
-        messages,
-        InfoReader::Caller,
-        registered,
-    )?;
+    let who = InfoReader::Caller;
+    let values = process_info_values(&scheduler.code, caller, current, messages, who, registered)?;
     let all = process_info_term(&scheduler.atoms, values)?;
     let all: Vec<Term> = all.proper_list().expect("a proper list").cloned().collect();
     let mut reductions = 0;
@@ -6048,14 +6042,8 @@ pub(super) fn process_info_1(
             let registered = scheduler.registered_name_of(*id);
             let values = {
                 let caller = scheduler.current_process();
-                process_info_values(
-                    &scheduler.code,
-                    caller,
-                    current,
-                    messages,
-                    InfoReader::Caller,
-                    registered,
-                )?
+                let who = InfoReader::Caller;
+                process_info_values(&scheduler.code, caller, current, messages, who, registered)?
             };
             let info = process_info_term(&scheduler.atoms, values)?;
             scheduler.current_process_mut().bump_reductions(
@@ -6081,14 +6069,8 @@ pub(super) fn process_info_1(
     };
     let messages = target.mailbox.message_count();
     let registered = scheduler.registered_name_of(*id);
-    let values = process_info_values(
-        &scheduler.code,
-        target,
-        0,
-        messages,
-        InfoReader::Other,
-        registered,
-    )?;
+    let who = InfoReader::Other;
+    let values = process_info_values(&scheduler.code, target, 0, messages, who, registered)?;
     let info = process_info_term(&scheduler.atoms, values)?;
     scheduler
         .current_process_mut()
@@ -6658,11 +6640,7 @@ pub(super) fn unique_integer_1(
         return Ok(BifResult::badarg());
     }
     let value = if monotonic {
-        scheduler.unique_monotonic_integer(if positive {
-            UniqueRange::Positive
-        } else {
-            UniqueRange::Signed
-        })?
+        scheduler.unique_monotonic_integer(UniqueRange::from(positive))?
     } else if positive {
         scheduler.unique_integer_positive()?
     } else {

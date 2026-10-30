@@ -366,3 +366,7 @@ pub(crate) fn monitor_down(monitor: Reference, pid: ProcessId, node: &Node) {
 
 /// `ERL_NIF_RT_CREATE` of `ErlNifResourceFlags` (`erl_nif.h:188-192`).
 pub(super) const CREATE: c_int = 1;
+
+#[cfg(test)]
+#[path = "../../../../tests/runtime/nif/abi/resource.rs"]
+mod tests;

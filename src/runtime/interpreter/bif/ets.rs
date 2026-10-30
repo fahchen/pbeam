@@ -711,13 +711,8 @@ pub(super) fn insert_list(
             }
             // The list call does its own membership walk and passes `false`
             // to `db_put` (`erl_db.c:1858`, `1943`).
-            put_objects(
-                &context.scheduler.atoms,
-                &mut table,
-                &tuples,
-                keypos,
-                InsertKind::Insert,
-            )?;
+            let kind = InsertKind::Insert;
+            put_objects(&context.scheduler.atoms, &mut table, &tuples, keypos, kind)?;
             units.left -= 2 * to_i64(count);
             break 'work Some(Value(Term::static_atom("true")));
         }

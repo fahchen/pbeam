@@ -1883,21 +1883,11 @@ impl Decoder<'_> {
         match tag {
             100 | 118 => {
                 let length = usize::from(self.u16()?);
-                let charset = if tag == 100 {
-                    CharEncoding::Latin1
-                } else {
-                    CharEncoding::Unicode
-                };
-                self.atom(length, charset)
+                self.atom(length, CharEncoding::from(tag == 100))
             }
             115 | 119 => {
                 let length = usize::from(self.u8()?);
-                let charset = if tag == 115 {
-                    CharEncoding::Latin1
-                } else {
-                    CharEncoding::Unicode
-                };
-                self.atom(length, charset)
+                self.atom(length, CharEncoding::from(tag == 115))
             }
             _ => Err(DecodeError::Badarg),
         }

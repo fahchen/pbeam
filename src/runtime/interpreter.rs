@@ -2412,11 +2412,8 @@ impl BeamProgram {
                 } => {
                     let (process, atoms) = scheduler.current_process_and_atoms();
                     let position = match_context(process, context, atoms)?.position();
-                    write(
-                        process,
-                        destination,
-                        Term::Integer(i64::try_from(position).expect("a bit position fits in i64")),
-                    )?;
+                    let value = i64::try_from(position).expect("a bit position fits in i64");
+                    write(process, destination, Term::Integer(value))?;
                 }
                 // ERTS `bs_set_position` sets `sb->start` to the unsigned
                 // value of the position (emu bs_instrs.tab:1120-1123). The
@@ -6076,12 +6073,7 @@ impl BinaryPart<'_> {
                 value,
                 bits,
             } => match value {
-                Term::Binary(binary)
-                    if u64::try_from(binary.bit_size()).expect("a bit size fits in u64")
-                        >= *bits =>
-                {
-                    None
-                }
+                Term::Binary(binary) if bit_size(binary) >= *bits => None,
                 Term::Binary(_) => Some(BinarySegmentFailure::badarg(
                     *segment,
                     "binary",
@@ -6096,9 +6088,7 @@ impl BinaryPart<'_> {
                 )),
             },
             BinaryPart::Shared(binary, _, segment, unit)
-                if !u64::try_from(binary.bit_size())
-                    .expect("a bit size fits in u64")
-                    .is_multiple_of(*unit) =>
+                if !bit_size(binary).is_multiple_of(*unit) =>
             {
                 Some(BinarySegmentFailure::badarg(
                     *segment,
@@ -6628,11 +6618,7 @@ fn create_binary(
                 segment, "binary", "type", value,
             )));
         };
-        if unit > 1
-            && !u64::try_from(start.bit_size())
-                .expect("a bit size fits in u64")
-                .is_multiple_of(unit)
-        {
+        if unit > 1 && !bit_size(start).is_multiple_of(unit) {
             return Ok(Err(BinarySegmentFailure::badarg(
                 segment, "binary", "unit", value,
             )));
@@ -6750,7 +6736,7 @@ fn write_binary_parts(
                 value: Term::Binary(binary),
                 bits,
                 ..
-            } if u64::try_from(binary.bit_size()).expect("a bit size fits in u64") >= *bits => {
+            } if bit_size(binary) >= *bits => {
                 // `erts_bs_put_binary` uses one reduction for each 8192
                 // copied bits (erl_bits.c:1306).
                 writer.push_binary(binary, usize::try_from(*bits).expect("a u64 fits in usize"));
@@ -6865,6 +6851,17 @@ fn sized_binary_part(
             ..BinarySegmentFailure::badarg(segment, "binary", "size", size)
         }),
     })
+}
+
+/// Return the size of `binary` in bits.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(bit_size(&Binary::from(vec![0x10])), 8);
+/// ```
+fn bit_size(binary: &Binary) -> u64 {
+    u64::try_from(binary.bit_size()).expect("a bit size fits in u64")
 }
 
 /// Return the bitstring of the `bits` bits at the start of `bytes`, the

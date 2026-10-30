@@ -575,15 +575,19 @@ fn rejects_bad_match_specifications() {
     let head = Term::tuple(vec![at(&atoms, "$1"), at(&atoms, "$2")]);
     let ok = Term::static_atom("true");
     // An unsupported guard, a map expression, and a bad specification.
-    let unsupported = Term::list_from(vec![Term::tuple(vec![
-        head.clone(),
-        Term::list_from([call(&atoms, "round", vec![Term::Float(1.0)])]),
-        Term::nil(),
-    ])]);
-    assert!(matches!(
-        MatchSpec::compile(&atoms, &unsupported),
-        Err(SpecError::Unsupported(_))
-    ));
+    // ERTS knows each of these guards, so each gives `Unsupported`, not
+    // `badarg`: one of each arity of the known list.
+    for (name, arity) in [("round", 1), ("binary_part", 2), ("is_record", 3)] {
+        let unsupported = Term::list_from(vec![Term::tuple(vec![
+            head.clone(),
+            Term::list_from([call(&atoms, name, vec![Term::Float(1.0); arity])]),
+            Term::nil(),
+        ])]);
+        assert!(matches!(
+            MatchSpec::compile(&atoms, &unsupported),
+            Err(SpecError::Unsupported(_))
+        ));
+    }
     let map =
         Term::Map(Map::from_pairs(vec![(at(&atoms, "a"), Term::Integer(1))], &atoms).unwrap());
     let spec = Term::list_from(vec![Term::tuple(vec![
