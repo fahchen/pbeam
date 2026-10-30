@@ -2777,3 +2777,14 @@ fn a_close_message_after_a_connect_or_a_close_on_another_scheduler_changes_nothi
         Some(false)
     );
 }
+
+#[test]
+fn treats_a_local_port_as_an_immediate_reason() {
+    // ERTS `is_immed` is true for an internal port (`_TAG_IMMED1_PORT`),
+    // so the exit sends the link exit signal of a link to another node at
+    // once for a port reason (erl_process.c:14115-14141).
+    assert!(super::signals::is_immediate(&Term::Port(
+        crate::term::PortId(1)
+    )));
+    assert!(!super::signals::is_immediate(&Term::tuple(vec![])));
+}
