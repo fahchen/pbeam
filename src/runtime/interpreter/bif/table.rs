@@ -313,7 +313,7 @@ bifs! {
     erlang:split_binary/2 as ErlangSplitBinary2 => |_, [binary, position]| Ok(erlang::split_binary(binary, position)),
     erlang:start_timer/3 as ErlangStartTimer3 => |cx, [time, receiver, message]| erlang::start_timer(cx, time, receiver, message),
     erlang:start_timer/4 as ErlangStartTimer4 => |cx, [time, receiver, message, options]| timer::start_timer_4(cx, time, receiver, message, options),
-    erlang:statistics/1 => unsupported,
+    erlang:statistics/1 as ErlangStatistics1 => |cx, [item]| erlang::statistics(cx.scheduler, item),
     erlang:subtract/2 as ErlangSubtractFn2 => |cx, [left, right]| { let (process, atoms) = cx.scheduler.current_process_and_atoms(); subtract::subtract(process, atoms, left, right) },
     erlang:system_flag/2 as ErlangSystemFlag2 => |cx, [item, value]| erlang::system_flag(cx, item, value),
     erlang:system_info/1 as ErlangSystemInfo1 => |cx, [item]| erlang::system_info(cx.scheduler, item),
