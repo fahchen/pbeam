@@ -4,7 +4,7 @@
 
 ## The pin
 
-`.github/blaze-version` names the blaze release. `scripts/blaze.sh` installs that release when the machine has another one, then runs the blaze command of its arguments. `mise run blaze-check` runs `check --workspace --all-targets` through it.
+`.github/blaze-version` names the blaze release on its first line and the SHA-256 of the `install.sh` of that release tag on its second line. `scripts/blaze.sh` downloads that installer from the tag, checks the hash, and stops before it runs a changed installer, because a tag can move and the installer of `ix.dev` changes without a release. A new pin changes both lines. `scripts/blaze.sh` installs that release when the machine has another one, then runs the blaze command of its arguments. `mise run blaze-check` runs `check --workspace --all-targets` through it.
 
 blaze builds every project with its own Rust toolchain, whatever `mise.toml` pins. Release 0.20261027.0 builds with `nightly-2026-10-27`. The project keeps Rust 1.99.0, and `mise run check` stays the final word.
 
