@@ -988,3 +988,8 @@ ref_as_ptr = "allow"
 borrow_as_ptr = "allow"
 ptr_cast_constness = "allow"
 checked_conversions = "allow"
+# The benchmark of benchmark/ compares the runtime with the pinned ERTS. It is
+# an example, not a test: it measures, and no check gate runs it.
+[[example]]
+name = "benchmark"
+path = "benchmark/benchmark.rs"
