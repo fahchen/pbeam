@@ -1,5 +1,5 @@
 -module(crypto_probe).
--export([main/0, nifs/0, info/0, supports/0, fips/0, oneshot/0, oneshot_host/0, xof_sizes/0, ciphers/0, ciphers_host/0, cipher_order/0, contexts/0, mac_contexts/0, mac_contexts_host/0, cipher_contexts/0, mac_poly1305_final/0, mac_poly1305_update/0, unsupported/0]).
+-export([main/0, nifs/0, info/0, supports/0, supports_host/0, fips/0, oneshot/0, oneshot_host/0, xof_sizes/0, ciphers/0, ciphers_host/0, cipher_order/0, contexts/0, mac_contexts/0, mac_contexts_host/0, cipher_contexts/0, mac_poly1305_final/0, mac_poly1305_update/0, unsupported/0]).
 
 %% Write the results of crypto:strong_rand_bytes/1, one term on each line.
 %% The first call loads crypto on demand, and its -on_load function loads
@@ -79,22 +79,47 @@ info() ->
 %% are in algorithms.c:86-224 and digest.c:226-242; supports/0 builds the
 %% list (crypto.erl:843-895). The pinned ERTS lists each algorithm of its
 %% OpenSSL. PBeam lists only the algorithms that it can run: the digests of
-%% hash_nif/2 and the MACs of mac_nif/4.
+%% hash_nif/2, the MACs of mac_nif/4, the ciphers, the curves, and the public
+%% key algorithms. The curves and the public key algorithms of the pinned
+%% ERTS depend on the libcrypto of the host, so supports_host/0 writes them.
 supports() ->
-    Run = [blake2s, blake2b, sm3, shake256, shake128, sha3_512, sha3_384, sha3_256,
-           sha3_224, sha512_256, sha512_224, sha512, sha384, sha256, sha224, sha,
-           ripemd160, md5, cmac, hmac, poly1305] ++ run_ciphers() ++
-          [sm4_gcm, sm4_ccm, aes_cbc, aes_ccm, aes_cfb128, aes_cfb8, aes_ctr, aes_ecb, aes_gcm],
     All = crypto:supports(),
+    Run = run_algorithms(),
     Items = [{Type, [Item || Item <- List, lists:member(Item, Run)]} || {Type, List} <- All],
     Lists = [crypto:supports(Type) || {Type, _} <- All],
     %% The probe cipher_order/0 checks the order of the ciphers, so this probe
     %% sorts them. The libcrypto of the Linux CI host has no sm4_gcm and
     %% sm4_ccm, so the list leaves them out.
     Sorted = [{Type, case Type of ciphers -> lists:sort(List) -- [sm4_gcm, sm4_ccm]; _ -> List end}
-              || {Type, List} <- Items],
+              || {Type, List} <- Items, Type =/= curves, Type =/= public_keys],
     io:format("~p~n", [[length(lists:append([List || {_, List} <- All])), Sorted,
                         All =:= Items, Lists =:= [List || {_, List} <- All]]]).
+
+%% Write the curves and the public key algorithms of crypto:supports/1 that
+%% PBeam can run, in their order (algorithms.c:162-202, 241-640,
+%% pkey.c:201-210).
+supports_host() ->
+    Run = run_algorithms(),
+    io:format("~p~n", [[[Item || Item <- crypto:supports(Type), lists:member(Item, Run)]
+                        || Type <- [curves, public_keys]]]).
+
+run_algorithms() ->
+    [blake2s, blake2b, sm3, shake256, shake128, sha3_512, sha3_384, sha3_256,
+     sha3_224, sha512_256, sha512_224, sha512, sha384, sha256, sha224, sha,
+     ripemd160, md5, cmac, hmac, poly1305] ++ run_ciphers() ++
+        [sm4_gcm, sm4_ccm, aes_cbc, aes_ccm, aes_cfb128, aes_cfb8, aes_ctr, aes_ecb, aes_gcm,
+         secp160k1, secp160r1, secp160r2, secp192k1, secp224k1, secp224r1, secp256k1,
+         secp384r1, secp521r1, secp192r1, prime192v1, prime192v2, prime192v3, prime239v1,
+         prime239v2, prime239v3, secp256r1, prime256v1, wtls7, wtls9, wtls12,
+         brainpoolP160r1, brainpoolP160t1, brainpoolP192r1, brainpoolP192t1,
+         brainpoolP224r1, brainpoolP224t1, brainpoolP256r1, brainpoolP256t1,
+         brainpoolP320r1, brainpoolP320t1, brainpoolP384r1, brainpoolP384t1,
+         brainpoolP512r1, brainpoolP512t1, secp112r1, secp112r2, secp128r1, secp128r2,
+         wtls6, wtls8, ed25519, ed448, x25519, x448,
+         slh_dsa_sha2_256f, slh_dsa_sha2_256s, slh_dsa_shake_256f, slh_dsa_shake_256s,
+         slh_dsa_sha2_192f, slh_dsa_sha2_192s, slh_dsa_shake_192f, slh_dsa_shake_192s,
+         slh_dsa_sha2_128f, slh_dsa_sha2_128s, slh_dsa_shake_128f, slh_dsa_shake_128s,
+         mldsa87, mldsa65, mldsa44, rsa, dss, dh, ecdsa, ecdh, eddsa, eddh, srp].
 
 %% Write the FIPS status and the results of crypto:enable_fips_mode/1. A
 %% build without FIPS support gives not_supported, false for true, true
