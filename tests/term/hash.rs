@@ -352,11 +352,13 @@ fn hashes_collision_nodes_as_pinned_erts() {
 
 #[test]
 fn hashes_a_deep_term_without_recursion() {
+    // All levels use one copy of the test atom table. A copy for each map level took about 90 µs, and the deep terms of 1,000,000 levels took minutes to build.
+    let atoms = crate::term::test_atom_table();
     let deep = |levels: usize| {
         (0..levels).fold(Term::nil(), |inner, level| match level % 5 {
             0 => Term::tuple(vec![inner, Term::binary(vec![])]),
             1 => Term::list_from(vec![inner, Term::Integer(1)]),
-            2 => map([(atom("ok"), inner)]),
+            2 => Term::Map(Map::from_pairs(vec![(atom("ok"), inner)], &atoms).unwrap()),
             3 => improper(vec![inner], Term::Integer(1)),
             _ => local(0, 7, 1, vec![inner, Term::Integer(1)]),
         })
