@@ -7,7 +7,7 @@
 use super::{Scheduler, node::Named};
 use crate::{
     error::{BeamError, error},
-    runtime::interpreter::bif::decode_dist,
+    runtime::{interpreter::bif::decode_dist, signal::Signal},
     term::{Term, external_id},
 };
 
@@ -32,13 +32,14 @@ const REJECTED: &str = "unsupported distribution message that ERTS rejects: ERTS
 impl Scheduler {
     /// Give the packet `packet` with data of a connection with the flags
     /// `flags` to its target, as
-    /// `erts_net_message` does for `SEND` (2), `SEND_SENDER` (22), and
-    /// `REG_SEND` (6) (`dist.c:2463-2553`). The first byte is skipped
-    /// (`external.c:922-926`). A message to a pid that is not a live local
-    /// process or to a name that no process has is dropped without a decode
-    /// (`dist.c:2489-2507`, `2544-2551`). PBeam does not offer
-    /// `DFLAG_ALIAS`, so another node sends no `ALIAS_SEND` (33), and it is
-    /// another operation here (#1455).
+    /// `erts_net_message` does for `SEND` (2), `SEND_SENDER` (22),
+    /// `REG_SEND` (6), and `ALIAS_SEND` (33) (`dist.c:2463-2578`). The first
+    /// byte is skipped (`external.c:922-926`). A message to a pid that is
+    /// not a live local process or to a name that no process has is dropped
+    /// without a decode (`dist.c:2489-2507`, `2544-2551`). A message to an
+    /// alias goes to the owner of a local pid reference as a signal, and
+    /// the owner checks the alias when it handles the signal; a reference
+    /// without a local owner drops it (`erl_proc_sig_queue.c:2314-2331`).
     ///
     /// # Examples
     ///
@@ -93,12 +94,29 @@ impl Scheduler {
                 }
                 Ok(())
             }
+            (Some(33), [_, _, to]) => match to {
+                Term::Reference(alias) => {
+                    if let Some(owner) = self.node.alias_owner(*alias)
+                        && self.node.live_owner(owner).is_some()
+                    {
+                        let message = self.dist_message(message)?;
+                        let signal = Signal::AliasMessage {
+                            alias: *alias,
+                            message,
+                        };
+                        let _ = self.send_signal(None, owner, signal);
+                    }
+                    Ok(())
+                }
+                _ if external_id::is_reference(to) => Ok(()),
+                _ => Err(error(REJECTED)),
+            },
             (Some(12 | 16 | 23 | 34), _) => Err(error(
                 "unsupported distribution message with a trace token: see \"Distribution\" in docs/erts-differences.md",
             )),
             // ERTS reads the operation as unsigned (`unsigned_val`,
             // dist.c:2223), so a negative one is not valid (dist.c:3131-3132).
-            (Some(2 | 6 | 22) | None, _) => Err(error(REJECTED)),
+            (Some(2 | 6 | 22 | 33) | None, _) => Err(error(REJECTED)),
             (Some(operation), _) if operation < 0 => Err(error(REJECTED)),
             (Some(operation), _) => Err(error(format!(
                 "unsupported distribution operation {operation}: see \"Distribution\" in docs/erts-differences.md"

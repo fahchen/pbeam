@@ -21,12 +21,13 @@ fn encodes_a_local_pid_port_and_reference_as_pinned_erts() {
     // ERTS.
     let atoms = AtomTable::new();
     let options = Options::default();
-    let pid = encode(&Term::Pid(ProcessId(5)), &atoms, &options).unwrap();
-    let port = encode(&Term::Port(PortId(5)), &atoms, &options).unwrap();
+    let pid = encode(&Term::Pid(ProcessId(5)), &atoms, &options, &|_| None).unwrap();
+    let port = encode(&Term::Port(PortId(5)), &atoms, &options, &|_| None).unwrap();
     let reference = encode(
         &Term::Reference(Reference::ordinary(5).unwrap()),
         &atoms,
         &options,
+        &|_| None,
     )
     .unwrap();
     assert_eq!(
@@ -60,7 +61,7 @@ fn encodes_local_pid_port_and_reference_with_a_nil_sysname() {
         ..Options::default()
     };
     assert_eq!(
-        encode(&Term::Pid(ProcessId(5)), &atoms, &options).unwrap(),
+        encode(&Term::Pid(ProcessId(5)), &atoms, &options, &|_| None).unwrap(),
         [88, 106, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0]
     );
 }
@@ -540,15 +541,41 @@ fn decodes_identifier_numbers_that_pbeam_cannot_hold() {
         decode_with(&atoms, &other_scheduler, AtomPolicy::Create),
         Err(DecodeError::Unsupported(_))
     ));
-    // ERTS marks a pid reference in the second reference number
-    // (`ERTS_REF1_PID_MARKER_BIT__`, `erl_bif_unique.h:106-109`), and the
-    // alias reference holds a pid that PBeam does not keep.
-    let mut pid_ref = vec![90, 0, 3];
+    // ERTS marks a pid reference in bit 16 of the second reference number
+    // (`ERTS_REF1_PID_MARKER_BIT__`, `erl_bif_unique.h:106-109`). With five
+    // numbers it is the pid reference of the pid word in the last two, and
+    // a word without the pid tag raises badarg (`external.c:4833-4843`).
+    // Three numbers give an ordinary reference with the marker, and a magic
+    // marker with it gives a pid reference with the magic bit, which PBeam
+    // cannot hold. Bit 30 is a counter bit.
+    let mut pid_ref = vec![90, 0, 5];
     pid_ref.extend(node());
-    pid_ref.extend(with_words(&[], &[0, 5, 0x4000_0001, 0]));
+    pid_ref.extend(with_words(&[], &[0, 5, 0x0001_0001, 0, 1283, 0]));
     assert!(matches!(
         decode_with(&atoms, &pid_ref, AtomPolicy::Create),
-        Err(DecodeError::Unsupported(_))
+        Ok(Term::Reference(reference)) if reference.is_pid_reference() && reference.numbers() == [5, 1, 1 << 31]
+    ));
+    for (count, numbers, badarg) in [
+        (5, [0, 5, 0x0001_0001, 0, 1280, 0], true),
+        (3, [0, 5, 0x0001_0001, 0, 0, 0], false),
+        (5, [0, 5, 0x0003_0001, 0, 1283, 0], false),
+    ] {
+        let mut bad = vec![90, 0, count];
+        bad.extend(node());
+        bad.extend(with_words(&[], &numbers[..=usize::from(count)]));
+        let result = decode_with(&atoms, &bad, AtomPolicy::Create);
+        assert!(
+            matches!(result, Err(DecodeError::Badarg)) == badarg
+                && matches!(result, Err(DecodeError::Unsupported(_))) != badarg,
+            "{numbers:?}"
+        );
+    }
+    let mut counter_bit = vec![90, 0, 3];
+    counter_bit.extend(node());
+    counter_bit.extend(with_words(&[], &[0, 5, 0x4000_0001, 0]));
+    assert!(matches!(
+        decode_with(&atoms, &counter_bit, AtomPolicy::Create),
+        Ok(Term::Reference(reference)) if !reference.is_pid_reference()
     ));
     // The high bit of the third number is not a marker in ERTS, and PBeam
     // cannot hold an ordinary reference with that bit.
@@ -738,7 +765,7 @@ fn decodes_local_terms_with_their_block_hash() {
         local: true,
         ..Options::default()
     };
-    let pid_body = encode(&Term::Pid(ProcessId(5)), &atoms, &options).unwrap();
+    let pid_body = encode(&Term::Pid(ProcessId(5)), &atoms, &options, &|_| None).unwrap();
     let pid_hash = external::block_hash(&pid_body, SEED);
     let pid_input = [
         &[VERSION_MAGIC, LOCAL_EXT][..],
@@ -753,7 +780,13 @@ fn decodes_local_terms_with_their_block_hash() {
     // The local node scope ends with the `LOCAL_EXT` term, so a sibling
     // pid cannot use `NIL_EXT` as its node (`decoded_size`,
     // `external.c:6150-6500`).
-    let inner = encode(&Term::static_atom("ok"), &atoms, &Options::default()).unwrap();
+    let inner = encode(
+        &Term::static_atom("ok"),
+        &atoms,
+        &Options::default(),
+        &|_| None,
+    )
+    .unwrap();
     let inner_hash = external::block_hash(&inner, SEED);
     let mut siblings = vec![104, 2, 121];
     siblings.extend(inner_hash.to_be_bytes());
@@ -767,7 +800,7 @@ fn decodes_local_terms_with_their_block_hash() {
     ));
     // A local term with a different block hash raises badarg
     // (`external.c:5250-5255`).
-    let body = encode(&Term::Integer(1), &atoms, &options).unwrap();
+    let body = encode(&Term::Integer(1), &atoms, &options, &|_| None).unwrap();
     let hash = external::block_hash(&body, SEED);
     let mut local = [&[VERSION_MAGIC, LOCAL_EXT][..], &hash.to_be_bytes(), &body].concat();
     assert_eq!(
@@ -882,38 +915,46 @@ fn encodes_the_large_and_unsupported_forms() {
     let options = Options::default();
     // A tuple of 256 elements takes `LARGE_TUPLE_EXT`.
     let elements = (0..256).map(Term::Integer).collect();
-    let bytes = encode(&Term::tuple(elements), &atoms, &options).unwrap();
+    let bytes = encode(&Term::tuple(elements), &atoms, &options, &|_| None).unwrap();
     assert_eq!(&bytes[..5], [105, 0, 0, 1, 0]);
     // An atom of 256 bytes takes `ATOM_UTF8_EXT`.
     let long = "a".repeat(256);
     let atom = atoms.put(&long).unwrap();
-    let bytes = encode(&Term::Atom(atom.clone()), &atoms, &options).unwrap();
+    let bytes = encode(&Term::Atom(atom.clone()), &atoms, &options, &|_| None).unwrap();
     assert_eq!(&bytes[..3], [118, 1, 0]);
     let latin1 = Options {
         minor: 1,
         ..Options::default()
     };
-    let bytes = encode(&Term::Atom(atom), &atoms, &latin1).unwrap();
+    let bytes = encode(&Term::Atom(atom), &atoms, &latin1, &|_| None).unwrap();
     assert_eq!(&bytes[..3], [100, 1, 0]);
     // A bignum of more than 255 magnitude bytes takes `LARGE_BIG_EXT`.
     let large = Term::BigInt(Arc::new(BigInt::from(1) << (256 * 8)));
-    let bytes = encode(&large, &atoms, &options).unwrap();
+    let bytes = encode(&large, &atoms, &options, &|_| None).unwrap();
     assert_eq!(&bytes[..5], [111, 0, 0, 1, 1]);
     // A match context has no bytes.
     let state = MatchState::new(Binary::from(vec![]));
-    assert!(encode(&Term::MatchContext(Arc::new(state)), &atoms, &options).is_err());
+    assert!(
+        encode(
+            &Term::MatchContext(Arc::new(state)),
+            &atoms,
+            &options,
+            &|_| None
+        )
+        .is_err()
+    );
     // A map above 32 pairs keeps the HAMT order of `Map::iter`.
     let pairs: Vec<(Term, Term)> = (0..40)
         .map(|value| (Term::Integer(value), Term::Integer(value)))
         .collect();
     let large = crate::term::Map::from_pairs(pairs, &atoms).unwrap();
-    let bytes = encode(&Term::Map(large), &atoms, &options).unwrap();
+    let bytes = encode(&Term::Map(large), &atoms, &options, &|_| None).unwrap();
     assert_eq!(&bytes[..5], [116, 0, 0, 0, 40]);
     // A bitstring at a bit offset is written from its first bit
     // (`external.c:3916-3935`).
     let partial = Term::Binary(Binary::from(vec![0x5A, 0xFF]).bits(1, 12));
     assert_eq!(
-        encode(&partial, &atoms, &options).unwrap(),
+        encode(&partial, &atoms, &options, &|_| None).unwrap(),
         [77, 0, 0, 0, 2, 3, 0xB5, 0xE0]
     );
     // `deterministic` sorts map keys in exact term order, where an integer
@@ -927,7 +968,7 @@ fn encodes_the_large_and_unsupported_forms() {
         deterministic: true,
         ..Options::default()
     };
-    let bytes = encode(&Term::Map(map), &atoms, &deterministic).unwrap();
+    let bytes = encode(&Term::Map(map), &atoms, &deterministic, &|_| None).unwrap();
     assert_eq!(&bytes[..9], [116, 0, 0, 0, 2, 97, 2, 119, 1]);
     assert_eq!(bytes[9], b'x');
 }
@@ -952,27 +993,46 @@ fn encodes_a_hashmap_in_the_erts_order() {
         29, 97, 29, 97, 19, 97, 19, 97, 12, 97, 12, 97, 4, 97, 4, 97, 18, 97, 18,
     ];
     assert_eq!(
-        encode(&Term::Map(map), &atoms, &Options::default()).unwrap(),
+        encode(&Term::Map(map), &atoms, &Options::default(), &|_| None).unwrap(),
         expected
     );
 }
 
 #[test]
-fn rejects_a_pid_reference() {
-    // ERTS writes the monitored pid in the alias reference, which PBeam
-    // does not hold, so a decode and an encode give a runtime error
-    // (`dec_term`, `external.c:4786-4855`).
+fn encodes_a_pid_reference_with_the_pid_word_of_its_owner() {
+    // ERTS writes five numbers for a pid reference: the marker in bit 16
+    // of the second, and the pid word of the owner in the last two
+    // (`external.c:3642-3668`, `erl_bif_unique.h:259-277`). PBeam keeps no
+    // pid in the reference, so a pid reference without an owner gives a
+    // runtime error.
     let reference = Reference::ordinary(5).unwrap().pid_reference();
-    let mut input = vec![VERSION_MAGIC, 90, 0, 3];
-    input.extend(node());
-    input.extend(with_words(&[], &[0, 5, 0x4000_0001, 0]));
     let atoms = AtomTable::new();
+    let owner = |_| Some(ProcessId(10));
+    let bytes = encode(
+        &Term::Reference(reference),
+        &atoms,
+        &Options::default(),
+        &owner,
+    )
+    .unwrap();
+    let mut expected = vec![90, 0, 5];
+    expected.extend(node());
+    expected.extend(with_words(&[], &[0, 5, 0x0001_0001, 0, 1283, 0]));
+    assert_eq!(bytes, expected);
+    let input = [&[VERSION_MAGIC][..], &bytes].concat();
     assert!(matches!(
         decode_full(&atoms, &input, AtomPolicy::Create),
-        Err(DecodeError::Unsupported(_))
+        Ok(Term::Reference(decoded)) if decoded == reference
     ));
-    let atoms = AtomTable::new();
-    assert!(encode(&Term::Reference(reference), &atoms, &Options::default()).is_err());
+    assert!(
+        encode(
+            &Term::Reference(reference),
+            &atoms,
+            &Options::default(),
+            &|_| None
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -1088,7 +1148,7 @@ fn decodes_and_encodes_a_deep_term_without_a_rust_stack() {
     let atoms = AtomTable::new();
     let term = decode_full(&atoms, &bytes, AtomPolicy::Create).unwrap();
     assert_eq!(
-        encode(&term, &atoms, &Options::default()).unwrap(),
+        encode(&term, &atoms, &Options::default(), &|_| None).unwrap(),
         bytes[1..]
     );
 }
