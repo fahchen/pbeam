@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Compile the scenarios of benchmark/ with the pinned erlc and compare the PBeam
-# runtime with the pinned ERTS. The comparison is benchmark/benchmark.rs, which
-# runs each scenario through the library API and through `erl +S 1 -noshell`.
+# Compare the PBeam runtime with the pinned ERTS on the scenarios of benchmark/.
+# The comparison is tests/integration/benchmark.rs. It compiles benchmark/*.erl
+# with the pinned erlc, runs each scenario through the library API and through
+# `erl +S 1 -noshell`, and prints the table.
 #
 # Usage: bash benchmark/run.sh
 #
 # The script prints the revision, the host, the toolchain, the load, and the
-# comparison table of benchmark/benchmark.rs.
+# comparison table of tests/integration/benchmark.rs.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -15,9 +16,6 @@ cd "$(dirname "$0")/.."
 # Rust release, and the record must name the tools that the numbers use.
 export LANG=en_US.UTF-8
 export LC_ALL=en_US.UTF-8
-
-beams=target/benchmark/beams
-mkdir -p "$beams"
 
 {
   printf '== PBeam and ERTS benchmark ==\n'
@@ -37,5 +35,4 @@ mkdir -p "$beams"
   printf '\n'
 }
 
-erlc +deterministic -o "$beams" benchmark/*.erl
-cargo run --quiet --locked --release --example benchmark
+cargo test --locked --release --test benchmark -- --nocapture

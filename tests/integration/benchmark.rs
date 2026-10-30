@@ -1,18 +1,22 @@
 //! The comparison of the PBeam runtime with the pinned ERTS on the five
 //! scenarios of `benchmark/`.
 //!
-//! Run `mise run bench-compare`, or `bash benchmark/run.sh`. The runner
+//! Run `mise run bench-compare`, or `bash benchmark/run.sh`. The test
 //! compiles `benchmark/*.erl` with the pinned `erlc` into
-//! `target/benchmark/beams/`, and then runs this example. Each scenario runs
-//! on PBeam through the library API, and on one scheduler of the pinned ERTS
-//! with `erl +S 1 -noshell`. The report gives the minimum of [`RUNS`] runs of
-//! each scenario.
+//! `target/benchmark/beams/`, runs each scenario on PBeam through the library
+//! API and on one scheduler of the pinned ERTS with `erl +S 1 -noshell`, and
+//! prints the table of the minimum of [`RUNS`] runs of each scenario.
 //!
 //! The two runs measure the same guest work: the ERTS run times the call in
-//! the guest with `erlang:monotonic_time/1`, and this example times the call
-//! of the runtime from the host. The start of the runtime and the start of
-//! ERTS are part of neither number, so the ratio is the cost of the work and
-//! not the cost of the boot.
+//! the guest with `erlang:monotonic_time/1`, and this test times the call of
+//! the runtime from the host. The start of the runtime and the start of ERTS
+//! are part of neither number, so the ratio is the cost of the work and not
+//! the cost of the boot.
+//!
+//! The check gate runs the test with [`RUNS`] and [`Scenario::count`] scaled
+//! down, as `tests/integration/dispatch_baseline.rs` scales its probes, so the
+//! gate stays short and still proves that the two runtimes return the same
+//! result for each scenario.
 
 use std::{
     ffi::OsStr,
@@ -26,8 +30,9 @@ use std::{
 use pbeam_runtime::{AtomTable, BeamProgram, HostTerm, Term};
 
 /// The number of timed runs of each scenario. The report gives the minimum,
-/// which the other processes of the host disturb the least.
-const RUNS: usize = 9;
+/// which the other processes of the host disturb the least. The check gate
+/// runs two rounds, because it needs the results and it must stay short.
+const RUNS: usize = if cfg!(debug_assertions) { 2 } else { 9 };
 
 /// One scenario of the benchmark. Its module exports `function/1`, which
 /// takes the iteration count of the scenario and returns an integer or `ok`.
@@ -40,11 +45,31 @@ struct Scenario {
     title: &'static str,
     /// The name of one unit of work in the report.
     unit: &'static str,
-    /// The iteration count of the run.
+    /// The iteration count of one release run.
     count: usize,
 }
 
-/// The five scenarios of `benchmark/`. The counts keep one PBeam run below
+impl Scenario {
+    /// Return the count of one run. The recorded count applies to the release
+    /// profile. The check gate runs one twentieth of it, so the debug
+    /// interpreter runs each scenario for about the same time as the release
+    /// interpreter.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(SCENARIOS[0].count() > 0);
+    /// ```
+    fn count(&self) -> usize {
+        if cfg!(debug_assertions) {
+            (self.count / 20).max(1)
+        } else {
+            self.count
+        }
+    }
+}
+
+/// The five scenarios of `benchmark/`. The counts keep one release run below
 /// a few hundred milliseconds, so the whole report stays short.
 const SCENARIOS: [Scenario; 5] = [
     Scenario {
@@ -84,7 +109,7 @@ const SCENARIOS: [Scenario; 5] = [
     },
 ];
 
-/// Return the directory of the compiled fixtures that the runner writes.
+/// Return the directory of the compiled fixtures that the test writes.
 ///
 /// # Examples
 ///
@@ -93,6 +118,44 @@ const SCENARIOS: [Scenario; 5] = [
 /// ```
 fn beam_directory() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/benchmark/beams")
+}
+
+/// Compile every `benchmark/*.erl` source with the pinned `erlc` into
+/// `directory`. The runner does not compile the sources, so the beam files
+/// always come from the sources of the current commit.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let modules = compile_scenarios(&beam_directory());
+/// assert!(modules.contains(&"bench_arith".to_owned()));
+/// ```
+fn compile_scenarios(directory: &Path) -> Vec<String> {
+    let source_directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmark");
+    let mut sources = std::fs::read_dir(&source_directory)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", source_directory.display()))
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension() == Some(OsStr::new("erl")))
+        .collect::<Vec<_>>();
+    sources.sort();
+    std::fs::create_dir_all(directory)
+        .unwrap_or_else(|error| panic!("cannot create {}: {error}", directory.display()));
+    let output = Command::new("erlc")
+        .arg("+deterministic")
+        .arg("-o")
+        .arg(directory)
+        .args(&sources)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "erlc failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    sources
+        .iter()
+        .map(|path| path.file_stem().unwrap().to_string_lossy().into_owned())
+        .collect()
 }
 
 /// Read the BEAM file of one scenario module from `directory`.
@@ -118,7 +181,7 @@ fn read_beam(directory: &Path, module: &str) -> Vec<u8> {
 /// assert_eq!(arguments(&program, &SCENARIOS[0]).len(), 1);
 /// ```
 fn arguments(program: &BeamProgram, scenario: &Scenario) -> Vec<HostTerm> {
-    vec![program.host_term(Term::Integer(scenario.count as i64))]
+    vec![program.host_term(Term::Integer(scenario.count() as i64))]
 }
 
 /// Return a result term as `io:format("~w")` prints it, for the integers and
@@ -186,7 +249,7 @@ fn measure_pbeam(program: &BeamProgram, scenario: &Scenario) -> Duration {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(erts_expression().contains("bench_arith:loop(500000)"));
+/// assert!(erts_expression().contains("bench_arith:loop("));
 /// ```
 fn erts_expression() -> String {
     let mut expression = String::from(
@@ -211,14 +274,20 @@ fn erts_expression() -> String {
         let _ = write!(
             expression,
             "io:format(\"result {} ~w~n\", [{}:{}({})]), ",
-            scenario.module, scenario.module, scenario.function, scenario.count
+            scenario.module,
+            scenario.module,
+            scenario.function,
+            scenario.count()
         );
     }
     for scenario in SCENARIOS {
         let _ = write!(
             expression,
             "io:format(\"time {} ~b~n\", [Run(fun() -> {}:{}({}) end)]), ",
-            scenario.module, scenario.module, scenario.function, scenario.count
+            scenario.module,
+            scenario.module,
+            scenario.function,
+            scenario.count()
         );
     }
     expression.push_str("halt().");
@@ -289,15 +358,24 @@ fn erts_result(lines: &[String], module: &str) -> String {
         .to_owned()
 }
 
-/// Run each scenario on PBeam and on the pinned ERTS, check the results, and
-/// print the comparison as a Markdown table.
-fn main() {
+/// Compile the scenarios, run each of them on PBeam and on the pinned ERTS,
+/// check the results, and print the comparison as a Markdown table.
+#[test]
+fn compares_the_runtime_with_the_pinned_erts() {
     let directory = beam_directory();
-    let modules = SCENARIOS
+    let modules = compile_scenarios(&directory);
+    for scenario in SCENARIOS {
+        assert!(
+            modules.contains(&scenario.module.to_owned()),
+            "benchmark/ has no source for {}",
+            scenario.module
+        );
+    }
+    let beams = SCENARIOS
         .iter()
         .map(|scenario| read_beam(&directory, scenario.module))
         .collect::<Vec<_>>();
-    let slices = modules.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    let slices = beams.iter().map(Vec::as_slice).collect::<Vec<_>>();
     let program = BeamProgram::load(&slices).unwrap();
 
     let lines = run_erts(&directory);
@@ -321,11 +399,11 @@ fn main() {
         );
         let pbeam = measure_pbeam(&program, &scenario).as_nanos();
         let erts = erts_nanos(&lines, scenario.module);
-        let units = scenario.count as f64;
+        let units = scenario.count() as f64;
         println!(
             "| {} | {} | {} | {:.3} | {:.3} | {:.2} | {} | {} |",
             scenario.title,
-            scenario.count,
+            scenario.count(),
             scenario.unit,
             erts as f64 / units,
             pbeam as f64 / units,

@@ -864,6 +864,10 @@ path = "tests/integration/net.rs"
 name = "erts_debug_size"
 path = "tests/integration/erts_debug_size.rs"
 
+[[test]]
+name = "benchmark"
+path = "tests/integration/benchmark.rs"
+
 # BeautifulRust lints (https://github.com/morganlinton/BeautifulRust, lints/lints.toml).
 # A lint with a hit on main is "allow" until its m23 task fixes the hits.
 # Silence a lint locally with #[expect(clippy::<lint>, reason = "...")].
@@ -988,8 +992,3 @@ ref_as_ptr = "allow"
 borrow_as_ptr = "allow"
 ptr_cast_constness = "allow"
 checked_conversions = "allow"
-# The benchmark of benchmark/ compares the runtime with the pinned ERTS. It is
-# an example, not a test: it measures, and no check gate runs it.
-[[example]]
-name = "benchmark"
-path = "benchmark/benchmark.rs"

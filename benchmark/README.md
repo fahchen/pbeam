@@ -18,12 +18,13 @@ Each module exports one function that takes the count as an integer, for example
 
 ## Method
 
-`benchmark.rs` is a Cargo example. It runs each scenario through the library API of the runtime, and it runs the ERTS reference through `erl +S 1 -noshell` with the same beam files on the code path. One scheduler matches the single scheduler thread of the PBeam binary.
+`tests/integration/benchmark.rs` is an integration test. It compiles `benchmark/*.erl` with the pinned `erlc` into `target/benchmark/beams/`, runs each scenario through the library API of the runtime, and runs the ERTS reference through `erl +S 1 -noshell` with the same beam files on the code path. One scheduler matches the single scheduler thread of the PBeam binary.
 
 - The ERTS run times the call in the guest with `erlang:monotonic_time(nanosecond)`.
 - The PBeam run times the call of the runtime from the host with `std::time::Instant`.
 - Each number is the minimum of 9 runs.
-- The example asserts that the result of each scenario is equal on PBeam and ERTS, so the two runs do the same work.
+- The test asserts that the result of each scenario is equal on PBeam and ERTS, so the two runs do the same work.
+- The check gate (`mise run check`) runs the same test with 2 runs and one twentieth of the units, so it checks the scenarios on every change and stays short.
 
 ## Run
 
@@ -31,7 +32,7 @@ Each module exports one function that takes the count as an integer, for example
 mise run bench-compare
 ```
 
-The task runs `bash benchmark/run.sh`. The script prints the revision, the host, the toolchain, the one-minute load, and the table. It compiles the Erlang sources with the pinned `erlc` into `target/benchmark/beams/` first.
+The task runs `bash benchmark/run.sh`. The script prints the revision, the host, the toolchain, the one-minute load, and the table, then runs `cargo test --release --test benchmark -- --nocapture`. The test compiles the Erlang sources with the pinned `erlc` into `target/benchmark/beams/` first.
 
 `mise run bench-compare` needs the Rust release build of the example and the pinned ERTS, and it needs no other setup.
 
