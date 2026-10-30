@@ -7,6 +7,7 @@ use super::{BeamError, BifContext, BifResult, Scheduler, Term, boot_denial, deni
 use crate::runtime::capability::{CapabilityKind, Operation};
 use crate::runtime::scheduler::node::ReceiverSite;
 use crate::runtime::timer::{Receiver, Timer, Timers};
+use crate::term::external_id::is_reference;
 
 /// The BIF that starts a BIF timer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -272,12 +273,16 @@ fn async_option(options: &Term) -> Option<ReadReply> {
 /// (`erl_hl_timer.c:2272-2295`); the reply comes later. A read changes no
 /// state, so the message and its value are the same.
 fn read(context: &mut BifContext<'_>, reference: &Term, reply: ReadReply) -> BifResult {
-    // A resource term is a magic reference (`erl_nif.c:3197-3204`).
-    let Some(id) = reference.reference() else {
+    // A resource term is a magic reference (`erl_nif.c:3197-3204`). A
+    // reference of another node has no timer (`erl_hl_timer.c:2245-2250`).
+    if !is_reference(reference) {
         return BifResult::badarg();
-    };
+    }
     let scheduler = &mut *context.scheduler;
-    let result = match scheduler.node().timer_end(id) {
+    let end = reference
+        .reference()
+        .and_then(|id| scheduler.node().timer_end(id));
+    let result = match end {
         Some(end) => Term::Integer(Timers::time_left(scheduler.timers.now(), end)),
         None => Term::static_atom("false"),
     };

@@ -57,8 +57,24 @@ use crate::term::{
 /// ```
 pub(in crate::runtime::interpreter) fn remote_unsupported(operation: &str) -> BeamError {
     error(format!(
-        "unsupported {operation} with a pid, a port, or a reference of another node: see \"Distribution\" in docs/erts-differences.md"
+        "unsupported {operation} with a pid of another node: see \"Distribution\" in docs/erts-differences.md"
     ))
+}
+
+/// Return whether `term` is a pid, a port, or a reference of an old
+/// incarnation of the local node: an external identifier whose node is the
+/// local node. ERTS gives it the dist entry of the local node
+/// (`erts_this_dist_entry`), so a signal to it needs no connection.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // <<131, 88, 100, 13:16, "nonode@nohost", 0:32, 0:32, 7:32>>
+/// assert!(old_incarnation(&old_pid));
+/// assert!(!old_incarnation(&Term::Pid(ProcessId(1))));
+/// ```
+pub(in crate::runtime::interpreter) fn old_incarnation(term: &Term) -> bool {
+    matches!(term, Term::External(id) if Term::Atom(id.node.clone()) == local_node())
 }
 
 /// Run `erlang:node/1`: return the node of a pid, a port, or a reference,
@@ -1313,7 +1329,32 @@ pub(super) fn link(scheduler: &mut Scheduler, target: &Term) -> Result<BifResult
     let target = match *target {
         Term::Pid(pid) => LinkId::Process(pid),
         Term::Port(port) => LinkId::Port(port),
-        Term::External(_) => return Err(remote_unsupported("erlang:link/1")),
+        // A link to an old incarnation of the local node raises `noproc`
+        // without `trap_exit`, else the caller gets the exit signal
+        // `noproc` at once (`bif.c:235-261`, `bif.c:271-289`).
+        Term::External(_) if old_incarnation(target) && !is_reference(target) => {
+            if let Some(denied) = denial(scheduler, CapabilityKind::Process, Operation::Link, None)?
+            {
+                return Ok(denied);
+            }
+            if !scheduler.current_process_mut().trap_exit {
+                return Ok(Raise {
+                    class: ExceptionClass::Error,
+                    reason: Term::static_atom("noproc"),
+                });
+            }
+            let caller = scheduler.current_process_mut().id;
+            let exit = Term::tuple(vec![
+                Term::static_atom("EXIT"),
+                target.clone(),
+                Term::static_atom("noproc"),
+            ]);
+            scheduler.deliver(caller, exit);
+            return Ok(Value(Term::static_atom("true")));
+        }
+        _ if matches!(target, Term::External(_)) && pid_parts(target).is_some() => {
+            return Err(remote_unsupported("erlang:link/1"));
+        }
         _ => return Ok(BifResult::badarg()),
     };
     if let Some(denied) = denial(scheduler, CapabilityKind::Process, Operation::Link, None)? {
@@ -1451,7 +1492,16 @@ fn send_exit(
             (Some(owner), Some(reference))
         }
         (Term::Port(_), _) => (None, None),
-        (Term::External(_), _) => return Err(remote_unsupported("erlang:exit/2,3")),
+        // An old incarnation of the local node takes no signal
+        // (`bif.c:1804-1808`, `bif.c:1857-1861`).
+        (Term::External(_), _) if old_incarnation(id) => {
+            return Ok(Value(Term::static_atom("true")));
+        }
+        (Term::External(_), _) if port_number(id).is_none() => {
+            return Err(error(
+                "unsupported erlang:exit/2,3 with a pid or an alias of another node: see \"Distribution\" in docs/erts-differences.md",
+            ));
+        }
         _ => return Ok(BifResult::badarg()),
     };
     if target != Some(caller_id) {
@@ -1540,11 +1590,15 @@ pub(super) fn demonitor(
             _ => return BifResult::badarg(),
         }
     }
-    // A resource term is a magic reference (`erl_nif.c:3197-3204`).
-    let Some(id) = reference.reference() else {
-        return BifResult::badarg();
+    // A resource term is a magic reference (`erl_nif.c:3197-3204`). A
+    // reference of an old incarnation of the local node is no monitor
+    // (`bif.c:443-449`).
+    let demonitored = match reference.reference() {
+        Some(id) => context.scheduler.demonitor(id),
+        None if old_incarnation(reference) && is_reference(reference) => false,
+        None => return BifResult::badarg(),
     };
-    if context.scheduler.demonitor(id) {
+    if demonitored {
         return Value(Term::static_atom("true"));
     }
     let result = Term::static_atom(if info { "false" } else { "true" });
@@ -1614,7 +1668,18 @@ pub(super) fn monitor(
     // support. It comes after the capability check.
     let target = match (context.scheduler.atoms.name_of(kind), target) {
         ("process", Term::Pid(id)) => Some(Ok(MonitorTarget::Process(*id))),
-        ("process", Term::External(_)) => Some(Err(remote_unsupported("erlang:monitor/2,3"))),
+        // ERTS sends a `DOWN` message with `noproc` at once for an old
+        // incarnation of the local node (`bif.c:811-825`, `bif.c:925-935`).
+        ("process" | "port", Term::External(_))
+            if old_incarnation(target) && !is_reference(target) =>
+        {
+            Some(Err(error(
+                "unsupported erlang:monitor/2,3 of a pid or a port of an old incarnation of the local node: see \"Distribution\" in docs/erts-differences.md",
+            )))
+        }
+        ("process", Term::External(_)) if pid_parts(target).is_some() => {
+            Some(Err(remote_unsupported("erlang:monitor/2,3")))
+        }
         ("process", target) => local_name(target).map(|name| Ok(MonitorTarget::ProcessName(name))),
         ("port", Term::Port(port)) => Some(Ok(MonitorTarget::Port(*port))),
         ("port", target) => local_name(target).map(|name| Ok(MonitorTarget::PortName(name))),
@@ -5379,7 +5444,15 @@ pub(super) fn process_info(
         None => is_process_info_item(atoms, item),
     };
     let (true, Term::Pid(id)) = (valid, process) else {
-        return Ok(BifResult::badarg());
+        // A pid of an old incarnation of the local node is not alive
+        // (`erl_bif_info.c:1364-1368`).
+        return Ok(
+            if valid && old_incarnation(process) && pid_parts(process).is_some() {
+                Value(Term::static_atom("undefined"))
+            } else {
+                BifResult::badarg()
+            },
+        );
     };
     let scheduler = &mut *context.scheduler;
     if let Some(denied) = other_process_denial(scheduler, *id, Operation::Inspect)? {
@@ -5650,7 +5723,13 @@ pub(super) fn is_process_alive(
     pid: &Term,
 ) -> Result<BifResult, BeamError> {
     let Term::Pid(id) = pid else {
-        return Ok(BifResult::badarg());
+        // A pid of an old incarnation of the local node is not alive
+        // (`erl_bif_info.c:4106-4109`).
+        return Ok(if old_incarnation(pid) && pid_parts(pid).is_some() {
+            Value(Term::static_atom("false"))
+        } else {
+            BifResult::badarg()
+        });
     };
     let scheduler = &mut *context.scheduler;
     if *id == scheduler.current_process_mut().id {
@@ -6064,7 +6143,14 @@ pub(super) fn process_info_1(
     process: &Term,
 ) -> Result<BifResult, BeamError> {
     let Term::Pid(id) = process else {
-        return Ok(BifResult::badarg());
+        // `erl_bif_info.c:1364-1368`.
+        return Ok(
+            if old_incarnation(process) && pid_parts(process).is_some() {
+                Value(Term::static_atom("undefined"))
+            } else {
+                BifResult::badarg()
+            },
+        );
     };
     let scheduler = &mut *context.scheduler;
     if let Some(denied) = other_process_denial(scheduler, *id, Operation::Inspect)? {
@@ -6613,9 +6699,15 @@ pub(super) fn unalias(
     context: &mut BifContext<'_>,
     reference: &Term,
 ) -> Result<BifResult, BeamError> {
-    // A resource term is a magic reference (`erl_nif.c:3197-3204`).
+    // A resource term is a magic reference (`erl_nif.c:3197-3204`). A
+    // reference of another node is no alias of the caller
+    // (`bif.c:5902-5906`).
     let Some(reference) = reference.reference() else {
-        return Ok(BifResult::badarg());
+        return Ok(if is_reference(reference) {
+            Value(Term::static_atom("false"))
+        } else {
+            BifResult::badarg()
+        });
     };
     let scheduler = &mut *context.scheduler;
     let caller = scheduler.current_process().id;
@@ -7338,12 +7430,20 @@ pub(super) fn cancel_timer(
     reference: &Term,
     options: &Term,
 ) -> Result<BifResult, BeamError> {
-    let (Some((asynchronous, info)), Some(id)) = (timer_options(options), reference.reference())
+    let (Some((asynchronous, info)), true) = (timer_options(options), is_reference(reference))
     else {
         return Ok(BifResult::badarg());
     };
     let scheduler = &mut *context.scheduler;
-    let result = match scheduler.cancel_bif_timer(id) {
+    // A reference of another node has no timer, and a call without `async`
+    // returns `false` for it (`erl_hl_timer.c:2209-2220`,
+    // `erl_hl_timer.c:2245-2250`).
+    let end = match reference.reference() {
+        Some(id) => scheduler.cancel_bif_timer(id),
+        None if !asynchronous => return Ok(Value(Term::static_atom("false"))),
+        None => None,
+    };
+    let result = match end {
         Some(end) => Term::Integer(Timers::time_left(scheduler.timers.now(), end)),
         None => Term::static_atom("false"),
     };

@@ -1343,18 +1343,41 @@ fn gives_the_pids_ports_and_references_of_another_node_as_pinned_erts() {
 
 #[test]
 fn stops_with_a_runtime_error_for_each_signal_to_another_node() {
-    // A link, an unlink, a monitor, an exit signal, and a group leader of a
-    // pid of another node need a connection (bif.c:811-925, 1295-1350,
-    // 1804-1862, 4943); a send to an old incarnation of the local node logs
-    // an error report (bif.c:2489-2503).
+    // A link, a monitor, an exit signal, and a group leader of a pid of
+    // another node, and an exit signal to an alias of another node, need a
+    // connection (bif.c:263-300, 811-830, 1809-1850, 4942-4964); a monitor
+    // of an old incarnation of the local node and a group leader of another
+    // node need state that PBeam does not keep (bif.c:811-825, 925-935,
+    // 4935); a send to an old incarnation of the local node logs an error
+    // report (bif.c:2489-2503).
     for (function, expected) in [
-        ("link", "unsupported erlang:link/1 with a pid"),
-        ("unlink", "unsupported erlang:unlink/1 with a pid"),
-        ("monitor", "unsupported erlang:monitor/2,3 with a pid"),
-        ("exit", "unsupported erlang:exit/2,3 with a pid"),
+        (
+            "link",
+            "unsupported erlang:link/1 with a pid of another node",
+        ),
+        (
+            "monitor",
+            "unsupported erlang:monitor/2,3 with a pid of another node",
+        ),
+        (
+            "old_monitor",
+            "unsupported erlang:monitor/2,3 of a pid or a port of an old incarnation",
+        ),
+        (
+            "exit",
+            "unsupported erlang:exit/2,3 with a pid or an alias of another node",
+        ),
+        (
+            "exit_alias",
+            "unsupported erlang:exit/2,3 with a pid or an alias of another node",
+        ),
         (
             "group_leader",
-            "unsupported erlang:group_leader/2 with a pid",
+            "unsupported erlang:group_leader/2 with a pid of another node",
+        ),
+        (
+            "group_leader_leader",
+            "unsupported erlang:group_leader/2 with a leader of another node",
         ),
         (
             "old_send",
