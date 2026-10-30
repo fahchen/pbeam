@@ -1,5 +1,5 @@
 -module(process_info_probe).
--export([links/0, charges/0, messages/0, items/0, wait/0]).
+-export([links/0, charges/0, messages/0, items/0, wait/0, stacktrace/0, nested/0]).
 
 %% Link two named children to a fresh reporter process. The reporter reads
 %% the names of its own links with `process_info(self(), links)` and prints
@@ -56,6 +56,50 @@ items() ->
         Item <- [status, message_queue_len, dictionary, trap_exit,
                  error_handler, current_function, initial_call, priority]],
     exit(Child, kill).
+
+%% process_info/2 with lists of items and current_stacktrace, as the crash
+%% report of gen_server reads the client (gen_server.erl:2804): another
+%% process gives the frame where it waits first, the caller gives its frames
+%% without process_info/2 (erl_bif_info.c:2396-2461), and a list gives
+%% {registered_name, []} for a process without a name and undefined for a
+%% dead process (erl_bif_info.c:1134-1145, 1616-1625).
+stacktrace() ->
+    Parent = self(),
+    Child = spawn(process_info_probe, nested, []),
+    Named = spawn(process_info_probe, wait, []),
+    register(process_info_probe_named, Named),
+    Dead = spawn(fun() -> ok end),
+    Self = spawn(fun() -> Parent ! {self, own(3)} end),
+    timer:sleep(50),
+    Busy = spawn(process_info_probe, nested, []),
+    Busy ! hello,
+    [io:format("~p~n", [Result]) || Result <- [
+        process_info(Child, current_stacktrace),
+        process_info(Child, [current_stacktrace, registered_name]),
+        process_info(Named, [registered_name, current_stacktrace, status]),
+        process_info(Named, [current_function, registered_name]),
+        process_info(Dead, [current_stacktrace, registered_name]),
+        process_info(Busy, [current_stacktrace, registered_name]),
+        receive {self, Own} -> Own end
+    ]],
+    [exit(P, kill) || P <- [Child, Named, Busy, Self]].
+
+%% Read the own frames three calls deep.
+own(0) ->
+    Info = process_info(self(), [registered_name, current_stacktrace, current_function]),
+    {Info};
+own(N) ->
+    {Result} = own(N - 1),
+    {Result}.
+
+%% Wait in a function that a call of nested/0 left on the stack.
+nested() ->
+    deeper(),
+    ok.
+
+deeper() ->
+    receive after 10000 -> ok end,
+    ok.
 
 %% Wait for one message, so a reader of another process sees a waiting
 %% process in a known function.

@@ -11,7 +11,7 @@
 use super::{
     Arc, Atom, AtomTable, BeamError, BeamProgram, Binary, BitWriter, ExceptionClass, ImportKind,
     Insert, Map, ProcessState, Scheduler, SpawnOptions, Target, Term, code, create_process,
-    current_frame, current_function, error, mfa_stacktrace, native, print_term,
+    current_frame, current_function, error, mfa_stacktrace, native, print_term, process_stacktrace,
 };
 use crate::runtime::{
     capability::{CapabilityKind, Operation},

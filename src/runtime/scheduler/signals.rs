@@ -796,6 +796,7 @@ impl Scheduler {
                     HandlingPoint::ScheduleIn => 0,
                 };
                 let registered = self.registered_name_of(id);
+                let backtrace_depth = self.node().backtrace_depth();
                 let process = self.processes.get_mut(id).expect("the process is alive");
                 let messages = process.mailbox.messages_before(node);
                 // The item name comes from the atom table, so remove the
@@ -808,6 +809,7 @@ impl Scheduler {
                     messages,
                     reader: bif::erlang::InfoReader::Other,
                     registered_name: registered,
+                    backtrace_depth,
                 };
                 let info = request
                     .item(process, &item)?
