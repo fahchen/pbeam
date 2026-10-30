@@ -768,9 +768,9 @@ fn runs_the_one_shot_crypto_ciphers_as_pinned_erts() {
 fn gives_the_crypto_algorithm_lists_and_fips_status_as_pinned_erts() {
     // The pinned ERTS lists each algorithm of its OpenSSL: 187 on macOS
     // and 177 with the libcrypto of the Linux CI host (algorithms.c:86-224,
-    // digest.c:226-242, crypto.erl:843-895). PBeam lists only the 18 digests
-    // and 3 MACs that it computes, in the ERTS order, so the items that
-    // PBeam can run are the same.
+    // digest.c:226-242, crypto.erl:843-895). PBeam lists only the 18 digests,
+    // 3 MACs, 40 ciphers, 45 curves, and 23 public key algorithms that it
+    // runs, in the ERTS order, so the items that PBeam can run are the same.
     let erts = run(&mut erts_probe(
         CRYPTO_PROBE,
         "crypto_probe",
@@ -795,16 +795,33 @@ fn gives_the_crypto_algorithm_lists_and_fips_status_as_pinned_erts() {
                  chacha20_poly1305,des_ede3_cbc,des_ede3_cfb,sm4_cbc,sm4_cfb,\n            \
                  sm4_ctr,sm4_ecb,sm4_ofb]},\n  \
                  {kems,[]},\n  \
-                 {public_keys,[]},\n  \
                  {macs,[cmac,hmac,poly1305]},\n  \
-                 {curves,[]},\n  \
                  {rsa_opts,[]}]";
     let rest = format!(",\n {items},\n false,true]\n");
     let count = erts
         .strip_suffix(rest.as_str())
         .and_then(|head| head.strip_prefix('['));
     assert!(matches!(count, Some("187" | "177")), "{erts}");
-    assert_eq!(pbeam, format!("[63,\n {items},\n true,true]\n"));
+    assert_eq!(pbeam, format!("[131,\n {items},\n true,true]\n"));
+    // The curves and the public key algorithms of the pinned ERTS depend on
+    // the libcrypto of the host, so only the pinned macOS ERTS is the
+    // reference (algorithms.c:162-202, 241-640, pkey.c:201-210).
+    let pbeam = run(&mut pbeam_probe(
+        CRYPTO_PROBE,
+        "crypto_probe",
+        "supports_host",
+        &[],
+    ));
+    assert_eq!(pbeam, SUPPORTS_HOST);
+    if cfg!(target_os = "macos") {
+        let erts = run(&mut erts_probe(
+            CRYPTO_PROBE,
+            "crypto_probe",
+            "supports_host",
+            &[],
+        ));
+        assert_eq!(erts, SUPPORTS_HOST);
+    }
     // A build without FIPS support (fips.c:27-62).
     let erts = run(&mut erts_probe(CRYPTO_PROBE, "crypto_probe", "fips", &[]));
     assert_eq!(erts, "[not_supported,false,true,{error,badarg}]\n");
@@ -1291,6 +1308,38 @@ const MAC_CONTEXTS_HOST: &str = "[[{error,{error,{\"mac.c\",840},\"mac update\"}
 /// ```
 /// The output of `crypto_probe:oneshot_host/0` on the pinned macOS ERTS.
 #[test]
+fn runs_each_listed_crypto_curve_and_public_key() {
+    // Each item of crypto:supports(curves) and crypto:supports(public_keys)
+    // runs a key exchange or a signature (algorithms.c:162-202, 241-640,
+    // pkey.c:201-210). The pinned macOS ERTS lists 87 curves and 24
+    // algorithms; the operation fails only for the curves ipsec3 and ipsec4
+    // and the algorithm ec_gf2m, which PBeam does not list.
+    assert_eq!(
+        run(&mut pbeam_probe(
+            CRYPTO_SIGN_PROBE,
+            "crypto_sign_probe",
+            "listed",
+            &[]
+        )),
+        "[45,23,[]]\n"
+    );
+    if cfg!(target_os = "macos") {
+        let erts = run(&mut erts_probe(
+            CRYPTO_SIGN_PROBE,
+            "crypto_sign_probe",
+            "listed",
+            &[],
+        ));
+        assert_eq!(
+            erts,
+            "[87,24,\n [{ipsec3,{error,{error,{\"pkey.c\",884},\"Can't EVP_PKEY_sign\"}}},\n  \
+             {ipsec4,{error,{error,{\"pkey.c\",884},\"Can't EVP_PKEY_sign\"}}},\n  \
+             {ec_gf2m,{error,{badarg,{\"evp.c\",259},\"Bad key type\"}}}]]\n"
+        );
+    }
+}
+
+#[test]
 fn signs_and_verifies_as_pinned_erts() {
     // pkey_sign_nif/5 and pkey_verify_nif/6 (pkey.c:212-1122) with RSA,
     // DSA, ECDSA, and EdDSA keys, and the error tuple of each failed check.
@@ -1526,6 +1575,23 @@ const ONESHOT_HOST: &str = r#"[[{error,notsup},
   {aes_256_ccm,{error,{error,{"mac.c",405},"Couldn't get mac"}}},
   {aes_ecb,{error,{error,{"mac.c",405},"Couldn't get mac"}}}]]
 "#;
+
+/// The curves and the public key algorithms that PBeam runs, as the probe
+/// `crypto_probe:supports_host/0` writes them.
+const SUPPORTS_HOST: &str = "\
+[[secp160k1,secp160r1,secp160r2,secp192k1,secp224k1,secp224r1,secp256k1,
+  secp384r1,secp521r1,secp192r1,prime192v1,prime192v2,prime192v3,prime239v1,
+  prime239v2,prime239v3,secp256r1,prime256v1,wtls7,wtls9,wtls12,
+  brainpoolP160r1,brainpoolP160t1,brainpoolP192r1,brainpoolP192t1,
+  brainpoolP224r1,brainpoolP224t1,brainpoolP256r1,brainpoolP256t1,
+  brainpoolP320r1,brainpoolP320t1,brainpoolP384r1,brainpoolP384t1,
+  brainpoolP512r1,brainpoolP512t1,secp112r1,secp112r2,secp128r1,secp128r2,
+  wtls6,wtls8,ed25519,ed448,x25519,x448],
+ [slh_dsa_sha2_256f,slh_dsa_sha2_256s,slh_dsa_shake_256f,slh_dsa_shake_256s,
+  slh_dsa_sha2_192f,slh_dsa_sha2_192s,slh_dsa_shake_192f,slh_dsa_shake_192s,
+  slh_dsa_sha2_128f,slh_dsa_sha2_128s,slh_dsa_shake_128f,slh_dsa_shake_128s,
+  mldsa87,mldsa65,mldsa44,rsa,dss,dh,ecdsa,ecdh,eddsa,eddh,srp]]
+";
 
 fn erts_probe(probe: &str, module: &str, function: &str, flags: &[&str]) -> Command {
     let mut command = Command::new("erl");

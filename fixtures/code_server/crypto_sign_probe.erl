@@ -1,5 +1,5 @@
 -module(crypto_sign_probe).
--export([main/0, host/0, post_quantum/0, unsupported_name/0, unsupported_curve/0]).
+-export([main/0, host/0, post_quantum/0, unsupported_name/0, unsupported_curve/0, listed/0]).
 
 %% Write the results of crypto:sign/5 and crypto:verify/6, which call
 %% pkey_sign_nif/5 and pkey_verify_nif/6 (crypto.erl:3285-3389,
@@ -427,3 +427,68 @@ unsigned(N) -> list_to_binary(lists:reverse(bytes(N))).
 
 bytes(0) -> [];
 bytes(N) -> [N band 255 | bytes(N bsr 8)].
+
+%% Run one operation of each item of crypto:supports(curves) and
+%% crypto:supports(public_keys) (algorithms.c:162-202, 241-640,
+%% pkey.c:201-210), and write the number of the items and each item whose
+%% operation fails. An ECDH, an X25519, a DH, or an SRP key exchange
+%% computes the same key on both sides; a signature verifies. The keys are
+%% random, so the probe writes only these results.
+listed() ->
+    Curves = crypto:supports(curves),
+    Keys = crypto:supports(public_keys),
+    Failed = [{Item, Result} || {Item, Result} <- [{C, bad_reason(fun() -> curve(C) end)} || C <- Curves]
+                                    ++ [{K, bad_reason(fun() -> public_key(K) end)} || K <- Keys],
+                                Result =/= true],
+    io:format("~p~n", [[length(Curves), length(Keys), Failed]]).
+
+curve(Curve) when Curve =:= ed25519; Curve =:= ed448 ->
+    signs(eddsa, none, [Curve]);
+curve(Curve) when Curve =:= x25519; Curve =:= x448 ->
+    exchanges(eddh, Curve);
+curve(Curve) ->
+    exchanges(ecdh, Curve) andalso signs(ecdsa, sha256, Curve).
+
+public_key(rsa) ->
+    {Pub, Priv} = crypto:generate_key(rsa, {1024, 65537}),
+    verifies(rsa, sha256, Priv, Pub);
+public_key(dss) ->
+    verifies(dss, sha, dss_priv(), dss_pub());
+public_key(dh) ->
+    exchanges(dh, [<<(1 bsl 521 - 1):528>>, <<3>>]);
+public_key(ecdsa) ->
+    signs(ecdsa, sha256, secp256r1);
+public_key(ecdh) ->
+    exchanges(ecdh, secp256r1);
+public_key(eddsa) ->
+    signs(eddsa, none, [ed25519]);
+public_key(eddh) ->
+    exchanges(eddh, x25519);
+public_key(srp) ->
+    Prime = <<(1 bsl 127 - 1):128>>,
+    Gen = <<3>>,
+    X = <<5>>,
+    Ver = crypto:mod_pow(Gen, X, Prime),
+    {UPub, UPriv} = crypto:generate_key(srp, {user, [Gen, Prime, '6a']}),
+    {HPub, HPriv} = crypto:generate_key(srp, {host, [Ver, Gen, Prime, '6a']}),
+    crypto:compute_key(srp, HPub, {UPub, UPriv}, {user, [X, Prime, Gen, '6a']})
+        =:= crypto:compute_key(srp, UPub, {HPub, HPriv}, {host, [Ver, Prime, '6a']});
+public_key(Type) ->
+    {Pub, Priv} = crypto:generate_key(Type, []),
+    verifies(Type, none, Priv, Pub).
+
+exchanges(Type, Params) ->
+    {Pub1, Priv1} = crypto:generate_key(Type, Params),
+    {Pub2, Priv2} = crypto:generate_key(Type, Params),
+    crypto:compute_key(Type, Pub2, Priv1, Params) =:= crypto:compute_key(Type, Pub1, Priv2, Params).
+
+signs(eddsa, Digest, [Curve]) ->
+    {Pub, Priv} = crypto:generate_key(eddsa, Curve),
+    verifies(eddsa, Digest, [Priv, Curve], [Pub, Curve]);
+signs(ecdsa, Digest, Curve) ->
+    {Pub, Priv} = crypto:generate_key(ecdh, Curve),
+    verifies(ecdsa, Digest, [Priv, Curve], [Pub, Curve]).
+
+verifies(Type, Digest, Priv, Pub) ->
+    Msg = <<"listed">>,
+    crypto:verify(Type, Digest, Msg, crypto:sign(Type, Digest, Msg, Priv), Pub).
