@@ -1,7 +1,7 @@
 -module(remote_id_probe).
 -compile({nowarn_deprecated_function, [{erlang, phash, 2}]}).
 -export([main/0, link/0, monitor/0, old_monitor/0, old_process_monitor/0, exit/0, exit_alias/0, group_leader/0,
-         group_leader_leader/0, old_send/0]).
+         group_leader_leader/0, old_send/0, other_scheduler/0]).
 
 %% Decode the pids, ports, and references of another node with
 %% binary_to_term/1 (external.c:3133-3200, 4685-4740, 4786-4890) and write
@@ -153,3 +153,6 @@ exit_alias() -> erlang:exit(lists:nth(7, ids()), x).
 group_leader() -> erlang:group_leader(self(), remote()).
 group_leader_leader() -> erlang:group_leader(remote(), self()).
 old_send() -> lists:last(ids()) ! x.
+%% A local reference of the second scheduler, which PBeam does not hold.
+other_scheduler() ->
+    binary_to_term(<<131, 90, 3:16, 100, 13:16, "nonode@nohost", 0:32, 1:32, 2:32, 3:32>>).

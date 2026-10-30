@@ -1384,6 +1384,10 @@ fn stops_with_a_runtime_error_for_each_signal_to_another_node() {
             "unsupported erlang:group_leader/2 with a leader of another node",
         ),
         (
+            "other_scheduler",
+            "unsupported erlang:binary_to_term/1,2 of a reference of another scheduler",
+        ),
+        (
             "old_send",
             "unsupported send to a pid, a port, or a reference of an old incarnation",
         ),
