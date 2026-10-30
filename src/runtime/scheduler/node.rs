@@ -466,10 +466,10 @@ impl Node {
     /// assert_eq!(atoms.this_node(), (Atom::from_static("nonode@nohost").unwrap(), 0));
     /// ```
     pub(in crate::runtime) fn net_exits(&self, id: ProcessId, atoms: &crate::term::AtomTable) {
-        // A node that is not alive has no owner, so most exits skip the lock.
-        if atoms.this_node().0.is_static("nonode@nohost") {
-            return;
-        }
+        // Each exit takes the lock: a `setnode/2` that found the process
+        // live before it left the table publishes the owner first, as ERTS
+        // sets `F_DISTRIBUTION` in one thread progress block with its check
+        // (`dist.c:5018-5058`).
         let mut owner = self
             .net_kernel
             .lock()
