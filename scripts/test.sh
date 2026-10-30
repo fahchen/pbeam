@@ -1,49 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# The root Mix project holds the PBeam.Native library. It declares the native
-# functions of an Elixir module that PBeam runs. The test requires 100%
-# coverage of the library.
-mix test --cover --warnings-as-errors
-
-(cd fixtures/hello && mix test --cover --warnings-as-errors)
-# The Plug and Bandit example fetches the dependencies of its mix.lock from Hex, so the check installs Hex and rebar3 (for telemetry) when they are missing.
-# `mix test --warnings-as-errors` does not pass the flag to the compile of the application code, so the check compiles the application first with warnings as errors. The test requires 100% coverage. The release build writes the compiled output to target/examples/plug_hello/.
-(
-  cd examples/plug_hello
-  mix local.hex --force --if-missing
-  mix local.rebar --force --if-missing
-  mix deps.get --check-locked
-  MIX_ENV='test' mix compile --warnings-as-errors
-  mix test --cover --warnings-as-errors
-  MIX_ENV=prod mix release --overwrite
-)
-# The bcrypt fixture fetches bcrypt_elixir from Hex and builds its NIF library with the host cc. Its entry module has the same gates: a compile with warnings as errors and a test with 100% coverage.
-(
-  cd fixtures/bcrypt
-  mix deps.get --check-locked
-  MIX_ENV='test' mix compile --warnings-as-errors
-  mix test --cover --warnings-as-errors
-)
-# The exqlite fixture fetches exqlite from Hex and builds its NIF library from source with the host cc (config :exqlite, force_build: true). Its entry module has the same gates.
-(
-  cd fixtures/exqlite
-  mix deps.get --check-locked
-  MIX_ENV='test' mix compile --warnings-as-errors
-  mix test --cover --warnings-as-errors
-)
-# The fs_notify fixture fetches fs_notify from Hex and builds its NIF library from source with rustler and the host cargo (config :rustler_precompiled, force_build_all: true). Its entry module has the same gates.
-(
-  cd fixtures/fs_notify
-  mix deps.get --check-locked
-  MIX_ENV='test' mix compile --warnings-as-errors
-  mix test --cover --warnings-as-errors
-)
-
 # Only the exact empty bootstrap is exempt; any Rust source addition enables coverage.
 rust_sources=$(git ls-files --cached --others --exclude-standard -- '*.rs')
 if [[ "$rust_sources" == 'src/lib.rs' ]] &&
   [[ "$(cat src/lib.rs)" == '//! Portable BEAM runtime. Implementation begins in subsequent task PRs.' ]]; then
+  bash scripts/elixir_checks.sh
   cargo test --locked --workspace --all-features
   echo 'Line coverage: N/A (empty bootstrap; no executable Rust code).'
 else
@@ -68,6 +30,19 @@ else
     find "$deps" -maxdepth 1 -type f -perm -u+x ! -name '*.*' -delete
   fi
   # CI sets PBEAM_TEST_PARTITION, such as slice:1/4, to run one part of the tests in each job. The report then covers only that part, and the last CI job checks the reports of all parts together.
+  # The Elixir checks run while cargo builds the tests, because they use other cores for most of the build. The filter none() builds and lists the tests but runs none of them. The Rust tests read the Elixir outputs, so they start only after the Elixir checks pass.
+  elixir_log=target/elixir-checks.log
+  mkdir -p target
+  bash scripts/elixir_checks.sh >"$elixir_log" 2>&1 &
+  elixir_pid=$!
+  cargo llvm-cov nextest --locked --workspace --all-features --no-clean --no-report \
+    -E 'none()' --no-tests=pass
+  elixir_status=0
+  wait "$elixir_pid" || elixir_status=$?
+  cat "$elixir_log"
+  if ((elixir_status != 0)); then
+    exit "$elixir_status"
+  fi
   cargo llvm-cov nextest --locked --workspace --all-features --no-clean \
     --status-level slow --final-status-level slow --no-fail-fast \
     ${PBEAM_TEST_PARTITION:+--partition "$PBEAM_TEST_PARTITION"} \
