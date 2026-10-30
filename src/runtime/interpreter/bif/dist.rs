@@ -655,10 +655,12 @@ pub(super) fn dist_ctrl_put_data(
     if !data.bit_size().is_multiple_of(8) {
         return Ok(BifResult::badarg());
     }
+    drop(dist);
+    // A packet with data goes to its target (`erts_net_message`,
+    // dist.c:4672-4680).
     if data.bit_size() != 0 {
-        return Err(error(
-            "unsupported erlang:dist_ctrl_put_data/2 of a distribution message: see \"Distribution\" in docs/erts-differences.md",
-        ));
+        let bytes = data.to_bytes();
+        context.scheduler.net_message(&bytes)?;
     }
     Ok(BifResult::Value(Term::static_atom("ok")))
 }

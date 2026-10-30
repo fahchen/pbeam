@@ -948,11 +948,48 @@ pub(super) fn binary_to_term(
             Term::Integer(to_i64(used_bytes)),
         ]))),
         Ok((term, _)) => Ok(Value(term)),
-        Err(DecodeError::Badarg) => Ok(BifResult::badarg()),
-        Err(DecodeError::Unsupported(what)) => Err(error(format!(
-            "unsupported erlang:binary_to_term/1,2 of {what}: see \"External term format\" in docs/erts-differences.md"
-        ))),
-        Err(DecodeError::Error(cause)) => Err(cause),
+        Err(failure) => failure
+            .into_error("erlang:binary_to_term/1,2")
+            .map_or_else(|| Ok(BifResult::badarg()), Err),
+    }
+}
+
+/// Decode the term at the start of `input`, which starts with
+/// `VERSION_MAGIC`, as `erts_decode_dist_ext` does for a term of a
+/// distribution message without an atom cache (`external.c:902-961`), and
+/// return it with the number of bytes it takes. Each atom is made when it
+/// does not exist.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let (control, used) = decode_dist(scheduler, &packet[1..])?.expect("a control message");
+/// ```
+///
+/// # Errors
+///
+/// `Ok(None)` for bytes that ERTS does not decode, after which ERTS ends
+/// the connection. A term that PBeam cannot hold gives a runtime error.
+pub(in crate::runtime) fn decode_dist(
+    scheduler: &crate::runtime::scheduler::Scheduler,
+    input: &[u8],
+) -> Result<Option<(Term, usize)>, BeamError> {
+    let seed = scheduler.local_node_hash();
+    let mut decoder = Decoder {
+        input,
+        pos: 0,
+        overrun: 0,
+        safe: false,
+        local: false,
+        atoms: &scheduler.atoms,
+        code: &scheduler.code,
+        ets: &scheduler.ets,
+    };
+    match decoder.decode_input(seed) {
+        Ok(term_and_size) => Ok(Some(term_and_size)),
+        Err(failure) => failure
+            .into_error("distribution message")
+            .map_or(Ok(None), Err),
     }
 }
 
@@ -998,6 +1035,20 @@ enum DecodeError {
 
 /// The decoder of one external term: the input bytes, the cursor, and the
 /// atom table of the run.
+impl DecodeError {
+    /// Return the runtime error of a decode in `call`, or `None` for
+    /// [`DecodeError::Badarg`].
+    fn into_error(self, call: &str) -> Option<BeamError> {
+        match self {
+            DecodeError::Badarg => None,
+            DecodeError::Unsupported(what) => Some(error(format!(
+                "unsupported {call} of {what}: see \"External term format\" in docs/erts-differences.md"
+            ))),
+            DecodeError::Error(cause) => Some(cause),
+        }
+    }
+}
+
 struct Decoder<'a> {
     /// The input binary.
     input: &'a [u8],
