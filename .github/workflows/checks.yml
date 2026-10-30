@@ -14,15 +14,51 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+env:
+  MISE_AUTO_INSTALL: "0"
+  # The cached target/ holds no incremental state, and with incremental compilation the tests of the `opt-level = 1` test profile ran slower in the measurement of #354. The value is explicit, because the profile default enables it.
+  CARGO_INCREMENTAL: "0"
+
+# The lint job and the test jobs run in parallel. The `checks` job is the status that the ruleset of main requires. It passes only when the lint job and each test job pass, and when the coverage reports of all test jobs together cover each application line.
 jobs:
-  checks:
-    name: checks
+  lint:
+    name: lint
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    env:
-      MISE_AUTO_INSTALL: "0"
-      # The cached target/ holds no incremental state, and with incremental compilation the tests of the `opt-level = 1` test profile ran slower in the measurement of #354. The value is explicit, because the profile default enables it.
-      CARGO_INCREMENTAL: "0"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7.0.1
+
+      - name: Set up mise
+        uses: jdx/mise-action@v5.1.1
+        with:
+          version: 2026.10.7
+          install: true
+
+      - name: Install Rust check components
+        run: mise run setup
+
+      # Clippy builds other files than the coverage build of the tests, so the lint job has its own cache.
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint
+          cache-on-failure: true
+
+      - name: Run the lint checks
+        run: mise run lint
+
+  # Each test job builds the instrumented tests, runs one slice of them, and keeps its coverage report as an artifact. A build in each job takes less time than a transfer of the built tests between jobs.
+  test:
+    name: test (${{ matrix.partition }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: [1, 2, 3, 4]
+    outputs:
+      task: ${{ steps.select.outputs.task }}
     steps:
       - name: Check out source
         uses: actions/checkout@v7.0.1
@@ -30,7 +66,7 @@ jobs:
           # The next step compares the base and head commits of a pull request, so it needs their history.
           fetch-depth: 0
 
-      # The job always runs, so that the required `checks` status is always reported. A pull request that changes only documentation runs the lint checks only.
+      # A pull request that changes only documentation runs the lint checks only, so the next steps of the test jobs do not run.
       - name: Select the checks
         id: select
         shell: bash
@@ -50,20 +86,74 @@ jobs:
           echo "task=$task" >>"$GITHUB_OUTPUT"
 
       - name: Set up mise
+        if: steps.select.outputs.task == 'check'
         uses: jdx/mise-action@v5.1.1
         with:
           version: 2026.10.7
           install: true
 
       - name: Install Rust check components
+        if: steps.select.outputs.task == 'check'
         run: mise run setup
 
+      # The test jobs build the same files, so they share one cache, and only the first job saves it.
       - name: Cache cargo
+        if: steps.select.outputs.task == 'check'
         uses: Swatinem/rust-cache@v2
         with:
+          shared-key: checks
+          save-if: ${{ matrix.partition == 1 }}
           cache-on-failure: true
 
-      - name: Run repository checks
+      - name: Run the tests
+        if: steps.select.outputs.task == 'check'
         env:
-          TASK: ${{ steps.select.outputs.task }}
-        run: mise run "$TASK"
+          PBEAM_TEST_PARTITION: slice:${{ matrix.partition }}/${{ strategy.job-total }}
+        run: mise run test
+
+      - name: Keep the coverage report
+        if: steps.select.outputs.task == 'check'
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: coverage-${{ matrix.partition }}
+          path: target/coverage.xml
+          if-no-files-found: error
+          retention-days: 1
+
+  checks:
+    name: checks
+    needs: [lint, test]
+    # The job runs also when a needed job fails or is cancelled, so that the required status is always reported.
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check the results of the jobs
+        env:
+          LINT: ${{ needs.lint.result }}
+          TEST: ${{ needs.test.result }}
+        run: |
+          echo "lint: $LINT, test: $TEST"
+          [[ $LINT == success && $TEST == success ]]
+
+      - name: Check out source
+        if: needs.test.outputs.task == 'check'
+        uses: actions/checkout@v7.0.1
+
+      - name: Set up mise
+        if: needs.test.outputs.task == 'check'
+        uses: jdx/mise-action@v5.1.1
+        with:
+          version: 2026.10.7
+          install: true
+
+      - name: Get the coverage reports
+        if: needs.test.outputs.task == 'check'
+        uses: actions/download-artifact@v8.0.2
+        with:
+          pattern: coverage-*
+          path: target/coverage
+
+      - name: Check the line coverage of all test jobs
+        if: needs.test.outputs.task == 'check'
+        run: mise exec -- elixir scripts/check_coverage.exs target/coverage/*/coverage.xml

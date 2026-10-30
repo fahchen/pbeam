@@ -67,8 +67,12 @@ else
   if [[ -d "$deps" ]]; then
     find "$deps" -maxdepth 1 -type f -perm -u+x ! -name '*.*' -delete
   fi
+  # CI sets PBEAM_TEST_PARTITION, such as slice:1/4, to run one part of the tests in each job. The report then covers only that part, and the last CI job checks the reports of all parts together.
   cargo llvm-cov nextest --locked --workspace --all-features --no-clean \
     --status-level slow --final-status-level slow --no-fail-fast \
+    ${PBEAM_TEST_PARTITION:+--partition "$PBEAM_TEST_PARTITION"} \
     --cobertura --output-path target/coverage.xml
-  mise exec -- elixir scripts/check_coverage.exs target/coverage.xml
+  if [[ -z "${PBEAM_TEST_PARTITION:-}" ]]; then
+    mise exec -- elixir scripts/check_coverage.exs target/coverage.xml
+  fi
 fi
