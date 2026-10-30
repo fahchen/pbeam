@@ -8,13 +8,13 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ## Build and dependencies
 
-### Make blaze the build gate
+### Build with blaze
 
-- **Now:** `.github/workflows/blaze.yml` runs the pinned blaze release with `continue-on-error`, and `mise run blaze-check` runs it locally (`docs/blaze.md`). blaze 0.20261027.0 cannot load the workspace: the build scripts of `libz-sys`, `zstd-sys`, and `openssl-sys` reach `cc`'s jobserver helper thread, which reads a writable static that rustc exports under no symbol.
-- **Option:** drop `continue-on-error` and run `blaze build`, `blaze test`, and `blaze check` in the required job.
-- **Evidence:** `blaze check --workspace --all-targets` on 2026-10-30, and the three changes that gave the same failure (`docs/blaze.md`).
+- **Now:** the project builds and checks with cargo only. PR #1389 added a CI job, a pinned installer, and a `mise` task for [blaze](https://github.com/indexable-inc/blaze), and a later PR removed them on the owner's request, because blaze cannot load this workspace and the job only failed on each pull request.
+- **Option:** add the job of #1389 again (`git show 152563d2`), first as a report, then as a gate that runs `blaze build`, `blaze test`, and `blaze check`.
+- **Evidence:** on 2026-10-30, `blaze check --workspace --all-targets` (release 0.20261027.0) stopped on the build scripts of `libz-sys`, `zstd-sys`, and `openssl-sys`: the jobserver helper thread of `cc` reads a writable static of `std` without a rustc symbol, which blaze refuses. Three changes gave the same failure; `docs/blaze.md` of 152563d2 records them.
 - **Trigger:** a blaze release that loads this workspace and agrees with cargo on it.
-- **Source:** owner request of 2026-10-30.
+- **Source:** owner requests of 2026-10-30.
 
 ### Use the `erlang/pcre2` fork as a git submodule for PCRE2
 
