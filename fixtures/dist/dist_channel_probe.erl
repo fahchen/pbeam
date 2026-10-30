@@ -2,7 +2,8 @@
 %% alive node, with no other node (dist.c:4272-4720, 5127-5711).
 -module(dist_channel_probe).
 -compile(nowarn_deprecated_catch).
--export([main/0, net_kernel_exit/0, port_controller/0, no_mandatory/0, message/0]).
+-export([main/0, net_kernel_exit/0, port_channel/0, no_mandatory/0, message/0,
+         port_message/0, deliver_port/0, deliver_udp/0]).
 
 main() ->
     %% net_kernel reports the dist_ctrlr message of a connection that it
@@ -130,10 +131,12 @@ self_controller(M) ->
           end),
     receive {self_result, A, B, C} -> [A, B, C] end.
 
-%% The exit of net_kernel kills each controller and makes each pending
+%% The exit of net_kernel kills each process controller, ends each port
+%% controller with net_kernel_terminated, and makes each pending
 %% connection idle (dist.c:926-1001).
 net_kernel_exit() ->
     logger:set_primary_config(level, none),
+    process_flag(trap_exit, true),
     {ok, _} = net_kernel:start(dprobe, #{name_domain => shortnames}),
     M = mandatory(),
     erts_internal:new_connection(pp@nohost),
@@ -142,18 +145,50 @@ net_kernel_exit() ->
     CtrlRef = monitor(process, Ctrl),
     {message, Reply} = erts_internal:create_dist_channel(zz@nohost, Ctrl, {M, 1}),
     receive {Reply, _} -> ok end,
+    erts_internal:new_connection(qq@nohost),
+    {ok, L} = gen_tcp:listen(0, []),
+    {ok, _} = erts_internal:create_dist_channel(qq@nohost, L, {M, 1}),
     show(before, [nodes(known)]),
     ok = net_kernel:stop(),
+    %% ERTS schedules the kill and the port exit (dist.c:975-990), so the
+    %% order of zz@nohost and qq@nohost in nodes(known) is not fixed.
     show(stopped, [receive {'DOWN', CtrlRef, _, _, Reason} -> Reason end,
-                   node(), nodes(known),
+                   receive {'EXIT', L, PortReason} -> PortReason end,
+                   node(), nodes(known) -- [qq@nohost],
+                   lists:member(qq@nohost, nodes(known)),
                    erts_internal:create_dist_channel(zz@nohost, self(), {M, 1})]).
 
-%% A port controller is not supported yet.
-port_controller() ->
+%% A tcp_inet port controls a connection (dist.c:5269-5336), and the exit
+%% of the port ends it (io.c:3910-3916).
+port_channel() ->
+    logger:set_primary_config(level, none),
+    M = mandatory(),
     erts_internal:new_connection(zz@nohost),
-    Port = open_port({spawn, "cat"}, []),
-    badarg = erts_internal:create_dist_channel(zz@nohost, Port, foo),
-    erts_internal:create_dist_channel(zz@nohost, Port, {mandatory(), 1}).
+    Spawn = open_port({spawn, "cat"}, []),
+    {ok, Udp} = gen_udp:open(0),
+    {ok, Closed} = gen_tcp:listen(0, []),
+    ok = gen_tcp:close(Closed),
+    {ok, L} = gen_tcp:listen(0, []),
+    show(port_errors, [erts_internal:create_dist_channel(zz@nohost, Spawn, {M, 1}),
+                       erts_internal:create_dist_channel(zz@nohost, Udp, {M, 1}),
+                       erts_internal:create_dist_channel(zz@nohost, Closed, {M, 1}),
+                       erts_internal:create_dist_channel(yy@nohost, L, {M, 1}),
+                       catch erlang:port_command(Udp, <<>>, [force]),
+                       nodes(known)]),
+    {ok, DH} = erts_internal:create_dist_channel(zz@nohost, L, {M, 1}),
+    erts_internal:new_connection(xx@nohost),
+    show(port_up, [nodes(hidden), erlang:dist_get_stat(DH),
+                   erts_internal:create_dist_channel(xx@nohost, L, {M, 1}),
+                   erts_internal:create_dist_channel(zz@nohost, L, {M, 1}),
+                   catch erlang:dist_ctrl_put_data(DH, <<>>),
+                   catch erlang:dist_ctrl_get_data(DH),
+                   catch erlang:dist_ctrl_input_handler(DH, self()),
+                   inet:getopts(L, [deliver]),
+                   inet:setopts(L, [{deliver, port}]),
+                   inet:getopts(L, [deliver])]),
+    ok = gen_tcp:close(L),
+    timer:sleep(100),
+    show(port_down, [nodes(hidden), nodes(known), erlang:dist_get_stat(DH)]).
 
 %% Flags without each mandatory flag.
 no_mandatory() ->
@@ -165,6 +200,35 @@ message() ->
     erts_internal:new_connection(zz@nohost),
     {ok, DH} = erts_internal:create_dist_channel(zz@nohost, self(), {mandatory(), 1}),
     erlang:dist_ctrl_put_data(DH, <<112>>).
+
+%% A packet with data on a port controller.
+port_message() ->
+    {ok, L} = gen_tcp:listen(0, [binary]),
+    {ok, Port} = inet:port(L),
+    {ok, C} = gen_tcp:connect({127, 0, 0, 1}, Port, [binary, {packet, 4}]),
+    {ok, A} = gen_tcp:accept(L),
+    erts_internal:new_connection(zz@nohost),
+    {ok, _} = erts_internal:create_dist_channel(zz@nohost, A, {mandatory(), 1}),
+    ok = inet:setopts(A, [{active, true}, {deliver, port}, {packet, 4}]),
+    ok = gen_tcp:send(C, <<112>>),
+    timer:sleep(1000).
+
+%% `{deliver, port}` on a tcp_inet port that is not a controller.
+deliver_port() ->
+    {ok, L} = gen_tcp:listen(0, [binary]),
+    {ok, Port} = inet:port(L),
+    {ok, C} = gen_tcp:connect({127, 0, 0, 1}, Port, [binary]),
+    {ok, A} = gen_tcp:accept(L),
+    ok = inet:setopts(A, [{active, true}, {deliver, port}]),
+    ok = gen_tcp:send(C, <<"hi">>),
+    receive Message -> io:format("~p~n", [Message]) end.
+
+%% `{deliver, port}` on an active udp_inet port.
+deliver_udp() ->
+    {ok, U} = gen_udp:open(0, [binary, {active, true}, {deliver, port}]),
+    {ok, Port} = inet:port(U),
+    ok = gen_udp:send(U, {127, 0, 0, 1}, Port, <<"hi">>),
+    receive Message -> io:format("~p~n", [Message]) end.
 
 mandatory() ->
     element(3, erts_internal:get_dflags()).
