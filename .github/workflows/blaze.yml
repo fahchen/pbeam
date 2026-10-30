@@ -26,8 +26,6 @@ jobs:
     name: blaze
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # The job is not a gate yet (docs/blaze.md).
-    continue-on-error: true
     env:
       # The store lives for one job, so nothing needs collecting. The default limit, a tenth of the free disk, drops packs that a warm run needs.
       BLAZE_CACHE_MAX: "off"
@@ -44,8 +42,6 @@ jobs:
             ~/.blaze
             ~/.cache/blaze
           key: blaze-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/blaze-version') }}
-          # The job fails until a blaze release loads the workspace (docs/blaze.md), and a failed job skips the save of its post step.
-          save-always: true
 
       # blaze runs each build script and each test in a sandbox of namespaces that a user makes. Ubuntu keeps a user from making them unless it is told otherwise.
       - name: Allow the sandbox of a build script
@@ -54,7 +50,9 @@ jobs:
             sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0
           fi
 
+      # The step is not a gate yet (docs/blaze.md). A failed step keeps the job green, so the save of the cache still runs.
       - name: Run blaze
+        continue-on-error: true
         run: bash scripts/blaze.sh check --workspace --all-targets
 
       # The line that says which step of blaze's own plan removes the refusal, and the count of builds that cargo had to do.
