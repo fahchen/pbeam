@@ -1,5 +1,5 @@
-use super::DistTable;
-use crate::term::{AtomTable, ProcessId, Reference, Term};
+use super::{Controller, DistTable};
+use crate::term::{AtomTable, PortId, ProcessId, Reference, Term};
 
 #[test]
 fn wraps_the_connection_id_at_24_bits() {
@@ -51,10 +51,18 @@ fn orders_the_nodes_by_state_and_by_the_time_of_each_change() {
         table.new_connection(name);
     }
     table.set_local(&nonode, Reference(10), &local, Reference(11), 0);
-    assert!(table.connect(&d, ProcessId(1), 1).is_some());
-    assert!(table.connect(&c, ProcessId(2), 0).is_some());
-    assert!(table.connect(&b, ProcessId(3), 0).is_some());
-    table.controller_exits(ProcessId(2));
+    assert!(
+        table
+            .connect(&d, Controller::Process(ProcessId(1)), 1)
+            .is_some()
+    );
+    assert!(table.connect(&c, Controller::Port(PortId(2)), 0).is_some());
+    assert!(
+        table
+            .connect(&b, Controller::Process(ProcessId(3)), 0)
+            .is_some()
+    );
+    table.controller_exits(Controller::Port(PortId(2)));
     let nodes = table.nodes();
     let names: Vec<_> = nodes
         .iter()
@@ -76,7 +84,16 @@ fn orders_the_nodes_by_state_and_by_the_time_of_each_change() {
     // The exit of net_kernel gives each controller and makes the pending
     // entry `a` idle (dist.c:926-1001).
     let mut controllers = table.net_kernel_exits();
-    controllers.sort_by_key(|id| id.0);
-    assert_eq!(controllers, vec![ProcessId(1), ProcessId(3)]);
+    controllers.sort_by_key(|controller| match controller {
+        Controller::Process(id) => id.0,
+        Controller::Port(_) => u64::MAX,
+    });
+    assert_eq!(
+        controllers,
+        vec![
+            Controller::Process(ProcessId(1)),
+            Controller::Process(ProcessId(3))
+        ]
+    );
     assert_eq!(table.nodes()[0].kind, "known");
 }

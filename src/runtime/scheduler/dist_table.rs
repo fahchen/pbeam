@@ -17,13 +17,23 @@
 
 use std::collections::HashMap;
 
-use crate::term::{Atom, ProcessId, Reference, Term};
+use crate::term::{Atom, PortId, ProcessId, Reference, Term};
 
 /// The mask of a connection id (`ERTS_DIST_CON_ID_MASK`, `external.h:137`).
 const CONNECTION_ID_MASK: u32 = 0x00ff_ffff;
 
 /// `DFLAG_PUBLISHED` (`dist.h:30`): the other node is a visible node.
 const PUBLISHED: u64 = 0x01;
+
+/// The distribution controller of a connection (`dep->cid`): a process or
+/// a port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::runtime) enum Controller {
+    /// A process controller, such as the one of `inet_epmd_socket`.
+    Process(ProcessId),
+    /// A port controller, such as the `tcp_inet` port of `inet_tcp_dist`.
+    Port(PortId),
+}
 
 /// The state of a dist entry (`ERTS_DE_STATE_*`, `erl_node_tables.h:74-77`).
 /// ERTS also has the state `EXITING` between the exit of a controller and
@@ -53,7 +63,7 @@ struct Entry {
     /// The distribution flags of the connection (`dep->dflags`).
     flags: u64,
     /// The distribution controller of a connected entry (`dep->cid`).
-    controller: Option<ProcessId>,
+    controller: Option<Controller>,
     /// The process that gives the data of the connection to
     /// `erlang:dist_ctrl_put_data/2` (`dep->input_handler`). The exit of the
     /// controller clears it (`dist.c:1074`), and an aborted connection had
@@ -280,7 +290,7 @@ impl DistTable {
     pub(in crate::runtime) fn connect(
         &mut self,
         name: &Atom,
-        controller: ProcessId,
+        controller: Controller,
         flags: u64,
     ) -> Option<Term> {
         if self.controlled_by(controller).is_some() {
@@ -294,7 +304,10 @@ impl DistTable {
         entry.state = State::Connected;
         entry.flags = flags;
         entry.controller = Some(controller);
-        entry.input_handler = Some(controller);
+        entry.input_handler = match controller {
+            Controller::Process(process) => Some(process),
+            Controller::Port(_) => None,
+        };
         entry.input = 0;
         entry.order = order;
         let connection_id = entry.connection_id;
@@ -302,12 +315,12 @@ impl DistTable {
         Some(self.dhandle(name, connection_id))
     }
 
-    /// Return the name of the entry that `process` controls
-    /// (`ERTS_PROC_GET_DIST_ENTRY`).
-    pub(in crate::runtime) fn controlled_by(&self, process: ProcessId) -> Option<Atom> {
+    /// Return the name of the entry that `controller` controls
+    /// (`ERTS_PROC_GET_DIST_ENTRY`, `ERTS_PRTSD_DIST_ENTRY`).
+    pub(in crate::runtime) fn controlled_by(&self, controller: Controller) -> Option<Atom> {
         self.entries
             .values()
-            .find(|entry| entry.controller == Some(process))
+            .find(|entry| entry.controller == Some(controller))
             .map(|entry| entry.name.clone())
     }
 
@@ -324,6 +337,14 @@ impl DistTable {
     /// Return the option `get_size` of the entry of `name` to change it.
     pub(in crate::runtime) fn get_size_mut(&mut self, name: &Atom) -> &mut bool {
         &mut self.entry_mut(name).get_size
+    }
+
+    /// Return whether a port controls the entry of `name`.
+    pub(in crate::runtime) fn port_controlled(&self, name: &Atom) -> bool {
+        matches!(
+            self.entries[&name.index()].controller,
+            Some(Controller::Port(_))
+        )
     }
 
     /// Return the input handler of the entry of `name`.
@@ -356,11 +377,11 @@ impl DistTable {
     /// Make the entry that `process` controls idle at the exit of
     /// `process` with the input count 0 and no input handler, as
     /// `erts_do_net_exits` does for a controller (`dist.c:1021-1117`).
-    pub(in crate::runtime) fn controller_exits(&mut self, process: ProcessId) {
+    pub(in crate::runtime) fn controller_exits(&mut self, controller: Controller) {
         if let Some(entry) = self
             .entries
             .values_mut()
-            .find(|entry| entry.controller == Some(process))
+            .find(|entry| entry.controller == Some(controller))
         {
             entry.set_idle(self.next_order);
             entry.input = 0;
@@ -372,7 +393,7 @@ impl DistTable {
     /// Make each pending entry idle and return the controller of each
     /// connected entry, as `erts_do_net_exits` does at the exit of
     /// `net_kernel` (`dist.c:926-1001`).
-    pub(in crate::runtime) fn net_kernel_exits(&mut self) -> Vec<ProcessId> {
+    pub(in crate::runtime) fn net_kernel_exits(&mut self) -> Vec<Controller> {
         let mut controllers = Vec::new();
         for entry in self.entries.values_mut() {
             match entry.state {

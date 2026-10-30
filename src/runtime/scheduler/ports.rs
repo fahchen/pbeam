@@ -445,6 +445,11 @@ impl Scheduler {
         // The port loses its name under its lock, before its exit signals
         // (`erts_deliver_port_exit`, io.c:3904-3905).
         self.node.remove_port_name(id);
+        // The exit of a port controller ends its connection
+        // (`erts_deliver_port_exit`, io.c:3910-3916).
+        self.node
+            .dist()
+            .controller_exits(super::dist_table::Controller::Port(id));
         port.closing |= queued;
         let serving = port.scheduler;
         let port = slot

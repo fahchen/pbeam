@@ -330,6 +330,13 @@ impl Inet {
         self.send_timeout
     }
 
+    /// Return whether the driver of the port has `ERL_DRV_FLAG_SOFT_BUSY`:
+    /// `tcp_inet` has it and `udp_inet` does not (`inet_drv.c:1374`). Only
+    /// such a port can be a distribution controller (`dist.c:5287-5288`).
+    pub(in crate::runtime) fn soft_busy(&self) -> bool {
+        self.socket_type == SocketType::Stream
+    }
+
     /// Return the descriptor of a new port of `socket_type`: no socket,
     /// `list` mode, passive, and an infinite send timeout.
     ///

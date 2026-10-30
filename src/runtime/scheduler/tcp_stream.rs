@@ -12,10 +12,11 @@
 
 use super::{
     Scheduler,
+    dist_table::Controller,
     tcp_inet::{INFINITY, error_status},
 };
 use crate::{
-    error::BeamError,
+    error::{BeamError, error},
     runtime::{
         port::{
             self, Driver, Port,
@@ -360,7 +361,23 @@ impl Scheduler {
                     vec![(sender.caller, message)]
                 }
                 Event::Data(bytes) => {
-                    vec![(owner, active(port, Atom::TCP, Some(tcp.data_term(bytes))))]
+                    // A port controller gives each packet to the
+                    // distribution of the node (`driver_output2`,
+                    // io.c:6402-6420): an empty packet is a tick, which only
+                    // counts.
+                    let mut dist = self.node.dist();
+                    if let Some(name) = dist.controlled_by(Controller::Port(port)) {
+                        if !bytes.is_empty() {
+                            return Err(error(
+                                "unsupported distribution message on a port controller: see \"Distribution\" in docs/erts-differences.md",
+                            ));
+                        }
+                        dist.count_input(&name);
+                        Vec::new()
+                    } else {
+                        drop(dist);
+                        vec![(owner, active(port, Atom::TCP, Some(tcp.data_term(bytes))))]
+                    }
                 }
                 Event::Closed => vec![(owner, active(port, Atom::TCP_CLOSED, None))],
                 Event::Error(name) => {

@@ -7,8 +7,8 @@ use num_bigint::BigInt;
 
 use super::{BifContext, BifResult, Term};
 use crate::error::{BeamError, error};
-use crate::runtime::scheduler::{Scheduler, node::Named};
-use crate::term::{Atom, ProcessId};
+use crate::runtime::scheduler::{Scheduler, dist_table::Controller, node::Named};
+use crate::term::{Atom, PortId, ProcessId};
 
 /// The lowest creation of an alive node. `setnode/2` raises a lower
 /// creation to it (`dist.c:5029-5030`).
@@ -282,8 +282,8 @@ pub(super) fn abort_pending_connection(
 /// not a small integer that is not negative, and when the entry is not pending, has a controller, or the
 /// controller controls another entry. Flags without each mandatory flag
 /// stop the run with a runtime error, where ERTS sends an error report and
-/// raises `badarg` (`dist.c:5176-5187`). A port controller stops the run
-/// with a runtime error (#1406).
+/// raises `badarg` (`dist.c:5176-5187`). A port controller takes
+/// [`port_channel`].
 ///
 /// # Examples
 ///
@@ -310,8 +310,8 @@ pub(super) fn create_dist_channel(
     };
     let scheduler = &mut *context.scheduler;
     let controller = match controller {
-        Term::Pid(pid) => Some(*pid),
-        Term::Port(_) => None,
+        Term::Pid(pid) => Controller::Process(*pid),
+        Term::Port(port) => Controller::Port(*port),
         _ => return Ok(BifResult::Value(Term::static_atom("badarg"))),
     };
     let Term::Tuple(options) = options else {
@@ -337,14 +337,13 @@ pub(super) fn create_dist_channel(
     if *name == scheduler.atoms.this_node().0 {
         return Ok(BifResult::Value(Term::static_atom("badarg")));
     }
-    // ERTS takes the port branch after the checks of the options and of
-    // the node (`dist.c:5163-5201`, `5269`).
-    let Some(controller) = controller else {
-        return Err(error(
-            "unsupported erts_internal:create_dist_channel/3 with a port controller: see \"Distribution\" in docs/erts-differences.md",
-        ));
-    };
     let caller = scheduler.current_process().id;
+    let controller = match controller {
+        Controller::Process(process) => process,
+        Controller::Port(port) => {
+            return port_channel(scheduler, name, port, flags, net_kernel);
+        }
+    };
     let start = connection_start(scheduler);
     let node = Arc::clone(scheduler.node());
     let handle = {
@@ -357,7 +356,7 @@ pub(super) fn create_dist_channel(
         if node.live_owner(controller).is_none() {
             return Ok(BifResult::Value(Term::static_atom("badarg")));
         }
-        dist.connect(name, controller, flags)
+        dist.connect(name, Controller::Process(controller), flags)
     };
     let Some(handle) = handle else {
         return Ok(if caller == controller {
@@ -381,6 +380,57 @@ pub(super) fn create_dist_channel(
     } else {
         message_reply(scheduler, caller, handle)?
     })
+}
+
+/// Make the pending connection of `name` connected with the port
+/// controller `port`, as the port branch of
+/// `erts_internal_create_dist_channel_3` does (`dist.c:5269-5336`), send
+/// `{dist_ctrlr, Port, Node, Caller}` to `net_kernel`
+/// (`dist.c:5394-5408`), and return `{ok, DHandle}`. The result is the atom
+/// `badarg` when the entry is not pending, the port is not open, its
+/// driver has no `ERL_DRV_FLAG_SOFT_BUSY` (only `tcp_inet` has it), or the
+/// port already controls a connection. The port lock comes before the lock
+/// of the dist table, as in the exit of a port, so a port that exits after
+/// the setup makes the entry idle.
+fn port_channel(
+    scheduler: &mut Scheduler,
+    name: &Atom,
+    port: PortId,
+    flags: u64,
+    net_kernel: ProcessId,
+) -> Result<BifResult, BeamError> {
+    let start = connection_start(scheduler);
+    let reference = scheduler.make_magic_ref()?;
+    let node = Arc::clone(scheduler.node());
+    let setup = |item: Option<&mut crate::runtime::port::Port>| {
+        let mut dist = node.dist();
+        // ERTS makes the entry first (`dist.c:5199`).
+        dist.insert(name, reference, start);
+        item.filter(|item| !item.closing && item.soft_busy())
+            .and_then(|_| dist.connect(name, Controller::Port(port), flags))
+    };
+    let handle = match node.with_port(port, |item| setup(Some(item))) {
+        Some(handle) => handle,
+        None => setup(None),
+    };
+    let Some(handle) = handle else {
+        return Ok(BifResult::Value(Term::static_atom("badarg")));
+    };
+    let caller = scheduler.current_process().id;
+    scheduler.send_message(
+        caller,
+        net_kernel,
+        Term::tuple(vec![
+            Term::static_atom("dist_ctrlr"),
+            Term::Port(port),
+            Term::Atom(name.clone()),
+            Term::Pid(caller),
+        ]),
+    );
+    Ok(BifResult::Value(Term::tuple(vec![
+        Term::static_atom("ok"),
+        handle,
+    ])))
 }
 
 /// Give the caller the reply `{Ref, Result}` of the setup that ERTS runs
@@ -413,7 +463,8 @@ fn notsup() -> BifResult {
 fn controlled_entry(context: &BifContext<'_>, handle: &Term) -> Result<Atom, BifResult> {
     let scheduler = &context.scheduler;
     let dist = scheduler.node().dist();
-    let Some(entry) = dist.controlled_by(scheduler.current_process().id) else {
+    let Some(entry) = dist.controlled_by(Controller::Process(scheduler.current_process().id))
+    else {
         return Err(notsup());
     };
     match dist.lookup(handle) {
@@ -540,7 +591,8 @@ pub(super) fn dist_ctrl_input_handler(
     let Some((name, id)) = dist.lookup(handle) else {
         return notsup();
     };
-    if dist.controlled_by(scheduler.current_process().id).as_ref() != Some(&name) {
+    let caller = Controller::Process(scheduler.current_process().id);
+    if dist.controlled_by(caller).as_ref() != Some(&name) && !dist.port_controlled(&name) {
         return BifResult::badarg();
     }
     let Term::Pid(handler) = handler else {

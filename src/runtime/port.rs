@@ -605,6 +605,12 @@ pub(super) enum PortEvent {
 pub(super) type End = (bool, Vec<Term>);
 
 impl Port {
+    /// Return whether the driver of the port has `ERL_DRV_FLAG_SOFT_BUSY`,
+    /// which a distribution controller needs (`dist.c:5287-5288`).
+    pub(in crate::runtime) fn soft_busy(&self) -> bool {
+        matches!(&self.driver, Driver::Inet(inet) if inet.soft_busy())
+    }
+
     /// Return the fd that the poll waits to read for the port, as the read
     /// select of its driver: the output pipe of a spawn port before its end
     /// of file, and then its status pipe, the socket of a `tcp_inet` listen
