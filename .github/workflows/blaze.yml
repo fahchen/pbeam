@@ -50,12 +50,19 @@ jobs:
             sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0
           fi
 
-      # The step is not a gate yet (docs/blaze.md). A failed step keeps the job green, so the save of the cache still runs.
+      # The step is not a gate yet (docs/blaze.md). A failed step keeps the job green, so the save of the cache still runs, and the step after it says that blaze failed.
       - name: Run blaze
+        id: blaze
         continue-on-error: true
         run: bash scripts/blaze.sh check --workspace --all-targets
 
       # The line that says which step of blaze's own plan removes the refusal, and the count of builds that cargo had to do.
       - name: Report the blaze state
         if: always()
-        run: blaze status || true
+        env:
+          OUTCOME: ${{ steps.blaze.outcome }}
+        run: |
+          blaze status || true
+          if [[ $OUTCOME != success ]]; then
+            echo "::warning file=docs/blaze.md::blaze could not load this workspace. docs/blaze.md records the reason and the condition that makes this job a gate."
+          fi

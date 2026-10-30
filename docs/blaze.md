@@ -14,7 +14,7 @@ blaze builds every project with its own Rust toolchain, whatever `mise.toml` pin
 
 The job does not use blaze's remote store, because that needs a cache service and a token that this repository does not have. Each run warms its own store from the Actions cache.
 
-The first run on Linux x86-64 (2026-10-30, run 40978160026) installed the release in 10 s, downloaded its 159 MB toolchain in 6 s, and failed in the load 27 s later. The failing step keeps the job green, so the job saves its cache and a later run restores it. Its failure is the one below.
+The first run on Linux x86-64 (2026-10-30, run 40978160026) installed the release in 10 s, downloaded its 159 MB toolchain in 6 s, and failed in the load 27 s later. The failing step keeps the job green, so the job saves its cache and a later run restores it. A later step adds a warning that names this document. The failure is the one below.
 
 ## The blocker, measured 2026-10-30
 
