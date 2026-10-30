@@ -110,6 +110,8 @@ controller(Parent) ->
                        catch erlang:dist_ctrl_input_handler(DH, foo),
                        catch erlang:dist_ctrl_input_handler(setelement(1, DH, 0), Parent),
                        erlang:dist_ctrl_put_data(DH, <<>>),
+                       catch erlang:dist_ctrl_put_data(DH, foo),
+                       catch erlang:dist_ctrl_get_data({1, 2}),
                        erlang:dist_get_stat(DH),
                        erlang:dist_ctrl_input_handler(DH, Parent),
                        catch erlang:dist_ctrl_put_data(DH, <<>>)]},
