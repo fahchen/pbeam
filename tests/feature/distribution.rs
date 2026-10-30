@@ -201,7 +201,7 @@ fn stops_at_a_part_of_a_channel_that_pbeam_does_not_have() {
     cases.extend((1..=8).map(|n| (format!("reject({n})"), rejected)));
     cases.push((
         "reject(9)".to_owned(),
-        "unsupported distribution message of an old local fun",
+        "unsupported distribution message of a pid reference",
     ));
     for (call, error) in cases {
         let expression = format!("dist_channel_probe:{call}, halt().");

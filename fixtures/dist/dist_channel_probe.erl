@@ -279,9 +279,18 @@ reject(N) ->
                  6 -> packet_only({2, '', self(), extra});
                  7 -> <<(packet_only({22, From, self()}))/binary, 131, 97>>;
                  8 -> packet_only({});
-                 9 -> <<(packet_only({2, '', self()}))/binary, 131, 117, 0:512>>
+                 9 -> pid_reference_packet()
              end,
     erlang:dist_ctrl_put_data(DH, Packet).
+
+%% A message with a reference of the local node that has the pid marker
+%% bit (erl_bif_unique.h:106-109), which PBeam cannot hold.
+pid_reference_packet() ->
+    <<131, 90, Rest/binary>> = term_to_binary(make_ref()),
+    Size = byte_size(Rest) - 12,
+    <<Head:Size/binary, N0:32, N1:32, N2:32>> = Rest,
+    <<(packet_only({2, '', self()}))/binary,
+      131, 90, Head/binary, N0:32, (N1 bor (1 bsl 30)):32, N2:32>>.
 
 %% A control message with a trace token.
 trace_token() ->
