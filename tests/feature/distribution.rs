@@ -287,7 +287,7 @@ fn stops_at_a_part_of_a_channel_that_pbeam_does_not_have() {
     cases.extend(
         [
             1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
-            26,
+            26, 27,
         ]
         .map(|n| (format!("reject({n})"), rejected)),
     );

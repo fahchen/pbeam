@@ -1369,7 +1369,7 @@ fn reply(reference: Reference, result: Term) -> Term {
 }
 
 /// Return true for a term that ERTS keeps in one word (`is_immed`): an
-/// atom, a small integer, a local pid, or `[]`. A monitor down signal with
+/// atom, a small integer, a local pid, a local port, or `[]` (`erl_term.h`). A monitor down signal with
 /// such a reason uses the monitor itself (`erl_proc_sig_queue.c:2826-2840`).
 ///
 /// # Examples
@@ -1380,7 +1380,7 @@ fn reply(reference: Reference, result: Term) -> Term {
 /// ```
 pub(super) fn is_immediate(term: &Term) -> bool {
     match term {
-        Term::Atom(_) | Term::Pid(_) => true,
+        Term::Atom(_) | Term::Pid(_) | Term::Port(_) => true,
         _ => term.is_nil() || term.small_integer().is_some(),
     }
 }
