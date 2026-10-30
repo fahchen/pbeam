@@ -5,7 +5,7 @@
 -export([main/0, net_kernel_exit/0, port_channel/0, no_mandatory/0, message/0,
          port_message/0, deliver_port/0, deliver_udp/0, input/0, reject/1,
          trace_token/0, link_op/0, atom_cache/0, output/0, port_output/0,
-         alias_ext/0, dead_alias/0, exit_input/0]).
+         alias_ext/0, dead_alias/1, exit_input/0]).
 
 main() ->
     %% net_kernel reports the dist_ctrlr message of a connection that it
@@ -445,13 +445,21 @@ alias_ext() ->
                  binary_to_term(term_to_binary({A, Monitor}, [local])) =:= {A, Monitor}]).
 
 %% The external term of an alias of a process that exited, which holds
-%% the pid of the owner in ERTS and which PBeam does not keep.
-dead_alias() ->
+%% the pid of the owner in ERTS and which PBeam does not keep: in
+%% term_to_binary/1, external_size/1, and a message to another node.
+dead_alias(Use) ->
     Parent = self(),
     {Pid, Ref} = spawn_monitor(fun() -> Parent ! {self(), alias()} end),
     receive {'DOWN', Ref, _, _, _} -> ok end,
     A = receive {Pid, Alias} -> Alias end,
-    term_to_binary(A).
+    case Use of
+        binary -> term_to_binary(A);
+        size -> erlang:external_size(A);
+        send ->
+            erts_internal:new_connection(zz@nohost),
+            {ok, _} = erts_internal:create_dist_channel(zz@nohost, self(), {mandatory(), 1}),
+            remote_pid(zz@nohost) ! A
+    end.
 
 %% A packet on a connection with DFLAG_DIST_HDR_ATOM_CACHE.
 atom_cache() ->

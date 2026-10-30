@@ -273,10 +273,12 @@ fn stops_at_a_part_of_a_channel_that_pbeam_does_not_have() {
         "reject(9)".to_owned(),
         "unsupported distribution message of a pid reference that is not of five numbers",
     ));
-    cases.push((
-        "dead_alias()".to_owned(),
-        "unsupported external term of a pid reference whose owner exited",
-    ));
+    for use_ in ["binary", "size", "send"] {
+        cases.push((
+            format!("dead_alias({use_})"),
+            "unsupported external term of a pid reference whose owner exited",
+        ));
+    }
     for (call, error) in cases {
         let expression = format!("dist_channel_probe:{call}, halt().");
         let output = pbeam_erl(&epmd, &probe(&["-sname", &name], &expression));
