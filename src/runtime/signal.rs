@@ -17,7 +17,7 @@
 
 use super::{
     capability::{Capability, CapabilityId},
-    process::LinkId,
+    process::{LinkId, RemotePid},
 };
 use crate::term::{Atom, PortId, ProcessId, Reference, Term};
 
@@ -84,6 +84,41 @@ pub(super) enum Signal {
         /// The process that handled the `Unlink`.
         from: ProcessId,
         /// The identifier of the `Unlink`.
+        id: u64,
+    },
+    /// `ERTS_SIG_Q_OP_LINK` from a pid of another node: the `LINK` packet
+    /// of a connection (`dist.c:2224-2275`). The receiver adds the link on
+    /// the connection unless it has a link to the pid; the cost is 0
+    /// (`erl_proc_sig_queue.c:6635-6663`). At exit it answers with `EXIT`
+    /// and the reason `noproc` on the same connection
+    /// (`erl_proc_sig_queue.c:7363-7368`; `erl_process.c:14101-14147`).
+    DistLink {
+        /// The pid of the other node that linked.
+        from: RemotePid,
+        /// The id of the connection that the packet came on.
+        connection: u32,
+    },
+    /// `ERTS_SIG_Q_OP_UNLINK` from a pid of another node: the `UNLINK_ID`
+    /// packet (`dist.c:2284-2313`). The receiver removes an active link for
+    /// 8 and answers with `UNLINK_ID_ACK` on the same connection for 1
+    /// (`erl_proc_sig_queue.c:6672-6697`). At exit it also answers
+    /// (`erl_proc_sig_queue.c:7369-7371`).
+    DistUnlink {
+        /// The pid of the other node that unlinked.
+        from: RemotePid,
+        /// The unlink identifier of the other node.
+        id: u64,
+        /// The id of the connection that the packet came on.
+        connection: u32,
+    },
+    /// `ERTS_SIG_Q_OP_UNLINK_ACK` from a pid of another node: the
+    /// `UNLINK_ID_ACK` packet (`dist.c:2315-2339`). The receiver removes its
+    /// unlinking link with the same identifier for 8
+    /// (`erl_proc_sig_queue.c:6739-6757`). At exit it is dropped.
+    DistUnlinkAck {
+        /// The pid of the other node that handled the unlink.
+        from: RemotePid,
+        /// The identifier of the unlink.
         id: u64,
     },
     /// `ERTS_SIG_Q_OP_MONITOR`: the watcher monitors the receiver. The
@@ -366,6 +401,16 @@ impl Signal {
                 pending.push(std::mem::replace(message, Term::Nil));
             }
             Signal::Link { from: _ }
+            | Signal::DistLink {
+                from: _,
+                connection: _,
+            }
+            | Signal::DistUnlink {
+                from: _,
+                id: _,
+                connection: _,
+            }
+            | Signal::DistUnlinkAck { from: _, id: _ }
             | Signal::Unlink { from: _, id: _ }
             | Signal::UnlinkAck { from: _, id: _ }
             | Signal::Monitor {

@@ -1,6 +1,6 @@
 use super::{
-    CONTEXT_REDS, ChildLink, ExitPhase, LinkId, MonitorOptions, MonitorTarget, RELEASE_BATCH,
-    RELEASE_CHUNK, Release, Scheduler, StartFlags, Turn,
+    CONTEXT_REDS, ChildLink, ExitPhase, LinkId, LinkState, MonitorOptions, MonitorTarget,
+    RELEASE_BATCH, RELEASE_CHUNK, Release, Scheduler, StartFlags, Turn,
     node::{Node, ReceiverSite},
     poll,
     ports::EndOfFile,
@@ -332,7 +332,7 @@ fn links_and_unlinks_processes_and_ignores_normal_exit_without_trap_exit() {
         .current_process_mut()
         .links
         .get(&LinkId::Process(child));
-    assert!(unlinking.is_some_and(|&id| id != 0));
+    assert!(unlinking.is_some_and(|state| !state.is_active()));
     scheduler.unlink(child);
     scheduler.unlink(ProcessId(99));
     scheduler.unlink(ProcessId(0));
@@ -342,7 +342,7 @@ fn links_and_unlinks_processes_and_ignores_normal_exit_without_trap_exit() {
             .current_process_mut()
             .links
             .get(&LinkId::Process(child)),
-        Some(&0)
+        Some(&LinkState::ACTIVE)
     );
     scheduler.park_current();
 
@@ -353,7 +353,7 @@ fn links_and_unlinks_processes_and_ignores_normal_exit_without_trap_exit() {
             .current_process_mut()
             .links
             .get(&LinkId::Process(ProcessId(0))),
-        Some(&0)
+        Some(&LinkState::ACTIVE)
     );
     scheduler.finish_current(atom("normal"), None).unwrap();
 
@@ -2084,7 +2084,7 @@ fn drops_the_link_exit_signal_of_a_process_that_the_port_does_not_link() {
         .handle_signals(child, 100, 100, HandlingPoint::ScheduleIn)
         .unwrap();
     let links = &scheduler.processes[&child].links;
-    assert_eq!(links.get(&LinkId::Port(port)), Some(&0));
+    assert_eq!(links.get(&LinkId::Port(port)), Some(&LinkState::ACTIVE));
     let killed = Term::static_atom("killed");
     scheduler.port_link_exit(port, child, &killed);
     assert!(scheduler.node.ports().get(port).is_some());
@@ -2155,12 +2155,13 @@ fn a_signal_to_a_dead_process_answers_an_unlink() {
     let root = ProcessId(0);
     let target = ProcessId(99);
     let link = LinkId::Process(target);
-    scheduler
-        .processes
-        .get_mut(root)
-        .unwrap()
-        .links
-        .insert(link, 7);
+    scheduler.processes.get_mut(root).unwrap().links.insert(
+        link,
+        LinkState {
+            unlinking: 7,
+            connection: 0,
+        },
+    );
     scheduler.dead_target_signal(target, &Signal::Unlink { from: root, id: 7 });
     scheduler
         .handle_signals(root, 100, 100, HandlingPoint::ScheduleIn)

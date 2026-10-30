@@ -56,10 +56,24 @@ impl TreeKey for LinkId {
     /// assert_eq!(pid.compare(LinkId::Port(PortId(2))), Ordering::Less);
     /// assert_eq!(pid.compare(LinkId::Port(PortId(1))), Ordering::Greater);
     /// ```
+    ///
+    /// A pid of another node is a boxed term, which comes after each
+    /// immediate term (`erl_monitor_link.c:138-139`, `186-187`). Two of
+    /// them compare the atom words of their node names, then the
+    /// creations, then the pid data with `sys_memcmp`
+    /// (`erl_monitor_link.c:216-230`): the bytes of `data.pid.num` and
+    /// then of `data.pid.ser` in little-endian memory order
+    /// (`erl_term.h:1143-1147`).
     fn compare(self, other: Self) -> Ordering {
         let word = |id| match id {
-            LinkId::Process(ProcessId(number)) => (number, 0x3),
-            LinkId::Port(PortId(number)) => (number, 0x7),
+            LinkId::Process(ProcessId(number)) => (0, (number, 0x3), [0; 8]),
+            LinkId::Port(PortId(number)) => (0, (number, 0x7), [0; 8]),
+            LinkId::Remote(pid) => {
+                let mut data = [0; 8];
+                data[..4].copy_from_slice(&pid.number.to_le_bytes());
+                data[4..].copy_from_slice(&pid.serial.to_le_bytes());
+                (1, (u64::from(pid.node), pid.creation), data)
+            }
         };
         word(self).cmp(&word(other))
     }

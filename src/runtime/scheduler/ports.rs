@@ -9,7 +9,7 @@
 //! the pipes of the ports only when no process can run (see
 //! [`Scheduler::wait_input`]).
 
-use super::{LinkId, Scheduler, tcp_inet::StopNotice};
+use super::{LinkId, LinkState, Scheduler, tcp_inet::StopNotice};
 use crate::{
     error::{BeamError, error},
     runtime::{
@@ -111,7 +111,7 @@ impl Scheduler {
         // (io.c:837-844).
         match self.process_mut(owner) {
             Some(process) => {
-                process.links.insert(LinkId::Port(id), 0);
+                process.links.insert(LinkId::Port(id), LinkState::ACTIVE);
             }
             None => {
                 let _ = self.send_signal(None, owner, Signal::PortLink { port: id });
@@ -551,12 +551,16 @@ impl Scheduler {
                 normal_kills: false,
                 alias: None,
             };
-            self.current_process_mut().links.insert(LinkId::Port(id), 0);
+            self.current_process_mut()
+                .links
+                .insert(LinkId::Port(id), LinkState::ACTIVE);
             self.send_signal(None, current, exit)
                 .expect("the current process gets the exit signal");
             return true;
         }
-        self.current_process_mut().links.insert(LinkId::Port(id), 0);
+        self.current_process_mut()
+            .links
+            .insert(LinkId::Port(id), LinkState::ACTIVE);
         true
     }
 
@@ -572,7 +576,7 @@ impl Scheduler {
     /// ```
     pub(in crate::runtime) fn unlink_port(&mut self, id: PortId) {
         let current = self.current_process_mut().id;
-        if self.current_process_mut().links.get(&LinkId::Port(id)) != Some(&0) {
+        if self.current_process_mut().links.get(&LinkId::Port(id)) != Some(&LinkState::ACTIVE) {
             return;
         }
         self.current_process_mut().links.remove(&LinkId::Port(id));

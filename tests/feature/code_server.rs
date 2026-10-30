@@ -1413,17 +1413,13 @@ fn encodes_and_decodes_the_pids_ports_and_references_as_pinned_erts() {
 
 #[test]
 fn stops_with_a_runtime_error_for_each_signal_to_another_node() {
-    // A link, a monitor, and a group leader of a pid of another node need
-    // a connection (bif.c:263-300, 811-830, 4942-4964); a monitor
+    // A monitor and a group leader of a pid of another node need a
+    // connection (bif.c:811-830, 4942-4964); a monitor
     // of an old incarnation of the local node and a group leader of another
     // node need state that PBeam does not keep (bif.c:811-825, 925-935,
     // 4935); a send to an old incarnation of the local node logs an error
     // report (bif.c:2489-2503).
     for (function, expected) in [
-        (
-            "link",
-            "unsupported erlang:link/1 with a pid of another node",
-        ),
         (
             "monitor",
             "unsupported erlang:monitor/2,3 with a pid of another node",

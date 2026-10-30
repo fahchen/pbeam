@@ -26,8 +26,9 @@ use super::{
     nif::abi,
     pcre2::{self, Code, Deserialized},
     process::{
-        DirtyCall, Flush, Frame, LinkId, Monitor, MonitorLinkTree, Origin, OriginMonitor, Priority,
-        ProcessState, ReceiveTimer, StackSlot, Start, StartFlags, TargetMonitor, WalkPosition,
+        DirtyCall, Flush, Frame, LinkId, LinkState, Monitor, MonitorLinkTree, Origin,
+        OriginMonitor, Priority, ProcessState, ReceiveTimer, StackSlot, Start, StartFlags,
+        TargetMonitor, WalkPosition,
     },
     regex_code::{RegexCodes, RegexSources},
     resources::lock,
@@ -339,6 +340,10 @@ enum ExitPhase {
     TargetMonitors(usize),
     /// The signals in the queue of the process.
     Signals,
+    /// The links to other nodes whose link exit signal has a reason that
+    /// is not immediate, in post-order (`ERTS_CONTINUE_EXIT_DIST_LINKS`,
+    /// `erl_process.c:14640-14656`).
+    DistLinks(Option<WalkPosition>),
 }
 
 /// A scheduler on one OS thread. A process runs until it waits, exits, or
@@ -1181,7 +1186,7 @@ impl Scheduler {
             });
         };
         if let Some((process, phase)) = self.freed.remove(&id) {
-            self.exit_links(process, phase, CONTEXT_REDS);
+            self.exit_links(process, phase, CONTEXT_REDS)?;
             return Ok(Turn::Done);
         }
         if self.processes[&id].dirty_running() {
@@ -3222,8 +3227,10 @@ impl Scheduler {
         if link == ChildLink::Linked {
             self.current_process_mut()
                 .links
-                .insert(LinkId::Process(child.id), 0);
-            child.links.insert(LinkId::Process(parent), 0);
+                .insert(LinkId::Process(child.id), LinkState::ACTIVE);
+            child
+                .links
+                .insert(LinkId::Process(parent), LinkState::ACTIVE);
         }
         let id = child.id;
         self.insert(child);
@@ -3345,7 +3352,12 @@ impl Scheduler {
             return false;
         }
         let linked = LinkId::Process(target);
-        if self.current_process_mut().links.insert(linked, 0) == Some(0) {
+        if self
+            .current_process_mut()
+            .links
+            .insert(linked, LinkState::ACTIVE)
+            == Some(LinkState::ACTIVE)
+        {
             return true;
         }
         let link = Signal::Link { from: current };
@@ -3381,13 +3393,19 @@ impl Scheduler {
     pub(super) fn unlink(&mut self, target: ProcessId) {
         let current = self.current_process_mut().id;
         let link = LinkId::Process(target);
-        if self.current_process_mut().links.get(&link) != Some(&0) {
+        if self.current_process_mut().links.get(&link) != Some(&LinkState::ACTIVE) {
             return;
         }
         let id = self.node.next_unlink_id();
         let unlink = Signal::Unlink { from: current, id };
         if self.send_signal(Some(current), target, unlink).is_ok() {
-            self.current_process_mut().links.insert(link, id);
+            self.current_process_mut().links.insert(
+                link,
+                LinkState {
+                    unlinking: id,
+                    connection: 0,
+                },
+            );
         } else {
             self.current_process_mut().links.remove(&link);
         }
@@ -4057,8 +4075,7 @@ impl Scheduler {
             self.switch_out_freed(process, ExitPhase::Links(None));
             return Ok(());
         }
-        self.exit_links(process, ExitPhase::Links(None), reds);
-        Ok(())
+        self.exit_links(process, ExitPhase::Links(None), reds)
     }
 
     /// Switch out the freed process `process`, whose exit continues at
@@ -4121,7 +4138,12 @@ impl Scheduler {
         clippy::too_many_lines,
         reason = "mirrors the exit phases of `erts_continue_exit_process` in `erl_process.c`: one arm for each phase of the state machine, and each arm yields with the position of its walk"
     )]
-    fn exit_links(&mut self, mut process: ProcessState, mut phase: ExitPhase, mut reds: i32) {
+    fn exit_links(
+        &mut self,
+        mut process: ProcessState,
+        mut phase: ExitPhase,
+        mut reds: i32,
+    ) -> Result<(), BeamError> {
         let id = process.id;
         let reason = process
             .exiting
@@ -4141,10 +4163,10 @@ impl Scheduler {
                         };
                         if reds <= 0 {
                             self.switch_out_freed(process, ExitPhase::Links(position));
-                            return;
+                            return Ok(());
                         }
                         match linked {
-                            LinkId::Process(linked) if unlinking == 0 => {
+                            LinkId::Process(linked) if unlinking.is_active() => {
                                 let exit = Signal::Exit {
                                     from: LinkId::Process(id),
                                     reason: reason.clone(),
@@ -4156,7 +4178,18 @@ impl Scheduler {
                                 // the signal.
                                 let _ = self.send_signal(Some(id), linked, exit);
                             }
-                            LinkId::Process(_) => {}
+                            // An immediate reason goes now, and another
+                            // reason after the signals of the process
+                            // (`erl_process.c:14115-14145`).
+                            LinkId::Remote(remote) if unlinking.is_active() => {
+                                if signals::is_immediate(&reason) {
+                                    let connection = unlinking.connection;
+                                    self.dist_link_exit(id, remote, connection, &reason)?;
+                                } else {
+                                    process.dist_links.insert(linked, unlinking);
+                                }
+                            }
+                            LinkId::Process(_) | LinkId::Remote(_) => {}
                             LinkId::Port(port) => self.port_link_exit(port, id, &reason),
                         }
                         reds -= 1;
@@ -4175,7 +4208,7 @@ impl Scheduler {
                         };
                         if reds <= 0 {
                             self.switch_out_freed(process, ExitPhase::Monitors(position));
-                            return;
+                            return Ok(());
                         }
                         if let Some(OriginMonitor {
                             kind: "process",
@@ -4205,7 +4238,7 @@ impl Scheduler {
                     while let Some(&monitor) = process.monitored_by.get(done) {
                         if reds <= 0 {
                             self.switch_out_freed(process, ExitPhase::TargetMonitors(done));
-                            return;
+                            return Ok(());
                         }
                         match monitor {
                             TargetMonitor::Process(monitor) => self.send_monitor_down(
@@ -4238,7 +4271,28 @@ impl Scheduler {
                 ExitPhase::Signals => {
                     if !self.handle_exit_signals(&mut process, reds) {
                         self.switch_out_freed(process, ExitPhase::Signals);
-                        return;
+                        return Ok(());
+                    }
+                    ExitPhase::DistLinks(None)
+                }
+                ExitPhase::DistLinks(position) => {
+                    let mut walk = match position {
+                        Some(position) => process.dist_links.post_order_from(position),
+                        None => process.dist_links.post_order(),
+                    };
+                    loop {
+                        let position = walk.position();
+                        let Some((&linked, &state)) = walk.next() else {
+                            break;
+                        };
+                        if reds <= 0 {
+                            self.switch_out_freed(process, ExitPhase::DistLinks(position));
+                            return Ok(());
+                        }
+                        if let LinkId::Remote(remote) = linked {
+                            self.dist_link_exit(id, remote, state.connection, &reason)?;
+                        }
+                        reds -= 1;
                     }
                     break;
                 }
@@ -4255,6 +4309,7 @@ impl Scheduler {
         // again. Its terms go to the release work list, so that the walk of a
         // large graph runs in bounded scheduler work and not in this step.
         self.release_process(process);
+        Ok(())
     }
 }
 
@@ -4274,6 +4329,7 @@ fn named_item(name: &Atom, atoms: &AtomTable) -> Term {
 
 mod code;
 mod dist_input;
+mod dist_link;
 pub(super) mod dist_output;
 pub(super) mod dist_table;
 mod known_nodes;

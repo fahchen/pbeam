@@ -4,7 +4,7 @@ mod tree;
 pub(super) use dictionary::Dictionary;
 pub(super) use tree::{MonitorLinkTree, TimerReference, WalkPosition};
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use super::{
     capability::SecurityContext,
@@ -17,7 +17,10 @@ use super::{
 use crate::{
     beam::{ModuleId, NameId},
     error::{BeamError, error},
-    term::{Atom, LiveBytes, PortId, ProcessId, Reference, Term},
+    term::{
+        Atom, LiveBytes, PortId, ProcessId, Reference, Term,
+        external_id::{ExternalData, ExternalId},
+    },
 };
 
 /// The other end of a link: a process or a port, as the `other.item` of an
@@ -30,6 +33,66 @@ pub(super) enum LinkId {
     Process(ProcessId),
     /// A local port.
     Port(PortId),
+    /// A pid of another node (`ERTS_LNK_TYPE_DIST_PROC`).
+    Remote(RemotePid),
+}
+
+/// A pid of another node as `Copy` data, so that a link tree key stays
+/// `Copy`: the atom-table index of the node name, the creation, and the pid
+/// data (`data.pid`, `erl_term.h:1143-1147`). [`RemotePid::term`] builds
+/// the pid again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct RemotePid {
+    /// The atom-table index of the node name.
+    pub(super) node: u32,
+    /// The creation of the node incarnation.
+    pub(super) creation: u32,
+    /// The process number (`data.pid.num`).
+    pub(super) number: u32,
+    /// The serial (`data.pid.ser`).
+    pub(super) serial: u32,
+}
+
+impl RemotePid {
+    /// Return the pid `pid` of another node, or `None` for another term.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let remote = RemotePid::of(&pid).unwrap();
+    /// assert_eq!(remote.term(), pid);
+    /// ```
+    pub(super) fn of(pid: &Term) -> Option<RemotePid> {
+        let Term::External(id) = pid else {
+            return None;
+        };
+        let ExternalData::Pid { number, serial } = id.data else {
+            return None;
+        };
+        Some(RemotePid {
+            node: id.node.index(),
+            creation: id.creation,
+            number,
+            serial,
+        })
+    }
+
+    /// Return the name of the node of the pid.
+    pub(super) fn node(self) -> Atom {
+        Atom::from_index(self.node)
+    }
+
+    /// Return the pid term.
+    pub(super) fn term(self) -> Term {
+        Term::External(Arc::new(ExternalId {
+            node: self.node(),
+            creation: self.creation,
+            data: ExternalData::Pid {
+                number: self.number,
+                serial: self.serial,
+            },
+        }))
+    }
 }
 
 impl LinkId {
@@ -46,7 +109,41 @@ impl LinkId {
         match self {
             LinkId::Process(id) => Term::Pid(id),
             LinkId::Port(id) => Term::Port(id),
+            LinkId::Remote(pid) => pid.term(),
         }
+    }
+}
+
+/// The state of a link in the link tree of a process: the identifier of
+/// an unlink that waits for its acknowledgment, or 0 for an active link
+/// (`ErtsILink.unlinking`, `ErtsELink.unlinking`), and for a link to a pid
+/// of another node the id of the connection that the link uses
+/// (`ErtsELink.dist->connection_id`, `erl_monitor_link.h`). A local link
+/// has the connection 0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct LinkState {
+    /// The unlink identifier, or 0 for an active link.
+    pub(super) unlinking: u64,
+    /// The connection id of a link to another node.
+    pub(super) connection: u32,
+}
+
+impl LinkState {
+    /// An active local link.
+    pub(super) const ACTIVE: LinkState = LinkState {
+        unlinking: 0,
+        connection: 0,
+    };
+
+    /// Return whether the link is active, not unlinking.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(LinkState::ACTIVE.is_active());
+    /// ```
+    pub(super) fn is_active(self) -> bool {
+        self.unlinking == 0
     }
 }
 
@@ -397,7 +494,13 @@ pub(super) struct ProcessState {
     /// acknowledgment, or 0 for an active link (`ErtsILink.unlinking`). A
     /// link that is unlinking sends no exit signal
     /// (`erl_process.c:14068-14081`).
-    pub(super) links: MonitorLinkTree<LinkId, u64>,
+    pub(super) links: MonitorLinkTree<LinkId, LinkState>,
+    /// The links to pids of other nodes whose link exit signal waits for
+    /// the end of the signal phase of the exit, because its reason is not
+    /// immediate (`ctxt->dist_links`, `erl_process.c:14142-14145`). The
+    /// exit inserts them in the walk order of `links`, so the walk of this
+    /// tree gives the ERTS order. Empty before the exit.
+    pub(super) dist_links: MonitorLinkTree<LinkId, LinkState>,
     /// The monitor tree: the monitors that this process holds and its
     /// aliases, by reference (`ERTS_P_MONITORS`).
     pub(super) monitors: MonitorLinkTree<Reference, Origin>,
@@ -721,6 +824,7 @@ impl ProcessState {
             node_monitors: BTreeMap::new(),
             priority: Priority::Normal,
             links: MonitorLinkTree::default(),
+            dist_links: MonitorLinkTree::default(),
             monitors: MonitorLinkTree::default(),
             monitored_by: Vec::new(),
             group_leader: id,
@@ -972,6 +1076,7 @@ impl ProcessState {
             + self.monitored_by.capacity() * std::mem::size_of::<TargetMonitor>()
             + self.mailbox.allocated_bytes()
             + self.links.allocated_bytes()
+            + self.dist_links.allocated_bytes()
             + self.monitors.allocated_bytes()
             + self.bif_timers.allocated_bytes();
         for frame in &self.frames {

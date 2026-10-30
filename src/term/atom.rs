@@ -132,6 +132,20 @@ impl Atom {
         self.index
     }
 
+    /// Return the atom at `index`, an index that [`Atom::index`] gave for
+    /// an atom of the same table. The table never removes an atom, so the
+    /// index stays valid.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let ok = Atom::from_static("ok").unwrap();
+    /// assert_eq!(Atom::from_index(ok.index()), ok);
+    /// ```
+    pub(crate) fn from_index(index: u32) -> Atom {
+        Atom { index }
+    }
+
     /// Return a static atom without a table. A static atom has the same
     /// index in every atom table. Return `None` for a name that is not
     /// static.

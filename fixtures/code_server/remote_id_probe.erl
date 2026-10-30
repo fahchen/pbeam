@@ -1,6 +1,6 @@
 -module(remote_id_probe).
 -compile({nowarn_deprecated_function, [{erlang, phash, 2}]}).
--export([main/0, external/0, link/0, monitor/0, old_monitor/0, old_process_monitor/0, group_leader/0,
+-export([main/0, external/0, monitor/0, old_monitor/0, old_process_monitor/0, group_leader/0,
          group_leader_leader/0, old_send/0, other_scheduler/0]).
 
 %% Decode the pids, ports, and references of another node with
@@ -193,7 +193,6 @@ text(I) -> ref_to_list(I).
 
 remote() -> hd(ids()).
 
-link() -> erlang:link(remote()).
 monitor() -> erlang:monitor(process, remote()).
 old_monitor() -> erlang:monitor(port, binary_to_term(<<131, 89, 100, 13:16, "nonode@nohost", 8:32, 7:32>>)).
 old_process_monitor() -> erlang:monitor(process, lists:last(ids())).

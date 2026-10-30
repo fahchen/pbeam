@@ -8,7 +8,7 @@
 //! the one place that applies a signal to its receiver.
 
 use super::{
-    Files, Flush, LinkId, Monitor, ProcessState, RECEIVE_FETCH_REDUCTIONS, Release,
+    Files, Flush, LinkId, LinkState, Monitor, ProcessState, RECEIVE_FETCH_REDUCTIONS, Release,
     SIGNAL_HANDLING_REDUCTIONS, Scheduler, TargetMonitor, check_process_code_reply, lock,
 };
 use crate::{
@@ -316,6 +316,16 @@ impl Scheduler {
                     alias: None,
                 };
                 let _ = self.send_signal(None, from, exit);
+            }
+            Signal::DistLink { from, connection } => {
+                self.dist_link_noproc(target, from, connection);
+            }
+            Signal::DistUnlink {
+                from,
+                id,
+                connection,
+            } => {
+                self.dist_unlink_reply(target, from, id, connection);
             }
             // The target answered an unlink at its exit
             // (`erl_proc_sig_queue.c:7369-7386`), so the sender can remove
@@ -671,14 +681,15 @@ impl Scheduler {
                 let links = &mut self.handled(id, node).links;
                 let from = LinkId::Process(from);
                 if links.get(&from).is_none() {
-                    links.insert(from, 0);
+                    links.insert(from, LinkState::ACTIVE);
                 }
                 0
             }
             Signal::Unlink { from, id: unlink } => {
                 let links = &mut self.handled(id, node).links;
                 let link = LinkId::Process(from);
-                let removed = links.get(&link) == Some(&0) && links.remove(&link).is_some();
+                let removed =
+                    links.get(&link) == Some(&LinkState::ACTIVE) && links.remove(&link).is_some();
                 let ack = Signal::UnlinkAck {
                     from: id,
                     id: unlink,
@@ -690,8 +701,46 @@ impl Scheduler {
             Signal::UnlinkAck { from, id: unlink } => {
                 let links = &mut self.handled(id, node).links;
                 let from = LinkId::Process(from);
-                let removed = links.get(&from) == Some(&unlink) && links.remove(&from).is_some();
+                let removed = links
+                    .get(&from)
+                    .is_some_and(|state| state.unlinking == unlink)
+                    && links.remove(&from).is_some();
                 4 * i32::from(removed)
+            }
+            Signal::DistLink { from, connection } => {
+                let links = &mut self.handled(id, node).links;
+                let from = LinkId::Remote(from);
+                if links.get(&from).is_none() {
+                    links.insert(
+                        from,
+                        LinkState {
+                            unlinking: 0,
+                            connection,
+                        },
+                    );
+                }
+                0
+            }
+            Signal::DistUnlink {
+                from,
+                id: unlink,
+                connection,
+            } => {
+                let links = &mut self.handled(id, node).links;
+                let link = LinkId::Remote(from);
+                let removed = links.get(&link).is_some_and(|state| state.is_active())
+                    && links.remove(&link).is_some();
+                self.dist_unlink_reply(id, from, unlink, connection);
+                8 * i32::from(removed) + 1
+            }
+            Signal::DistUnlinkAck { from, id: unlink } => {
+                let links = &mut self.handled(id, node).links;
+                let link = LinkId::Remote(from);
+                let removed = links
+                    .get(&link)
+                    .is_some_and(|state| state.unlinking == unlink)
+                    && links.remove(&link).is_some();
+                8 * i32::from(removed)
             }
             Signal::Monitor { watcher, reference } => {
                 let monitor = TargetMonitor::Process(Monitor { watcher, reference });
@@ -738,14 +787,15 @@ impl Scheduler {
             Signal::PortLink { port } => {
                 let links = &mut self.handled(id, node).links;
                 if links.get(&LinkId::Port(port)).is_none() {
-                    links.insert(LinkId::Port(port), 0);
+                    links.insert(LinkId::Port(port), LinkState::ACTIVE);
                 }
                 0
             }
             Signal::PortUnlink { port } => {
                 let links = &mut self.handled(id, node).links;
                 let link = LinkId::Port(port);
-                let removed = links.get(&link) == Some(&0) && links.remove(&link).is_some();
+                let removed =
+                    links.get(&link) == Some(&LinkState::ACTIVE) && links.remove(&link).is_some();
                 4 * i32::from(removed)
             }
             Signal::PortMonitor { port, reference } => {
@@ -841,7 +891,7 @@ impl Scheduler {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.handled(id, node).links.insert(from, 0);
+    /// scheduler.handled(id, node).links.insert(from, LinkState::ACTIVE);
     /// ```
     fn handled(&mut self, id: ProcessId, node: NodeId) -> &mut ProcessState {
         let process = self.processes.get_mut(id).expect("the process is alive");
@@ -895,7 +945,12 @@ impl Scheduler {
                 .monitors
                 .get(&alias)
                 .is_some_and(|origin| origin.alias.is_some()),
-            None => link.is_none_or(|link| process.links.remove(&link) == Some(0)),
+            None => link.is_none_or(|link| {
+                process
+                    .links
+                    .remove(&link)
+                    .is_some_and(LinkState::is_active)
+            }),
         };
         let kill = !linked && reason == Term::static_atom("kill");
         if active && !kill && process.trap_exit {
@@ -1025,6 +1080,10 @@ impl Scheduler {
     /// ```rust,ignore
     /// assert!(scheduler.handle_exit_signals(&mut process, 3850));
     /// ```
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm for each signal type, as `erts_proc_sig_handle_exit` in `erl_proc_sig_queue.c` has one case for each signal"
+    )]
     pub(in crate::runtime) fn handle_exit_signals(
         &mut self,
         process: &mut ProcessState,
@@ -1099,6 +1158,10 @@ impl Scheduler {
                 }
                 Signal::PortLink { port } => {
                     self.port_link_exit(port, id, &Term::static_atom("noproc"));
+                }
+                // The answers are the answers of a process that is gone.
+                signal @ (Signal::DistLink { .. } | Signal::DistUnlink { .. }) => {
+                    self.dead_target_signal(id, &signal);
                 }
                 Signal::GroupLeader {
                     requester,
@@ -1315,7 +1378,7 @@ fn reply(reference: Reference, result: Term) -> Term {
 /// assert!(is_immediate(&Term::static_atom("normal")));
 /// assert!(!is_immediate(&Term::tuple(vec![])));
 /// ```
-fn is_immediate(term: &Term) -> bool {
+pub(super) fn is_immediate(term: &Term) -> bool {
     match term {
         Term::Atom(_) | Term::Pid(_) => true,
         _ => term.is_nil() || term.small_integer().is_some(),

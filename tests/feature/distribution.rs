@@ -164,6 +164,27 @@ fn runs_the_bifs_of_a_process_controller_as_pinned_erts() {
     let erts = stdout(&erts_erl(&epmd, &exit_input));
     assert!(erts.contains("[ok,{down,killed}]"), "{erts}");
     assert_eq!(stdout(&pbeam_erl(&epmd, &exit_input)), erts);
+    // LINK, UNLINK_ID, UNLINK_ID_ACK, EXIT, and PAYLOAD_EXIT packets link
+    // local processes to a pid of the node, and local processes send them
+    // (bif.c:263-394, 1295-1348, dist.c:2224-2339, 2745-2805).
+    let link_input = probe(
+        &["-sname", &name],
+        "dist_channel_probe:link_input(), halt().",
+    );
+    let erts = stdout(&erts_erl(&epmd, &link_input));
+    assert!(
+        erts.contains("[[[from],[{'EXIT',from,boom},alive],[]],"),
+        "{erts}"
+    );
+    assert_eq!(stdout(&pbeam_erl(&epmd, &link_input)), erts);
+    // A node that is not alive has no connection (bif.c:323-340).
+    let noconnection = probe(&[], "dist_channel_probe:link_noconnection(), halt().");
+    let erts = stdout(&erts_erl(&epmd, &noconnection));
+    assert_eq!(
+        erts,
+        "noconnection: [true,noconnection,true,{links,[<0.0.0>]}]\n"
+    );
+    assert_eq!(stdout(&pbeam_erl(&epmd, &noconnection)), erts);
     let exit = probe(&[], "dist_channel_probe:net_kernel_exit(), halt().");
     let erts = stdout(&erts_erl(&epmd, &exit));
     assert!(
@@ -251,19 +272,24 @@ fn stops_at_a_part_of_a_channel_that_pbeam_does_not_have() {
         ("message()".to_owned(), rejected),
         ("port_message()".to_owned(), rejected),
         (
-            "trace_token()".to_owned(),
-            "unsupported distribution message with a trace token",
-        ),
-        (
-            "link_op()".to_owned(),
-            "unsupported distribution operation 1",
+            "monitor_op()".to_owned(),
+            "unsupported distribution operation 19",
         ),
         ("deliver_port()".to_owned(), deliver),
         ("deliver_udp()".to_owned(), deliver),
     ];
+    cases.extend([12, 13, 25].map(|op| {
+        (
+            format!("trace_token({op})"),
+            "unsupported distribution message with a trace token",
+        )
+    }));
     cases.extend(
-        [1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15]
-            .map(|n| (format!("reject({n})"), rejected)),
+        [
+            1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
+            26,
+        ]
+        .map(|n| (format!("reject({n})"), rejected)),
     );
     cases.push((
         "atom_cache()".to_owned(),
@@ -591,6 +617,53 @@ fn sends_messages_to_an_alias_between_erts_and_pbeam_nodes() {
             stdout(&pbeam_erl(&epmd, &client(&pbeam_name, &pbeam))),
             replied
         );
+    }
+}
+
+#[test]
+fn links_processes_between_erts_and_pbeam_nodes() {
+    // A client process links to a server process and the server process
+    // links to a client process, with and without trap_exit, and the
+    // linked process exits with normal, kill, or a reason that is not
+    // immediate (bif.c:263-394, dist.c:2224-2275, 2745-2805,
+    // erl_process.c:14101-14147, 13981-14040); an unlink sends UNLINK_ID
+    // and UNLINK_ID_ACK (bif.c:1295-1348, dist.c:2284-2339). Each pair of
+    // ERTS and PBeam nodes runs over the prim_socket carrier and over the
+    // tcp_inet port controller.
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let expected = "[{to,false,normal,alive},\n {to,false,kill,{down,kill}},\n \
+                    {to,false,{boom},{down,{boom}}},\n {to,true,normal,{'EXIT',normal}},\n \
+                    {to,true,kill,{'EXIT',kill}},\n {to,true,{boom},{'EXIT',{boom}}},\n \
+                    {from,false,normal,alive},\n {from,false,kill,{down,kill}},\n \
+                    {from,false,{boom},{down,{boom}}},\n {from,true,normal,{'EXIT',normal}},\n \
+                    {from,true,kill,{'EXIT',kill}},\n {from,true,{boom},{'EXIT',{boom}}},\n \
+                    {unlink_to,boom,[]},\n {unlink_from,[],boom,alive}]\n";
+    for (server_pbeam, socket) in [(false, true), (false, false), (true, true), (true, false)] {
+        let name = format!("dlsrv{server_pbeam}{socket}{id}");
+        let mut arguments = vec!["-sname", &name, "-setcookie", "ck", "-pa", "fixtures/dist"];
+        if socket {
+            arguments.extend(SOCKET_CARRIER);
+        }
+        let server = "dist_link_probe:server().";
+        let node = if server_pbeam {
+            pbeam_node(&epmd, &arguments, server)
+        } else {
+            ErtsNode::start(&epmd, &arguments, server)
+        };
+        let expression = format!("dist_link_probe:client('{}'), halt().", node.line());
+        let client = |name: &str| {
+            let mut arguments = vec!["-sname", name, "-setcookie", "ck", "-hidden"];
+            if socket {
+                arguments.extend(SOCKET_CARRIER);
+            }
+            arguments.extend(["-noshell", "-pa", "fixtures/dist", "-eval", &expression]);
+            arguments.into_iter().map(str::to_owned).collect::<Vec<_>>()
+        };
+        let erts = format!("dlerts{server_pbeam}{socket}{id}");
+        assert_eq!(stdout(&erts_erl(&epmd, &client(&erts))), expected);
+        let pbeam = format!("dlpb{server_pbeam}{socket}{id}");
+        assert_eq!(stdout(&pbeam_erl(&epmd, &client(&pbeam))), expected);
     }
 }
 

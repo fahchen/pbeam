@@ -30,7 +30,7 @@ const HEADER_FLAGS: u64 = 0x2000 | 0x0080_0000;
 
 /// The runtime error of a packet that ERTS rejects: ERTS logs it and ends
 /// the connection (`dist.c:3144-3165`).
-const REJECTED: &str = "unsupported distribution message that ERTS rejects: ERTS ends the connection: see \"Distribution\" in docs/erts-differences.md";
+pub(super) const REJECTED: &str = "unsupported distribution message that ERTS rejects: ERTS ends the connection: see \"Distribution\" in docs/erts-differences.md";
 
 impl Scheduler {
     /// Give the packet `packet` with data of a connection with the flags
@@ -47,7 +47,9 @@ impl Scheduler {
     /// give the exit signal of a pid of the node `node` of the connection
     /// to a live local process; a process that is not alive and a pid of an
     /// old incarnation of the local node drop it without a decode
-    /// (`dist.c:2806-2870`).
+    /// (`dist.c:2806-2870`). `LINK` (1), `UNLINK_ID` (35),
+    /// `UNLINK_ID_ACK` (36), `EXIT` (3), and `PAYLOAD_EXIT` (24) go to the
+    /// links of the node (see [`super::dist_link`]).
     ///
     /// # Examples
     ///
@@ -126,12 +128,22 @@ impl Scheduler {
             (Some(26), [_, from, to]) => {
                 self.dist_exit_signal(node, from, to, |scheduler| scheduler.dist_message(message))
             }
-            (Some(12 | 16 | 18 | 23 | 27 | 34), _) => Err(error(
+            (Some(1), [_, from, to]) => self.net_link(node, from, to),
+            (Some(35), [_, id, from, to]) => self.net_unlink(node, id, from, to),
+            (Some(36), [_, id, from, to]) => self.net_unlink_ack(node, id, from, to),
+            (Some(3), [_, from, to, reason]) => {
+                self.net_link_exit(node, from, to, |_| Ok(reason.clone()))
+            }
+            (Some(24), [_, from, to]) => {
+                self.net_link_exit(node, from, to, |scheduler| scheduler.dist_message(message))
+            }
+            (Some(12 | 13 | 16 | 18 | 23 | 25 | 27 | 34), _) => Err(error(
                 "unsupported distribution message with a trace token: see \"Distribution\" in docs/erts-differences.md",
             )),
             // ERTS reads the operation as unsigned (`unsigned_val`,
             // dist.c:2223), so a negative one is not valid (dist.c:3131-3132).
-            (Some(2 | 6 | 8 | 22 | 26 | 33) | None, _) => Err(error(REJECTED)),
+            // `UNLINK` (4) is not valid since OTP 26 (dist.c:2277-2282).
+            (Some(1..=4 | 6 | 8 | 22 | 24 | 26 | 33 | 35 | 36) | None, _) => Err(error(REJECTED)),
             (Some(operation), _) if operation < 0 => Err(error(REJECTED)),
             (Some(operation), _) => Err(error(format!(
                 "unsupported distribution operation {operation}: see \"Distribution\" in docs/erts-differences.md"
@@ -184,7 +196,7 @@ impl Scheduler {
     ///
     /// Bytes that ERTS does not decode (see [`REJECTED`]) and a term that
     /// PBeam cannot hold.
-    fn dist_message(&self, bytes: &[u8]) -> Result<Term, BeamError> {
+    pub(super) fn dist_message(&self, bytes: &[u8]) -> Result<Term, BeamError> {
         decode_dist(self, bytes)?
             .map(|(message, _)| message)
             .ok_or_else(|| error(REJECTED))

@@ -1,8 +1,8 @@
 use std::{collections::HashMap, sync::Arc};
 
 use super::{
-    CallKind, Frame, LinkId, Origin, OriginMonitor, PendingBif, ProcessState, ReceiveTimer,
-    StackSlot, Start,
+    CallKind, Frame, LinkId, LinkState, Origin, OriginMonitor, PendingBif, ProcessState,
+    ReceiveTimer, StackSlot, Start,
 };
 use crate::{
     BeamModule,
@@ -263,12 +263,24 @@ fn gives_the_links_of_a_process_as_process_info_2() {
             .unwrap(),
         None
     );
-    process.links.insert(LinkId::Process(ProcessId(1)), 0);
-    process.links.insert(LinkId::Process(ProcessId(2)), 0);
-    process.links.insert(LinkId::Process(ProcessId(3)), 0);
+    process
+        .links
+        .insert(LinkId::Process(ProcessId(1)), LinkState::ACTIVE);
+    process
+        .links
+        .insert(LinkId::Process(ProcessId(2)), LinkState::ACTIVE);
+    process
+        .links
+        .insert(LinkId::Process(ProcessId(3)), LinkState::ACTIVE);
     // A link that waits for its unlink acknowledgment stays out of the
     // result (`collect_one_link`, `erl_bif_info.c:574-585`).
-    process.links.insert(LinkId::Process(ProcessId(4)), 7);
+    process.links.insert(
+        LinkId::Process(ProcessId(4)),
+        LinkState {
+            unlinking: 7,
+            connection: 0,
+        },
+    );
     let value = request
         .item(&process, &Term::static_atom("links"))
         .unwrap()

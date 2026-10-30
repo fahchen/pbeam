@@ -26,7 +26,7 @@ use crate::runtime::interpreter::code_table::{AfterOnLoad, CodeTable, Finish};
 use crate::runtime::local_node;
 use crate::runtime::process::{Flush, Origin, Priority};
 use crate::runtime::process::{InitialCall, OTHER_PROCESS_INFO_ITEMS};
-use crate::runtime::process::{LinkId, ProcessState};
+use crate::runtime::process::{LinkId, ProcessState, RemotePid};
 use crate::runtime::scheduler::PTAB_SIZE;
 use crate::runtime::scheduler::dist_output::SendPriority;
 use crate::runtime::scheduler::dist_table::NodeInfo;
@@ -57,7 +57,7 @@ use crate::term::{
 /// # Examples
 ///
 /// ```rust,ignore
-/// return Err(remote_unsupported("erlang:link/1"));
+/// return Err(remote_unsupported("erlang:monitor/2,3"));
 /// ```
 pub(in crate::runtime::interpreter) fn remote_unsupported(operation: &str) -> BeamError {
     error(format!(
@@ -1400,9 +1400,9 @@ pub(super) fn link(scheduler: &mut Scheduler, target: &Term) -> Result<BifResult
         Term::External(_) if old_incarnation(target, &scheduler.atoms) && !is_reference(target) => {
             None
         }
-        _ if matches!(target, Term::External(_)) && pid_parts(target).is_some() => {
-            return Err(remote_unsupported("erlang:link/1"));
-        }
+        _ if matches!(target, Term::External(_)) && pid_parts(target).is_some() => Some(
+            LinkId::Remote(RemotePid::of(target).expect("a pid of another node")),
+        ),
         _ => return Ok(BifResult::badarg()),
     };
     if let Some(denied) = denial(scheduler, CapabilityKind::Process, Operation::Link, None)? {
@@ -1435,6 +1435,10 @@ pub(super) fn link(scheduler: &mut Scheduler, target: &Term) -> Result<BifResult
             scheduler.link(target)
         }
         LinkId::Port(port) => scheduler.link_port(port),
+        LinkId::Remote(_) => {
+            scheduler.dist_link(target)?;
+            true
+        }
     };
     Ok(if linked {
         Value(Term::static_atom("true"))
@@ -6469,7 +6473,7 @@ fn process_info_values(
             let links: Vec<Term> = process
                 .links
                 .post_order()
-                .filter(|(_, unlinking)| **unlinking == 0)
+                .filter(|(_, unlinking)| unlinking.is_active())
                 .map(|(id, _)| id.term())
                 .collect();
             links.into_iter().rev().collect()
