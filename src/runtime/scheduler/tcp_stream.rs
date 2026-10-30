@@ -419,17 +419,18 @@ impl Scheduler {
     /// A port that is not a distribution controller (see [`DELIVER_PORT`])
     /// and the errors of [`Self::net_message`].
     fn port_data(&mut self, port: PortId, bytes: &[u8]) -> Result<(), BeamError> {
-        {
+        let flags = {
             let mut dist = self.node.dist();
             let Some(name) = dist.controlled_by(Controller::Port(port)) else {
                 return Err(error(DELIVER_PORT));
             };
             dist.count_input(&name);
-        }
+            dist.flags(&name)
+        };
         if bytes.is_empty() {
             return Ok(());
         }
-        self.net_message(bytes)
+        self.net_message(flags, bytes)
     }
 
     /// The status term of a result with no value: `ok`, or the error status

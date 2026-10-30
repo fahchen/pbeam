@@ -198,7 +198,11 @@ fn stops_at_a_part_of_a_channel_that_pbeam_does_not_have() {
         ("deliver_port()".to_owned(), deliver),
         ("deliver_udp()".to_owned(), deliver),
     ];
-    cases.extend((1..=8).map(|n| (format!("reject({n})"), rejected)));
+    cases.extend([1, 2, 3, 4, 5, 6, 7, 8, 10].map(|n| (format!("reject({n})"), rejected)));
+    cases.push((
+        "atom_cache()".to_owned(),
+        "unsupported distribution message on a connection with the atom cache or fragments",
+    ));
     cases.push((
         "reject(9)".to_owned(),
         "unsupported distribution message of a pid reference",

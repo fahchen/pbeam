@@ -4,7 +4,7 @@
 -compile(nowarn_deprecated_catch).
 -export([main/0, net_kernel_exit/0, port_channel/0, no_mandatory/0, message/0,
          port_message/0, deliver_port/0, deliver_udp/0, input/0, reject/1,
-         trace_token/0, link_op/0]).
+         trace_token/0, link_op/0, atom_cache/0]).
 
 main() ->
     %% net_kernel reports the dist_ctrlr message of a connection that it
@@ -279,7 +279,8 @@ reject(N) ->
                  6 -> packet_only({2, '', self(), extra});
                  7 -> <<(packet_only({22, From, self()}))/binary, 131, 97>>;
                  8 -> packet_only({});
-                 9 -> pid_reference_packet()
+                 9 -> pid_reference_packet();
+                 10 -> packet_only({-1, '', self()})
              end,
     erlang:dist_ctrl_put_data(DH, Packet).
 
@@ -291,6 +292,12 @@ pid_reference_packet() ->
     <<Head:Size/binary, N0:32, N1:32, N2:32>> = Rest,
     <<(packet_only({2, '', self()}))/binary,
       131, 90, Head/binary, N0:32, (N1 bor (1 bsl 30)):32, N2:32>>.
+
+%% A packet on a connection with DFLAG_DIST_HDR_ATOM_CACHE.
+atom_cache() ->
+    erts_internal:new_connection(zz@nohost),
+    {ok, DH} = erts_internal:create_dist_channel(zz@nohost, self(), {mandatory() bor 16#2000, 1}),
+    erlang:dist_ctrl_put_data(DH, packet_only({2, '', self()})).
 
 %% A control message with a trace token.
 trace_token() ->

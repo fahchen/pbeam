@@ -646,6 +646,7 @@ pub(super) fn dist_ctrl_put_data(
         return Ok(notsup());
     }
     dist.count_input(&name);
+    let flags = dist.flags(&name);
     if matches!(data, Term::Nil) {
         return Ok(BifResult::Value(Term::static_atom("ok")));
     }
@@ -660,7 +661,7 @@ pub(super) fn dist_ctrl_put_data(
     // dist.c:4672-4680).
     if data.bit_size() != 0 {
         let bytes = data.to_bytes();
-        context.scheduler.net_message(&bytes)?;
+        context.scheduler.net_message(flags, &bytes)?;
     }
     Ok(BifResult::Value(Term::static_atom("ok")))
 }

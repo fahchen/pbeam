@@ -20,12 +20,18 @@ const VERSION_MAGIC: u8 = 131;
 /// (`external.c:956-977`).
 const DIST_HEADERS: [u8; 3] = *b"DEF";
 
+/// `DFLAG_DIST_HDR_ATOM_CACHE` and `DFLAG_FRAGMENTS` (`dist.h:43`, `53`):
+/// with either flag a packet has a distribution header
+/// (`external.c:922-926`, `953-977`).
+const HEADER_FLAGS: u64 = 0x2000 | 0x0080_0000;
+
 /// The runtime error of a packet that ERTS rejects: ERTS logs it and ends
 /// the connection (`dist.c:3144-3165`).
 const REJECTED: &str = "unsupported distribution message that ERTS rejects: ERTS ends the connection: see \"Distribution\" in docs/erts-differences.md";
 
 impl Scheduler {
-    /// Give the packet `packet` with data of a connection to its target, as
+    /// Give the packet `packet` with data of a connection with the flags
+    /// `flags` to its target, as
     /// `erts_net_message` does for `SEND` (2), `SEND_SENDER` (22), and
     /// `REG_SEND` (6) (`dist.c:2463-2553`). The first byte is skipped
     /// (`external.c:922-926`). A message to a pid that is not a live local
@@ -42,10 +48,20 @@ impl Scheduler {
     ///
     /// # Errors
     ///
-    /// A packet that ERTS rejects (see [`REJECTED`]), a control message
+    /// A connection with the atom cache or fragments (see [`HEADER_FLAGS`]),
+    /// a packet that ERTS rejects (see [`REJECTED`]), a control message
     /// with a trace token, another operation, and a term that PBeam cannot
     /// hold.
-    pub(in crate::runtime) fn net_message(&mut self, packet: &[u8]) -> Result<(), BeamError> {
+    pub(in crate::runtime) fn net_message(
+        &mut self,
+        flags: u64,
+        packet: &[u8],
+    ) -> Result<(), BeamError> {
+        if flags & HEADER_FLAGS != 0 {
+            return Err(error(
+                "unsupported distribution message on a connection with the atom cache or fragments: see \"Distribution\" in docs/erts-differences.md",
+            ));
+        }
         let ext = packet.get(1..).unwrap_or_default();
         if ext.len() < 2 || ext[0] != VERSION_MAGIC || DIST_HEADERS.contains(&ext[1]) {
             return Err(error(REJECTED));
@@ -80,7 +96,10 @@ impl Scheduler {
             (Some(12 | 16 | 23 | 34), _) => Err(error(
                 "unsupported distribution message with a trace token: see \"Distribution\" in docs/erts-differences.md",
             )),
+            // ERTS reads the operation as unsigned (`unsigned_val`,
+            // dist.c:2223), so a negative one is not valid (dist.c:3131-3132).
             (Some(2 | 6 | 22) | None, _) => Err(error(REJECTED)),
+            (Some(operation), _) if operation < 0 => Err(error(REJECTED)),
             (Some(operation), _) => Err(error(format!(
                 "unsupported distribution operation {operation}: see \"Distribution\" in docs/erts-differences.md"
             ))),
