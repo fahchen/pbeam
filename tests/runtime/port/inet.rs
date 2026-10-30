@@ -31,7 +31,11 @@ fn trick(
             priority
         },
     );
-    let errno = outcome.err().map(|failure| failure.raw_os_error().unwrap());
+    let errno = outcome.err().map(|failure| {
+        failure
+            .raw_os_error()
+            .expect("an option error has an errno")
+    });
     (errno, sets.into_inner())
 }
 

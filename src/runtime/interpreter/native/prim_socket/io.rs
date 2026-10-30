@@ -771,8 +771,8 @@ fn send_messages(
         })
         .map(|(index, (sent, _))| {
             Term::tuple(vec![
-                Term::Integer(index as i64),
-                Term::Integer(*sent as i64),
+                Term::Integer(to_i64(index)),
+                Term::Integer(to_i64(*sent)),
             ])
         })
         .collect();
@@ -921,7 +921,7 @@ fn receive_messages(
     let control_size = control_buffer_size(&state, control_size);
     state.counters.read_tries += 1;
     let mut received = Vec::new();
-    for _ in 0..(count as usize).min(MMSG_MAX) {
+    for _ in 0..usize::try_from(count).unwrap_or(usize::MAX).min(MMSG_MAX) {
         let mut buffer = vec![0; size];
         let mut control = vec![0; control_size];
         match recv_message(&state, &mut buffer, &mut control, flags) {
@@ -949,10 +949,10 @@ fn receive_messages(
         }
     }
     let counters = &mut state.counters;
-    counters.read_pkg += received.len() as u64;
+    counters.read_pkg += to_u64(received.len());
     for (buffer, ..) in &received {
-        counters.read_byte += buffer.len() as u64;
-        counters.read_pkg_max = counters.read_pkg_max.max(buffer.len() as u64);
+        counters.read_byte += to_u64(buffer.len());
+        counters.read_pkg_max = counters.read_pkg_max.max(to_u64(buffer.len()));
     }
     let mut messages = Vec::new();
     for (buffer, control, from, message_flags) in received {

@@ -1509,7 +1509,7 @@ fn priority(_socket: Option<&Socket>) -> Option<i32> {
 fn priority(socket: Option<&Socket>) -> Option<i32> {
     socket
         .and_then(|socket| socket.priority().ok())
-        .map(|value| value.cast_signed())
+        .map(u32::cast_signed)
 }
 
 impl Inet {
