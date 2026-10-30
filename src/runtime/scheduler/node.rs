@@ -276,6 +276,11 @@ pub(in crate::runtime) struct Node {
     /// the schedulers, as the thread progress block of ERTS does
     /// (`dist.c:5018-5058`).
     net_kernel: Mutex<Option<ProcessId>>,
+    /// The dist entries of the connections of the node (see
+    /// [`super::dist_table`]). ERTS keeps one dist table for the node, and
+    /// a process of any scheduler sets up or uses a connection
+    /// (`erl_node_tables.c:150-371`).
+    dist: Mutex<super::dist_table::DistTable>,
     /// The ETS tables of the node, which each scheduler shares, as ERTS
     /// keeps one table store for the node (`erl_db.c:420-433`).
     pub(super) ets: Arc<NodeTables>,
@@ -377,6 +382,7 @@ impl Node {
                 dirty: Pools::new(count),
                 local_node_hash: OnceLock::new(),
                 net_kernel: Mutex::new(None),
+                dist: Mutex::default(),
                 ets: Arc::default(),
                 code: super::code::NodeCode::default(),
                 atomics: crate::runtime::atomics::AtomicArrays::default(),
@@ -450,22 +456,31 @@ impl Node {
     }
 
     /// Run the cleanup of the exit of the process `id` that ERTS runs for a
-    /// process with `F_DISTRIBUTION` (`erl_process.c:14471-14506`): when
-    /// `id` owns the distribution, give the local node of the run that owns
-    /// `atoms` the name `nonode@nohost` and the creation 0 again, as
-    /// `erts_do_net_exits` and `set_node_not_alive` do for a node with no
-    /// connection (`dist.c:922-1117`, `853-872`). ERTS does the last step in
-    /// the aux work of a scheduler soon after the exit, and PBeam does it in
-    /// the exit. The process must have left the process table, so that a
-    /// later `setnode/2` does not find it.
+    /// process with `F_DISTRIBUTION` (`erl_process.c:14471-14506`), and
+    /// return the distribution controllers that the exit kills.
+    ///
+    /// When `id` owns the distribution, give the local node of the run that
+    /// owns `atoms` the name `nonode@nohost` and the creation 0 again, make
+    /// each pending connection idle, and return the controller of each
+    /// connection, as `erts_do_net_exits` and `set_node_not_alive` do
+    /// (`dist.c:922-1117`, `853-872`). ERTS gives the node its new name in
+    /// the aux work of a scheduler after the exit of the last controller,
+    /// and PBeam does it in the exit. When `id` is the controller of a
+    /// connection, make its dist entry idle (`dist.c:1021-1117`). The
+    /// process must have left the process table, so that a later
+    /// `setnode/2` or `create_dist_channel/3` does not find it.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// node.net_exits(net_kernel, &atoms);
+    /// assert!(node.net_exits(net_kernel, &atoms).is_empty());
     /// assert_eq!(atoms.this_node(), (Atom::from_static("nonode@nohost").unwrap(), 0));
     /// ```
-    pub(in crate::runtime) fn net_exits(&self, id: ProcessId, atoms: &crate::term::AtomTable) {
+    pub(in crate::runtime) fn net_exits(
+        &self,
+        id: ProcessId,
+        atoms: &crate::term::AtomTable,
+    ) -> Vec<ProcessId> {
         // Each exit takes the lock: a `setnode/2` that found the process
         // live before it left the table publishes the owner first, as ERTS
         // sets `F_DISTRIBUTION` in one thread progress block with its check
@@ -474,12 +489,36 @@ impl Node {
             .net_kernel
             .lock()
             .expect("the net_kernel lock is not poisoned");
+        let mut dist = self.dist();
         if *owner == Some(id) {
             *owner = None;
             let nonode = crate::term::Atom::from_static("nonode@nohost")
                 .expect("nonode@nohost is a static atom");
             atoms.set_this_node(&nonode, 0);
+            return dist.net_kernel_exits();
         }
+        dist.controller_exits(id);
+        Vec::new()
+    }
+
+    /// Return the process that `erlang:setnode/2` made the owner of the
+    /// distribution, which ERTS marks with `F_DISTRIBUTION`
+    /// (`dist.c:5044-5054`, `5138-5149`).
+    pub(in crate::runtime) fn net_kernel(&self) -> Option<ProcessId> {
+        *self
+            .net_kernel
+            .lock()
+            .expect("the net_kernel lock is not poisoned")
+    }
+
+    /// Return the dist table of the node, locked. A connection setup checks
+    /// that its controller is live under the lock, and the exit of a
+    /// process takes the lock after the process left the process table, so
+    /// a controller that exits always leaves an idle entry.
+    pub(in crate::runtime) fn dist(&self) -> MutexGuard<'_, super::dist_table::DistTable> {
+        self.dist
+            .lock()
+            .expect("the dist table lock is not poisoned")
     }
 
     /// Return the seed of the local node hash. `compute` runs at the first
@@ -537,6 +576,7 @@ impl Node {
             statistics: Statistics::default(),
             local_node_hash: OnceLock::new(),
             net_kernel: Mutex::new(None),
+            dist: Mutex::default(),
             ets: Arc::default(),
             code: super::code::NodeCode::default(),
             atomics: crate::runtime::atomics::AtomicArrays::default(),

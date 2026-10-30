@@ -4027,7 +4027,18 @@ impl Scheduler {
             .expect("the exiting process is alive");
         debug_assert!(!process.in_run_queue, "only the current process exits");
         self.node.remove_process(id);
-        self.node.net_exits(id, &self.atoms);
+        // ERTS kills each controller from the init process `<0.0.0>`
+        // (`kill_dist_ctrl_proc`, `dist.c:896-903`).
+        for controller in self.node.net_exits(id, &self.atoms) {
+            let kill = Signal::Exit {
+                from: LinkId::Process(ProcessId(0)),
+                reason: Term::static_atom("kill"),
+                linked: false,
+                normal_kills: false,
+                alias: None,
+            };
+            let _ = self.send_signal(Some(ProcessId(0)), controller, kill);
+        }
         self.delegations
             .release(std::mem::take(&mut process.security));
         self.policy_exited(id, &reason);
@@ -4253,6 +4264,7 @@ fn named_item(name: &Atom, atoms: &AtomTable) -> Term {
 }
 
 mod code;
+pub(super) mod dist_table;
 mod known_nodes;
 pub(super) mod node;
 mod policy;

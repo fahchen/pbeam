@@ -705,7 +705,18 @@ ambient() ->
         erts_internal:term_type(id(a)),
         tuple_size(erlang:statistics(runtime)),
         erts_internal:get_creation(),
-        attempt(fun() -> erlang:setnode(nonode@nohost, 0) end)
+        attempt(fun() -> erlang:setnode(nonode@nohost, 0) end),
+        element(1, erts_internal:get_dflags()),
+        tuple_size(erts_internal:new_connection(effect@nohost)),
+        attempt(fun() -> erts_internal:abort_pending_connection(1, foo) end),
+        erts_internal:create_dist_channel(effect@nohost, self(), {0, 1}),
+        attempt(fun() -> erlang:dist_ctrl_get_data(foo) end),
+        attempt(fun() -> erlang:dist_ctrl_get_data_notification(foo) end),
+        attempt(fun() -> erlang:dist_ctrl_get_opt(foo, get_size) end),
+        attempt(fun() -> erlang:dist_ctrl_set_opt(foo, get_size, true) end),
+        attempt(fun() -> erlang:dist_ctrl_input_handler(foo, self()) end),
+        attempt(fun() -> erlang:dist_ctrl_put_data(foo, <<>>) end),
+        attempt(fun() -> erlang:dist_get_stat(foo) end)
     ].
 
 %% Each metadata probe makes a temporary file, so `write_file_info/3`
