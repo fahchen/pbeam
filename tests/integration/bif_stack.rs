@@ -1,3 +1,9 @@
+//! Checks the stack trace of a BIF error on PBeam against the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::process::Command;
 
 use pbeam_runtime::BeamProgram;

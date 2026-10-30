@@ -3,7 +3,10 @@
 //! `do_exor/2` (`cipher.c`, `api_ng.c`, `aead.c`, and `math.c` of OTP
 //! 29.1.1). The safe `openssl` crate makes each OpenSSL call.
 
-use super::*;
+use super::{
+    AtomTable, BeamError, BifResult, CIPHERS, ExceptionClass, Map, Scheduler, Term, atom_name,
+    c_error, c_error_text, iodata_bytes, print_term,
+};
 use openssl::cipher::{Cipher, CipherRef};
 use openssl::cipher_ctx::{CipherCtx, CipherCtxRef};
 
@@ -151,7 +154,8 @@ pub(super) fn cipher_info_nif(
         Some(&(_, kind)) => Term::Integer(kind),
         None => Term::static_atom("undefined"),
     };
-    let size = |value: usize| Term::Integer(value as i64);
+    let size =
+        |value: usize| Term::Integer(i64::try_from(value).expect("a cipher size fits in i64"));
     let aead = Term::static_atom(if index >= FIRST_AEAD { "true" } else { "false" });
     let pairs = [
         ("type", kind),
@@ -277,6 +281,25 @@ pub(super) fn cipher_options(
     Ok((encrypt.unwrap_or(1), padding.unwrap_or(Padding::Undefined)))
 }
 
+/// Whether a cipher context encrypts or decrypts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CipherDirection {
+    /// `EVP_CipherInit_ex` with the flag 0.
+    Decrypt,
+    /// `EVP_CipherInit_ex` with the flag 1.
+    Encrypt,
+}
+
+impl From<bool> for CipherDirection {
+    fn from(encrypt: bool) -> Self {
+        if encrypt {
+            Self::Encrypt
+        } else {
+            Self::Decrypt
+        }
+    }
+}
+
 /// Initialize `context` with the cipher, the key, or the IV, in the
 /// direction `encrypt`. ERTS calls `EVP_CipherInit_ex` with its encrypt
 /// flag first, then with -1, which keeps the direction; the flag -1 on a
@@ -285,16 +308,16 @@ pub(super) fn cipher_options(
 /// # Examples
 ///
 /// ```rust,ignore
-/// cipher_init(&mut context, true, Some(&cipher), None, None)?;
+/// cipher_init(&mut context, CipherDirection::Encrypt, Some(&cipher), None, None)?;
 /// ```
 pub(super) fn cipher_init(
     context: &mut CipherCtxRef,
-    encrypt: bool,
+    direction: CipherDirection,
     cipher: Option<&CipherRef>,
     key: Option<&[u8]>,
     iv: Option<&[u8]>,
 ) -> Result<(), openssl::error::ErrorStack> {
-    if encrypt {
+    if direction == CipherDirection::Encrypt {
         context.encrypt_init(cipher, key, iv)
     } else {
         context.decrypt_init(cipher, key, iv)
@@ -324,7 +347,7 @@ pub(super) fn ng_crypto_one_time_nif(
         (data.is_none(), 851, "expected binary as data"),
         (
             data.as_ref()
-                .is_some_and(|data| data.len() > i32::MAX as usize),
+                .is_some_and(|data| data.len() > super::INT_MAX),
             854,
             "too long data",
         ),
@@ -365,11 +388,11 @@ fn one_time(
     context
         .cipher_update_vec(data, &mut output)
         .map_err(|_| ("error", 475, -1, "Can't update"))?;
-    let size = data.len() as u32;
+    let size = u32::try_from(data.len()).expect("the caller bounds data to INT_MAX bytes");
     let mut padded_size = -1;
     final_output(
         &mut context,
-        encrypt != 0,
+        CipherDirection::from(encrypt != 0),
         padding,
         size,
         &mut padded_size,
@@ -421,7 +444,7 @@ pub(super) fn init_context(
         return Err(("badarg", 309, 2, "Bad iv size"));
     }
     let mut context = CipherCtx::new().expect("OpenSSL allocates each cipher context");
-    let direction = encrypt == 1;
+    let direction = CipherDirection::from(encrypt == 1);
     cipher_init(&mut context, direction, Some(&cipher), None, None)
         .map_err(|_| ("error", 356, -1, "Can't initialize context, step 1"))?;
     context
@@ -451,17 +474,20 @@ pub(super) fn init_context(
 /// The failure of the padding or of `EVP_CipherFinal_ex`.
 pub(super) fn final_output(
     context: &mut CipherCtxRef,
-    encrypt: bool,
+    direction: CipherDirection,
     padding: Padding,
     size: u32,
     padded_size: &mut i32,
     output: &mut Vec<u8>,
 ) -> Result<(), CipherFailure> {
+    let encrypt = direction == CipherDirection::Encrypt;
     let block_size = context.block_size();
-    let pad_size = (block_size - size as usize % block_size) % block_size;
+    let pad_size = (block_size - usize::try_from(size).expect("a u32 fits in usize") % block_size)
+        % block_size;
     if encrypt {
         let pkcs_block = padding == Padding::Pkcs && pad_size == 0;
-        *padded_size = if pkcs_block { block_size } else { pad_size } as i32;
+        *padded_size = i32::try_from(if pkcs_block { block_size } else { pad_size })
+            .expect("a cipher block size fits in i32");
     }
     if padding == Padding::Undefined {
         return Ok(());
@@ -516,6 +542,10 @@ pub(super) fn aead_cipher_nif(
 /// # Errors
 ///
 /// The failure of the first check or OpenSSL call that fails.
+#[expect(
+    clippy::too_many_lines,
+    reason = "mirrors `aead_cipher` of `aead.c` (180-332) step by step; the error tuples name the line of each check in `aead.c`, so a split would break the mapping"
+)]
 fn aead(scheduler: &Scheduler, arguments: &[Term]) -> Result<Option<Term>, CipherFailure> {
     let encrypt: i8 = match atom_name(scheduler, &arguments[6]) {
         "true" => 1,
@@ -534,7 +564,9 @@ fn aead(scheduler: &Scheduler, arguments: &[Term]) -> Result<Option<Term>, Ciphe
     // decryption (aead.c:199-208).
     let tag = match (encrypt, &arguments[5]) {
         (0, tag) => Err(iodata_bytes(tag).ok_or(("badarg", 205, 5, "non-binary Tag"))?),
-        (_, Term::Integer(length)) if u32::try_from(*length).is_ok() => Ok(*length as usize),
+        (_, Term::Integer(length)) if u32::try_from(*length).is_ok() => {
+            Ok(usize::try_from(*length).expect("the guard bounds the tag length to u32"))
+        }
         _ => return Err(("badarg", 201, 5, "Bad Tag length")),
     };
     let tag_length = tag.as_ref().map_or_else(Vec::len, |length| *length);
@@ -543,7 +575,7 @@ fn aead(scheduler: &Scheduler, arguments: &[Term]) -> Result<Option<Term>, Ciphe
         .filter(|&index| CIPHERS[index].2 == 0 || CIPHERS[index].2 == key.len());
     let failed = [
         (
-            sizes.iter().any(|&size| size > i32::MAX as usize),
+            sizes.iter().any(|&size| size > super::INT_MAX),
             ("badarg", 215, 5, "binary too long"),
         ),
         (
@@ -562,7 +594,7 @@ fn aead(scheduler: &Scheduler, arguments: &[Term]) -> Result<Option<Term>, Ciphe
     let cipher = fetch_cipher(index).ok_or(("notsup", 232, 0, message))?;
     let ccm = CIPHERS[index].0.ends_with("_ccm");
     let mut context = CipherCtx::new().expect("OpenSSL allocates each cipher context");
-    let direction = encrypt == 1;
+    let direction = CipherDirection::from(encrypt == 1);
     cipher_init(&mut context, direction, Some(&cipher), None, None)
         .map_err(|_| ("error", 237, -1, "CipherInit failed"))?;
     context
@@ -578,9 +610,10 @@ fn aead(scheduler: &Scheduler, arguments: &[Term]) -> Result<Option<Term>, Ciphe
         };
         set.map_err(|_| ("badarg", 286, 5, "Can't set tag"))?;
     }
-    let (line, message) = match ccm {
-        true => (288, "Can't set key or iv"),
-        false => (296, "Can't set key and iv"),
+    let (line, message) = if ccm {
+        (288, "Can't set key or iv")
+    } else {
+        (296, "Can't set key and iv")
     };
     cipher_init(&mut context, direction, None, Some(&key), Some(&iv))
         .map_err(|_| ("error", line, -1, message))?;

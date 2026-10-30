@@ -3,9 +3,10 @@
 use std::ffi::c_int;
 
 use super::BifResult::{Trap, Value};
-use super::*;
+use super::{AtomTable, BeamError, BifContext, BifResult, ExceptionClass, Term, iolist, to_i64};
 use crate::runtime::pcre2;
 use crate::runtime::scheduler::CONTEXT_REDS;
+use crate::runtime::unicode::CharEncoding;
 
 /// The atom options of `re:compile/2` that set one `PCRE2_*` compile bit
 /// (`parse_options`, `erl_bif_re.c:442-537`).
@@ -89,7 +90,7 @@ struct Options {
     /// The last `bsr_anycrlf` or `bsr_unicode` value, if any.
     bsr: Option<u32>,
     /// The `PCRE2_*` match bits, the `match` field of the ERTS struct.
-    match_options: u32,
+    match_bits: u32,
     /// The `PARSE_FLAG_*` bits.
     flags: i32,
     /// The `{offset, N}` value, or 0 without the option.
@@ -152,13 +153,13 @@ fn parse_options(atoms: &AtomTable, options: &Term) -> Option<Options> {
                 let name = atoms.name_of(atom);
                 if name == "anchored" {
                     parsed.compile |= pcre2::ANCHORED;
-                    parsed.match_options |= pcre2::ANCHORED;
+                    parsed.match_bits |= pcre2::ANCHORED;
                 } else if COMPILE_ONLY.contains(&name) {
                     parsed.compile |= lookup(&COMPILE_OPTIONS, name)?;
                     parsed.flags |= FLAG_UNIQUE_COMPILE_OPT;
                 } else if let Some(&(_, bit)) = MATCH_ONLY.iter().find(|&&(name_, _)| name_ == name)
                 {
-                    parsed.match_options |= bit;
+                    parsed.match_bits |= bit;
                     parsed.flags |= FLAG_UNIQUE_EXEC_OPT;
                 } else if name == "unicode" {
                     parsed.compile |= pcre2::UTF;
@@ -311,7 +312,12 @@ pub(super) fn compile(
         Err(failure) => return Ok(Value(compile_error(&failure, None))),
     };
     if parsed.flags & FLAG_EXPORT != 0 {
-        return Ok(Value(export(&code, unicode, bytes, options)));
+        let charset = if unicode {
+            CharEncoding::Unicode
+        } else {
+            CharEncoding::Latin1
+        };
+        return Ok(Value(export(&code, charset, bytes, options)));
     }
     let result = compile_result(context, code, unicode.into())?;
     Ok(Value(Term::tuple(vec![Term::static_atom("ok"), result])))
@@ -425,9 +431,8 @@ fn import_fallback(
         return Ok(BifResult::badopt());
     }
     let unicode = parsed.flags & FLAG_UNICODE != 0;
-    let code = match pcre2::compile(source, parsed.compile, parsed.newline, parsed.bsr) {
-        Ok(code) => code,
-        Err(_) => return Ok(BifResult::badarg()),
+    let Ok(code) = pcre2::compile(source, parsed.compile, parsed.newline, parsed.bsr) else {
+        return Ok(BifResult::badarg());
     };
     Ok(Value(compile_result(context, code, unicode.into())?))
 }
@@ -698,6 +703,11 @@ fn capture_field(atoms: &AtomTable, code: &pcre2::Code, element: &Term) -> Optio
     }
 }
 
+/// Return the number of a named group as an `int` field, as ERTS reads it.
+fn group_index(number: u32) -> i32 {
+    i32::try_from(number).expect("PCRE2 limits a group number to 65535")
+}
+
 /// Return the field of the group name `name` of `code`, as
 /// `build_one_capture` (`erl_bif_re.c:1269-1307`) makes it. Without the
 /// `dupnames` compile bit, that function reads the number with
@@ -728,14 +738,19 @@ fn name_field(code: &pcre2::Code, name: &[u8]) -> Field {
         .collect();
     if !code.has_dupnames() {
         return match entries.as_slice() {
-            [(number, _)] => Field::Index(*number as i32),
+            [(number, _)] => Field::Index(group_index(*number)),
             _ => Field::Index(-1),
         };
     }
     match entries.as_slice() {
         [] => Field::Index(-1),
-        [(number, _)] => Field::Index(*number as i32),
-        entries => Field::Duplicate(entries.iter().map(|&(number, _)| number as i32).collect()),
+        [(number, _)] => Field::Index(group_index(*number)),
+        entries => Field::Duplicate(
+            entries
+                .iter()
+                .map(|&(number, _)| group_index(number))
+                .collect(),
+        ),
     }
 }
 
@@ -757,7 +772,7 @@ fn name_fields(code: &pcre2::Code) -> Vec<Field> {
     if !code.has_dupnames() {
         return names
             .into_iter()
-            .map(|(number, _)| Field::Index(number as i32))
+            .map(|(number, _)| Field::Index(group_index(number)))
             .collect();
     }
     let mut fields = Vec::new();
@@ -769,8 +784,13 @@ fn name_fields(code: &pcre2::Code) -> Vec<Field> {
         }
         let entries = &names[start..end];
         fields.push(match entries {
-            [(number, _)] => Field::Index(*number as i32),
-            _ => Field::Duplicate(entries.iter().map(|&(number, _)| number as i32).collect()),
+            [(number, _)] => Field::Index(group_index(*number)),
+            _ => Field::Duplicate(
+                entries
+                    .iter()
+                    .map(|&(number, _)| group_index(number))
+                    .collect(),
+            ),
         });
         start = end;
     }
@@ -822,7 +842,7 @@ fn exec_return(
     let Some(kind) = capture.kind else {
         return Term::static_atom("match");
     };
-    let rc = rc as usize;
+    let rc = usize::try_from(rc).expect("the check above keeps a positive count");
     let ovector = data.ovector(rc);
     let element = |index: usize| capture_element(kind, ovector, index, subject);
     let elements: Vec<Term> = match &capture.groups {
@@ -841,7 +861,15 @@ fn exec_return(
                         usize::try_from(index)
                             .is_ok_and(|index| index < rc && ovector[index * 2] != pcre2::UNSET)
                     })
-                    .map_or_else(|| empty_element(kind), |&index| element(index as usize)),
+                    .map_or_else(
+                        || empty_element(kind),
+                        |&index| {
+                            element(
+                                usize::try_from(index)
+                                    .expect("the search keeps a non-negative index"),
+                            )
+                        },
+                    ),
             })
             .collect(),
     };
@@ -916,8 +944,8 @@ fn capture_element(kind: ReturnType, ovector: &[usize], index: usize, subject: &
     let bytes = &subject[from..to];
     match kind {
         ReturnType::Index => Term::tuple(vec![
-            Term::Integer(from as i64),
-            Term::Integer((to - from) as i64),
+            Term::Integer(to_i64(from)),
+            Term::Integer(to_i64(to - from)),
         ]),
         ReturnType::List => Term::list_from(bytes.iter().map(|&byte| Term::Integer(byte.into()))),
         ReturnType::Binary => Term::binary(bytes.to_vec()),
@@ -942,12 +970,13 @@ const MAX_LOOP_LIMIT: i32 = CONTEXT_REDS * LOOP_FACTOR;
 ///
 /// ```rust,ignore
 /// assert_eq!(loop_limit(1), 16);
-/// assert_eq!(loop_limit(CONTEXT_REDS as u64), 64000);
+/// assert_eq!(loop_limit(u64::from(CONTEXT_REDS.cast_unsigned())), 64000);
 /// assert_eq!(loop_limit(u64::MAX), 64000);
 /// ```
 fn loop_limit(reds: u64) -> i32 {
-    let limit = reds.wrapping_mul(LOOP_FACTOR as u64);
-    i32::try_from(limit.min(MAX_LOOP_LIMIT as u64)).expect("the limit fits in i32")
+    let limit = reds.wrapping_mul(u64::from(LOOP_FACTOR.cast_unsigned()));
+    i32::try_from(limit.min(u64::from(MAX_LOOP_LIMIT.cast_unsigned())))
+        .expect("the limit fits in i32")
 }
 
 /// Return the number of offset pairs of the match data of a precompiled
@@ -966,7 +995,17 @@ fn loop_limit(reds: u64) -> i32 {
 /// assert_eq!(ovec_pairs(-1), 0);
 /// ```
 fn ovec_pairs(count: i64) -> u32 {
-    (count as u64).wrapping_add(1) as u32
+    let sum = count.cast_unsigned().wrapping_add(1);
+    u32::try_from(sum & u64::from(u32::MAX)).expect("the mask keeps the low 32 bits")
+}
+
+/// Whether a match run is the first run of a `re:run/3` call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RunStage {
+    /// The first run, which checks that the subject is valid UTF.
+    First,
+    /// A later run of a trapped call, which has checked the subject.
+    Later,
 }
 
 /// Run `re:run(Subject, RE, Options)`, or
@@ -1016,12 +1055,12 @@ fn ovec_pairs(count: i64) -> u32 {
 ///
 /// ```rust,ignore
 /// // {match, [{1, 1}]}
-/// let value = run(&mut context, &Term::binary(b"abc".to_vec()), &Term::binary(b"b".to_vec()), &Term::nil(), true)?;
+/// let value = run(&mut context, &Term::binary(b"abc".to_vec()), &Term::binary(b"b".to_vec()), &Term::nil(), RunStage::First)?;
 /// // {match, [[{1, 1}], [{4, 1}]]}
 /// let global = Term::list_from(vec![Term::static_atom("global")]);
-/// let value = run(&mut context, &Term::binary(b"abcabc".to_vec()), &Term::binary(b"b".to_vec()), &global, true)?;
+/// let value = run(&mut context, &Term::binary(b"abcabc".to_vec()), &Term::binary(b"b".to_vec()), &global, RunStage::First)?;
 /// // badarg
-/// let value = run(&mut context, &Term::binary(b"a".to_vec()), &Term::binary(b"a".to_vec()), &Term::list_from(vec![Term::static_atom("export")]), true)?;
+/// let value = run(&mut context, &Term::binary(b"a".to_vec()), &Term::binary(b"a".to_vec()), &Term::list_from(vec![Term::static_atom("export")]), RunStage::First)?;
 /// ```
 ///
 /// # Errors
@@ -1029,12 +1068,16 @@ fn ovec_pairs(count: i64) -> u32 {
 /// Return the runtime error of the scheduler for a run without a new
 /// reference, and a runtime error for a PCRE2 result that this code does
 /// not expect.
+#[expect(
+    clippy::too_many_lines,
+    reason = "mirrors `re_run` of `erl_bif_re.c` (1500-1905) step by step: the pattern, the subject, the match, the restart loop, and the result; the steps share the locals of the original"
+)]
 pub(super) fn run(
     context: &mut BifContext<'_>,
     subject: &Term,
     pattern: &Term,
     options: &Term,
-    first: bool,
+    stage: RunStage,
 ) -> Result<BifResult, BeamError> {
     let Some(mut parsed) = parse_options(&context.scheduler.atoms, options) else {
         return Ok(BifResult::badopt());
@@ -1042,8 +1085,8 @@ pub(super) fn run(
     if parsed.flags & FLAG_EXPORT != 0 {
         return Ok(BifResult::badopt());
     }
-    if !first {
-        parsed.match_options |= pcre2::NO_UTF_CHECK;
+    if stage == RunStage::Later {
+        parsed.match_bits |= pcre2::NO_UTF_CHECK;
     }
     let unicode = parsed.flags & FLAG_UNICODE != 0;
     let global = parsed.flags & FLAG_GLOBAL != 0;
@@ -1128,9 +1171,10 @@ pub(super) fn run(
                 // The pattern becomes a compiled pattern, and the call
                 // continues in `re:grun/3` (`erl_bif_re.c:1557-1572`).
                 let precompiled = compile_result(context, code, unicode.into())?;
-                let clean = match parsed.flags & FLAG_UNIQUE_COMPILE_OPT != 0 {
-                    true => "true",
-                    false => "false",
+                let clean = if parsed.flags & FLAG_UNIQUE_COMPILE_OPT != 0 {
+                    "true"
+                } else {
+                    "false"
                 };
                 return Ok(BifResult::Trap {
                     module: "re",
@@ -1178,21 +1222,21 @@ pub(super) fn run(
                     .then_some(parsed.match_limit_recursion),
             )
         });
-    let start = parsed.startoffset as usize;
+    let start = usize::try_from(parsed.startoffset)
+        .expect("`option_integer` keeps the offset non-negative");
 
     // The match and the capture specification, which reads the ovector of
     // the match. A precompiled pattern gives a borrow of the resources of
     // the node, which ends before the reductions below change the process.
     let (capture, mut rc) = {
-        let (code, atoms) = match &own_code {
-            Some(code) => (code, &context.scheduler.atoms),
-            None => {
-                let (code, atoms) = context
-                    .scheduler
-                    .regex_code(stored_code.expect("a precompiled pattern"))
-                    .expect("the reference holds a compiled expression");
-                (&*code, atoms)
-            }
+        let (code, atoms) = if let Some(code) = &own_code {
+            (code, &context.scheduler.atoms)
+        } else {
+            let (code, atoms) = context
+                .scheduler
+                .regex_code(stored_code.expect("a precompiled pattern"))
+                .expect("the reference holds a compiled expression");
+            (&*code, atoms)
         };
         let Some(capture) = build_capture(atoms, code, parsed.capture()) else {
             return Ok(BifResult::badarg());
@@ -1203,7 +1247,7 @@ pub(super) fn run(
             match_context.as_ref(),
             &subject_bytes,
             start,
-            parsed.match_options,
+            parsed.match_bits,
         );
         (capture, rc)
     };
@@ -1222,7 +1266,7 @@ pub(super) fn run(
         // in one call, so it adds each ended turn here and starts a fresh
         // budget.
         context.scheduler.account_turn();
-        limit = loop_limit(CONTEXT_REDS as u64);
+        limit = loop_limit(u64::from(CONTEXT_REDS.cast_unsigned()));
         data.set_loops_left(limit);
         data.clear_restart();
         rc = data.resume();
@@ -1303,9 +1347,9 @@ pub(super) fn internal_run(
     first: &Term,
 ) -> Result<BifResult, BeamError> {
     if is_atom(first, "true") {
-        run(context, subject, pattern, options, true)
+        run(context, subject, pattern, options, RunStage::First)
     } else if is_atom(first, "false") {
-        run(context, subject, pattern, options, false)
+        run(context, subject, pattern, options, RunStage::Later)
     } else {
         Ok(BifResult::badarg())
     }
@@ -1367,14 +1411,14 @@ const EXPORT_UNICODE_OFFSET: usize = 13;
 /// let options = Term::list_from(vec![Term::static_atom("export")]);
 /// // {ok, {re_exported_pattern, <<"re-PCRE2",163,240,192,168,1,0>>,
 /// //       <<"a">>, [export], Encoded}} on aarch64 macOS, as ERTS
-/// let result = export(&code, false, b"a".to_vec(), &options);
+/// let result = export(&code, CharEncoding::Latin1, b"a".to_vec(), &options);
 /// ```
-fn export(code: &pcre2::Code, unicode: bool, source: Vec<u8>, options: &Term) -> Term {
+fn export(code: &pcre2::Code, charset: CharEncoding, source: Vec<u8>, options: &Term) -> Term {
     let encoded = code.serialize();
     let mut header = EXPORT_TITLE.to_vec();
     header.extend_from_slice(&crc32(&encoded).to_be_bytes());
     header.push(EXPORT_VERSION);
-    header.push(unicode.into());
+    header.push((charset == CharEncoding::Unicode).into());
     Term::tuple(vec![
         Term::static_atom("ok"),
         Term::tuple(vec![

@@ -1,5 +1,9 @@
 //! Native records of OTP 29: the `Recs` chunk, the record instructions, the
 //! `is_record` BIFs, term order, equality, hashes, and flat size.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 #[path = "../common/mod.rs"]
 mod common;

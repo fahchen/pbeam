@@ -48,6 +48,12 @@ impl Schedulers {
 
     /// Return the count of schedulers, which `erlang:system_info(schedulers)`
     /// gives.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the stored count is not positive. This does not happen:
+    /// each constructor and [`Schedulers::apply_flag`] keep the count
+    /// positive.
     pub fn total(&self) -> usize {
         usize::try_from(self.total).expect("a checked count is positive")
     }
@@ -55,6 +61,12 @@ impl Schedulers {
     /// Return the count of schedulers online, which
     /// `erlang:system_info(schedulers_online)` gives. The node starts one
     /// scheduler thread for each.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the stored count is not positive. This does not happen:
+    /// each constructor and [`Schedulers::apply_flag`] keep the count
+    /// positive.
     pub fn online(&self) -> usize {
         usize::try_from(self.online).expect("a checked count is positive")
     }
@@ -196,7 +208,9 @@ fn scan_int(text: &[u8]) -> Option<(i32, &[u8])> {
             value.saturating_mul(10).saturating_add(digit)
         }
     });
-    Some((value as i32, &digits[end..]))
+    // The number keeps its low 32 bits, as the C conversion to `int` does.
+    let [b0, b1, b2, b3, ..] = value.to_le_bytes();
+    Some((i32::from_le_bytes([b0, b1, b2, b3]), &digits[end..]))
 }
 
 /// The ids of one logical processor that ERTS reads from the processor
@@ -224,10 +238,11 @@ fn read_host_topology() -> Vec<CpuIds> {
     // `erl_misc_utils.c:297-306`, `erl_misc_utils.c:330-331`: an error
     // gives 0, and the C cast to `int` truncates.
     let count = |var| {
-        sysconf(var)
-            .ok()
-            .flatten()
-            .map_or(0, |count| (count as i32).max(0) as usize)
+        sysconf(var).ok().flatten().map_or(0, |count| {
+            let [b0, b1, b2, b3, ..] = count.to_le_bytes();
+            usize::try_from(i32::from_le_bytes([b0, b1, b2, b3]).max(0))
+                .expect("a non-negative i32 fits in usize")
+        })
     };
     let configured = count(SysconfVar::_NPROCESSORS_CONF);
     let online = count(SysconfVar::_NPROCESSORS_ONLN).min(configured);

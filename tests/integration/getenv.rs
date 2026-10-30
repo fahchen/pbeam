@@ -1,3 +1,9 @@
+//! Runs `os:getenv` on PBeam and compares the results with the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::{
     env,
     ffi::OsStr,
@@ -75,6 +81,15 @@ impl Value {
 
 const YES: Value = Value::Characters(&[121, 101, 115]);
 
+/// The native file name encoding of the host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NativeEncoding {
+    /// UTF-8.
+    Utf8,
+    /// Latin-1.
+    Latin1,
+}
+
 /// Return the results of `keys/0`, `values/0`, and `decomposed/0` on ERTS
 /// in the native file name encoding of the host. The encoding is UTF-8 on
 /// macOS and with `LC_ALL=C.UTF-8`, else Latin-1
@@ -83,9 +98,9 @@ const YES: Value = Value::Characters(&[121, 101, 115]);
 /// In Latin-1, the key `PBEAM_é` is the byte `\xe9`, which is not in the
 /// environment, and `[256]` raises `badarg`. The values come from
 /// erl_unicode.c:2164-2220.
-fn expected(utf8: bool) -> (Vec<Value>, Vec<Value>, Value) {
+fn expected(encoding: NativeEncoding) -> (Vec<Value>, Vec<Value>, Value) {
     use Value::Characters;
-    let (key_results, composed, cyrillic, decomposed) = if utf8 {
+    let (key_results, composed, cyrillic, decomposed) = if encoding == NativeEncoding::Utf8 {
         let decomposed = if cfg!(target_os = "macos") {
             Characters(&[97, 233])
         } else {
@@ -138,7 +153,12 @@ fn erl() -> PathBuf {
 fn reads_the_os_environment_with_os_getenv_as_erts() {
     for locale in ["C.UTF-8", "C"] {
         let utf8 = cfg!(target_os = "macos") || locale == "C.UTF-8";
-        let (keys, values, decomposed) = expected(utf8);
+        let encoding = if utf8 {
+            NativeEncoding::Utf8
+        } else {
+            NativeEncoding::Latin1
+        };
+        let (keys, values, decomposed) = expected(encoding);
         let erts_list = |values: &[Value]| {
             format!(
                 "[{}]",

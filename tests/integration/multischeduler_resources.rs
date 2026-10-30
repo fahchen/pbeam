@@ -1,6 +1,10 @@
 //! The resources of the node on two scheduler threads. A zlib stream that
 //! one root opens resolves on the scheduler of the other root, as an ERTS
 //! resource does (`enif_get_resource`, `erl_nif.c`).
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 #[path = "../common/mod.rs"]
 mod common;

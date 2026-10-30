@@ -141,7 +141,7 @@ pub(super) enum Signal {
     },
     /// `ERTS_SIG_Q_OP_MONITOR` of a port monitor: `driver_monitor_process`
     /// (`io.c`) in `INET_REQ_ACCEPT` monitors the caller for the listen
-    /// port `port` (inet_drv.c:12172, 12198, 12214). The receiver adds the
+    /// port `port` (`inet_drv.c:12172`, 12198, 12214). The receiver adds the
     /// target monitor for 2 (`erl_proc_sig_queue.c:6544-6562`). At exit it
     /// runs the monitor of the port (`tcp_inet_process_exit`,
     /// inet_drv.c:12732-12771).
@@ -305,8 +305,7 @@ impl Signal {
     /// ```
     pub(super) fn visit_terms(&self, visit: &mut impl FnMut(&Term)) {
         match self {
-            Signal::Exit { reason, .. } => visit(reason),
-            Signal::MonitorDown { reason, .. } => visit(reason),
+            Signal::Exit { reason, .. } | Signal::MonitorDown { reason, .. } => visit(reason),
             Signal::ProcessInfo { item, .. } => visit(item),
             Signal::AliasMessage { message, .. } => visit(message),
             Signal::CheckProcessCode { tag, .. } => visit(tag),
@@ -339,8 +338,8 @@ impl Signal {
                 linked: _,
                 normal_kills: _,
                 alias: _,
-            } => pending.push(std::mem::replace(reason, Term::Nil)),
-            Signal::MonitorDown {
+            }
+            | Signal::MonitorDown {
                 reference: _,
                 reason,
             } => pending.push(std::mem::replace(reason, Term::Nil)),
@@ -350,7 +349,7 @@ impl Signal {
                 item,
             } => pending.push(std::mem::replace(item, Term::Nil)),
             Signal::AliasMessage { alias: _, message } => {
-                pending.push(std::mem::replace(message, Term::Nil))
+                pending.push(std::mem::replace(message, Term::Nil));
             }
             Signal::Link { from: _ }
             | Signal::Unlink { from: _, id: _ }

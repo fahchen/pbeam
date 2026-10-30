@@ -23,6 +23,36 @@ use num_bigint::BigInt;
 
 use super::{Binary, Term};
 
+/// The byte order of a binary segment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Endian {
+    /// The `big` segment flag (the default).
+    Big,
+    /// The `little` segment flag.
+    Little,
+}
+
+impl From<bool> for Endian {
+    fn from(little: bool) -> Self {
+        if little { Self::Little } else { Self::Big }
+    }
+}
+
+/// The signedness of a binary integer segment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Signedness {
+    /// The `unsigned` segment flag (the default).
+    Unsigned,
+    /// The `signed` segment flag.
+    Signed,
+}
+
+impl From<bool> for Signedness {
+    fn from(signed: bool) -> Self {
+        if signed { Self::Signed } else { Self::Unsigned }
+    }
+}
+
 /// The panic message of a term operation, such as printing or hashing,
 /// that gets a match context. The interpreter gives a runtime error before
 /// a match context can reach such an operation.
@@ -135,7 +165,8 @@ impl MatchState {
     /// assert_eq!(MatchState::new(Binary::from(&[1][..])).position(), 0);
     /// ```
     pub(crate) fn position(&self) -> usize {
-        self.position.load(Ordering::Relaxed) as usize
+        usize::try_from(self.position.load(Ordering::Relaxed))
+            .expect("a position inside a binary fits in usize")
     }
 
     /// Set the bit position of the next segment, as `bs_set_position`
@@ -151,7 +182,7 @@ impl MatchState {
     /// assert_eq!(context.remaining_bits(), 8);
     /// ```
     pub(crate) fn set_position(&self, position: usize) {
-        self.position.store(position as u64, Ordering::Relaxed);
+        self.position.store(wide(position), Ordering::Relaxed);
     }
 
     /// Move the position by `size` bits, as the `skip` command of
@@ -173,7 +204,7 @@ impl MatchState {
         let size = usize::try_from(size)
             .ok()
             .filter(|&size| size <= self.remaining_bits())?;
-        self.position.fetch_add(size as u64, Ordering::Relaxed);
+        self.position.fetch_add(wide(size), Ordering::Relaxed);
         Some(())
     }
 
@@ -291,13 +322,13 @@ impl MatchState {
         if segment_bits(self.bytes.bit_bytes(), start, size) != segment_bits(text, 0, size) {
             return false;
         }
-        self.position.fetch_add(size as u64, Ordering::Relaxed);
+        self.position.fetch_add(wide(size), Ordering::Relaxed);
         true
     }
 
     /// Return the bits after the position as a view of the bytes of the
     /// binary, and keep the position, as the `get_tail` command of
-    /// `bs_match` does (`emit_bs_get_tail_shared`, jit/arm/instr_bs.cpp:
+    /// `bs_match` does (`emit_bs_get_tail_shared`, `jit/arm/instr_bs.cpp`:
     /// 407-439). The view shares the bytes of the binary, as an ERTS
     /// sub-bitstring refers to its binary. The position can be at any bit,
     /// so the tail can be a bitstring.
@@ -340,12 +371,12 @@ impl MatchState {
     ///
     /// ```rust,ignore
     /// let context = MatchState::new(Binary::from(&[0x3C, 0x00, 0x7C, 0x00][..]));
-    /// assert_eq!(context.get_float(0, false), Some(0.0));
-    /// assert_eq!(context.get_float(16, false), Some(1.0));
-    /// assert_eq!(context.get_float(16, false), None);
+    /// assert_eq!(context.get_float(0, Endian::Big), Some(0.0));
+    /// assert_eq!(context.get_float(16, Endian::Big), Some(1.0));
+    /// assert_eq!(context.get_float(16, Endian::Big), None);
     /// assert_eq!(context.position(), 16);
     /// ```
-    pub(crate) fn get_float(&self, size: u64, little: bool) -> Option<f64> {
+    pub(crate) fn get_float(&self, size: u64, endian: Endian) -> Option<f64> {
         if size == 0 {
             return Some(0.0);
         }
@@ -354,21 +385,23 @@ impl MatchState {
             .ok()
             .filter(|&size| size <= self.remaining_bits() && matches!(size, 16 | 32 | 64))?;
         let mut bytes = segment_bits(self.bytes.bit_bytes(), start, size);
-        if little {
+        if endian == Endian::Little {
             bytes.reverse();
         }
         let raw = bytes
             .iter()
             .fold(0_u64, |raw, &byte| raw << 8 | u64::from(byte));
         let value = match size {
-            16 => half_float(raw as u16),
-            32 => f64::from(f32::from_bits(raw as u32)),
+            16 => half_float(u16::try_from(raw).expect("a 16-bit segment is 2 bytes")),
+            32 => f64::from(f32::from_bits(
+                u32::try_from(raw).expect("a 32-bit segment is 4 bytes"),
+            )),
             _ => f64::from_bits(raw),
         };
         if !value.is_finite() {
             return None;
         }
-        self.skip(size as u64)?;
+        self.skip(wide(size))?;
         Some(value)
     }
 
@@ -436,8 +469,7 @@ impl MatchState {
             }
             _ => return None,
         };
-        self.position
-            .fetch_add((size * 8) as u64, Ordering::Relaxed);
+        self.position.fetch_add(wide(size * 8), Ordering::Relaxed);
         Some(code_point)
     }
 
@@ -452,20 +484,20 @@ impl MatchState {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(MatchState::new(Binary::from(&[0, 65][..])).get_utf16(false), Some(65));
-    /// assert_eq!(MatchState::new(Binary::from(&[65, 0][..])).get_utf16(true), Some(65));
+    /// assert_eq!(MatchState::new(Binary::from(&[0, 65][..])).get_utf16(Endian::Big), Some(65));
+    /// assert_eq!(MatchState::new(Binary::from(&[65, 0][..])).get_utf16(Endian::Little), Some(65));
     /// let pair = MatchState::new(Binary::from(&[216, 61, 222, 0][..]));
-    /// assert_eq!(pair.get_utf16(false), Some(0x1F600));
-    /// assert_eq!(MatchState::new(Binary::from(&[216, 61][..])).get_utf16(false), None);
-    /// assert_eq!(MatchState::new(Binary::from(&[220, 0][..])).get_utf16(false), None);
+    /// assert_eq!(pair.get_utf16(Endian::Big), Some(0x1F600));
+    /// assert_eq!(MatchState::new(Binary::from(&[216, 61][..])).get_utf16(Endian::Big), None);
+    /// assert_eq!(MatchState::new(Binary::from(&[220, 0][..])).get_utf16(Endian::Big), None);
     /// ```
-    pub(crate) fn get_utf16(&self, little: bool) -> Option<u32> {
+    pub(crate) fn get_utf16(&self, endian: Endian) -> Option<u32> {
         // `erts_bs_get_utf16` copies 32 bits when it has them and else 16.
         let bits = (self.remaining_bits() / 16).min(2) * 16;
         let rest = segment_bits(self.bytes.bit_bytes(), self.position(), bits);
         let unit = |index: usize| {
             let pair = rest.get(index..index + 2)?;
-            let (high, low) = if little {
+            let (high, low) = if endian == Endian::Little {
                 (pair[1], pair[0])
             } else {
                 (pair[0], pair[1])
@@ -496,20 +528,20 @@ impl MatchState {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(MatchState::new(Binary::from(&[0, 1, 246, 0][..])).get_utf32(false), Some(0x1F600));
-    /// assert_eq!(MatchState::new(Binary::from(&[0, 246, 1, 0][..])).get_utf32(true), Some(0x1F600));
-    /// assert_eq!(MatchState::new(Binary::from(&[0, 0, 216, 0][..])).get_utf32(false), None);
-    /// assert_eq!(MatchState::new(Binary::from(&[0, 17, 0, 0][..])).get_utf32(false), None);
-    /// assert_eq!(MatchState::new(Binary::from(&[0, 0, 0][..])).get_utf32(false), None);
+    /// assert_eq!(MatchState::new(Binary::from(&[0, 1, 246, 0][..])).get_utf32(Endian::Big), Some(0x1F600));
+    /// assert_eq!(MatchState::new(Binary::from(&[0, 246, 1, 0][..])).get_utf32(Endian::Little), Some(0x1F600));
+    /// assert_eq!(MatchState::new(Binary::from(&[0, 0, 216, 0][..])).get_utf32(Endian::Big), None);
+    /// assert_eq!(MatchState::new(Binary::from(&[0, 17, 0, 0][..])).get_utf32(Endian::Big), None);
+    /// assert_eq!(MatchState::new(Binary::from(&[0, 0, 0][..])).get_utf32(Endian::Big), None);
     /// ```
-    pub(crate) fn get_utf32(&self, little: bool) -> Option<u32> {
+    pub(crate) fn get_utf32(&self, endian: Endian) -> Option<u32> {
         if self.remaining_bits() < 32 {
             return None;
         }
         let bytes: [u8; 4] = segment_bits(self.bytes.bit_bytes(), self.position(), 32)
             .try_into()
             .ok()?;
-        let code_point = if little {
+        let code_point = if endian == Endian::Little {
             u32::from_le_bytes(bytes)
         } else {
             u32::from_be_bytes(bytes)
@@ -520,6 +552,12 @@ impl MatchState {
         self.position.fetch_add(32, Ordering::Relaxed);
         Some(code_point)
     }
+}
+
+/// A `usize` bit count or position as `u64`, which holds every `usize`.
+#[inline]
+fn wide(value: usize) -> u64 {
+    u64::try_from(value).expect("a usize fits in u64")
 }
 
 /// Return `size` bits of `bytes` from the bit offset `start`, packed in
@@ -540,7 +578,13 @@ fn segment_bits(bytes: &[u8], start: usize, size: usize) -> Vec<u8> {
         .map(|index| {
             let next = bytes.get(index + 1).copied().unwrap_or(0);
             // A shift of 0 takes no bit of the next byte.
-            (bytes[index] << shift) | (u16::from(next) >> (8 - shift)) as u8
+            #[expect(
+                clippy::as_conversions,
+                clippy::cast_possible_truncation,
+                reason = "the shifted next byte fits in u8: a shift of 0 gives 0, else the shift of a u8 is below 256"
+            )]
+            let carried = (u16::from(next) >> (8 - shift)) as u8;
+            (bytes[index] << shift) | carried
         })
         .collect();
     if let Some(last) = bits.last_mut() {
@@ -562,19 +606,24 @@ fn segment_bits(bytes: &[u8], start: usize, size: usize) -> Vec<u8> {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(segment_integer(&[0x01, 0x20], 12, false, false), Term::Integer(0x012));
-/// assert_eq!(segment_integer(&[0x23, 0x10], 12, true, false), Term::Integer(0x123));
-/// assert_eq!(segment_integer(&[0xFF], 8, false, true), Term::Integer(-1));
-/// assert_eq!(segment_integer(&[0x80, 0, 0, 0, 0, 0, 0, 0], 64, false, false), Term::from_bigint(BigInt::from(1u64 << 63)));
-/// assert_eq!(segment_integer(&[], 0, false, true), Term::Integer(0));
+/// assert_eq!(segment_integer(&[0x01, 0x20], 12, Endian::Big, Signedness::Unsigned), Term::Integer(0x012));
+/// assert_eq!(segment_integer(&[0x23, 0x10], 12, Endian::Little, Signedness::Unsigned), Term::Integer(0x123));
+/// assert_eq!(segment_integer(&[0xFF], 8, Endian::Big, Signedness::Signed), Term::Integer(-1));
+/// assert_eq!(segment_integer(&[0x80, 0, 0, 0, 0, 0, 0, 0], 64, Endian::Big, Signedness::Unsigned), Term::from_bigint(BigInt::from(1u64 << 63)));
+/// assert_eq!(segment_integer(&[], 0, Endian::Big, Signedness::Signed), Term::Integer(0));
 /// ```
-pub(crate) fn segment_integer(bits: &[u8], size: usize, little: bool, signed: bool) -> Term {
+pub(crate) fn segment_integer(
+    bits: &[u8],
+    size: usize,
+    endian: Endian,
+    signedness: Signedness,
+) -> Term {
     let (full, partial) = (size / 8, size % 8);
     // The parts of the segment, each a value and its width in bits, from
     // the most significant part.
     let last = (partial > 0).then(|| (bits[full] >> (8 - partial), partial));
     let bytes = bits[..full].iter().map(|&byte| (byte, 8));
-    let parts: Vec<(u8, usize)> = if little {
+    let parts: Vec<(u8, usize)> = if endian == Endian::Little {
         last.into_iter().chain(bytes.rev()).collect()
     } else {
         bytes.chain(last).collect()
@@ -582,25 +631,24 @@ pub(crate) fn segment_integer(bits: &[u8], size: usize, little: bool, signed: bo
     let Some((&(first, width), rest)) = parts.split_first() else {
         return Term::Integer(0);
     };
-    let negative = signed && first >> (width - 1) == 1;
+    let negative = signedness == Signedness::Signed && first >> (width - 1) == 1;
     let mut value = i64::from(first) - if negative { 1 << width } else { 0 };
     // Each step moves the value away from 0 or keeps it, so a value that
     // leaves the 64-bit range does not come back: the steps after it use a
     // bignum.
     for (index, &(part, width)) in rest.iter().enumerate() {
-        match value
+        if let Some(next) = value
             .checked_mul(1 << width)
             .and_then(|value| value.checked_add(i64::from(part)))
         {
-            Some(next) => value = next,
-            None => {
-                let big = rest[index..]
-                    .iter()
-                    .fold(BigInt::from(value), |big, &(part, width)| {
-                        (big << width) + part
-                    });
-                return Term::from_bigint(big);
-            }
+            value = next;
+        } else {
+            let big = rest[index..]
+                .iter()
+                .fold(BigInt::from(value), |big, &(part, width)| {
+                    (big << width) + part
+                });
+            return Term::from_bigint(big);
         }
     }
     Term::Integer(value)

@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use super::{
-    Access, Busy, EMPTY, EtsTables, FIRST_SEGMENT_SLOTS, Freeing, KeyIndex, Lacking, Retained,
-    Table, TableType, key_hash, object_hash, segment, stored_hash,
+    Access, Busy, EMPTY, EtsTables, FIRST_SEGMENT_SLOTS, Freeing, InsertKind, KeyIndex, Lacking,
+    Retained, Table, TableType, key_hash, object_hash, segment, stored_hash,
 };
 use crate::term::atom_hash;
 use crate::term::{Atom, AtomTable, Map, ProcessId, Reference, Term, test_atom_table};
@@ -20,7 +20,7 @@ fn bounds_the_work_of_one_turn_of_a_busy_list_insert() {
     let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
     assert_eq!(table.step_busy(&atoms, 7), (0, None));
     let objects = (0..10).map(|value| vec![Term::Integer(value)]).collect();
-    table.busy = Some(Busy::new(ProcessId(0), objects, false));
+    table.busy = Some(Busy::new(ProcessId(0), objects, InsertKind::Insert));
     // The counter yields after the loop unit of a step (`erl_db.c:1936-1940`),
     // so 7 units put three objects in and charge the loop unit of the
     // fourth.
@@ -42,7 +42,7 @@ fn bounds_the_work_of_one_turn_of_a_busy_list_insert() {
     let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Bag);
     let mut tables = EtsTables::default();
     let objects = vec![vec![Term::Integer(1)], vec![Term::Integer(2)]];
-    table.busy = Some(Busy::new(ProcessId(0), objects, false));
+    table.busy = Some(Busy::new(ProcessId(0), objects, InsertKind::Insert));
     // The budget ends the insert with the last object, so the state with
     // the walk of each key stays for this turn.
     table.step_busy(&atoms, 4);
@@ -66,7 +66,11 @@ fn bounds_the_work_of_one_turn_of_a_busy_list_insert() {
     // turn gives the result `false` (`erl_db.c:1863-1873`, `1909-1925`).
     let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
     table.insert_all(&atoms, vec![vec![Term::Integer(1)]]);
-    table.busy = Some(Busy::new(ProcessId(0), vec![vec![Term::Integer(1)]], true));
+    table.busy = Some(Busy::new(
+        ProcessId(0),
+        vec![vec![Term::Integer(1)]],
+        InsertKind::InsertNew,
+    ));
     assert_eq!(table.step_busy(&atoms, 2), (2, None));
     assert_eq!(
         table.step_busy(&atoms, 2),
@@ -580,17 +584,23 @@ fn keeps_the_objects_of_a_bag_key_in_insertion_order_across_deletes() {
     let object = |key, value| vec![Term::Integer(key), Term::Integer(value)];
     let mut insert = |object| table.insert_all(&atoms, vec![object])[0];
     for value in 1..=3 {
-        assert_eq!(insert(object(1, value)), value as usize - 1);
+        assert_eq!(
+            insert(object(1, value)),
+            usize::try_from(value).unwrap() - 1
+        );
     }
     assert_eq!(insert(object(2, 1)), 0);
     assert_eq!(insert(object(1, 2)), 1);
     table.delete(&atoms, &Term::Integer(1));
-    assert!(table.objects(&atoms, &Term::Integer(1)).is_empty());
+    assert_eq!(
+        table.objects(&atoms, &Term::Integer(1)),
+        <[&[crate::term::Term]; 0]>::default()
+    );
     assert_eq!(table.slot_count(), 4);
     for value in [7, 8, 9] {
         assert_eq!(
             table.insert_all(&atoms, vec![object(1, value)]),
-            vec![value as usize - 7]
+            vec![usize::try_from(value).unwrap() - 7]
         );
     }
     assert_eq!(table.slot_count(), 4);
@@ -626,7 +636,10 @@ fn hashes_bag_objects_whose_changing_elements_cancelled_under_rotate_and_xor() {
     let atoms = AtomTable::new();
     let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Bag);
     let counts = table.insert_all(&atoms, objects);
-    assert_eq!(counts, (0..OBJECTS as usize).collect::<Vec<_>>());
+    assert_eq!(
+        counts,
+        (0..usize::try_from(OBJECTS).unwrap()).collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -743,7 +756,7 @@ fn keeps_the_erts_bucket_chains_through_splits_and_joins() {
     let mut model: Vec<Vec<Term>> = vec![Vec::new(); 256];
     let bucket = |buckets: usize, key: &Term| {
         let mask = buckets.next_power_of_two() - 1;
-        let slot = stored_hash(&atoms, key) as usize & mask;
+        let slot = usize::try_from(stored_hash(&atoms, key)).unwrap() & mask;
         if slot >= buckets {
             slot & (mask >> 1)
         } else {
@@ -761,7 +774,7 @@ fn keeps_the_erts_bucket_chains_through_splits_and_joins() {
             let from = to & (mask >> 1);
             let (high, low) = model[from]
                 .drain(..)
-                .partition(|key| stored_hash(&atoms, key) as usize & mask == to);
+                .partition(|key| usize::try_from(stored_hash(&atoms, key)).unwrap() & mask == to);
             model[from] = low;
             model.push(high);
         }
@@ -878,7 +891,7 @@ fn compares_the_keys_of_an_ordered_set_by_the_arithmetic_order() {
     let atoms = Arc::new(AtomTable::new());
     let atom = |atoms: &AtomTable, name: &str| Term::Atom(atoms.put(name).unwrap());
     let (a, b, c) = (atom(&atoms, "a"), atom(&atoms, "b"), atom(&atoms, "c"));
-    let (t, l, v) = (atom(&atoms, "t"), atom(&atoms, "l"), atom(&atoms, "v"));
+    let (tagged, listed, value_atom) = (atom(&atoms, "t"), atom(&atoms, "l"), atom(&atoms, "v"));
     let mut table = Table::ordered(ProcessId(0), Access::Public, 1, Arc::clone(&atoms));
     let integer = Term::Integer(1);
     let float = Term::Float(1.0);
@@ -891,36 +904,36 @@ fn compares_the_keys_of_an_ordered_set_by_the_arithmetic_order() {
     assert!(table.update_elements(&atoms, &float, &[(2, b.clone())]));
     assert_eq!(
         table.object(&atoms, &integer),
-        Some(&[integer.clone(), b.clone()][..])
+        Some(&[integer.clone(), b][..])
     );
     // A replacement moves the stored hash of the key to the hash of the new
     // key, so a delete removes the index entry of the object.
     table.insert(&atoms, vec![float.clone(), c.clone()]);
     assert_eq!(
         table.object(&atoms, &integer),
-        Some(&[float.clone(), c.clone()][..])
+        Some(&[float.clone(), c][..])
     );
     assert_eq!(table.object_count(), 1);
     // A tuple and a list compare element by element.
-    let tuple = Term::tuple(vec![integer.clone(), t.clone()]);
-    table.insert(&atoms, vec![tuple.clone(), v.clone()]);
+    let tuple = Term::tuple(vec![integer.clone(), tagged.clone()]);
+    table.insert(&atoms, vec![tuple.clone(), value_atom.clone()]);
     assert_eq!(
-        table.object(&atoms, &Term::tuple(vec![float.clone(), t.clone()])),
-        Some(&[tuple.clone(), v.clone()][..])
+        table.object(&atoms, &Term::tuple(vec![float.clone(), tagged])),
+        Some(&[tuple, value_atom.clone()][..])
     );
-    let list = Term::list_from([integer.clone(), l.clone()]);
-    table.insert(&atoms, vec![list.clone(), v.clone()]);
+    let list = Term::list_from([integer.clone(), listed.clone()]);
+    table.insert(&atoms, vec![list.clone(), value_atom.clone()]);
     assert_eq!(
-        table.object(&atoms, &Term::list_from([float.clone(), l.clone()])),
-        Some(&[list, v.clone()][..])
+        table.object(&atoms, &Term::list_from([float.clone(), listed])),
+        Some(&[list, value_atom.clone()][..])
     );
     // A map key compares its keys exactly and its values arithmetically.
     let map =
         |value| Term::Map(Map::from_pairs(vec![(a.clone(), value)], &AtomTable::new()).unwrap());
-    table.insert(&atoms, vec![map(integer.clone()), v.clone()]);
+    table.insert(&atoms, vec![map(integer.clone()), value_atom.clone()]);
     assert_eq!(
         table.object(&atoms, &map(float.clone())),
-        Some(&[map(integer.clone()), v.clone()][..])
+        Some(&[map(integer.clone()), value_atom][..])
     );
     assert_eq!(table.object_count(), 4);
     table.delete(&atoms, &float);
@@ -1054,7 +1067,7 @@ fn frees_a_clear_after_the_last_unfix() {
     let (done, charge) = table.step_clear(&atoms, ProcessId(0), 300, i64::MAX);
     assert!(done);
     assert!(charge > 0);
-    assert!(!table.clear.is_some());
+    assert!(table.clear.is_none());
     assert_eq!(table.object_count(), 0);
     assert_eq!(table.deleted_objects, 0);
     assert!(table.next_key(&atoms, &Term::Integer(0)).is_none());
@@ -1236,7 +1249,7 @@ fn frees_a_clear_until_the_budget_is_negative() {
     table.unfix_all(ProcessId(0));
     let first = table.segment_free_cost(1);
     let second = table.segment_free_cost(0);
-    let (done, charge) = table.step_clear(&atoms, ProcessId(0), 300, first as i64);
+    let (done, charge) = table.step_clear(&atoms, ProcessId(0), 300, i64::try_from(first).unwrap());
     assert!(!done);
     assert_eq!(charge, first + second);
     let (done, charge) = table.step_clear(&atoms, ProcessId(0), 300, 0);
@@ -1330,7 +1343,7 @@ fn marks_the_buckets_of_a_fixed_clear_in_turns() {
         table.step_clear(&atoms, ProcessId(0), 300, i64::MAX),
         (true, 30)
     );
-    assert!(!table.clear.is_some());
+    assert!(table.clear.is_none());
     assert_eq!(table.object_count(), 0);
     assert_eq!(table.fixdels, 1);
 }
@@ -1608,7 +1621,7 @@ fn counts_the_bag_comparisons_after_a_restore() {
             &atoms,
             vec![
                 vec![key.clone(), Term::Integer(1)],
-                vec![key.clone(), Term::Integer(1)],
+                vec![key, Term::Integer(1)],
             ],
         ),
         vec![2, 0]
@@ -1662,8 +1675,8 @@ fn a_read_or_a_write_helps_the_list_insert_of_another_process() {
     for id in 0..2 {
         let mut table = Table::new(ProcessId(1), Access::Public, 1, TableType::Set);
         let objects = vec![vec![Term::Integer(id)], vec![Term::Integer(id + 10)]];
-        table.busy = Some(Busy::new(ProcessId(1), objects, false));
-        tables.create(Reference(id as u64), None, table);
+        table.busy = Some(Busy::new(ProcessId(1), objects, InsertKind::Insert));
+        tables.create(Reference(u64::try_from(id).unwrap()), None, table);
     }
     tables.reserve_result(ProcessId(1));
     // The helper runs the insert with its budget under the table lock and
@@ -1684,7 +1697,11 @@ fn a_read_or_a_write_helps_the_list_insert_of_another_process() {
     assert!(write.is_ok_and(|table| table.busy.is_none() && table.len() == 2));
     // The starter itself takes its busy table with no completion.
     let mut table = Table::new(ProcessId(1), Access::Public, 1, TableType::Set);
-    table.busy = Some(Busy::new(ProcessId(1), vec![vec![Term::Integer(5)]], false));
+    table.busy = Some(Busy::new(
+        ProcessId(1),
+        vec![vec![Term::Integer(5)]],
+        InsertKind::Insert,
+    ));
     tables.create(Reference(2), None, table);
     let own = tables.write(&atoms, &id(2), ProcessId(1), 4000);
     assert!(own.is_ok_and(|table| table.busy.is_some()));

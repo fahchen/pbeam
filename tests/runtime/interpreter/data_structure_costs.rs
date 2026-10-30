@@ -32,6 +32,16 @@ use crate::{
     term::{Atom, AtomTable, Binary, Fun, Map, ProcessId, Term, internal_hash},
 };
 
+/// Return a count of the fixtures as the integer of a term.
+fn signed(value: usize) -> i64 {
+    i64::try_from(value).expect("a fixture count fits in `i64`")
+}
+
+/// Return a count of the fixtures as the sum of a probe.
+fn unsigned(value: usize) -> u64 {
+    u64::try_from(value).expect("a fixture count fits in `u64`")
+}
+
 /// The number of timed runs of one operation. The report gives the minimum
 /// of the runs, as the term measurement does.
 const RUNS: usize = 9;
@@ -81,6 +91,11 @@ fn report_bytes(name: &str, bytes: usize) {
 
 /// Return the nanoseconds for each operation of `body`, as the minimum of
 /// [`RUNS`] timed runs. The caller performs exactly `operations` operations.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "the probe reports an average of nanoseconds as `f64`"
+)]
 fn measure(operations: usize, mut body: impl FnMut() -> u64) -> f64 {
     let mut best = f64::INFINITY;
     for _ in 0..RUNS {
@@ -97,6 +112,11 @@ fn measure(operations: usize, mut body: impl FnMut() -> u64) -> f64 {
 /// [`RUNS`] timed runs. [`measure`] reads a state that does not change;
 /// this form builds the state of each run with `setup` outside the timer, so
 /// a measurement that changes its input starts each run from the same state.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "the probe reports an average of nanoseconds as `f64`"
+)]
 fn measure_with<State>(
     operations: usize,
     mut setup: impl FnMut() -> State,
@@ -117,7 +137,7 @@ fn measure_with<State>(
 
 /// Return the elements of a tuple of `len` integers.
 fn tuple_of(len: usize) -> Term {
-    Term::tuple((0..len).map(|value| Term::Integer(value as i64)).collect())
+    Term::tuple((0..len).map(|value| Term::Integer(signed(value))).collect())
 }
 
 /// Return a module of `functions` functions, each with its own label. The
@@ -146,7 +166,7 @@ fn table_of(atoms: &AtomTable, objects: usize) -> Table {
     for index in 0..objects {
         table.insert(
             atoms,
-            vec![Term::Integer(index as i64), Term::Integer(index as i64)],
+            vec![Term::Integer(signed(index)), Term::Integer(signed(index))],
         );
     }
     table
@@ -203,7 +223,7 @@ impl KeyIndex {
     /// assert!(index.slot(index.hashes[0]) < 1024);
     /// ```
     fn slot(&self, hash: u64) -> usize {
-        hash as usize & (self.slots.len() - 1)
+        usize::try_from(hash).expect("a u64 fits in usize") & (self.slots.len() - 1)
     }
 
     /// Store `key`, as `db_put_hash` does: an equal stored key keeps its
@@ -371,7 +391,15 @@ fn prints_the_size_of_every_structure() {
 
 /// Print the cost of every derivation that the audit names.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "table of measurements: one `report` call for each derivation, and the calls share the fixtures"
+)]
 fn prints_the_cost_of_every_derivation() {
+    struct Position {
+        index: usize,
+    }
+
     let atoms = AtomTable::new();
     let tuple_1000 = tuple_of(1000);
     let tuple_32 = tuple_of(32);
@@ -393,7 +421,7 @@ fn prints_the_cost_of_every_derivation() {
         measure(OPERATIONS, || {
             let mut sum = 0u64;
             for _ in 0..OPERATIONS {
-                sum += tuple_len(black_box(&tuple_1000)) as u64;
+                sum += unsigned(tuple_len(black_box(&tuple_1000)));
             }
             sum
         }),
@@ -403,7 +431,7 @@ fn prints_the_cost_of_every_derivation() {
         measure(OPERATIONS, || {
             let mut sum = 0u64;
             for _ in 0..OPERATIONS {
-                sum += tuple_len(black_box(&tuple_32)) as u64;
+                sum += unsigned(tuple_len(black_box(&tuple_32)));
             }
             sum
         }),
@@ -411,9 +439,6 @@ fn prints_the_cost_of_every_derivation() {
 
     // The counterfactual of a stored value: one field read of a plain
     // structure, which is the shape that a resolved code position takes.
-    struct Position {
-        index: usize,
-    }
     let position = Position { index: 12 };
     report(
         "stored_position_read",
@@ -424,7 +449,7 @@ fn prints_the_cost_of_every_derivation() {
                 // of the field happens after the opaque call. A bare
                 // `black_box(position.index)` passes the known constant 12
                 // and folds the load away.
-                sum += black_box(&position).index as u64;
+                sum += unsigned(black_box(&position).index);
             }
             sum
         }),
@@ -439,13 +464,13 @@ fn prints_the_cost_of_every_derivation() {
         measure(OPERATIONS, || {
             let mut sum = 0u64;
             for _ in 0..OPERATIONS {
-                sum += black_box(
+                sum += unsigned(black_box(
                     *module
                         .tables
                         .jump_targets
                         .get(black_box(&500))
                         .expect("label 500 exists"),
-                ) as u64;
+                ));
             }
             sum
         }),
@@ -455,8 +480,9 @@ fn prints_the_cost_of_every_derivation() {
         measure(OPERATIONS, || {
             let mut sum = 0u64;
             for _ in 0..OPERATIONS {
-                sum += black_box(function_at_label(black_box(&module), black_box(500)).unwrap())
-                    .start as u64;
+                sum += unsigned(
+                    black_box(function_at_label(black_box(&module), black_box(500)).unwrap()).start,
+                );
             }
             sum
         }),
@@ -466,9 +492,11 @@ fn prints_the_cost_of_every_derivation() {
         measure(OPERATIONS, || {
             let mut sum = 0u64;
             for _ in 0..OPERATIONS {
-                sum += black_box(code_table::frame(black_box(&module), black_box(500), 0).unwrap())
-                    .stack
-                    .len() as u64;
+                sum += unsigned(
+                    black_box(code_table::frame(black_box(&module), black_box(500), 0).unwrap())
+                        .stack
+                        .len(),
+                );
             }
             sum
         }),
@@ -515,7 +543,7 @@ fn prints_the_cost_of_every_derivation() {
         measure(OPERATIONS, || {
             let mut sum = 0u64;
             for value in 0..OPERATIONS {
-                sum ^= internal_hash(black_box(&Term::Integer(value as i64)));
+                sum ^= internal_hash(black_box(&Term::Integer(signed(value))));
             }
             sum
         }),
@@ -568,9 +596,9 @@ fn prints_the_cost_of_every_derivation() {
             || table_of(&atoms, 1000),
             |table| {
                 for round in 0..ETS_OPERATIONS {
-                    table.insert(&atoms, vec![Term::Integer(-1 - round as i64), Term::Nil]);
+                    table.insert(&atoms, vec![Term::Integer(-1 - signed(round)), Term::Nil]);
                 }
-                ETS_OPERATIONS as u64
+                unsigned(ETS_OPERATIONS)
             },
         ),
     );
@@ -588,9 +616,9 @@ fn prints_the_cost_of_every_derivation() {
                 || table_of(&atoms, objects),
                 |table| {
                     for round in 0..ETS_OPERATIONS {
-                        table.insert(&atoms, vec![Term::Integer(-1 - round as i64), Term::Nil]);
+                        table.insert(&atoms, vec![Term::Integer(-1 - signed(round)), Term::Nil]);
                     }
-                    ETS_OPERATIONS as u64
+                    unsigned(ETS_OPERATIONS)
                 },
             ),
         );
@@ -601,9 +629,9 @@ fn prints_the_cost_of_every_derivation() {
                 || table_of(&atoms, objects + ETS_OPERATIONS),
                 |table| {
                     for round in 0..ETS_OPERATIONS {
-                        table.delete(&atoms, &Term::Integer((objects + round) as i64));
+                        table.delete(&atoms, &Term::Integer(signed(objects + round)));
                     }
-                    ETS_OPERATIONS as u64
+                    unsigned(ETS_OPERATIONS)
                 },
             ),
         );
@@ -619,9 +647,9 @@ fn prints_the_cost_of_every_derivation() {
             || KeyIndex::of((0..1000).map(Term::Integer).collect(), 1024),
             |index| {
                 for round in 0..ETS_OPERATIONS {
-                    index.insert(Term::Integer(-1 - round as i64));
+                    index.insert(Term::Integer(-1 - signed(round)));
                 }
-                ETS_OPERATIONS as u64
+                unsigned(ETS_OPERATIONS)
             },
         ),
     );
@@ -641,14 +669,14 @@ fn prints_the_cost_of_every_derivation() {
         &crate::term::test_atom_table(),
     )
     .unwrap();
-    let flat_4 = Map::from_pairs(
+    let four_pairs = Map::from_pairs(
         (0..4)
             .map(|key| (Term::Integer(key), Term::Integer(key)))
             .collect(),
         &crate::term::test_atom_table(),
     )
     .unwrap();
-    let flat_2 = Map::from_pairs(
+    let two_pairs = Map::from_pairs(
         (0..2)
             .map(|key| (Term::Integer(key), Term::Integer(key)))
             .collect(),
@@ -656,8 +684,8 @@ fn prints_the_cost_of_every_derivation() {
     )
     .unwrap();
     for (name, map, key) in [
-        ("map_get_2_flatmap", &flat_2, 1),
-        ("map_get_4_flatmap", &flat_4, 3),
+        ("map_get_2_flatmap", &two_pairs, 1),
+        ("map_get_4_flatmap", &four_pairs, 3),
         ("map_get_32_flatmap", &flat_32, 31),
     ] {
         report(
@@ -665,7 +693,7 @@ fn prints_the_cost_of_every_derivation() {
             measure(ETS_OPERATIONS, || {
                 let mut sum = 0u64;
                 for _ in 0..ETS_OPERATIONS {
-                    sum += map.get(black_box(&Term::Integer(key))).is_some() as u64;
+                    sum += u64::from(map.get(black_box(&Term::Integer(key))).is_some());
                 }
                 sum
             }),
@@ -676,7 +704,7 @@ fn prints_the_cost_of_every_derivation() {
         measure(ETS_OPERATIONS, || {
             let mut sum = 0u64;
             for _ in 0..ETS_OPERATIONS {
-                sum += map_1000.get(black_box(&Term::Integer(500))).is_some() as u64;
+                sum += u64::from(map_1000.get(black_box(&Term::Integer(500))).is_some());
             }
             sum
         }),
@@ -694,16 +722,23 @@ fn prints_the_cost_of_every_derivation() {
     let atoms = AtomTable::new();
     for choices in SELECT_VAL_SHAPES {
         let list: Vec<(Term, u32)> = (0..choices)
-            .map(|index| (Term::Integer(index as i64), index as u32))
+            .map(|index| {
+                (
+                    Term::Integer(signed(index)),
+                    u32::try_from(index).expect("a fixture index fits in u32"),
+                )
+            })
             .collect();
-        let value = Term::Integer((choices - 1) as i64);
+        let value = Term::Integer(signed(choices - 1));
         report(
             &format!("select_val_scan_{choices}"),
             measure(OPERATIONS, || {
                 let mut sum = 0u64;
                 for _ in 0..OPERATIONS {
-                    sum += black_box(list.iter().find(|(choice, _)| choice == black_box(&value)))
-                        .map_or(0, |(_, label)| *label) as u64;
+                    sum += u64::from(
+                        black_box(list.iter().find(|(choice, _)| choice == black_box(&value)))
+                            .map_or(0, |(_, label)| *label),
+                    );
                 }
                 sum
             }),
@@ -713,13 +748,15 @@ fn prints_the_cost_of_every_derivation() {
             measure(OPERATIONS, || {
                 let mut sum = 0u64;
                 for _ in 0..OPERATIONS {
-                    sum += black_box(select_value_ordered(
-                        black_box(&value),
-                        black_box(&list),
-                        &atoms,
-                    ))
-                    .unwrap()
-                    .unwrap_or(0) as u64;
+                    sum += u64::from(
+                        black_box(select_value_ordered(
+                            black_box(&value),
+                            black_box(&list),
+                            &atoms,
+                        ))
+                        .unwrap()
+                        .unwrap_or(0),
+                    );
                 }
                 sum
             }),
@@ -838,7 +875,7 @@ fn prints_the_cost_of_every_derivation() {
                     &mut [],
                 )
                 .unwrap();
-                writes += grown.len() as u64;
+                writes += unsigned(grown.len());
             }
             writes
         }),
@@ -849,7 +886,7 @@ fn prints_the_cost_of_every_derivation() {
             let mut writes = 0u64;
             for _ in 0..OPERATIONS {
                 preallocated[black_box(1023)] = Some(black_box(term.clone()));
-                writes += preallocated[1023].is_some() as u64;
+                writes += u64::from(preallocated[1023].is_some());
             }
             writes
         }),
@@ -866,9 +903,11 @@ fn prints_the_cost_of_every_derivation() {
         measure(OPERATIONS, || {
             let mut sum = 0u64;
             for value in 0..OPERATIONS {
-                sum += terms
-                    .get(black_box(&Term::Integer((value % 100) as i64)))
-                    .is_some() as u64;
+                sum += u64::from(
+                    terms
+                        .get(black_box(&Term::Integer(signed(value % 100))))
+                        .is_some(),
+                );
             }
             sum
         }),
@@ -893,8 +932,8 @@ fn prints_the_cost_of_every_derivation() {
         &collision_key,
         &map_1000,
         &flat_32,
-        &flat_4,
-        &flat_2,
+        &four_pairs,
+        &two_pairs,
         &grown,
         &preallocated,
     ));

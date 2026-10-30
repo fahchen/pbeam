@@ -36,6 +36,11 @@ const MAX_ARG: u64 = 255;
 /// The largest count of pairs in a map on a 64-bit host (`external.c:6311-6320`).
 const MAX_MAP_PAIRS: u64 = (1 << 31) - 1;
 
+/// A `usize` limit or count as `u64`, which holds every `usize`.
+fn wide(value: usize) -> u64 {
+    u64::try_from(value).expect("a usize fits in u64")
+}
+
 /// The native functions that the `Attr` chunk of a module declares.
 ///
 /// Return each `{name, arity}` pair of the attribute `pbeam_native`, in the
@@ -174,7 +179,7 @@ impl<'a> Cursor<'a> {
     /// Take a big-endian unsigned number of `count` bytes.
     fn number(&mut self, count: usize) -> Result<u64, BeamError> {
         let mut value = 0u64;
-        for byte in self.take(count as u64)? {
+        for byte in self.take(wide(count))? {
             value = (value << 8) | u64::from(*byte);
         }
         Ok(value)
@@ -194,10 +199,10 @@ impl<'a> Cursor<'a> {
     /// (`dec_atom`, `external.c:4485-4516`).
     fn atom(&mut self) -> Result<String, BeamError> {
         let (length, latin1, limit) = match self.byte()? {
-            100 => (self.number(2)?, true, MAX_ATOM_CHARACTERS as u64),
-            118 => (self.number(2)?, false, MAX_ATOM_SZ_LIMIT as u64),
-            115 => (u64::from(self.byte()?), true, MAX_ATOM_CHARACTERS as u64),
-            119 => (u64::from(self.byte()?), false, MAX_ATOM_SZ_LIMIT as u64),
+            100 => (self.number(2)?, true, wide(MAX_ATOM_CHARACTERS)),
+            118 => (self.number(2)?, false, wide(MAX_ATOM_SZ_LIMIT)),
+            115 => (u64::from(self.byte()?), true, wide(MAX_ATOM_CHARACTERS)),
+            119 => (u64::from(self.byte()?), false, wide(MAX_ATOM_SZ_LIMIT)),
             tag => {
                 return Err(error(format!("the external term tag {tag} is not an atom")));
             }
@@ -315,13 +320,12 @@ impl<'a> Cursor<'a> {
             for _ in 0..count {
                 let start = self.pos;
                 let extra = self.extra;
-                match self.declaration() {
-                    Some(declaration) => declarations.push(declaration),
-                    None => {
-                        self.pos = start;
-                        self.extra = extra;
-                        self.skip_term()?;
-                    }
+                if let Some(declaration) = self.declaration() {
+                    declarations.push(declaration);
+                } else {
+                    self.pos = start;
+                    self.extra = extra;
+                    self.skip_term()?;
                 }
             }
             // The declaration list can also continue through more than one
@@ -377,6 +381,10 @@ impl<'a> Cursor<'a> {
     /// container, so a term of any depth needs no recursion. The identity
     /// bytes of a pid, a port, or a reference stay in [`Cursor::extra`] until
     /// the tag of the atom of its node consumes them.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm for each external term format tag, as the size walk of `decoded_size` in `external.c` has one case for each tag; each arm is short"
+    )]
     fn skip_term(&mut self) -> Result<(), BeamError> {
         let mut remaining: u64 = 1;
         let mut stack: Vec<u64> = Vec::new();
@@ -408,9 +416,9 @@ impl<'a> Cursor<'a> {
                 // the identity (`external.c:6152-6189`).
                 100 | 118 => {
                     let limit = if tag == 100 {
-                        MAX_ATOM_CHARACTERS as u64
+                        wide(MAX_ATOM_CHARACTERS)
                     } else {
-                        MAX_ATOM_SZ_LIMIT as u64
+                        wide(MAX_ATOM_SZ_LIMIT)
                     };
                     let length = self.number(2)?;
                     if length > limit {
@@ -488,7 +496,7 @@ impl<'a> Cursor<'a> {
                 // A pid, a port, or a reference: the walk reads the node as
                 // one more term and adds the identity bytes to its atom tag
                 // (`external.c:6194-6248`).
-                88 => {
+                88 | 120 => {
                     self.extra = 12;
                     remaining += 1;
                 }
@@ -496,19 +504,11 @@ impl<'a> Cursor<'a> {
                     self.extra = 9;
                     remaining += 1;
                 }
-                120 => {
-                    self.extra = 12;
-                    remaining += 1;
-                }
                 89 => {
                     self.extra = 8;
                     remaining += 1;
                 }
-                102 => {
-                    self.extra = 5;
-                    remaining += 1;
-                }
-                101 => {
+                102 | 101 => {
                     self.extra = 5;
                     remaining += 1;
                 }
@@ -541,7 +541,7 @@ impl<'a> Cursor<'a> {
                 }
                 105 => {
                     let count = self.number(4)?;
-                    if count > MAX_TUPLE_SIZE as u64 {
+                    if count > wide(MAX_TUPLE_SIZE) {
                         return Err(error("an external term tuple is too large"));
                     }
                     stack.push(remaining);

@@ -4,7 +4,7 @@
 //! `docs/erts-differences.md`).
 
 use super::BifResult::Value;
-use super::*;
+use super::{BeamError, BifResult, Scheduler, Term};
 use crate::runtime::capability::{CapabilityKind, Denied};
 
 /// Run `pbeam_cap:revoke(Pid, Kind)`: revoke the copies of the capability
@@ -206,6 +206,10 @@ pub(super) fn enter_runtime(
 /// # Errors
 ///
 /// None: the result is always `Ok`.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "arm of `named_bif`; every PBeam BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn serve(
     scheduler: &mut Scheduler,
     pid: &Term,

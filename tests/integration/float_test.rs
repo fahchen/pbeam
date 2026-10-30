@@ -1,3 +1,10 @@
+//! Runs the `is_float` test and the float register instructions on PBeam and compares them with the
+//! pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 #[path = "../common/mod.rs"]
 mod common;
 
@@ -44,7 +51,7 @@ fn runs_the_is_float_test_as_pinned_erts() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     assert_eq!(
         reference.stdout,
         b"[other,other,other,other,other,other,other,other,other,other,other,other,\
@@ -87,7 +94,7 @@ fn runs_the_float_register_instructions_of_a_division() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     assert_eq!(reference.stdout, b"4.0\n");
 }
 
@@ -129,7 +136,7 @@ fn raises_badarith_when_fconv_gets_a_term_that_is_not_a_number() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     assert_eq!(
         reference.stdout,
         b"[badarith,badarith,badarith,badarith,badarith,badarith,badarith,badarith,badarith,\
@@ -193,6 +200,6 @@ fn raises_badarith_at_the_fconv_after_a_float_register_instruction() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     assert_eq!(reference.stdout, b"[badarith,badarith,badarith]\n");
 }

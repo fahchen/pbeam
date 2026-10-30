@@ -3,6 +3,10 @@
 //! `error_handler:crash/1`, which keeps the tail of the stack trace of
 //! `erlang:error(undef)` after the frame of the failed call
 //! (`error_handler.erl:165-178`).
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 #[path = "../common/mod.rs"]
 mod common;

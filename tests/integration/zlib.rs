@@ -1,3 +1,10 @@
+//! Runs the `zlib` functions (deflate, inflate, flush, one-shot) on PBeam and compares the bytes
+//! with the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};
@@ -270,7 +277,7 @@ fn matches_the_pinned_erts_safe_inflate_chunks() {
         .collect();
     let expected =
         reference("[io:format(\"~s ~p~n\",[Tag,Size]) || {Tag,Size} <- zlib_probe:safe_chunks()]");
-    assert_eq!(actual.join("\n") + "\n", expected);
+    assert_eq!(format!("{}\n", actual.join("\n")), expected);
 }
 
 #[test]
@@ -297,7 +304,7 @@ fn matches_the_pinned_erts_errors() {
         .map(|error| binary_text(error))
         .collect();
     let expected = reference("[io:format(\"~s~n\",[Error]) || Error <- zlib_probe:errors()]");
-    assert_eq!(actual.join("\n") + "\n", expected);
+    assert_eq!(format!("{}\n", actual.join("\n")), expected);
 }
 
 #[test]

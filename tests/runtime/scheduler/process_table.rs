@@ -50,7 +50,7 @@ fn does_not_mark_a_pid_with_no_process() {
 fn gives_the_processes_of_each_block_in_index_order() {
     let table = ProcessTable::default();
     let wrapped = PTAB_SIZE + 5;
-    let far = BLOCK * SHARDS as u64 + 3;
+    let far = BLOCK * u64::try_from(SHARDS).unwrap() + 3;
     for id in [far, BLOCK + 1, wrapped, 5, BLOCK - 1, 0] {
         table.insert(ProcessId(id), 0);
     }
@@ -96,8 +96,8 @@ fn shares_the_table_between_threads() {
             scope.spawn(move || {
                 for n in 0..2000 {
                     let id = ProcessId(n * 4 + owner);
-                    table.insert(id, owner as usize);
-                    assert_eq!(table.owner(id), Some(owner as usize));
+                    table.insert(id, usize::try_from(owner).unwrap());
+                    assert_eq!(table.owner(id), Some(usize::try_from(owner).unwrap()));
                     if n % 2 == 0 {
                         table.remove(id, || {});
                     }
@@ -150,18 +150,15 @@ fn bounds_the_work_of_each_step_of_overlapping_reads() {
         active.retain(|reader| {
             let (step, cost) = work(&table, |table| table.next_deleted(*reader));
             max = max.max(cost);
-            match step {
-                Some((entry, free)) => {
-                    listed[reader.0 as usize] += usize::from(entry.is_some());
-                    frees += usize::from(free);
-                    true
-                }
-                None => {
-                    assert!(table.deleted_done(*reader));
-                    let ((), cost) = work(&table, |table| table.end_list(*reader));
-                    max = max.max(cost);
-                    false
-                }
+            if let Some((entry, free)) = step {
+                listed[usize::try_from(reader.0).unwrap()] += usize::from(entry.is_some());
+                frees += usize::from(free);
+                true
+            } else {
+                assert!(table.deleted_done(*reader));
+                let ((), cost) = work(&table, |table| table.end_list(*reader));
+                max = max.max(cost);
+                false
             }
         });
     }

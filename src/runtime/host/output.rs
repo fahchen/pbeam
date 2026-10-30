@@ -67,7 +67,7 @@ pub(crate) struct IovecWrite {
 }
 
 /// The end of an [`IovecWrite`].
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IovecWritten {
     /// All groups are written, and no bad group follows.
     All,

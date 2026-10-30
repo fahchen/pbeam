@@ -1,3 +1,5 @@
+//! Checks that PBeam charges the reductions of each BIF with a body as the pinned ERTS does.
+
 use std::process::Command;
 
 use pbeam_runtime::{AtomTable, BeamProgram, Term};

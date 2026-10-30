@@ -55,8 +55,9 @@ fn full_pipe() -> (PipeReader, PipeWriter) {
     let fd = writer.as_raw_fd();
     // SAFETY: `fcntl` changes only the status flags of an open fd.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-    // SAFETY: as above.
     assert_eq!(
+        // SAFETY: as above. `flags` came from `F_GETFL` of the same open fd,
+        // and `fcntl` with `F_SETFL` reads no pointer.
         unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) },
         0
     );
@@ -267,7 +268,7 @@ fn runs_no_call_of_a_dropped_claim_and_ends_the_threads_after_the_run() {
     for (reader, _) in &pipes {
         let mut written = vec![0; bytes.len()];
         (&*reader).read_exact(&mut written).unwrap();
-        assert!(written == bytes);
+        assert_eq!(written, bytes);
     }
     // Each thread writes to the wake socket after each call. The end of
     // file comes when each call dropped its copy of the write end.
@@ -293,6 +294,10 @@ static GATE: (Mutex<(usize, bool)>, Condvar) = (Mutex::new((0, false)), Condvar:
 
 /// Count the start of the call, wait until the test opens [`GATE`], and
 /// return the name of the thread as a binary.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "NIF function pointer; every NIF returns `Result<NativeResult, BeamError>`"
+)]
 fn gated_thread_name(_: &mut NifContext<'_>, _: &[Term]) -> Result<NativeResult, BeamError> {
     let (state, changed) = &GATE;
     let mut state = state.lock().unwrap();

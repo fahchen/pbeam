@@ -1,8 +1,8 @@
-//! fs_notify 0.1.2 from Hex runs through the PBeam NIF ABI.
+//! `fs_notify` 0.1.2 from Hex runs through the PBeam NIF ABI.
 //!
 //! `fixtures/fs_notify` sets `config :rustler_precompiled, force_build_all:
 //! true` and the rustler feature `nif_version_2_18`, so rustler builds the
-//! NIF library of fs_notify from source with the host `cargo`, as Suikou
+//! NIF library of `fs_notify` from source with the host `cargo`, as Suikou
 //! does. The test builds the release of the project, checks that the NIF
 //! gate of `pbeam_bundle` accepts its bundle, and runs the one-file
 //! executable with the entry `FsNotifyFixture.main/0`. The entry watches a
@@ -10,6 +10,10 @@
 //! thread of the library sends (`enif_send` with no caller env). The line
 //! has the base names of the paths, so the temporary directory does not
 //! change it. The PBeam line is the line of the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 #[path = "../common/mix_bundle.rs"]
 mod mix_bundle;

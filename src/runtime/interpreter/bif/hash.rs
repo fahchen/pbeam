@@ -21,7 +21,7 @@
 //! turn (see `docs/erts-differences.md`).
 
 use super::BifResult::{TrapBif, Value};
-use super::*;
+use super::{BeamError, BifResult, Binary, Scheduler, Term, to_i64, to_u64, to_usize};
 use crate::term::{make_hash, make_hash2};
 use num_bigint::Sign;
 
@@ -145,7 +145,7 @@ impl Md5 {
     fn update(&mut self, bytes: &[u8]) {
         let mut part = bytes;
         if self.buffered > 0 {
-            let buffered = self.buffered as usize;
+            let buffered = to_usize(self.buffered);
             let copy = 64 - buffered;
             if copy < part.len() {
                 self.buffer[buffered..].copy_from_slice(&part[..copy]);
@@ -156,7 +156,7 @@ impl Md5 {
                 self.total = self.total.wrapping_add(64);
             } else {
                 self.buffer[buffered..buffered + part.len()].copy_from_slice(part);
-                self.buffered += part.len() as u64;
+                self.buffered += to_u64(part.len());
                 return;
             }
         }
@@ -169,7 +169,7 @@ impl Md5 {
         }
         if !part.is_empty() {
             self.buffer[..part.len()].copy_from_slice(part);
-            self.buffered = part.len() as u64;
+            self.buffered = to_u64(part.len());
         }
     }
 
@@ -183,7 +183,7 @@ impl Md5 {
     /// assert_eq!(Md5::init().finish(), [212, 29, 140, 217, 143, 0, 178, 4, 233, 128, 9, 152, 236, 248, 66, 126]);
     /// ```
     fn finish(&mut self) -> [u8; DIGEST_BYTES] {
-        let size = self.buffered as usize;
+        let size = to_usize(self.buffered);
         let mut pad = [0u8; 128];
         pad[..size].copy_from_slice(&self.buffer[..size]);
         pad[size] = 0x80;
@@ -192,7 +192,7 @@ impl Md5 {
         let filled = (size + 1) % 64;
         // `size_t` arithmetic wraps for a buffered part of 56 bytes or more,
         // as `pad` does (`erl_md5.c:227-231`).
-        let zeroes = (56_u64.wrapping_sub(filled as u64) & 63) as usize;
+        let zeroes = to_usize(56_u64.wrapping_sub(to_u64(filled)) & 63);
         let bits = self.total.wrapping_add(self.buffered).wrapping_mul(8);
         let length = size + 1 + zeroes + 8;
         pad[length - 8..length].copy_from_slice(&bits.to_le_bytes());
@@ -404,7 +404,7 @@ pub(super) fn read(
                     return Err(());
                 }
                 let size = bit_size / 8;
-                let taken = (size as u64).min(*budget) as usize;
+                let taken = to_usize(to_u64(size).min(*budget));
                 // One update call reads the binary, as `md5_wrap` reads one
                 // bitstring, so the state does not depend on the parts of a
                 // binary that an append built (`erl_bif_chksum.c:74-92`).
@@ -419,7 +419,7 @@ pub(super) fn read(
                         sum(&bytes);
                     }
                 }
-                *budget -= taken as u64;
+                *budget -= to_u64(taken);
                 if taken < size {
                     let rest = Term::Binary(binary.bits(taken * 8, bit_size));
                     return Ok(Some(rest_term(rest, tails)));
@@ -437,7 +437,9 @@ pub(super) fn read(
                         continue;
                     }
                     Term::Integer(value @ 0..=255) => {
-                        run.push(value as u8);
+                        run.push(
+                            u8::try_from(value).expect("the pattern bounds the byte to 0..=255"),
+                        );
                         *budget -= 1;
                         current = rest;
                         continue;
@@ -455,17 +457,14 @@ pub(super) fn read(
         }
         // The current term is read: continue with the tail of the list above
         // it, or end the walk.
-        match tails.pop() {
-            Some(tail) => {
-                // ERTS reads each flat list level with its own update call,
-                // so the run ends with the level (`erl_bif_chksum.c:120-160`).
-                flush(&mut run, sum);
-                current = tail;
-            }
-            None => {
-                flush(&mut run, sum);
-                return Ok(None);
-            }
+        if let Some(tail) = tails.pop() {
+            // ERTS reads each flat list level with its own update call,
+            // so the run ends with the level (`erl_bif_chksum.c:120-160`).
+            flush(&mut run, sum);
+            current = tail;
+        } else {
+            flush(&mut run, sum);
+            return Ok(None);
         }
     }
 }
@@ -532,6 +531,10 @@ pub(super) fn charge(scheduler: &mut Scheduler, bytes: u64) {
 /// let result = checksum(&mut scheduler, Md5::init(), &Term::binary(b"abc".to_vec()), Checksum::Digest)?;
 /// assert!(matches!(result, BifResult::Value(Term::Binary(bytes)) if bytes.len() == DIGEST_BYTES));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "result of this helper is the tail of BIF entries that return `Result<BifResult, BeamError>` like every BIF"
+)]
 fn checksum(
     scheduler: &mut Scheduler,
     mut state: Md5,
@@ -541,18 +544,18 @@ fn checksum(
     // `do_chksum` returns the whole term when `left <= 0`, so a negative
     // budget traps at once, as a budget of 0 does (`erl_bif_chksum.c:64-67`).
     let reds = scheduler.current_process_mut().bif_reductions_or_zero();
-    let mut budget = (reds as u64 * 4) & !0x3f;
+    let mut budget = (to_u64(reds) * 4) & !0x3f;
     let walk = read(iolist, &mut budget, &mut |bytes| state.update(bytes));
     let rest = match walk {
         Err(()) => {
             // A walk that found a term that is not iodata charges the bytes
             // that it read and raises `badarg` (`erl_bif_chksum.c:470-473`).
-            charge(scheduler, ((reds as u64 * 4) & !0x3f) - budget);
+            charge(scheduler, ((to_u64(reds) * 4) & !0x3f) - budget);
             return Ok(BifResult::badarg());
         }
         Ok(rest) => rest,
     };
-    let bytes = ((reds as u64 * 4) & !0x3f) - budget;
+    let bytes = ((to_u64(reds) * 4) & !0x3f) - budget;
     charge(scheduler, bytes);
     let Some(rest) = rest else {
         return Ok(Value(match kind {
@@ -710,7 +713,7 @@ pub(super) fn phash(scheduler: &mut Scheduler, term: &Term, range: &Term) -> Bif
         0 => u64::from(hash) + 1,
         range => 1 + u64::from(hash) % u64::from(range),
     };
-    Value(Term::Integer(value as i64))
+    Value(Term::Integer(to_i64(value)))
 }
 
 /// Charge the reductions of a `phash2` call: one reduction for each 64

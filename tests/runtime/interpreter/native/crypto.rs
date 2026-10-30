@@ -1,13 +1,14 @@
 use super::*;
+use std::sync::Arc;
+
 use crate::runtime::capability::{AllowAll, Policy};
 use crate::runtime::process::tests::frame;
+use crate::term::Atom;
 
 /// Return a scheduler whose current process is a new root process.
 fn scheduler() -> Scheduler {
     let mut scheduler = Scheduler::new(AtomTable::new());
-    scheduler
-        .start(frame(), vec![], AllowAll.initial())
-        .unwrap();
+    scheduler.start(frame(), vec![], AllowAll.initial());
     scheduler.schedule_next().unwrap();
     scheduler
 }
@@ -225,20 +226,20 @@ fn raises_the_erts_error_for_a_bad_digest_type_or_data() {
     let result = hash_nif(&mut scheduler, &nosuch, &data).unwrap();
     assert_c_error(
         result,
-        &scheduler.atoms.clone(),
+        &Arc::clone(&scheduler.atoms),
         ("badarg", "hash.c", 111, 0, "Bad digest type"),
     );
     let result = hash_nif(&mut scheduler, &Term::Integer(1), &data).unwrap();
     assert_c_error(
         result,
-        &scheduler.atoms.clone(),
+        &Arc::clone(&scheduler.atoms),
         ("badarg", "hash.c", 111, 0, "Bad digest type"),
     );
     let sha = atom(&mut scheduler, "sha");
     let result = hash_nif(&mut scheduler, &sha, &Term::Integer(1)).unwrap();
     assert_c_error(
         result,
-        &scheduler.atoms.clone(),
+        &Arc::clone(&scheduler.atoms),
         ("badarg", "hash.c", 118, 1, "Not iolist"),
     );
 }
@@ -253,7 +254,7 @@ fn raises_not_iolist_for_hash_update_data_that_is_not_a_binary() {
     let result = hash_update_nif(&mut scheduler, &context, &Term::Integer(1)).unwrap();
     assert_c_error(
         result,
-        &scheduler.atoms.clone(),
+        &Arc::clone(&scheduler.atoms),
         ("badarg", "hash.c", 222, 1, "Not iolist"),
     );
 }
@@ -267,7 +268,7 @@ fn raises_bad_key_for_a_mac_init_key_that_is_not_iodata() {
     let result = mac_init_nif(&mut scheduler, &hmac, &sha, &Term::Integer(1)).unwrap();
     assert_c_error(
         result,
-        &scheduler.atoms.clone(),
+        &Arc::clone(&scheduler.atoms),
         ("badarg", "mac.c", 596, 2, "Bad key"),
     );
 }
@@ -279,7 +280,7 @@ fn gives_the_argument_number_of_each_mac_context_error() {
     let (hmac, sha) = (atom(&mut scheduler, "hmac"), atom(&mut scheduler, "sha"));
     let key = Term::binary(b"k".to_vec());
     let context = value(mac_init_nif(&mut scheduler, &hmac, &sha, &key).unwrap());
-    let atoms = scheduler.atoms.clone();
+    let atoms = Arc::clone(&scheduler.atoms);
     let result = mac_update_nif(&mut scheduler, &Term::Integer(1), &Term::Integer(1)).unwrap();
     assert_c_error(result, &atoms, ("badarg", "mac.c", 807, 1, "Bad text"));
     let result = mac_update_nif(&mut scheduler, &Term::Integer(1), &key).unwrap();
@@ -319,7 +320,20 @@ fn gives_the_pinned_erts_pbkdf2_value_for_each_eligible_digest() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "case table: one entry for each bad argument of `pbkdf2_hmac`"
+)]
 fn checks_the_pbkdf2_arguments_in_the_erts_order() {
+    type Case = (
+        Term,
+        Term,
+        Term,
+        Term,
+        Term,
+        (&'static str, &'static str, i64, i64, &'static str),
+    );
+
     let mut scheduler = scheduler();
     let sha = atom(&mut scheduler, "sha");
     let password = Term::binary(b"password".to_vec());
@@ -328,14 +342,6 @@ fn checks_the_pbkdf2_arguments_in_the_erts_order() {
         b"password"
             .iter()
             .map(|&byte| Term::Integer(i64::from(byte))),
-    );
-    type Case = (
-        Term,
-        Term,
-        Term,
-        Term,
-        Term,
-        (&'static str, &'static str, i64, i64, &'static str),
     );
     let cases: [Case; 11] = [
         (
@@ -413,15 +419,15 @@ fn checks_the_pbkdf2_arguments_in_the_erts_order() {
         (
             sha.clone(),
             text.clone(),
-            salt.clone(),
+            salt,
             Term::Integer(1),
             Term::Integer(16),
             ("badarg", "pbkdf2_hmac.c", 43, 1, "Not binary"),
         ),
         (
-            sha.clone(),
-            password.clone(),
-            text.clone(),
+            sha,
+            password,
+            text,
             Term::Integer(1),
             Term::Integer(16),
             ("badarg", "pbkdf2_hmac.c", 46, 2, "Not binary"),
@@ -437,7 +443,7 @@ fn checks_the_pbkdf2_arguments_in_the_erts_order() {
             &key_length,
         )
         .unwrap();
-        assert_c_error(result, &scheduler.atoms.clone(), expected);
+        assert_c_error(result, &Arc::clone(&scheduler.atoms), expected);
     }
 }
 
@@ -477,7 +483,7 @@ fn truncates_the_pbkdf2_iterations_to_a_c_int_as_erts() {
     .unwrap();
     assert_c_error(
         zero,
-        &scheduler.atoms.clone(),
+        &Arc::clone(&scheduler.atoms),
         ("error", "pbkdf2_hmac.c", 63, -1, "Low-level call failed"),
     );
     let negative = pbkdf2_hmac_nif(
@@ -491,7 +497,7 @@ fn truncates_the_pbkdf2_iterations_to_a_c_int_as_erts() {
     .unwrap();
     assert_c_error(
         negative,
-        &scheduler.atoms.clone(),
+        &Arc::clone(&scheduler.atoms),
         ("error", "pbkdf2_hmac.c", 63, -1, "Low-level call failed"),
     );
 }
@@ -514,7 +520,7 @@ fn bounds_the_key_length_to_a_c_int() {
     .unwrap();
     assert_c_error(
         negative,
-        &scheduler.atoms.clone(),
+        &Arc::clone(&scheduler.atoms),
         ("error", "pbkdf2_hmac.c", 63, -1, "Low-level call failed"),
     );
     let wrapped = pbkdf2_hmac_nif(
@@ -562,7 +568,7 @@ fn gives_the_allocation_error_of_a_key_length_that_does_not_fit() {
     .unwrap();
     assert_c_error(
         result,
-        &scheduler.atoms.clone(),
+        &Arc::clone(&scheduler.atoms),
         ("error", "pbkdf2_hmac.c", 56, -1, "Can't allocate binary"),
     );
 }
@@ -632,7 +638,7 @@ fn gives_the_pinned_erts_info() {
     let BifResult::Value(info) = info_nif(&mut scheduler).unwrap() else {
         panic!("info_nif gives a map");
     };
-    let atoms = scheduler.atoms.clone();
+    let atoms = Arc::clone(&scheduler.atoms);
     assert_eq!(
         map_field(&info, "compile_type", &atoms),
         Some(&Term::Atom(Atom::from_static("normal").unwrap()))
@@ -696,7 +702,7 @@ fn gives_the_argument_number_of_each_cipher_context_error() {
     // crypto.erl drops `c_function_arg_num` (crypto.erl:761-775), so the
     // probe `crypto_probe:cipher_contexts/0` does not compare it.
     let mut scheduler = scheduler();
-    let atoms = scheduler.atoms.clone();
+    let atoms = Arc::clone(&scheduler.atoms);
     let cbc = atom(&mut scheduler, "aes_128_cbc");
     let key = Term::binary(vec![1; 16]);
     let iv = Term::binary(vec![2; 16]);
@@ -738,7 +744,7 @@ fn gives_the_argument_number_of_each_aead_context_error() {
     // iolist_to_binary/1 (crypto.erl:2058), so only a direct NIF call
     // reaches the `non-binary key` check of aead.c:104-105.
     let mut scheduler = scheduler();
-    let atoms = scheduler.atoms.clone();
+    let atoms = Arc::clone(&scheduler.atoms);
     let gcm = atom(&mut scheduler, "aes_128_gcm");
     let truth = atom(&mut scheduler, "true");
     let key = Term::binary(vec![1; 16]);
@@ -782,7 +788,7 @@ fn gives_the_argument_number_of_each_aead_context_error() {
         let mut bad = [state.clone(), empty.clone(), empty.clone(), empty.clone()];
         bad[index] = Term::Integer(1);
         let result = aead_cipher_context_nif(&mut scheduler, &bad).unwrap();
-        let argument = index as i64;
+        let argument = i64::try_from(index).unwrap();
         assert_c_error(
             result,
             &atoms,

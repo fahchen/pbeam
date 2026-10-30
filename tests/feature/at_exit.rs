@@ -1,3 +1,11 @@
+//! Runs the `at_exit` callbacks and the logger flush at the end of a `pbeam` run and compares the
+//! output with the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
+use std::fmt::Write as _;
 use std::{
     path::PathBuf,
     process::{Command, Stdio},
@@ -133,8 +141,10 @@ fn run_both(entry: &str) -> [(&'static str, std::process::Output); 2] {
 fn drop_library_frames(text: &str) -> String {
     text.lines()
         .filter(|line| !line.starts_with("    ("))
-        .map(|line| format!("{line}\n"))
-        .collect()
+        .fold(String::new(), |mut kept, line| {
+            let _ = writeln!(kept, "{line}");
+            kept
+        })
 }
 
 #[test]

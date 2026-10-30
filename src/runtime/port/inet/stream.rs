@@ -1,6 +1,6 @@
 //! The receive and send state of a connected socket of a `tcp_inet` port
 //! in passive and active mode with `{packet, raw}`, as `tcp_descriptor` keeps it
-//! (inet_drv.c:1308, 1050-1064, 12268-12325, 12657-12731, 12783-12890,
+//! (`inet_drv.c:1308`, 1050-1064, 12268-12325, 12657-12731, 12783-12890,
 //! 12967-13240, 13613-13852, 14234-14370).
 //!
 //! `TCP_REQ_RECV` (42) takes `[T3, T2, T1, T0, N3, N2, N1, N0]`: the
@@ -34,7 +34,9 @@ use std::{
     os::fd::AsRawFd,
 };
 
-use super::{Control, Inet, MAX_OPT_BUFFER, OK, SocketType, State, errno_name, error_reply};
+use super::{
+    Control, Inet, MAX_OPT_BUFFER, OK, SocketType, State, errno_name, error_reply, low_u32, to_u64,
+};
 use crate::{
     error::BeamError,
     runtime::timer::PortTimer,
@@ -42,18 +44,18 @@ use crate::{
 };
 
 /// The buffer size of a receive of length 0 (`INET_BUFFER_TCP_DEFAULT`,
-/// inet_drv.c:1050).
+/// `inet_drv.c:1050`).
 pub(super) const BUFFER: usize = 9216;
 
-/// The largest receive length (`TCP_MAX_PACKET_SIZE`, inet_drv.c:1308).
+/// The largest receive length (`TCP_MAX_PACKET_SIZE`, `inet_drv.c:1308`).
 const MAX_PACKET: i32 = 0x400_0000;
 
 /// The queue size that makes a send wait (`INET_HIGH_WATERMARK`,
-/// inet_drv.c:1062).
+/// `inet_drv.c:1062`).
 const HIGH: usize = 8 * 1024;
 
 /// The queue size that ends the wait of a send (`INET_LOW_WATERMARK`,
-/// inet_drv.c:1063).
+/// `inet_drv.c:1063`).
 const LOW: usize = 4 * 1024;
 
 /// The caller of the receive that waits (`enq_async`, one at a time,
@@ -199,6 +201,11 @@ pub(super) struct Statistics {
 
 impl Statistics {
     /// Count a delivered packet of `length` bytes (`inet_input_count`).
+    #[expect(
+        clippy::as_conversions,
+        clippy::cast_precision_loss,
+        reason = "ERTS keeps the averages as C doubles and converts the length and the count with `(double)`, which rounds as `as` does"
+    )]
     pub(super) fn input(&mut self, length: u64) {
         let count = self.receive_count.wrapping_add(1).max(1);
         self.receive_bytes = self.receive_bytes.wrapping_add(length);
@@ -211,6 +218,11 @@ impl Statistics {
     }
 
     /// Count a send of `length` bytes (`inet_output_count`).
+    #[expect(
+        clippy::as_conversions,
+        clippy::cast_precision_loss,
+        reason = "ERTS keeps the average as a C double and converts the length and the count with `(double)`, which rounds as `as` does"
+    )]
     pub(super) fn output(&mut self, length: u64) {
         let count = self.send_count.wrapping_add(1).max(1);
         self.send_bytes = self.send_bytes.wrapping_add(length);
@@ -220,8 +232,21 @@ impl Statistics {
     }
 }
 
+/// What a socket that became active does first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::runtime) enum Activation {
+    /// Deliver the bytes of the input buffer (`tcp_deliver`).
+    Deliver,
+    /// Read the socket (`tcp_recv`).
+    Read,
+}
+
 /// The receive and send state of a connected socket.
 #[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "mirrors the independent `TCP_ADDF_*` flags and the closed state of the `tcp_descriptor` of `inet_drv.c`, which the port sets one by one"
+)]
 pub(in crate::runtime) struct Stream {
     /// The size of the buffer of a receive of length 0 (`bufsz`).
     pub(super) buffer: usize,
@@ -265,7 +290,7 @@ pub(in crate::runtime) struct Stream {
     closed_sent: bool,
     /// The connection ended and the socket closed: `INET_STATE_CLOSED`
     /// with the `stype` `SOCK_STREAM` of `OPEN`, which a port without
-    /// `OPEN` does not have (inet_drv.c:5215, 10925).
+    /// `OPEN` does not have (`inet_drv.c:5215`, 10925).
     pub(super) ended: bool,
     /// The counts of `GETSTAT`.
     pub(super) statistics: Statistics,
@@ -349,7 +374,7 @@ impl Inet {
             _ => {
                 return Ok(Control::Receive {
                     timeout: u32::from_be_bytes([t3, t2, t1, t0]),
-                    length: length as usize,
+                    length: usize::try_from(length).expect("a negative length returned above"),
                 });
             }
         };
@@ -425,8 +450,8 @@ impl Inet {
 
     /// Deliver the bytes of the input buffer to the owner of a socket that
     /// became active, as `tcp_recv` (`read`, for `once`) and `tcp_deliver`
-    /// do after `SETOPTS` (inet_drv.c:11131-11148, 13042-13060). Without
-    /// `read`, an empty buffer and a buffer that waits for more bytes give
+    /// do after `SETOPTS` (inet_drv.c:11131-11148, 13042-13060). With
+    /// [`Activation::Deliver`], an empty buffer and a buffer that waits for more bytes give
     /// no message. A socket whose connection ended gives `{tcp_closed, S}`
     /// once, and the port ends with the reason `normal`
     /// (inet_drv.c:7001-7011).
@@ -434,14 +459,14 @@ impl Inet {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(port.activate(false), vec![Event::Data(vec![1, 2])]);
+    /// assert_eq!(port.activate(Activation::Deliver), vec![Event::Data(vec![1, 2])]);
     /// ```
-    pub(in crate::runtime) fn activate(&mut self, read: bool) -> Vec<Event> {
+    pub(in crate::runtime) fn activate(&mut self, activation: Activation) -> Vec<Event> {
         let stream = &self.stream;
         if stream.ended {
             return self.active_end(Vec::new(), None, "normal".to_owned());
         }
-        if read {
+        if activation == Activation::Read {
             self.receive(0)
         } else if stream.input_size == 0 || stream.remain > 0 || stream.filled == 0 {
             Vec::new()
@@ -460,7 +485,7 @@ impl Inet {
     /// bytes, and the bytes after them move to the start of the buffer.
     fn deliver(&mut self, length: usize) -> Vec<Event> {
         let stream = &mut self.stream;
-        stream.statistics.input(length as u64);
+        stream.statistics.input(to_u64(length));
         let data = if length == stream.filled {
             let mut data = std::mem::take(&mut stream.input);
             data.truncate(length);
@@ -733,7 +758,7 @@ impl Inet {
             }
             return reply(Err("enotconn".to_owned()));
         }
-        self.stream.statistics.output(data.len() as u64);
+        self.stream.statistics.output(to_u64(data.len()));
         if !self.stream.output.is_empty() {
             self.stream.output.extend(data);
             match self.send_timeout {
@@ -860,8 +885,8 @@ impl Inet {
 
     /// Return the fd of a socket with a receive that waits and a read
     /// select that is on (`sock_select(desc, FD_READ, 1)`,
-    /// inet_drv.c:12317, 15496; see `Inet::read_off`) or of a
-    /// connected stream socket in active mode (inet_drv.c:7966), else
+    /// `inet_drv.c:12317`, 15496; see `Inet::read_off`) or of a
+    /// connected stream socket in active mode (`inet_drv.c:7966`), else
     /// `None`.
     pub(in crate::runtime) fn stream_receive_fd(&self) -> Option<c_int> {
         let socket = self.socket.as_ref()?;
@@ -872,8 +897,8 @@ impl Inet {
     }
 
     /// Return the fd of a socket with queued output (`sock_select(desc,
-    /// FD_WRITE, 1)`, inet_drv.c:13846) or that connects (`sock_select(desc,
-    /// FD_CONNECT, 1)`, inet_drv.c:12109), else `None`.
+    /// FD_WRITE, 1)`, `inet_drv.c:13846`) or that connects (`sock_select(desc,
+    /// FD_CONNECT, 1)`, `inet_drv.c:12109`), else `None`.
     pub(in crate::runtime) fn send_fd(&self) -> Option<c_int> {
         let socket = self.socket.as_ref()?;
         (!self.stream.output.is_empty() || self.state == State::Connecting)
@@ -933,12 +958,12 @@ impl Inet {
             let value = match code {
                 1 => counts.receive_count,
                 2 => counts.receive_max,
-                3 => counts.receive_average as u64,
-                4 => counts.receive_deviation.abs() as u64,
+                3 => from_double(counts.receive_average),
+                4 => from_double(counts.receive_deviation.abs()),
                 5 => counts.send_count,
                 6 => counts.send_max,
-                7 => counts.send_average as u64,
-                8 => self.stream.output.len() as u64,
+                7 => from_double(counts.send_average),
+                8 => to_u64(self.stream.output.len()),
                 9 | 10 => {
                     let bytes = if code == 9 {
                         counts.receive_bytes
@@ -950,10 +975,22 @@ impl Inet {
                 }
                 _ => return Control::Badarg,
             };
-            reply.extend((value as u32).to_be_bytes());
+            reply.extend(low_u32(value).to_be_bytes());
         }
         Control::Reply(reply)
     }
+}
+
+/// Return the whole-number part of a statistics average, as the C conversion
+/// of the double to the unsigned counter does.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "an average length is a non-negative double far below 2^53, so the saturating cast of Rust keeps its whole part as the C cast does"
+)]
+fn from_double(value: f64) -> u64 {
+    value as u64
 }
 
 /// True for an error of a write that would block (`ERRNO_BLOCK`) or that a

@@ -88,6 +88,10 @@ pub(crate) fn print_term_limited(term: &Term, atoms: &AtomTable, limit: i64) -> 
 /// lengths of its module and function names (`:698-718`). Each character
 /// of a string takes 1 before it prints (`:537-538`), and each byte of a
 /// binary takes 1 after it prints (`:631-632`, `:667-668`).
+#[expect(
+    clippy::too_many_lines,
+    reason = "mirrors `print_term` of `erl_printf_term.c` with its `dcount` accounting: one arm for each term type, and the arms share the work stack"
+)]
 fn print_term_counted(term: &Term, atoms: &AtomTable, dcount: &mut i64) -> Vec<u8> {
     let mut text = Vec::new();
     let mut items = vec![Item::Term(term)];
@@ -116,7 +120,7 @@ fn print_term_counted(term: &Term, atoms: &AtomTable, dcount: &mut i64) -> Vec<u
             // `PRINT_DOUBLE(res, fn, arg, 'e', 6, 0, ff.fd)`
             // (`erl_printf_term.c:596-600`): six digits after the point.
             Term::Float(value) => {
-                text.extend_from_slice(&crate::term::float_text::scientific(*value, 6))
+                text.extend_from_slice(&crate::term::float_text::scientific(*value, 6));
             }
             Term::Nil => text.extend_from_slice(b"[]"),
             Term::Cons(_)

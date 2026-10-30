@@ -2,7 +2,10 @@
 //! and `mac_final_nif/1` (`mac.c:514-887` of OTP 29.1.1, with the OpenSSL 3
 //! API). The safe `openssl` crate makes each OpenSSL call.
 
-use super::*;
+use super::{
+    BeamError, BifResult, Hash, HashMap, Id, Md, PKey, Reference, Scheduler, Signer, Term,
+    atom_name, c_error, cmac_cipher, error, iodata_bytes, lock,
+};
 use openssl::cipher_ctx::CipherCtx;
 use openssl::error::ErrorStack;
 use openssl::md_ctx::MdCtx;
@@ -313,7 +316,7 @@ pub(super) fn mac_update_nif(
         (data.is_none(), 807, "Bad text"),
         (
             data.as_ref()
-                .is_some_and(|data| data.len() > i32::MAX as usize),
+                .is_some_and(|data| data.len() > super::INT_MAX),
             810,
             "Too long text",
         ),

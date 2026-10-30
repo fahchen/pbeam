@@ -86,7 +86,7 @@ fn keeps_the_bif_timer_index_in_sync_with_the_queue() {
         Some(bif(0, Receiver::Process(ProcessId(0))))
     );
     assert_eq!(timers.cancel_bif(Reference(0)), None);
-    assert!(timers.bif_timers.is_empty());
+    assert!(timers.bif_by_reference.is_empty());
     assert!(!timers.active());
 }
 
@@ -137,7 +137,7 @@ fn sets_the_first_check_timer_at_the_start_as_late_init_time_correction() {
     assert!(!timers.active());
     assert_eq!(
         timers.wait_time(1_000_000_000),
-        Duration::from_millis((timers.check.0 - 1000) as u64)
+        Duration::from_millis(u64::try_from(timers.check.0 - 1000).unwrap())
     );
 }
 

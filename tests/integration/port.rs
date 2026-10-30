@@ -1,3 +1,10 @@
+//! Runs ports of external programs (output, input, close, exit status, owner exit) on PBeam and
+//! compares them with the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::{io::Write, os::fd::AsRawFd, process::Command};
 
 use pbeam_runtime::{AtomTable, BeamProgram, Term};

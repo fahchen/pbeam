@@ -14,7 +14,7 @@
 use std::mem::{align_of, size_of};
 
 use super::options::{decode_tos, tos_term};
-use super::*;
+use super::{BeamError, Scheduler, Term, atom, atom_name, error, field, int, map, pairs};
 
 /// The size of the `cmsg_len` field of the `cmsghdr` of the host:
 /// `size_t` on Linux.
@@ -34,7 +34,8 @@ fn read_length(bytes: &[u8]) -> usize {
 /// Return the `cmsg_len` of the `LENGTH` bytes `bytes`.
 #[cfg(not(target_os = "linux"))]
 fn read_length(bytes: &[u8]) -> usize {
-    u32::from_ne_bytes(bytes.try_into().expect("a cmsg_len")) as usize
+    usize::try_from(u32::from_ne_bytes(bytes.try_into().expect("a cmsg_len")))
+        .expect("a usize holds a u32 on every supported target")
 }
 
 /// Return the `LENGTH` bytes of the `cmsg_len` `length`.
@@ -47,7 +48,8 @@ fn length_bytes(length: usize) -> Vec<u8> {
 /// buffer of at most `wCtrlSz` bytes keeps in the `socklen_t` range.
 #[cfg(not(target_os = "linux"))]
 fn length_bytes(length: usize) -> Vec<u8> {
-    (length as u32).to_ne_bytes().to_vec()
+    let [b0, b1, b2, b3, ..] = length.to_le_bytes();
+    u32::from_le_bytes([b0, b1, b2, b3]).to_ne_bytes().to_vec()
 }
 
 /// Return the `tv_usec` of the bytes after the `tv_sec` of a `timeval`: a

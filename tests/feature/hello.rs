@@ -1,3 +1,10 @@
+//! Runs the compiled Elixir greeting fixtures through the `pbeam` binary and checks its output, its
+//! errors and its help text.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::{
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
@@ -356,7 +363,7 @@ fn prints_help_and_exits_successfully() {
     );
     assert!(stdout.contains("--policy <MODULE>"));
     assert!(stdout.contains("-h, --help"));
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, <[u8; 0]>::default());
 }
 
 #[test]

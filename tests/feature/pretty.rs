@@ -1,4 +1,8 @@
 //! `io_lib:format/2` with `~p` and `~w` under the PBeam boot.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 #[path = "../common/boot.rs"]
 mod boot;
 #[expect(
@@ -18,9 +22,9 @@ const PRETTY_PROBE: &str = "fixtures/pretty/pretty_probe";
 
 /// The pinned OTP modules that `io:format/2` with `~p` calls after the
 /// boot, in addition to `BOOT_MODULES`. `io_lib_pretty` calls
-/// `epp:default_encoding/0` (io_lib_pretty.erl:102), and `io_lib` quotes
+/// `epp:default_encoding/0` (`io_lib_pretty.erl:102`), and `io_lib` quotes
 /// an atom with `erl_scan:reserved_word/1`, which calls
-/// `erl_features:keywords/0` (erl_scan.erl:1357).
+/// `erl_features:keywords/0` (`erl_scan.erl:1357`).
 const FORMAT_MODULES: [&str; 4] = ["io_lib_pretty", "erl_scan", "erl_features", "epp"];
 
 /// Run `command` and return its stdout. The run must exit with status 0

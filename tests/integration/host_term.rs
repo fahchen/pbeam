@@ -7,6 +7,10 @@
 //! and a run can load different code under one module name on demand, so the
 //! import rejects every local fun. An external fun holds no label and resolves
 //! through an export at call time, so it imports across programs.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 #[path = "../common/mod.rs"]
 mod common;

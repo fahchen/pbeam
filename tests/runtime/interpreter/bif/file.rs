@@ -1,4 +1,5 @@
 use super::*;
+use crate::term::Atom;
 
 #[test]
 fn names_the_native_name_encoding_of_each_host_encoding() {

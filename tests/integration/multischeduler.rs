@@ -1,6 +1,10 @@
 //! Two scheduler threads share one node. A root on each thread exchanges
 //! messages: the ping root sends a burst to the pong root, and the pong root
 //! reports whether the burst arrived in the order of the sender.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 #[path = "../common/mod.rs"]
 mod common;
@@ -595,7 +599,7 @@ fn cancels_a_bif_timer_at_an_exit() {
     assert_eq!(results[1].term, Term::Atom(ok_atom), "the holder");
 }
 
-/// A link to a tcp_inet port of another scheduler gives `true`, as on
+/// A link to a `tcp_inet` port of another scheduler gives `true`, as on
 /// `erl +S 2`: a port task runs on any scheduler (`erl_port_task.c`).
 #[test]
 fn links_to_an_inet_port_of_another_scheduler() {

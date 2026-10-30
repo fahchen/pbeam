@@ -34,7 +34,7 @@ const BOOT_DIRECTORY: &str = "target/examples/hello_world";
 ///     .arg(boot_beam());
 /// assert_eq!(boot_beam(), Path::new("target/examples/hello_world/pbeam_boot.beam"));
 /// ```
-pub fn boot_beam() -> &'static Path {
+pub(crate) fn boot_beam() -> &'static Path {
     static BOOT_BEAM: OnceLock<&'static Path> = OnceLock::new();
     BOOT_BEAM.get_or_init(|| {
         let directory = format!("{BOOT_DIRECTORY}/erlc-{}", process::id());
@@ -71,7 +71,7 @@ pub fn boot_beam() -> &'static Path {
 ///     .args(["pbeam_boot", "start", "boot_probe", "main", "--root"])
 ///     .arg(otp_root());
 /// ```
-pub fn otp_root() -> &'static Path {
+pub(crate) fn otp_root() -> &'static Path {
     static ROOT: OnceLock<PathBuf> = OnceLock::new();
     ROOT.get_or_init(|| {
         let output = Command::new("erl")
@@ -103,7 +103,7 @@ pub fn otp_root() -> &'static Path {
 ///     .args(&beams)
 ///     .arg(boot_beam());
 /// ```
-pub const BOOT_MODULES: [&str; 46] = [
+pub(crate) const BOOT_MODULES: [&str; 46] = [
     "erlang",
     "prim_tty",
     "proc_lib",

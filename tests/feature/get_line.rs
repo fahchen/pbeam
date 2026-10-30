@@ -1,3 +1,10 @@
+//! Reads lines from a pipe and from a terminal through the `pbeam` binary and compares them with
+//! the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::{
     io::{self, Read, Write},
     os::fd::{FromRawFd, OwnedFd},

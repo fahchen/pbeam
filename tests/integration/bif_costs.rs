@@ -1,3 +1,10 @@
+//! Checks the reduction costs of the remaining BIFs and of the process exit on PBeam against the
+//! pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::process::Command;
 
 use pbeam_runtime::{AtomTable, BeamProgram, HostTerm, Term};

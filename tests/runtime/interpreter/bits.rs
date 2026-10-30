@@ -1,9 +1,9 @@
 use super::BitWriter;
-use crate::term::Binary;
+use crate::term::{Binary, Endian};
 
 /// The result of a writer that wrote the whole bytes `bytes`.
 fn whole(bytes: Vec<u8>) -> (Vec<u8>, u64) {
-    let bits = bytes.len() as u64 * 8;
+    let bits = u64::try_from(bytes.len()).expect("a vector length fits in `u64`") * 8;
     (bytes, bits)
 }
 
@@ -38,36 +38,39 @@ fn writes_bytes_at_a_bit_offset() {
 fn writes_integers_in_each_byte_order_as_erts() {
     // The values of the pinned ERTS 29.1.1 run of
     // `fixtures/bs_create_bin/bs_create_bin_integer_probe.erl`.
-    let bytes = |parts: &[(i64, u64, bool)]| {
+    let bytes = |parts: &[(i64, u64, Endian)]| {
         let mut writer = BitWriter::default();
         for &(value, bits, little) in parts {
             writer.push_integer(value, bits, little);
         }
         writer.into_bytes()
     };
-    assert_eq!(bytes(&[(0x1234, 16, false)]), whole(vec![0x12, 0x34]));
-    assert_eq!(bytes(&[(0x1234, 16, true)]), whole(vec![0x34, 0x12]));
-    assert_eq!(bytes(&[(263, 8, false)]), whole(vec![7]));
-    assert_eq!(bytes(&[(-1, 72, false)]), whole(vec![0xFF; 9]));
+    assert_eq!(bytes(&[(0x1234, 16, Endian::Big)]), whole(vec![0x12, 0x34]));
     assert_eq!(
-        bytes(&[(0x0102_0304_0506_0708, 72, false)]),
+        bytes(&[(0x1234, 16, Endian::Little)]),
+        whole(vec![0x34, 0x12])
+    );
+    assert_eq!(bytes(&[(263, 8, Endian::Big)]), whole(vec![7]));
+    assert_eq!(bytes(&[(-1, 72, Endian::Big)]), whole(vec![0xFF; 9]));
+    assert_eq!(
+        bytes(&[(0x0102_0304_0506_0708, 72, Endian::Big)]),
         whole(vec![0, 1, 2, 3, 4, 5, 6, 7, 8])
     );
     assert_eq!(
-        bytes(&[(-2, 72, true)]),
+        bytes(&[(-2, 72, Endian::Little)]),
         whole(vec![0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF])
     );
     assert_eq!(
-        bytes(&[(0xABC, 12, true), (0xD, 4, false)]),
+        bytes(&[(0xABC, 12, Endian::Little), (0xD, 4, Endian::Big)]),
         whole(vec![0xBC, 0xAD])
     );
     assert_eq!(
-        bytes(&[(5, 3, false), (0x1234, 13, true)]),
+        bytes(&[(5, 3, Endian::Big), (0x1234, 13, Endian::Little)]),
         whole(vec![166, 146])
     );
-    assert_eq!(bytes(&[(5, 0, false)]), whole(Vec::new()));
+    assert_eq!(bytes(&[(5, 0, Endian::Big)]), whole(Vec::new()));
     // <<1:4>> keeps its 4 bits in the high bits of one byte.
-    assert_eq!(bytes(&[(1, 4, false)]), (vec![0x10], 4));
+    assert_eq!(bytes(&[(1, 4, Endian::Big)]), (vec![0x10], 4));
 }
 
 #[test]

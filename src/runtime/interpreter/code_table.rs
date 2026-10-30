@@ -64,7 +64,7 @@ pub(in crate::runtime) struct CodeTable {
     /// The code of each module that `erlang:finish_loading/1` loaded with an
     /// `-on_load` function, by module name, as the ERTS `on_load` instance
     /// of the module (`beam_load.c:305-313`). The code is in `by_id`, so
-    /// that its on_load function runs, but not in `modules`: the module is
+    /// that its `on_load` function runs, but not in `modules`: the module is
     /// not loaded, and its exports stay hidden until
     /// [`CodeTable::finish_after_on_load`] keeps the code.
     on_load: HashMap<String, OnLoadCode>,
@@ -209,6 +209,16 @@ impl ExportTarget {
             stack: Vec::new(),
         }
     }
+}
+
+/// What [`CodeTable::finish_after_on_load`] does with the code of a module
+/// that waited for its `-on_load` function.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::runtime) enum AfterOnLoad {
+    /// The code becomes the loaded code of the module.
+    Keep,
+    /// The code stays until a purge, and the module stays not loaded.
+    Drop,
 }
 
 /// The result of [`CodeTable::finish`].
@@ -762,7 +772,7 @@ impl CodeTable {
     }
 
     /// Return the code of `module` that waits for its `-on_load` function,
-    /// else the loaded module `module`. `erlang:load_nif/2` from an on_load
+    /// else the loaded module `module`. `erlang:load_nif/2` from an `on_load`
     /// function checks the functions of the waiting code, as ERTS
     /// `erts_load_nif` takes the `on_load` instance of the module
     /// (`beam/erl_nif.c:4764-4770`).
@@ -793,7 +803,7 @@ impl CodeTable {
     ///
     /// ```rust,ignore
     /// code.prepare(reference, module);
-    /// assert_eq!(code.prepared_module(&reference), Some("load_target"));
+    /// assert_eq!(code.prepared_module(reference), Some("load_target"));
     /// ```
     pub(in crate::runtime) fn prepare(&mut self, reference: Reference, module: BeamModule) {
         self.prepared.insert(reference, Arc::new(module));
@@ -807,12 +817,12 @@ impl CodeTable {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(code.prepared_module(&reference), Some("load_target"));
-    /// assert_eq!(code.prepared_module(&other), None);
+    /// assert_eq!(code.prepared_module(reference), Some("load_target"));
+    /// assert_eq!(code.prepared_module(other), None);
     /// ```
-    pub(in crate::runtime) fn prepared_module(&self, reference: &Reference) -> Option<&str> {
+    pub(in crate::runtime) fn prepared_module(&self, reference: Reference) -> Option<&str> {
         self.prepared
-            .get(reference)
+            .get(&reference)
             .map(|module| module.name.as_str())
     }
 
@@ -836,7 +846,7 @@ impl CodeTable {
     ) -> Option<Vec<String>> {
         references
             .iter()
-            .map(|reference| self.prepared_module(reference).map(str::to_owned))
+            .map(|reference| self.prepared_module(*reference).map(str::to_owned))
             .collect()
     }
 
@@ -995,13 +1005,13 @@ impl CodeTable {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(code.finished_prepared_on_load(&reference), Some(false));
+    /// assert_eq!(code.finished_prepared_on_load(reference), Some(false));
     /// ```
     pub(in crate::runtime) fn finished_prepared_on_load(
         &self,
-        reference: &Reference,
+        reference: Reference,
     ) -> Option<bool> {
-        self.finished_prepared.get(reference).copied()
+        self.finished_prepared.get(&reference).copied()
     }
 
     /// Return the frame of the `-on_load` function of the module `name` while
@@ -1019,7 +1029,7 @@ impl CodeTable {
     ///
     /// # Errors
     ///
-    /// An on_load function with an arity that is not 0 gives the error of
+    /// An `on_load` function with an arity that is not 0 gives the error of
     /// [`frame`].
     pub(in crate::runtime) fn on_load_frame(&self, name: &str) -> Result<Option<Frame>, BeamError> {
         self.on_load
@@ -1036,22 +1046,22 @@ impl CodeTable {
     /// Keep or drop the code of the module `name` after its `-on_load`
     /// function, as `finish_after_on_load_2` (`beam_bif_load.c:819-941`)
     /// does. Return `false`, and change nothing, when no code of `name`
-    /// waits for its function. With `keep`, the code becomes the loaded
-    /// code of the module, and its exports become visible. Without `keep`,
-    /// the exports no longer wait for the code, and the code stays until a
+    /// waits for its function. With [`AfterOnLoad::Keep`], the code becomes the
+    /// loaded code of the module, and its exports become visible. With
+    /// [`AfterOnLoad::Drop`], the exports no longer wait for the code, and the code stays until a
     /// purge, as in ERTS. Else return `true`.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert!(code.finish_after_on_load("on_load_ok", true)?);
+    /// assert!(code.finish_after_on_load("on_load_ok", AfterOnLoad::Keep)?);
     /// assert!(code.get("on_load_ok").is_some());
-    /// assert!(!code.finish_after_on_load("on_load_ok", true)?);
+    /// assert!(!code.finish_after_on_load("on_load_ok", AfterOnLoad::Keep)?);
     /// ```
     ///
     /// # Errors
     ///
-    /// `keep` after an earlier call without `keep` gives the runtime error
+    /// [`AfterOnLoad::Keep`] after an earlier [`AfterOnLoad::Drop`] gives the runtime error
     /// `erlang:finish_after_on_load/2 cannot keep the code of M after its
     /// exports were dropped`. ERTS then makes the code current with exports
     /// that call the error handler (`beam_bif_load.c:887-897`), and PBeam has
@@ -1059,12 +1069,12 @@ impl CodeTable {
     pub(in crate::runtime) fn finish_after_on_load(
         &mut self,
         name: &str,
-        keep: bool,
+        code: AfterOnLoad,
     ) -> Result<bool, BeamError> {
         let Some(waiting) = self.on_load.get_mut(name) else {
             return Ok(false);
         };
-        if !keep {
+        if code == AfterOnLoad::Drop {
             waiting.deferred = false;
             return Ok(true);
         }
@@ -1248,7 +1258,7 @@ pub(in crate::runtime) fn frame_at(
     let (name, function_arity) = module
         .tables
         .functions
-        .get(function as usize)
+        .get(usize::try_from(function).expect("a u32 fits in usize"))
         .expect("the loader resolves a call label to a function");
     if *function_arity != arity {
         return Err(error(format!(
@@ -1260,7 +1270,7 @@ pub(in crate::runtime) fn frame_at(
     Ok(Frame {
         module_id: module.id,
         function: *name,
-        next_instruction: target as usize,
+        next_instruction: usize::try_from(target).expect("a u32 fits in usize"),
         stack: Vec::new(),
     })
 }

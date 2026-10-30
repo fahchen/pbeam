@@ -10,7 +10,10 @@
 //! characteristic-two field give a runtime error (row "NIF stubs" of
 //! `docs/erts-differences.md`).
 
-use super::*;
+use super::{
+    BeamError, BifResult, Hash, Hasher, Md, PKey, Scheduler, Term, atom_name, c_error, error,
+    iodata_bytes,
+};
 use openssl::bn::{BigNum, BigNumContext};
 use openssl::dsa::Dsa;
 use openssl::ec::{EcGroup, EcKey, EcPoint};
@@ -464,7 +467,7 @@ fn sign_options(
     term: &Term,
     argument: usize,
 ) -> Result<SignOptions, Failure> {
-    let argument = argument as i64;
+    let argument = i64::try_from(argument).expect("an argument position fits in i64");
     if !matches!(term, Term::Nil) && term.cons_cell().is_none() {
         return Err(badarg(400, argument, "Expected a list"));
     }
@@ -765,21 +768,33 @@ fn next_number(cell: &mut &Term) -> Option<BigNum> {
 /// (`rsa.c:364-411`).
 fn rsa_private_key(term: &Term) -> Option<PKey<Private>> {
     let mut cell = term;
-    let e = next_number(&mut cell)?;
-    let n = next_number(&mut cell)?;
-    let d = next_number(&mut cell)?;
+    let exponent = next_number(&mut cell)?;
+    let modulus = next_number(&mut cell)?;
+    let private_exponent = next_number(&mut cell)?;
     let rsa = if matches!(cell, Term::Nil) {
-        RsaPrivateKeyBuilder::new(n, e, d).ok()?.build()
+        RsaPrivateKeyBuilder::new(modulus, exponent, private_exponent)
+            .ok()?
+            .build()
     } else {
-        let p = next_number(&mut cell)?;
-        let q = next_number(&mut cell)?;
-        let dmp1 = next_number(&mut cell)?;
-        let dmq1 = next_number(&mut cell)?;
-        let iqmp = next_number(&mut cell)?;
+        let prime1 = next_number(&mut cell)?;
+        let prime2 = next_number(&mut cell)?;
+        let exponent1 = next_number(&mut cell)?;
+        let exponent2 = next_number(&mut cell)?;
+        let coefficient = next_number(&mut cell)?;
         if !matches!(cell, Term::Nil) {
             return None;
         }
-        Rsa::from_private_components(n, e, d, p, q, dmp1, dmq1, iqmp).ok()?
+        Rsa::from_private_components(
+            modulus,
+            exponent,
+            private_exponent,
+            prime1,
+            prime2,
+            exponent1,
+            exponent2,
+            coefficient,
+        )
+        .ok()?
     };
     PKey::from_rsa(rsa).ok()
 }
@@ -808,7 +823,7 @@ fn dss_parts(term: &Term) -> Option<[BigNum; 4]> {
     matches!(cell, Term::Nil).then_some(parts)
 }
 
-/// Return the bytes and the type of the EdDSA key `[Key, Curve]`
+/// Return the bytes and the type of the `EdDSA` key `[Key, Curve]`
 /// (`eddsa.c:26-66`).
 fn eddsa_parts<'a>(scheduler: &Scheduler, term: &'a Term) -> Option<(&'a [u8], Id)> {
     let (head, tail) = term.cons_cell()?;
@@ -955,7 +970,7 @@ fn crypt(scheduler: &Scheduler, arguments: &[Term]) -> Result<Vec<u8>, Failure> 
         } else {
             context.decrypt_init()
         };
-        run_crypt(context, init, &algorithm, &options, |context, out| {
+        run_crypt(context, &init, &algorithm, &options, |context, out| {
             if is_encrypt {
                 context.sign(data, out)
             } else {
@@ -971,7 +986,7 @@ fn crypt(scheduler: &Scheduler, arguments: &[Term]) -> Result<Vec<u8>, Failure> 
         } else {
             context.verify_recover_init()
         };
-        run_crypt(context, init, &algorithm, &options, |context, out| {
+        run_crypt(context, &init, &algorithm, &options, |context, out| {
             if is_encrypt {
                 context.encrypt(data, out)
             } else {
@@ -997,7 +1012,7 @@ fn new_context<T>(pkey: &PKey<T>) -> Result<PkeyCtx<T>, Failure> {
 /// result (`pkey.c:1380-1474`).
 fn run_crypt<T>(
     mut context: PkeyCtx<T>,
-    init: Result<(), ErrorStack>,
+    init: &Result<(), ErrorStack>,
     algorithm: &str,
     options: &CryptOptions,
     mut operation: impl FnMut(&mut PkeyCtx<T>, Option<&mut [u8]>) -> Result<usize, ErrorStack>,

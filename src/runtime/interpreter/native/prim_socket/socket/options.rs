@@ -12,10 +12,19 @@
 use nix::errno::Errno;
 use nix::sys::socket::{getsockopt, setsockopt, sockopt};
 
+#[cfg(target_os = "linux")]
+use std::net::Ipv6Addr;
 use std::os::fd::AsRawFd;
 use std::ptr;
 
-use super::*;
+#[cfg(target_os = "linux")]
+use super::in6_addr;
+use super::{
+    Arc, BeamError, BifResult, CLOSED, CLOSING, ExceptionClass, Ipv4Addr, Mutex, OtpOptions,
+    Reference, Scheduler, Signal, Socket, SocketState, Sockets, Term, atom, atom_name, closed,
+    decode_domain, domain_term, errno_error, error, field, in_addr, int, invalid, io, lock, map,
+    named, pairs, send_registry, socket_argument, type_term, uint,
+};
 use crate::runtime::interpreter::native::prim_socket::supports::option_name;
 
 /// The number `ESOCK_OPT_OTP_DEBUG` (`prim_socket_nif.c:920`).
@@ -244,7 +253,7 @@ pub(in crate::runtime::interpreter::native::prim_socket) fn setopt_5(
         Form::Uint => value
             .bigint()
             .and_then(|value| u32::try_from(value.as_ref()).ok())
-            .map(|value| Value::Int(value as i32)),
+            .map(|value| Value::Int(value.cast_signed())),
         Form::Hops => decode_hops(scheduler, value).map(Value::Int),
         Form::Addr => in_addr(scheduler, value).map(Value::Addr),
         Form::Membership => decode_membership(scheduler, value),
@@ -296,9 +305,9 @@ fn set_form(name: (&str, &str)) -> Option<Form> {
     match name {
         (
             "socket",
-            "broadcast" | "keepalive" | "reuseaddr" | "reuseport" | "oobinline" | "dontroute",
+            "broadcast" | "keepalive" | "reuseaddr" | "reuseport" | "oobinline" | "dontroute"
+            | "timestamp" | "acceptconn",
         )
-        | ("socket", "timestamp" | "acceptconn")
         | ("tcp", "nodelay")
         | ("ip", "multicast_loop" | "recvtos" | "hdrincl")
         | ("ipv6", "v6only" | "recvtclass" | "multicast_loop") => Some(Form::Bool),
@@ -352,8 +361,10 @@ fn raw_form(name: (&str, &str)) -> Option<Form> {
         | ("udp", "cork") => Some(Form::Bool),
         ("socket", "bindtodevice") => Some(Form::Str),
         ("ip" | "ipv6", "mtu_discover") => Some(Form::Pmtu),
-        ("ip", "add_source_membership" | "drop_source_membership")
-        | ("ip", "block_source" | "unblock_source") => Some(Form::Source),
+        (
+            "ip",
+            "add_source_membership" | "drop_source_membership" | "block_source" | "unblock_source",
+        ) => Some(Form::Source),
         ("ipv6", "addrform") => Some(Form::Addrform),
         _ => None,
     }
@@ -459,7 +470,8 @@ fn decode_msfilter(scheduler: &Scheduler, value: &Term) -> Option<Vec<u8>> {
     bytes.extend(in_addr(scheduler, interface)?.octets());
     bytes.extend(mode.to_ne_bytes());
     // `imsf_numsrc` is a `uint32_t`, so a longer list wraps as in C.
-    bytes.extend((sources.len() as u32).to_ne_bytes());
+    let [b0, b1, b2, b3, ..] = sources.len().to_le_bytes();
+    bytes.extend(u32::from_le_bytes([b0, b1, b2, b3]).to_ne_bytes());
     bytes.extend(sources.iter().flat_map(Ipv4Addr::octets));
     Some(bytes)
 }
@@ -666,7 +678,7 @@ pub(super) fn decode_tos(scheduler: &Scheduler, value: &Term) -> Option<i32> {
 /// an `unsigned char`.
 fn decode_tos_map(scheduler: &Scheduler, value: &Term) -> Option<i32> {
     let decode = |term: &Term, table: &[(i32, &str)]| match uint(term) {
-        Some(number) => Some(i32::from(number as u8)),
+        Some(number) => Some(i32::from(number.to_le_bytes()[0])),
         None => named_value(table, atom_name(scheduler, term)),
     };
     let precedence = decode(field(&scheduler.atoms, value, "precedence")?, &PRECEDENCES)?;
@@ -789,7 +801,7 @@ fn set_host(
     // The safe APIs pass these values on as a C `int` (`nix` `SetUsize`
     // casts with `as c_int`, `socket2::set_ttl_v4` casts the `u32`), so the
     // bit-identical casts below give the host the `int` that ERTS gives.
-    let count = value as u32;
+    let count = value.cast_unsigned();
     keep_tos_and_priority(host, opt, || {
         let result = match name {
             ("socket", "broadcast") => setsockopt(host, sockopt::Broadcast, &flag),
@@ -798,8 +810,8 @@ fn set_host(
             ("socket", "reuseport") => setsockopt(host, sockopt::ReusePort, &flag),
             ("socket", "oobinline") => setsockopt(host, sockopt::OobInline, &flag),
             ("socket", "dontroute") => setsockopt(host, sockopt::DontRoute, &flag),
-            ("socket", "rcvbuf") => setsockopt(host, sockopt::RcvBuf, &(value as usize)),
-            ("socket", "sndbuf") => setsockopt(host, sockopt::SndBuf, &(value as usize)),
+            ("socket", "rcvbuf") => setsockopt(host, sockopt::RcvBuf, &sign_extended(value)),
+            ("socket", "sndbuf") => setsockopt(host, sockopt::SndBuf, &sign_extended(value)),
             ("tcp", "nodelay") => setsockopt(host, sockopt::TcpNoDelay, &flag),
             ("tcp", "keepcnt") => setsockopt(host, sockopt::TcpKeepCount, &count),
             ("tcp", "keepintvl") => setsockopt(host, sockopt::TcpKeepInterval, &count),
@@ -853,7 +865,7 @@ fn set_socket2(
     value: i32,
 ) -> io::Result<()> {
     let flag = value != 0;
-    let count = value as u32;
+    let count = value.cast_unsigned();
     match name {
         ("ip", "multicast_ttl") => host.set_multicast_ttl_v4(count),
         ("ip", "multicast_loop") => host.set_multicast_loop_v4(flag),
@@ -876,12 +888,36 @@ fn set_socket2(
     }
 }
 
+/// The `socklen_t` of a byte size, which wraps as the C cast of a `size_t`
+/// does.
+fn socklen(size: usize) -> libc::socklen_t {
+    let [b0, b1, b2, b3, ..] = size.to_le_bytes();
+    libc::socklen_t::from_le_bytes([b0, b1, b2, b3])
+}
+
+/// The `size_t` of a C `int`, which keeps the sign bits as the C
+/// conversion does.
+fn sign_extended(value: i32) -> usize {
+    isize::try_from(value)
+        .expect("an isize holds an i32 on every supported target")
+        .cast_unsigned()
+}
+
+/// The `int` of a socket type, which `nix` gives as a `repr(i32)` enum.
+#[expect(
+    clippy::as_conversions,
+    reason = "nix::sys::socket::SockType is a repr(i32) enum and has no From or TryFrom to i32"
+)]
+fn sock_type_code(kind: nix::sys::socket::SockType) -> i32 {
+    kind as i32
+}
+
 /// Set the option `opt` at the level `level` of `host` to the bytes of
 /// `value`, as `socket_setopt` passes a value and its size to
 /// `setsockopt` (`prim_socket_nif.c:11422-11481`). The size is a
 /// `socklen_t`, so a larger size wraps as in C.
 fn raw_set<T: ?Sized>(host: &Socket, level: i32, opt: i32, value: &T) -> io::Result<()> {
-    let size = std::mem::size_of_val(value) as libc::socklen_t;
+    let size = socklen(std::mem::size_of_val(value));
     // SAFETY: `value` is a live shared reference, so the `size` bytes at its
     // address stay valid for reads during the call, and `setsockopt` reads
     // at most `size` bytes. `host` owns the descriptor during the call.
@@ -906,7 +942,7 @@ fn raw_set<T: ?Sized>(host: &Socket, level: i32, opt: i32, value: &T) -> io::Res
 /// a larger buffer size wraps as in C.
 fn raw_get(host: &Socket, level: i32, opt: i32, buffer: Option<Vec<u8>>) -> io::Result<Vec<u8>> {
     let mut buffer = buffer;
-    let mut size = buffer.as_ref().map_or(0, Vec::len) as libc::socklen_t;
+    let mut size = socklen(buffer.as_ref().map_or(0, Vec::len));
     let (value, size_ptr) = match buffer.as_mut() {
         Some(buffer) => (buffer.as_mut_ptr().cast(), ptr::from_mut(&mut size)),
         None => (ptr::null_mut(), ptr::null_mut()),
@@ -920,7 +956,7 @@ fn raw_get(host: &Socket, level: i32, opt: i32, buffer: Option<Vec<u8>>) -> io::
     let result = unsafe { libc::getsockopt(host.as_raw_fd(), level, opt, value, size_ptr) };
     Errno::result(result).map_err(io::Error::from)?;
     let mut bytes = buffer.unwrap_or_default();
-    bytes.truncate(size as usize);
+    bytes.truncate(usize::try_from(size).expect("a socklen_t fits in usize"));
     Ok(bytes)
 }
 
@@ -1064,7 +1100,11 @@ fn getopt(
     // to a `socklen_t` as in C (`prim_socket_nif.c:13285-13295`).
     #[cfg(target_os = "linux")]
     if name == ("ip", "pktoptions") {
-        let buffer = vec![0; socket.options.recv_ctrl as libc::socklen_t as usize];
+        let buffer = vec![
+            0;
+            usize::try_from(socklen(socket.options.recv_ctrl))
+                .expect("a socklen_t fits in usize")
+        ];
         let value = match raw_get(host, level, opt, Some(buffer)) {
             Ok(bytes) => Ok(Some(pktoptions(scheduler, &bytes)?)),
             Err(failure) => Err(failure),
@@ -1082,7 +1122,7 @@ fn getopt(
         Ok(Got::Type(kind)) => type_term(scheduler, kind).map(Some).map(Ok)?,
         Ok(Got::Linger(linger)) => {
             let entries = [
-                ("onoff", boolean(linger.l_onoff != 0)),
+                ("onoff", Term::from(linger.l_onoff != 0)),
                 ("linger", Term::Integer(linger.l_linger.into())),
             ];
             let pairs = pairs(scheduler, &entries)?;
@@ -1127,14 +1167,22 @@ fn getopt_native(
     let value = match (int(spec), atom_name(scheduler, spec), spec.binary_bytes()) {
         (Some(0), _, _) => raw_get(host, level, opt, None).map(|_| None),
         // `valueSz` is a `socklen_t`, so a negative size wraps as in C.
-        (Some(size), _, _) => {
-            raw_get(host, level, opt, Some(vec![0; size as u32 as usize])).map(binary)
-        }
+        (Some(size), _, _) => raw_get(
+            host,
+            level,
+            opt,
+            Some(vec![
+                0;
+                usize::try_from(size.cast_unsigned())
+                    .expect("a u32 fits in usize")
+            ]),
+        )
+        .map(binary),
         (None, Some("integer"), _) => {
             raw_int(host, level, opt).map(|value| Some(Term::Integer(value.into())))
         }
         (None, Some("boolean"), _) => {
-            raw_int(host, level, opt).map(|value| Some(boolean(value != 0)))
+            raw_int(host, level, opt).map(|value| Some(Term::from(value != 0)))
         }
         // `esock_getopt_bin_opt` gives `{error, {invalid, data_size}}` for
         // a size that a `socklen_t` cannot hold
@@ -1164,14 +1212,12 @@ fn get_host(host: &Socket, name: (&str, &str), level_opt: (i32, i32)) -> Option<
         ("socket", "priority") => {
             getsockopt(host, sockopt::Priority).map(|value| Got::Int(value.into()))
         }
-        ("socket", "rcvbuf") => {
-            getsockopt(host, sockopt::RcvBuf).map(|value| Got::Int(value as i64))
-        }
-        ("socket", "sndbuf") => {
-            getsockopt(host, sockopt::SndBuf).map(|value| Got::Int(value as i64))
-        }
+        ("socket", "rcvbuf") => getsockopt(host, sockopt::RcvBuf)
+            .map(|value| Got::Int(i64::try_from(value).expect("a buffer size fits in i64"))),
+        ("socket", "sndbuf") => getsockopt(host, sockopt::SndBuf)
+            .map(|value| Got::Int(i64::try_from(value).expect("a buffer size fits in i64"))),
         ("socket", "type") => {
-            getsockopt(host, sockopt::SockType).map(|kind| Got::Type(kind as i32))
+            getsockopt(host, sockopt::SockType).map(|kind| Got::Type(sock_type_code(kind)))
         }
         ("tcp", "nodelay") => getsockopt(host, sockopt::TcpNoDelay).map(Got::Bool),
         ("tcp", "keepcnt") => {
@@ -1194,7 +1240,7 @@ fn get_host(host: &Socket, name: (&str, &str), level_opt: (i32, i32)) -> Option<
         ("socket", "passcred") => getsockopt(host, sockopt::PassCred).map(Got::Bool),
         #[cfg(target_os = "linux")]
         ("tcp", "keepidle") => {
-            getsockopt(host, sockopt::TcpKeepIdle).map(|value| Got::Int((value as i32).into()))
+            getsockopt(host, sockopt::TcpKeepIdle).map(|value| Got::Int(value.cast_signed().into()))
         }
         #[cfg(target_os = "linux")]
         ("tcp", "user_timeout") => {
@@ -1232,7 +1278,7 @@ fn get_socket2(
     name: (&str, &str),
     level_opt: (i32, i32),
 ) -> Option<io::Result<Got>> {
-    let int = |value: io::Result<u32>| value.map(|value| Got::Int((value as i32).into()));
+    let int = |value: io::Result<u32>| value.map(|value| Got::Int(value.cast_signed().into()));
     Some(match name {
         ("ip", "ttl") => int(host.ttl_v4()),
         ("ip", "multicast_ttl") => int(host.multicast_ttl_v4()),
@@ -1247,7 +1293,7 @@ fn get_socket2(
         ("ipv6", "multicast_hops") => int(host.multicast_hops_v6()),
         ("ipv6", "unicast_hops") => int(host.unicast_hops_v6()),
         ("tcp", "maxseg") => int(host.tcp_mss()),
-        ("ip", "tos") => host.tos_v4().map(|value| Got::Tos(value as i32)),
+        ("ip", "tos") => host.tos_v4().map(|value| Got::Tos(value.cast_signed())),
         #[cfg(target_os = "linux")]
         ("tcp", "cork") => host.tcp_cork().map(Got::Bool),
         #[cfg(target_os = "linux")]
@@ -1485,16 +1531,16 @@ fn getopt_otp(
     }
     let options = socket.options;
     let value = match opt {
-        OTP_USE_REGISTRY => boolean(socket.registered),
+        OTP_USE_REGISTRY => Term::from(socket.registered),
         // PBeam does not set `dbg` (see `setopt_otp`).
         OTP_DEBUG => Term::static_atom("false"),
-        OTP_SELECT_READ => boolean(socket.select_read),
-        OTP_IOW => boolean(options.iow),
+        OTP_SELECT_READ => Term::from(socket.select_read),
+        OTP_IOW => Term::from(options.iow),
         OTP_CTRL_PROC => Term::Pid(socket.owner.expect("an open socket has an owner")),
         // `{N, Size}` while `rNum` is set, with `MKI` of the `unsigned int`
         // N, which wraps to an `int` (`prim_socket_nif.c:11838-11844`).
         OTP_RCVBUF if options.recv_count != 0 => Term::tuple(vec![
-            Term::Integer((options.recv_count as i32).into()),
+            Term::Integer((options.recv_count.cast_signed()).into()),
             size_term(options.recv_buffer),
         ]),
         OTP_RCVBUF => size_term(options.recv_buffer),

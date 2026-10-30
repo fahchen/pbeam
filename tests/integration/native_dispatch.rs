@@ -1,9 +1,20 @@
+//! Checks that a registered native MFA reaches Rust and that an unregistered MFA resolves to BEAM
+//! code.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use pbeam_runtime::{
     Atom, BeamProgram, Binding, Job, Library, NativeResult, NifContext, Term, register_library,
 };
 
 const NATIVE_PROBE: &[u8] = include_bytes!("../../fixtures/native/native_probe.beam");
 
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "NIF function pointer; every NIF returns `Result<NativeResult, BeamError>`"
+)]
 fn add(
     context: &mut NifContext<'_>,
     arguments: &[Term],
@@ -16,6 +27,10 @@ fn add(
     }
 }
 
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "NIF function pointer; every NIF returns `Result<NativeResult, BeamError>`"
+)]
 fn hidden(
     context: &mut NifContext<'_>,
     arguments: &[Term],

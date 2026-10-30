@@ -4,7 +4,7 @@
 //! (`erl_iolist.c:113-649`) that they share.
 
 use super::BifResult::Value;
-use super::*;
+use super::{BeamError, BifResult, Binary, ProcessState, Scheduler, Term, to_i64, to_usize};
 use crate::runtime::interpreter::bits::BitWriter;
 use crate::runtime::interpreter::bitstring;
 
@@ -266,7 +266,8 @@ impl<'a> Walk<'a> {
 /// assert_eq!(walk_cost(80, 71), 2);
 /// ```
 fn walk_cost(init: i64, steps: i64) -> i32 {
-    ((init - steps - 1) / STEPS_PER_RED + 1) as i32
+    i32::try_from((init - steps - 1) / STEPS_PER_RED + 1)
+        .expect("a walk uses at most the steps of the reductions that it has")
 }
 
 /// Run `erlang:iolist_size/1` as ERTS `iolist_size_1` does
@@ -325,13 +326,17 @@ fn bump_all_after_walk(process: &mut ProcessState, init: i64) {
 /// assert!(matches!(trap, BifResult::TrapBif { function: "iolist_size_continue", .. }));
 /// assert_eq!(process.fcalls, 0);
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "trap export arm of `bif_trap`; every trap arm returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn iolist_size_continue(
     process: &mut ProcessState,
     term: &Term,
     stack: &[&Term],
     mut size: usize,
 ) -> Result<BifResult, BeamError> {
-    let init = STEPS_PER_RED * process.bif_reductions_or_zero() as i64;
+    let init = STEPS_PER_RED * to_i64(process.bif_reductions_or_zero());
     let mut steps = init;
     let mut walk = Walk::new(term, stack);
     let step = walk.run(&mut steps, |leaf, _, _| {
@@ -347,12 +352,12 @@ pub(super) fn iolist_size_continue(
         return Ok(BifResult::TrapBif {
             module: "erts_internal",
             function: "iolist_size_continue",
-            arguments: vec![term, stack, Term::Integer(size as i64)],
+            arguments: vec![term, stack, Term::Integer(to_i64(size))],
         });
     }
     process.bump_reductions(walk_cost(init, steps));
     Ok(match step {
-        Step::Done => Value(Term::Integer(size as i64)),
+        Step::Done => Value(Term::Integer(to_i64(size))),
         _ => BifResult::badarg(),
     })
 }
@@ -410,13 +415,17 @@ pub(super) fn iolist_to_iovec(
 /// assert!(matches!(iovec, BifResult::Value(binaries) if binaries == Term::list_from([Term::binary(vec![1])])));
 /// assert_eq!(process.fcalls, 8);
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "trap export arm of `bif_trap`; every trap arm returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn iovec_size(
     process: &mut ProcessState,
     arg: &Term,
     term: &Term,
     stack: &[&Term],
 ) -> Result<BifResult, BeamError> {
-    let reds_left = process.bif_reductions_or_zero() as i64;
+    let reds_left = to_i64(process.bif_reductions_or_zero());
     let init = STEPS_PER_RED * reds_left;
     let mut steps = init;
     let mut walk = Walk::new(term, stack);
@@ -485,7 +494,7 @@ pub(super) fn iovec_copy(
     let mut walk = Walk::new(term, stack);
     let step = walk.run(&mut steps, |leaf, offset, steps| match leaf {
         Term::Integer(byte) => {
-            merged.push(*byte as u8);
+            merged.push(u8::try_from(*byte).expect("the walk yields only bytes of 0..=255"));
             None
         }
         Term::Binary(bytes) if leaf_bytes(bytes).len() <= IOVEC_COPY_LIMIT => {
@@ -578,15 +587,16 @@ fn leaf_bytes(binary: &Binary) -> &[u8] {
 /// assert_eq!(steps, 0);
 /// ```
 fn copy_bytes(bytes: &mut Vec<u8>, rest: &[u8], steps: &mut i64) -> Option<usize> {
-    let taken = rest
-        .len()
-        .min(((*steps + 1) * COPY_BYTES_PER_STEP) as usize);
+    let taken = rest.len().min(
+        // A negative budget reads as an unsigned count that exceeds each length.
+        usize::try_from((*steps + 1) * COPY_BYTES_PER_STEP).unwrap_or(usize::MAX),
+    );
     bytes.extend_from_slice(&rest[..taken]);
     if taken < rest.len() {
         *steps = 0;
         return Some(taken);
     }
-    *steps -= taken as i64 / COPY_BYTES_PER_STEP;
+    *steps -= to_i64(taken) / COPY_BYTES_PER_STEP;
     None
 }
 
@@ -681,6 +691,10 @@ pub(super) fn list_to_bitstring_1(
 /// assert!(matches!(list_to_bitstring(&mut scheduler, &list, "list_to_binary", Unit::Byte)?, BifResult::Value(Term::Binary(bytes)) if bytes == [1, 2]));
 /// assert!(matches!(list_to_bitstring(&mut scheduler, &Term::static_atom("a"), "iolist_to_binary", Unit::Byte)?, BifResult::Raise { .. }));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "result of this helper is the tail of BIF entries that return `Result<BifResult, BeamError>` like every BIF"
+)]
 fn list_to_bitstring(
     scheduler: &mut Scheduler,
     term: &Term,
@@ -688,7 +702,7 @@ fn list_to_bitstring(
     unit: Unit,
 ) -> Result<BifResult, BeamError> {
     let process = scheduler.current_process_mut();
-    let mut reds_left = process.bif_reductions_or_zero() as i64;
+    let mut reds_left = to_i64(process.bif_reductions_or_zero());
     if reds_left <= L2B_RESCHED_REDS {
         scheduler.vbump_all_reductions();
         return Ok(BifResult::TrapBif {
@@ -766,7 +780,7 @@ pub(super) fn l2b_size(
             arg.clone(),
             term,
             stack,
-            Term::Integer(size as i64),
+            Term::Integer(to_i64(size)),
             Term::Integer(unit.bits()),
         ]);
     }
@@ -785,7 +799,7 @@ pub(super) fn l2b_size(
             Term::static_atom("copy"),
             arg.clone(),
             Term::nil(),
-            Term::Integer(size as i64),
+            Term::Integer(to_i64(size)),
             Term::binary(Vec::new()),
         ]);
     }
@@ -826,12 +840,15 @@ pub(super) fn l2b_copy(
         Term::Binary(binary) => copy_bits(&mut bits, binary, offset, steps),
         byte => {
             if let Term::Integer(byte) = byte {
-                bits.push_bits(*byte as u8, 8);
+                bits.push_bits(
+                    u8::try_from(*byte).expect("the walk yields only bytes of 0..=255"),
+                    8,
+                );
             }
             None
         }
     });
-    if step == Step::Yield && (bits.bit_size() as usize) < size {
+    if step == Step::Yield && to_usize(bits.bit_size()) < size {
         process.bump_all_reductions();
         let (term, stack) = walk.term();
         let (bytes, copied) = bits.into_bytes();
@@ -839,7 +856,7 @@ pub(super) fn l2b_copy(
             Term::static_atom("copy"),
             term,
             stack,
-            Term::Integer(size as i64),
+            Term::Integer(to_i64(size)),
             Term::Binary(bitstring(bytes, copied)),
         ]);
     }
@@ -870,13 +887,16 @@ fn copy_bits(
     steps: &mut i64,
 ) -> Option<usize> {
     let rest = binary.bit_size() - offset;
-    let taken = rest.min(((*steps + 1) * COPY_BITS_PER_STEP) as usize);
+    let taken = rest.min(
+        // A negative budget reads as an unsigned count that exceeds each length.
+        usize::try_from((*steps + 1) * COPY_BITS_PER_STEP).unwrap_or(usize::MAX),
+    );
     bits.push_bit_bytes(&binary.bit_bytes()[offset / 8..], taken);
     if taken < rest {
         *steps = 0;
         return Some(taken);
     }
-    *steps -= taken as i64 / COPY_BITS_PER_STEP;
+    *steps -= to_i64(taken) / COPY_BITS_PER_STEP;
     None
 }
 
@@ -918,7 +938,7 @@ pub(crate) fn iodata_bytes(term: &Term) -> Option<Vec<u8>> {
         if let Term::Binary(binary) = leaf {
             bytes.extend_from_slice(leaf_bytes(binary));
         } else if let Term::Integer(byte) = leaf {
-            bytes.push(*byte as u8);
+            bytes.push(u8::try_from(*byte).expect("the walk yields only bytes of 0..=255"));
         }
         None
     });

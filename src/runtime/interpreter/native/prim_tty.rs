@@ -1,7 +1,7 @@
 //! Native bindings of the `prim_tty` NIFs (`erts/emulator/nifs/common/prim_tty_nif.c`).
 
 use super::bif::{denial, iodata_bytes};
-use super::*;
+use super::{Atom, AtomTable, BeamError, BifResult, Binding, Job, Scheduler, Term, Work};
 use crate::runtime::{
     capability::{CapabilityKind, Operation},
     host::{
@@ -830,8 +830,16 @@ fn error_errno(atoms: &AtomTable, errno: libc::c_int) -> Result<Term, BeamError>
 /// assert_eq!(MAXIOV, 1024);
 /// ```
 #[cfg(target_os = "macos")]
+#[expect(
+    clippy::as_conversions,
+    reason = "IOV_MAX is a small positive c_int, and TryFrom is not const"
+)]
 const MAXIOV: usize = libc::IOV_MAX as usize;
 #[cfg(not(target_os = "macos"))]
+#[expect(
+    clippy::as_conversions,
+    reason = "UIO_MAXIOV is a small positive c_int, and TryFrom is not const"
+)]
 const MAXIOV: usize = libc::UIO_MAXIOV as usize;
 
 /// Run `prim_tty:write_nif(TTY, IOVec)`, as the ERTS NIF `tty_write_nif`
@@ -905,7 +913,7 @@ fn write_nif(scheduler: &mut Scheduler, tty: &Term, iovec: &Term) -> Result<BifR
             match element {
                 Term::Binary(bytes) if bytes.bit_size() == 0 => {}
                 Term::Binary(bytes) if let Some(bytes) = bytes.bytes() => {
-                    buffers.push(bytes.to_vec())
+                    buffers.push(bytes.to_vec());
                 }
                 _ => return Ok(BifResult::Dirty(Work::Write(write))),
             }

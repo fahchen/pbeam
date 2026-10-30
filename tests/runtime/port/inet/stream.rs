@@ -4,7 +4,7 @@ use socket2::{Domain, Socket, Type};
 
 use super::{
     super::{Control, MAGIC},
-    Event, HIGH, Output, Receiver, Sender, Waiter,
+    Activation, Event, HIGH, Output, Receiver, Sender, Waiter,
 };
 use crate::{
     runtime::{
@@ -68,13 +68,13 @@ fn fills_one_buffer_for_a_receive_in_many_reads() {
     peer.write_all(&[63]).unwrap();
     let mut events = port.receive(0);
     let Some(Event::Received {
-        receiver: received,
+        receiver: from_port,
         result: Ok(data),
     }) = events.pop()
     else {
         panic!("the receive gives its data");
     };
-    assert_eq!((received, events), (receiver, Vec::new()));
+    assert_eq!((from_port, events), (receiver, Vec::new()));
     assert_eq!(data, (0..64).collect::<Vec<u8>>());
     assert_eq!(data.capacity(), 64);
     assert_eq!(port.stream.input.capacity(), 0);
@@ -161,13 +161,16 @@ fn delivers_the_buffer_when_a_socket_becomes_active() {
     let (local, mut peer) = Socket::pair(Domain::UNIX, Type::STREAM, None).unwrap();
     let mut port = Inet::new(SocketType::Stream).copy(local);
     port.active = 1;
-    assert_eq!(port.activate(false), Vec::new());
+    assert_eq!(port.activate(Activation::Deliver), Vec::new());
     port.active = 0;
     peer.write_all(&[1, 2]).unwrap();
     assert_eq!(port.receive(4), Vec::new());
     assert_eq!(port.receive_timeout(), Vec::new());
     port.active = 1;
-    assert_eq!(port.activate(false), [Event::Data(vec![1, 2])]);
+    assert_eq!(
+        port.activate(Activation::Deliver),
+        [Event::Data(vec![1, 2])]
+    );
     assert_eq!(port.active, 1);
 }
 

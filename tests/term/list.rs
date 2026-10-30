@@ -148,9 +148,5 @@ fn drops_a_long_list_and_a_shared_list_without_recursion() {
 
 #[test]
 fn reports_the_bytes_of_a_cons_cell() {
-    let term = Term::cons(Term::Integer(1), Term::nil());
-    let Term::Cons(cell) = &term else {
-        unreachable!()
-    };
-    assert_eq!(cell.allocated_bytes(), std::mem::size_of::<Cons>());
+    assert_eq!(ConsRef::allocated_bytes(), std::mem::size_of::<Cons>());
 }

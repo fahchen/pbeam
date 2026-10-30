@@ -1,3 +1,5 @@
+//! Checks local and external calls, unresolved imports and malformed modules on PBeam.
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};
@@ -24,7 +26,7 @@ fn executes_local_and_startup_loaded_external_calls_like_erts() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     assert_eq!(reference.stdout, b"7\n");
 }
 

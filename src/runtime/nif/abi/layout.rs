@@ -173,13 +173,18 @@ impl ErlNifMonitor {
     /// number in the first word.
     pub(super) fn of(reference: Reference) -> Self {
         Self {
-            words: [reference.0 as usize, 0, 0, 0],
+            words: [
+                usize::try_from(reference.0).expect("a reference number fits in usize"),
+                0,
+                0,
+                0,
+            ],
         }
     }
 
     /// Return the monitor reference of the `ErlNifMonitor`.
     pub(super) fn reference(&self) -> Reference {
-        Reference(self.words[0] as u64)
+        Reference(u64::try_from(self.words[0]).expect("a usize fits in u64"))
     }
 }
 

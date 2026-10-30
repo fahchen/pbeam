@@ -1,3 +1,5 @@
+//! Runs `binary_to_integer` on PBeam and compares the results with the pinned ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};
@@ -42,7 +44,7 @@ fn reads_integers_from_binaries_as_pinned_erts() {
         ok(Term::Integer(35)),
         ok(Term::Integer(1)),
         ok(Term::Integer(0)),
-        ok(Term::Integer(12345678901234567)),
+        ok(Term::Integer(12_345_678_901_234_567)),
         ok(atom("big")),
         ok(atom("big")),
     ];

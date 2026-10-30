@@ -1,3 +1,10 @@
+//! Runs monitors, aliases, exit signals and `erlang:send` on PBeam and compares the results with
+//! the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};
@@ -29,7 +36,7 @@ fn erl_reference(call: &str) -> String {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     String::from_utf8(reference.stdout).unwrap()
 }
 

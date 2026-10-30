@@ -4,6 +4,10 @@
 //! The test profile holds debug assertions, so the constants scale the runs
 //! down and the check gate stays short. The release profile of `cargo test`
 //! holds the measurement runs.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::{hint::black_box, time::Instant};
 
@@ -26,7 +30,35 @@ fn execute(program: &BeamProgram, function: &str, arguments: &[Term]) -> Term {
         .term
 }
 
+/// The time in nanoseconds of one `execute` call of `function`.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "timing probe: the nanosecond and round counts convert to f64 for a ratio"
+)]
+fn timed(program: &BeamProgram, function: &str, arguments: &[Term]) -> f64 {
+    let start = Instant::now();
+    let out = execute(program, function, arguments);
+    let elapsed = start.elapsed().as_nanos() as f64;
+    black_box(&out);
+    elapsed
+}
+
+/// The least time of `RUNS` runs of `run`, which gives the time of one run.
+fn best_of(mut run: impl FnMut() -> f64) -> f64 {
+    let mut best = f64::MAX;
+    for _ in 0..RUNS {
+        best = best.min(run());
+    }
+    best
+}
+
 #[test]
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "timing probe: the nanosecond and round counts convert to f64 for a ratio"
+)]
 fn appends_and_matches() {
     let program = BeamProgram::load(&[BINARY_APPEND_PROBE]).unwrap();
 
@@ -34,18 +66,12 @@ fn appends_and_matches() {
     for (len, rounds) in [(1024_usize, 1000_usize), (100_000, 100), (1_000_000, 20)] {
         let prefix = Term::binary(vec![b'a'; len]);
         let suffix = Term::binary(b"b".to_vec());
-        let mut best = f64::MAX;
-        for _ in 0..RUNS {
-            let start = Instant::now();
-            let out = execute(
-                &program,
-                "append_many",
-                &[prefix.clone(), suffix.clone(), Term::Integer(rounds as i64)],
-            );
-            let elapsed = start.elapsed().as_nanos() as f64;
-            black_box(&out);
-            best = best.min(elapsed);
-        }
+        let arguments = [
+            prefix,
+            suffix,
+            Term::Integer(i64::try_from(rounds).unwrap()),
+        ];
+        let best = best_of(|| timed(&program, "append_many", &arguments));
         println!(
             "APPEND-COPY len={len} rounds={rounds} per-append={:.3} ns",
             best / rounds as f64
@@ -54,18 +80,11 @@ fn appends_and_matches() {
 
     // The build cost of the doubling, which retains the prefix.
     for count in [1000_usize, 100_000, 1_000_000] {
-        let mut best = f64::MAX;
-        for _ in 0..RUNS {
-            let start = Instant::now();
-            let out = execute(
-                &program,
-                "repeat",
-                &[Term::Integer(count as i64), Term::binary(b"a".to_vec())],
-            );
-            let elapsed = start.elapsed().as_nanos() as f64;
-            black_box(&out);
-            best = best.min(elapsed);
-        }
+        let arguments = [
+            Term::Integer(i64::try_from(count).unwrap()),
+            Term::binary(b"a".to_vec()),
+        ];
+        let best = best_of(|| timed(&program, "repeat", &arguments));
         println!("APPEND-BUILD count={count} total={best:.0} ns");
     }
 
@@ -84,22 +103,12 @@ fn appends_and_matches() {
         &[subject.clone(), needle.clone(), Term::Integer(1)],
     );
     for rounds in [1_usize, 100, 1000] {
-        let mut best = f64::MAX;
-        for _ in 0..RUNS {
-            let start = Instant::now();
-            let out = execute(
-                &program,
-                "match_many",
-                &[
-                    subject.clone(),
-                    needle.clone(),
-                    Term::Integer(rounds as i64),
-                ],
-            );
-            let elapsed = start.elapsed().as_nanos() as f64;
-            black_box(&out);
-            best = best.min(elapsed);
-        }
+        let arguments = [
+            subject.clone(),
+            needle.clone(),
+            Term::Integer(i64::try_from(rounds).unwrap()),
+        ];
+        let best = best_of(|| timed(&program, "match_many", &arguments));
         println!("MATCH-WARM rounds={rounds} total={best:.0} ns");
     }
 
@@ -107,44 +116,32 @@ fn appends_and_matches() {
     // the timer, so the number holds the first read of the representation
     // and the scan.
     for count in [100_000_usize, 1_000_000] {
-        let mut best = f64::MAX;
-        for _ in 0..RUNS {
+        let best = best_of(|| {
             let fresh = execute(
                 &program,
                 "repeat",
-                &[Term::Integer(count as i64), Term::binary(b"a".to_vec())],
+                &[
+                    Term::Integer(i64::try_from(count).unwrap()),
+                    Term::binary(b"a".to_vec()),
+                ],
             );
-            let start = Instant::now();
-            let out = execute(
+            timed(
                 &program,
                 "match_many",
                 &[fresh, needle.clone(), Term::Integer(1)],
-            );
-            let elapsed = start.elapsed().as_nanos() as f64;
-            black_box(&out);
-            best = best.min(elapsed);
-        }
+            )
+        });
         println!("MATCH-FIRST count={count} total={best:.0} ns");
     }
 
     // The build and one match together, which the doubling consumer does.
     for count in [100_000_usize, 1_000_000] {
-        let mut best = f64::MAX;
-        for _ in 0..RUNS {
-            let start = Instant::now();
-            let out = execute(
-                &program,
-                "match_built",
-                &[
-                    Term::Integer(count as i64),
-                    Term::binary(b"b".to_vec()),
-                    Term::Integer(1),
-                ],
-            );
-            let elapsed = start.elapsed().as_nanos() as f64;
-            black_box(&out);
-            best = best.min(elapsed);
-        }
+        let arguments = [
+            Term::Integer(i64::try_from(count).unwrap()),
+            Term::binary(b"b".to_vec()),
+            Term::Integer(1),
+        ];
+        let best = best_of(|| timed(&program, "match_built", &arguments));
         println!("MATCH-BUILD-MATCH count={count} total={best:.0} ns");
     }
 
@@ -153,7 +150,10 @@ fn appends_and_matches() {
         let out = execute(
             &program,
             "repeat",
-            &[Term::Integer(count as i64), Term::binary(b"a".to_vec())],
+            &[
+                Term::Integer(i64::try_from(count).unwrap()),
+                Term::binary(b"a".to_vec()),
+            ],
         );
         println!(
             "APPEND-SIZE count={count} bytes={}",
@@ -181,11 +181,7 @@ fn appends_a_string_and_an_integer_segment_to_a_large_binary() {
         &[&[b'a'; 5000][..], b"tail"].concat()[..]
     );
 
-    let with_integer = execute(
-        &program,
-        "append_integer",
-        &[prefix.clone(), Term::Integer(7)],
-    );
+    let with_integer = execute(&program, "append_integer", &[prefix, Term::Integer(7)]);
     let Term::Binary(bytes) = &with_integer else {
         panic!("not a binary: {with_integer:?}");
     };

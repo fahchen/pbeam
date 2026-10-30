@@ -1,7 +1,7 @@
 //! Bodies of the `lists` BIFs that do not fit on one table line.
 
 use super::BifResult::Value;
-use super::*;
+use super::{BeamError, BifResult, ProcessState, Term};
 use crate::runtime::scheduler::CONTEXT_REDS;
 
 /// Run `lists:keyfind/3`: return the first tuple in `list` whose element at
@@ -112,6 +112,15 @@ pub(super) fn keysearch(
 /// assert!(key_equal(&Term::Float(1.0), &Term::Integer(1)));
 /// assert!(!key_equal(&Term::Integer(1), &Term::Integer(2)));
 /// ```
+#[expect(
+    clippy::float_cmp,
+    reason = "a small integer equals a float only when the float is exactly that integer, as `eq` in `utils.c` compares"
+)]
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "the C `(double)` conversion of a small integer rounds as `as` does"
+)]
 fn key_equal(key: &Term, element: &Term) -> bool {
     match (key.small_integer(), element) {
         (Some(key), Term::Float(element)) => key as f64 == *element,
@@ -144,7 +153,7 @@ fn key_search(
     let (Some(index), Some(mut elements)) = (index, list.list_iter()) else {
         return BifResult::badarg();
     };
-    let max_iter = 10 * CONTEXT_REDS as usize;
+    let max_iter = 10 * usize::try_from(CONTEXT_REDS).expect("CONTEXT_REDS is positive");
     let found = elements.by_ref().take(max_iter).find(
         |element| matches!(element, Term::Tuple(elements) if elements.get(index).is_some_and(|element| key_equal(key, element))),
     );
@@ -189,6 +198,10 @@ fn key_search(
 /// ERTS keeps the budget in an `int` and traps when `--max_iter < 0`, before
 /// the first element (`erl_bif_lists.c:1114-1130`), so a negative budget
 /// traps at once as a budget of 0 does.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn member(
     process: &mut ProcessState,
     element: &Term,
@@ -201,7 +214,10 @@ pub(super) fn member(
     let max_iter = 16 * reds_left;
     // `BIF_RET2` and `BUMP_REDS` with `reds_left - max_iter / 16`, where
     // `max_iter` counts down for each compared element.
-    let cost = |compared: usize| (reds_left - (max_iter - compared) / 16) as i32;
+    let cost = |compared: usize| {
+        i32::try_from(reds_left - (max_iter - compared) / 16)
+            .expect("the cost is at most the reductions left")
+    };
     let mut compared = 0;
     for item in elements.by_ref().take(max_iter) {
         compared += 1;
@@ -220,9 +236,10 @@ pub(super) fn member(
         });
     }
     process.bump_reductions(cost(compared));
-    Ok(match rest.is_nil() {
-        true => Value(Term::static_atom("false")),
-        false => BifResult::badarg(),
+    Ok(if rest.is_nil() {
+        Value(Term::static_atom("false"))
+    } else {
+        BifResult::badarg()
     })
 }
 
@@ -261,6 +278,10 @@ pub(super) fn member(
 /// takes no element and its `BUMP_REDS` sets the budget to 0
 /// (`erl_bif_lists.c:1215-1230`, `bif.h:71-78`), so `lists_reverse_alloc`
 /// reads 0, takes no element, and traps (`erl_bif_lists.c:1158-1191`).
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn reverse(
     process: &mut ProcessState,
     list: &Term,
@@ -276,7 +297,10 @@ pub(super) fn reverse(
         walked += 1;
         reversed = Term::cons(element.clone(), reversed);
     }
-    process.bump_reductions((walked / 60) as i32);
+    process.bump_reductions(
+        i32::try_from(walked / 60)
+            .expect("the walk reads at most the cells that the budget allows"),
+    );
     let rest = elements.rest();
     if rest.is_nonempty_list() {
         process.bump_all_reductions();
@@ -286,8 +310,9 @@ pub(super) fn reverse(
             arguments: vec![rest.clone(), reversed],
         });
     }
-    Ok(match rest.is_nil() {
-        true => Value(reversed),
-        false => BifResult::badarg(),
+    Ok(if rest.is_nil() {
+        Value(reversed)
+    } else {
+        BifResult::badarg()
     })
 }

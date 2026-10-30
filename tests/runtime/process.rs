@@ -1,7 +1,8 @@
 use std::{collections::HashMap, sync::Arc};
 
 use super::{
-    Frame, LinkId, Origin, OriginMonitor, PendingBif, ProcessState, ReceiveTimer, StackSlot, Start,
+    CallKind, Frame, LinkId, Origin, OriginMonitor, PendingBif, ProcessState, ReceiveTimer,
+    StackSlot, Start,
 };
 use crate::{
     BeamModule,
@@ -164,7 +165,7 @@ fn walks_the_terms_of_the_monitors_the_pending_bif_and_the_length_trap() {
         module: "lists",
         function: "member",
         arguments: vec![Term::tuple(vec![Term::Integer(2)])],
-        tail: false,
+        entry: CallKind::Body,
         origin: None,
     });
     process.length_trap = Some(vec![Term::tuple(vec![Term::Integer(3)])]);
@@ -183,7 +184,7 @@ fn reports_the_bytes_of_the_pending_bif_arguments_and_the_length_trap() {
         module: "lists",
         function: "member",
         arguments: vec![Term::Integer(1), Term::Integer(2)],
-        tail: false,
+        entry: CallKind::Body,
         origin: None,
     });
     let arguments = process.pending_bif.as_ref().unwrap().arguments.capacity();
@@ -234,7 +235,7 @@ fn gives_the_links_of_a_process_as_process_info_2() {
         atoms: &atoms,
         current: 0,
         messages: 0,
-        caller: false,
+        reader: crate::runtime::interpreter::bif::erlang::InfoReader::Other,
         registered_name: None,
     };
     assert_eq!(
@@ -284,7 +285,7 @@ fn reads_each_item_of_another_process_that_a_remote_request_carries() {
         atoms: &atoms,
         current: 0,
         messages: 0,
-        caller: false,
+        reader: crate::runtime::interpreter::bif::erlang::InfoReader::Other,
         registered_name: None,
     };
     for name in super::OTHER_PROCESS_INFO_ITEMS {
@@ -309,7 +310,7 @@ fn reads_the_current_function_and_the_error_handler_of_another_process() {
         atoms: &atoms,
         current: 0,
         messages: 0,
-        caller: false,
+        reader: crate::runtime::interpreter::bif::erlang::InfoReader::Other,
         registered_name: None,
     };
     let item = |process: &ProcessState, name: &'static str| {

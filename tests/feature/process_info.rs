@@ -1,6 +1,10 @@
 //! Compare `erlang:process_info/2` of the pinned ERTS with the same call
 //! on the `pbeam` binary. The probes print registered names and item values
 //! that need no pid of another run.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::process::Command;
 

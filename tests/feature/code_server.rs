@@ -1,3 +1,10 @@
+//! Runs the code server, the crypto functions and other native functions through the `pbeam` binary
+//! and compares the results with the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::process::{Command, Output, Stdio};
 
 #[path = "../common/boot.rs"]
@@ -1619,7 +1626,7 @@ fn run(command: &mut Command) -> String {
 
 /// The output of `crypto_probe:ciphers_host/0` on PBeam and on the pinned
 /// macOS ERTS: `notsup` for each legacy cipher (cipher.c:282-283,
-/// api_ng.c:284-287), the AEAD results of sm4_gcm and sm4_ccm, and the type of each cipher.
+/// api_ng.c:284-287), the AEAD results of `sm4_gcm` and `sm4_ccm`, and the type of each cipher.
 const CIPHERS_HOST: &str = r#"[[{error,notsup},
   {error,notsup},
   {error,notsup},

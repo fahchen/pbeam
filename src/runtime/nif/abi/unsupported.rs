@@ -1,6 +1,6 @@
 //! The exported `enif_*` functions that PBeam does not implement yet.
 //!
-//! Rustler 0.38.0, which fs_notify 0.1.2 uses, resolves every name of its
+//! Rustler 0.38.0, which `fs_notify` 0.1.2 uses, resolves every name of its
 //! NIF 2.18 API at load, inside the generated `nif_init`, and aborts the
 //! process on the first name that `dlsym` does not find
 //! (`rustler-0.38.0/src/sys/nif_filler.rs:35`). Each executable of PBeam
@@ -27,7 +27,7 @@ use super::layout::{
 use super::resource::ResourceType;
 
 /// `THE_NON_VALUE`: the term that no env has, which each term-valued stub
-/// returns (`erl_nif.h`, "THE_NON_VALUE").
+/// returns (`erl_nif.h`, "`THE_NON_VALUE`").
 const THE_NON_VALUE: NifTerm = 0;
 
 /// Generate the exported stubs: one `#[unsafe(no_mangle)]` function for
@@ -40,7 +40,7 @@ macro_rules! unsupported_functions {
     ($($name:ident($($argument:tt)*) $(-> $result:ty)? = $default:expr;)*) => {
         $(
             #[unsafe(no_mangle)]
-            pub unsafe extern "C" fn $name($($argument)*) $(-> $result)? {
+            pub(super) unsafe extern "C" fn $name($($argument)*) $(-> $result)? {
                 super::process::record_unsupported(stringify!($name));
                 $default
             }

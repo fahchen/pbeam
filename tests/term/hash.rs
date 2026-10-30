@@ -39,9 +39,9 @@ fn improper(cells: Vec<Term>, tail: Term) -> Term {
 
 #[test]
 fn mixes_a_word_as_erts_ihash_mix64() {
-    assert_eq!(mix64(0x1F), 7938660269479274665);
+    assert_eq!(mix64(0x1F), 7_938_660_269_479_274_665);
     // true has index 1: its ERTS word is (1 << 6) | 0xB = 0x4B.
-    assert_eq!(mix64(0x4B), 14558535449716669319);
+    assert_eq!(mix64(0x4B), 14_558_535_449_716_669_319);
 }
 
 #[test]
@@ -49,98 +49,101 @@ fn hashes_each_term_kind_as_pinned_erts() {
     // Each value is erts_debug:get_internal_state({internal_hash, Term}) on ERTS 29.1.1.
     let tuple = |elements: Vec<Term>| Term::tuple(elements);
     let cases = [
-        (atom("ok"), 4036026909208831136),
-        (Term::Integer(1), 7938660269479274665),
-        (Term::Integer(-1), 7256831767414464289),
-        (Term::nil(), 16046243290777390298),
-        (tuple(vec![]), 4510301282025278020),
+        (atom("ok"), 4_036_026_909_208_831_136),
+        (Term::Integer(1), 7_938_660_269_479_274_665),
+        (Term::Integer(-1), 7_256_831_767_414_464_289),
+        (Term::nil(), 16_046_243_290_777_390_298),
+        (tuple(vec![]), 4_510_301_282_025_278_020),
         (
             tuple(vec![atom("ok"), Term::Integer(1)]),
-            13883435329789904289,
+            13_883_435_329_789_904_289,
         ),
         (
             tuple(vec![Term::Integer(1), tuple(vec![Term::Integer(2)])]),
-            15167167310543595139,
+            15_167_167_310_543_595_139,
         ),
-        (Term::list_from(vec![atom("ok")]), 466713979249896199),
+        (Term::list_from(vec![atom("ok")]), 466_713_979_249_896_199),
         (
             integers(b"hello".map(i64::from).as_slice()),
-            5671500630603279798,
+            5_671_500_630_603_279_798,
         ),
-        (integers(&[300]), 15858254366034436735),
+        (integers(&[300]), 15_858_254_366_034_436_735),
         (
             Term::list_from(vec![tuple(vec![atom("ok")])]),
-            15994800526372216946,
+            15_994_800_526_372_216_946,
         ),
-        (Term::list_from(vec![Term::nil()]), 7939938580689537527),
+        (
+            Term::list_from(vec![Term::nil()]),
+            7_939_938_580_689_537_527,
+        ),
         (
             Term::list_from(vec![Term::binary(vec![]), Term::Integer(2)]),
-            2437268029134553953,
+            2_437_268_029_134_553_953,
         ),
         (
             Term::list_from(vec![Term::Integer(1), tuple(vec![]), Term::Integer(2)]),
-            11634306265473751121,
+            11_634_306_265_473_751_121,
         ),
-        (Term::binary(vec![]), 10873612744977862784),
-        (Term::binary(vec![1, 2, 3]), 3963608694498431467),
+        (Term::binary(vec![]), 10_873_612_744_977_862_784),
+        (Term::binary(vec![1, 2, 3]), 3_963_608_694_498_431_467),
         (
             Term::binary(b"0123456789abcde".to_vec()),
-            13603490536549166064,
+            13_603_490_536_549_166_064,
         ),
         (
             Term::binary(b"0123456789abcdef".to_vec()),
-            8513549014846254092,
+            8_513_549_014_846_254_092,
         ),
         (
             Term::binary(b"0123456789abcdefg".to_vec()),
-            11292494362027136432,
+            11_292_494_362_027_136_432,
         ),
-        (Term::Integer(1 << 59), 10054563828903259082),
-        (Term::Integer(-(1 << 59) - 1), 12317164193119007090),
-        (Term::Integer(i64::MAX), 1866222494570913558),
-        (Term::Integer(i64::MIN), 11874823041652698399),
-        (map([]), 9376759162891905861),
+        (Term::Integer(1 << 59), 10_054_563_828_903_259_082),
+        (Term::Integer(-(1 << 59) - 1), 12_317_164_193_119_007_090),
+        (Term::Integer(i64::MAX), 1_866_222_494_570_913_558),
+        (Term::Integer(i64::MIN), 11_874_823_041_652_698_399),
+        (map([]), 9_376_759_162_891_905_861),
         (
             map([
                 (atom("ok"), Term::nil()),
                 (Term::Integer(1), Term::binary(vec![])),
             ]),
-            13992029790355293803,
+            13_992_029_790_355_293_803,
         ),
         // maps:from_list([{I, I} || I <- lists:seq(1, 33)]): a HEAD_BITMAP root.
         (
             map((1..=33).map(|key| (Term::Integer(key), Term::Integer(key)))),
-            178448403113005431,
+            178_448_403_113_005_431,
         ),
         // maps:from_list([{I, [I]} || I <- lists:seq(1, 200)]): a HEAD_ARRAY root
         // with inner nodes.
         (
             map((1..=200).map(|key| (Term::Integer(key), integers(&[key])))),
-            5428453677902343107,
+            5_428_453_677_902_343_107,
         ),
         // <0.10.0> has the pid data 10 and the pid word 0x503: ERTS spreads
         // the data over the process table index bits (`erl_ptab.h:301-326`).
-        (Term::Pid(ProcessId(10)), 8954564308403532307),
+        (Term::Pid(ProcessId(10)), 8_954_564_308_403_532_307),
         // #Ref<0.358569601.1537736705.33174> has the numbers 0x8196, 0x5BA80001, and
         // 0x155F5681: the counter value 0x155F56815BA88196 of scheduler 1.
         (
             Term::Reference(Reference(0x155F_5681_5BA8_8196)),
-            10526915437407727147,
+            10_526_915_437_407_727_147,
         ),
         // #Ref<0.358569601.1537867777.33174>: the magic reference of that
         // counter value, with bit 17 of `N1`.
         (
             Term::Reference(Reference(0x155F_5681_5BA8_8196).magic_reference()),
-            11598664530364143084,
+            11_598_664_530_364_143_084,
         ),
         // Bignums of one, two, three, and four 64-bit digits.
-        (Term::Integer(1 << 62), 2820654030469875806),
-        (big(1, 64), 1273177175058809839),
-        (big(-1, 64), 773736285751472253),
-        (big(1, 128), 9267933053641204122),
+        (Term::Integer(1 << 62), 2_820_654_030_469_875_806),
+        (big(1, 64), 1_273_177_175_058_809_839),
+        (big(-1, 64), 773_736_285_751_472_253),
+        (big(1, 128), 9_267_933_053_641_204_122),
         (
             Term::from_bigint((num_bigint::BigInt::from(1) << 192u32) + 7),
-            15715561134050055630,
+            15_715_561_134_050_055_630,
         ),
     ];
     for (term, hash) in cases {
@@ -157,24 +160,24 @@ fn hashes_a_bitstring_by_its_bits_as_pinned_erts() {
     let mut tail = b"0123456789abcdefg".to_vec();
     tail.push(0xA0);
     let cases = [
-        (bits(&[0x20], 3), 2772974853977271676),
-        (Term::binary(vec![0x20]), 10090078442021580778),
-        (Term::binary(b"abc".to_vec()), 11766418651593861201),
+        (bits(&[0x20], 3), 2_772_974_853_977_271_676),
+        (Term::binary(vec![0x20]), 10_090_078_442_021_580_778),
+        (Term::binary(b"abc".to_vec()), 11_766_418_651_593_861_201),
         // <<_:4, A:12/bits, _/bits>> = <<"abc">>, A = <<22,2:4>>.
         (
             Term::Binary(Binary::from(b"abc".to_vec()).bits(4, 16)),
-            12847386933134786152,
+            12_847_386_933_134_786_152,
         ),
-        (bits(&[0x10], 4), 5341495853110203383),
-        (bits(&[0], 3), 2512535726010557823),
-        (bits(&tail, 139), 6506100538193254079),
+        (bits(&[0x10], 4), 5_341_495_853_110_203_383),
+        (bits(&[0], 3), 2_512_535_726_010_557_823),
+        (bits(&tail, 139), 6_506_100_538_193_254_079),
     ];
     for (term, hash) in cases {
         assert_eq!(internal_hash(&term), hash, "{term:?}");
     }
     // The bits after the size do not change the hash, as they do not change
     // the equality.
-    assert_eq!(internal_hash(&bits(&[0x3F], 3)), 2772974853977271676);
+    assert_eq!(internal_hash(&bits(&[0x3F], 3)), 2_772_974_853_977_271_676);
 }
 
 /// Return a local fun of `lists` with a fun entry and free variables.
@@ -200,18 +203,18 @@ fn hashes_local_funs_as_pinned_erts() {
     let free = local(0, 7, 1, vec![Term::Integer(1), Term::tuple(vec![])]);
     let negative = || local(3, -5, 2, vec![Term::binary(b"ab".to_vec()), atom("ok")]);
     let cases = [
-        (zero(), 16900316212850717680),
-        (free.clone(), 15970829942560899780),
-        (negative(), 12860429061993126401),
+        (zero(), 16_900_316_212_850_717_680),
+        (free.clone(), 15_970_829_942_560_899_780),
+        (negative(), 12_860_429_061_993_126_401),
         (
             Term::tuple(vec![zero(), Term::Integer(1)]),
-            9006137623669004246,
+            9_006_137_623_669_004_246,
         ),
         (
             map([(atom("ok"), free), (Term::Integer(1), zero())]),
-            14001711515840955162,
+            14_001_711_515_840_955_162,
         ),
-        (Term::list_from(vec![negative()]), 1176312308706464788),
+        (Term::list_from(vec![negative()]), 1_176_312_308_706_464_788),
     ];
     for (term, hash) in cases {
         assert_eq!(internal_hash(&term), hash, "{term:?}");
@@ -253,41 +256,41 @@ fn hashes_improper_lists_as_pinned_erts() {
     let cases = [
         (
             improper(vec![Term::Integer(1)], Term::Integer(2)),
-            5915944085625558568,
+            5_915_944_085_625_558_568,
         ),
         (
             improper(vec![Term::Integer(97), Term::Integer(98)], atom("ok")),
-            6406651010506344343,
+            6_406_651_010_506_344_343,
         ),
         (
             improper(vec![Term::tuple(vec![])], atom("ok")),
-            10451236899705497869,
+            10_451_236_899_705_497_869,
         ),
         (
             improper(vec![Term::Integer(1)], Term::tuple(vec![])),
-            4641139002621691555,
+            4_641_139_002_621_691_555,
         ),
         (
             improper(
                 vec![improper(vec![Term::Integer(1)], Term::Integer(2))],
                 Term::Integer(3),
             ),
-            6434836968081835632,
+            6_434_836_968_081_835_632,
         ),
         (
             improper(vec![integers(&[1])], Term::binary(vec![])),
-            465555062996238064,
+            465_555_062_996_238_064,
         ),
         (
             improper(vec![atom("ok")], atom("true")),
-            12145861372843638597,
+            12_145_861_372_843_638_597,
         ),
         (
             improper(
                 vec![Term::Integer(1), Term::tuple(vec![])],
                 Term::Integer(2),
             ),
-            502573382164607531,
+            502_573_382_164_607_531,
         ),
     ];
     for (term, hash) in cases {
@@ -305,10 +308,10 @@ fn hashes_collision_nodes_as_pinned_erts() {
     let b = integers(&[57, 112, 19, 186, 16, 195, 81, 198]);
     let c = integers(&[161, 92, 65, 50, 231, 24, 153, 137]);
     let d = integers(&[246, 157, 203, 77, 19, 254, 19, 93]);
-    assert_eq!(internal_hash(&a), 16578151383281136240);
-    assert_eq!(internal_hash(&b), 16578151383281136240);
-    assert_eq!(internal_hash(&c), 10130931470384579971);
-    assert_eq!(internal_hash(&d), 10130931470384579971);
+    assert_eq!(internal_hash(&a), 16_578_151_383_281_136_240);
+    assert_eq!(internal_hash(&b), 16_578_151_383_281_136_240);
+    assert_eq!(internal_hash(&c), 10_130_931_470_384_579_971);
+    assert_eq!(internal_hash(&d), 10_130_931_470_384_579_971);
     let with = |first: (Term, Term), second: (Term, Term)| {
         map([first, second]
             .into_iter()
@@ -320,7 +323,7 @@ fn hashes_collision_nodes_as_pinned_erts() {
                 (a.clone(), Term::Integer(100)),
                 (b.clone(), Term::Integer(200)),
             ),
-            9593933779384815641,
+            9_593_933_779_384_815_641,
         ),
         // An improper list value continues the [Key | Value] cell as more cells.
         (
@@ -331,15 +334,15 @@ fn hashes_collision_nodes_as_pinned_erts() {
                 ),
                 (b.clone(), Term::tuple(vec![])),
             ),
-            243852246011044368,
+            243_852_246_011_044_368,
         ),
         (
             with((a, integers(&[120, 121])), (b, Term::nil())),
-            2185849235149492526,
+            2_185_849_235_149_492_526,
         ),
         (
             with((c, Term::Integer(1000)), (d, Term::tuple(vec![]))),
-            3981912085379260197,
+            3_981_912_085_379_260_197,
         ),
     ];
     for (term, hash) in cases {
@@ -369,7 +372,10 @@ fn hashes_a_port_as_pinned_erts() {
     // after erts_debug:set_internal_state(available_internal_state, true).
     // The port has the port data 5. ERTS spreads the data over the port
     // table index bits (`erl_ptab.h:301-326`), so its word is 0x287.
-    assert_eq!(internal_hash(&Term::Port(PortId(5))), 589508649189025146);
+    assert_eq!(
+        internal_hash(&Term::Port(PortId(5))),
+        589_508_649_189_025_146
+    );
 }
 
 #[test]
@@ -381,10 +387,10 @@ fn hashes_a_float_as_pinned_erts() {
     assert_eq!(
         hashes,
         [
-            1378904917976523826,
-            12330998780720423744,
-            13198493423301380071,
-            3606456034818785087
+            1_378_904_917_976_523_826,
+            12_330_998_780_720_423_744,
+            13_198_493_423_301_380_071,
+            3_606_456_034_818_785_087
         ]
     );
 }

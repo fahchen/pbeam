@@ -1,3 +1,9 @@
+//! Runs the pinned OTP IO request path down to the writer NIF on PBeam.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};
@@ -97,7 +103,7 @@ fn executes_the_pinned_otp_io_request_path_to_the_writer_nif() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     assert_eq!(
         without_writer_report(&String::from_utf8(reference.stdout).unwrap()),
         "{{error,badarg},noise_ok,normal,normal,{badarg,prim_tty,write_nif}}\n"

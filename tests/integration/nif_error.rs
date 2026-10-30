@@ -1,3 +1,5 @@
+//! Checks `erlang:nif_error` and the fallback of a NIF without a binding on PBeam.
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};
@@ -23,7 +25,7 @@ fn raises_undef_for_a_local_function_that_calls_nif_error() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     assert_eq!(
         reference.stdout,
         b"error undef [{erlang,nif_error,[undef]},{nif_error_probe,stub,0}]\n"
@@ -59,7 +61,7 @@ fn runs_the_nif_error_fallback_of_a_nif_without_a_binding() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     assert_eq!(reference.stdout, b"{error,undef}\n");
 
     let program = BeamProgram::load(&[NIF_ERROR_PROBE]).unwrap();

@@ -13,10 +13,10 @@ use std::{fs, thread};
 use crate::run::run_with_time_limit;
 
 /// The time that a run has to end.
-pub const RUN_TIME_LIMIT: Duration = Duration::from_secs(60);
+pub(crate) const RUN_TIME_LIMIT: Duration = Duration::from_secs(60);
 
 /// A fixture Mix project whose release ships one NIF library.
-pub struct Release<'a> {
+pub(crate) struct Release<'a> {
     /// The directory of the project, for example `fixtures/bcrypt`.
     pub project: &'a str,
     /// The name of the application and of its release.
@@ -30,7 +30,7 @@ pub struct Release<'a> {
 /// Build the release of `release`, run `main/0` on the pinned ERTS, bundle
 /// the release with `pbeam_bundle`, and run the one-file executable. Return
 /// the line of the ERTS run after the PBeam run gives the same line.
-pub fn run_release_bundle(release: &Release) -> String {
+pub(crate) fn run_release_bundle(release: &Release<'_>) -> String {
     let directory = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{}-bundle", release.app));
     let _ = fs::remove_dir_all(&directory);
     let temporary = directory.join("tmp");
@@ -117,7 +117,10 @@ pub fn run_release_bundle(release: &Release) -> String {
     let mut stderr = String::new();
     std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut stderr).unwrap();
     assert_eq!(
-        line.ok().flatten().map(|line| line + "\n").as_deref(),
+        line.ok()
+            .flatten()
+            .map(|line| format!("{line}\n"))
+            .as_deref(),
         Some(expected.as_str()),
         "status: {status:?}\nstdout: {rest:?}\nstderr: {stderr}"
     );
@@ -132,7 +135,7 @@ pub fn run_release_bundle(release: &Release) -> String {
 
 /// Run `mix` with `arguments` in `project` with `MIX_ENV` `environment`,
 /// and panic with its output when it fails.
-pub fn mix(project: &str, arguments: &[&str], environment: &str) {
+pub(crate) fn mix(project: &str, arguments: &[&str], environment: &str) {
     let built = Command::new("mix")
         .args(arguments)
         .env("MIX_ENV", environment)
@@ -164,7 +167,7 @@ fn start_list(directory: &Path) -> PathBuf {
 
 /// Run `command` and return its stdout. The run must exit with status 0
 /// and write nothing to stderr.
-pub fn output(command: &mut Command) -> String {
+pub(crate) fn output(command: &mut Command) -> String {
     let output: Output = run_with_time_limit(command, Stdio::piped(), RUN_TIME_LIMIT);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success() && stderr.is_empty(), "{output:?}");

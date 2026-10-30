@@ -14,7 +14,12 @@
 //! numbers but proves that the probes and the ERTS reference run. The test
 //! profile holds debug assertions, so the constants scale the loop lengths
 //! and the runs down and the gate stays short.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
+use std::fmt::Write as _;
 use std::{
     collections::HashMap,
     hint::black_box,
@@ -193,7 +198,7 @@ fn arguments(
     map: &Term,
     key: &Term,
 ) -> Vec<HostTerm> {
-    let counter = Term::Integer(length as i64);
+    let counter = Term::Integer(i64::try_from(length).unwrap());
     let zero = Term::Integer(0);
     let terms = match function {
         "floor_ext_loop" | "floor_loop" => vec![counter],
@@ -238,7 +243,7 @@ fn arguments_text(function: &str, length: usize) -> String {
 fn expected(program: &BeamProgram, function: &str, length: usize) -> Term {
     match function {
         "floor_ext_loop" | "floor_loop" => Term::Integer(0),
-        "plus_loop" => Term::Integer(length as i64),
+        "plus_loop" => Term::Integer(i64::try_from(length).unwrap()),
         "tuple_size_loop" => Term::Integer(3),
         "element_loop" => Term::Atom(program.atom("b").unwrap()),
         "hd_loop" => Term::Atom(program.atom("a").unwrap()),
@@ -287,18 +292,20 @@ fn erts_expression() -> String {
              erlang:monotonic_time(nanosecond) - S end || _ <- lists:seq(1, 9)]) end, ",
     );
     for probe in probes() {
-        expression.push_str(&format!(
+        let _ = write!(
+            expression,
             "io:format(\"result {} ~w~n\", [{}]), ",
             probe.key(),
             call_text(&probe)
-        ));
+        );
     }
     for probe in probes() {
-        expression.push_str(&format!(
+        let _ = write!(
+            expression,
             "io:format(\"time {} ~b~n\", [Run(fun() -> {} end)]), ",
             probe.key(),
             call_text(&probe)
-        ));
+        );
     }
     expression.push_str("halt().");
     expression
@@ -431,6 +438,10 @@ fn disassemble(module: &str) -> HashMap<String, Vec<String>> {
 /// the compiled shape fails here, because the numbers would then measure
 /// other work.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "case table: one expected disassembly for each loop function"
+)]
 fn keeps_the_measured_instructions_in_each_loop() {
     let loops = disassemble("dispatch_probe");
     for function in LOOP_FUNCTIONS {
@@ -659,13 +670,25 @@ fn records_the_interpreter_dispatch_baseline() {
         })
         .unwrap();
 
+    print_baseline(&rows, floor);
+}
+
+/// Print the tables of the baseline: the rows of each probe, and the added
+/// cost of one instruction over the `floor` row of the local floor loop.
+#[expect(clippy::print_stdout, reason = "the probe prints its measurement")]
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "timing probe: the nanosecond and record counts convert to f64 for a ratio"
+)]
+fn print_baseline(rows: &[(Probe, u128, u128)], floor: &(Probe, u128, u128)) {
     println!("Interpreter dispatch baseline: minimum of {RUNS} runs of each probe.");
     println!();
     println!(
         "| shape | iterations | PBeam ns for each iteration | ERTS ns for each iteration | PBeam ns for the run | ERTS ns for the run |"
     );
     println!("| --- | --- | --- | --- | --- | --- |");
-    for (probe, pbeam, erts) in &rows {
+    for (probe, pbeam, erts) in rows {
         println!(
             "| {} | {} | {:.1} | {:.2} | {} | {} |",
             probe.shape,
@@ -681,7 +704,7 @@ fn records_the_interpreter_dispatch_baseline() {
         "| added instruction | added PBeam ns for each iteration | added ERTS ns for each iteration |"
     );
     println!("| --- | --- | --- |");
-    for (probe, pbeam, erts) in &rows {
+    for (probe, pbeam, erts) in rows {
         if probe.function.starts_with("floor") {
             continue;
         }
@@ -733,7 +756,7 @@ const STREAM_RUNS: usize = 5;
 /// ```
 fn stream_buffer(records: usize, stride: usize) -> Vec<u8> {
     (0..records * stride)
-        .map(|index| (index % 251) as u8)
+        .map(|index| u8::try_from(index % 251).unwrap())
         .collect()
 }
 
@@ -775,6 +798,11 @@ fn walk(buffer: &[u8], stride: usize, rounds: usize) -> u64 {
 /// One iteration of the floor loop retires 4 instructions and reads 4
 /// records, so the last column multiplies the per-record difference by 4.
 #[test]
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "timing probe: the nanosecond and record counts convert to f64 for a ratio"
+)]
 fn records_the_instruction_stream_cache_proxy() {
     println!(
         "Instruction stream cache proxy: target of {STREAM_VISITS} record reads for each measurement, minimum of {STREAM_RUNS} runs. One floor-loop iteration reads {FLOOR_LOOP_RECORDS} records."
@@ -826,12 +854,17 @@ fn records_the_instruction_stream_cache_proxy() {
 /// `docs/interpreter-dispatch-plan.md` measures, and the floor loop holds the
 /// `test`, the `gc_bif '-'`, and the `call_only` that the attribution names.
 #[test]
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "timing probe: the nanosecond and record counts convert to f64 for a ratio"
+)]
 fn records_the_attribution_reference_points() {
     let program = BeamProgram::load(&[DISPATCH_PROBE]).unwrap();
     let length = DELTA_LENGTH;
-    let floor_arguments = [program.host_term(Term::Integer(length as i64))];
+    let floor_arguments = [program.host_term(Term::Integer(i64::try_from(length).unwrap()))];
     let plus_arguments = [
-        program.host_term(Term::Integer(length as i64)),
+        program.host_term(Term::Integer(i64::try_from(length).unwrap())),
         program.host_term(Term::Integer(0)),
     ];
     assert_eq!(
@@ -846,7 +879,7 @@ fn records_the_attribution_reference_points() {
             .execute("dispatch_probe", "plus_loop", &plus_arguments)
             .unwrap()
             .term,
-        Term::Integer(length as i64)
+        Term::Integer(i64::try_from(length).unwrap())
     );
     let floor = measure_pbeam(&program, "dispatch_probe", "floor_loop", &floor_arguments);
     let plus = measure_pbeam(&program, "dispatch_probe", "plus_loop", &plus_arguments);

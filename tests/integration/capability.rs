@@ -1,11 +1,16 @@
 //! Capability checks at spawn. The default policy gives the pinned ERTS
 //! results. A test policy that holds back one operation or one module is
 //! the oracle of each denial, which ERTS does not have.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::{collections::BTreeSet, process::Command};
 
 use pbeam_runtime::{
-    AllowAll, BeamProgram, Capability, CapabilityKind, Constraint, Operation, Policy, Term,
+    AllowAll, BeamProgram, Capability, CapabilityKind, Constraint, Delegation, Operation, Policy,
+    Term,
 };
 
 #[path = "../common/mod.rs"]
@@ -25,9 +30,9 @@ impl Policy for Grants {
 }
 
 /// Return a policy with one `process` capability.
-fn process(operations: &[Operation], modules: Constraint, delegable: bool) -> Grants {
+fn process(operations: &[Operation], modules: Constraint, delegation: Delegation) -> Grants {
     Grants(vec![
-        Capability::new(CapabilityKind::Process, operations, modules, delegable).unwrap(),
+        Capability::new(CapabilityKind::Process, operations, modules, delegation).unwrap(),
     ])
 }
 
@@ -118,7 +123,11 @@ fn gives_the_erts_results_with_the_default_policy() {
 #[test]
 fn denies_each_spawn_without_the_spawn_operation() {
     let program = program();
-    let policy = process(&all_but(Operation::Spawn), Constraint::Any, true);
+    let policy = process(
+        &all_but(Operation::Spawn),
+        Constraint::Any,
+        Delegation::Delegable,
+    );
     assert_eq!(
         run(&program, "main", &policy),
         results(&program, &["denied"; 5])
@@ -128,7 +137,11 @@ fn denies_each_spawn_without_the_spawn_operation() {
 #[test]
 fn denies_a_linked_spawn_without_the_link_operation() {
     let program = program();
-    let policy = process(&all_but(Operation::Link), Constraint::Any, true);
+    let policy = process(
+        &all_but(Operation::Link),
+        Constraint::Any,
+        Delegation::Delegable,
+    );
     assert_eq!(
         run(&program, "main", &policy),
         results(&program, &["ok", "denied", "ok", "denied", "ok"])
@@ -138,7 +151,11 @@ fn denies_a_linked_spawn_without_the_link_operation() {
 #[test]
 fn denies_a_monitored_spawn_without_the_monitor_operation() {
     let program = program();
-    let policy = process(&all_but(Operation::Monitor), Constraint::Any, true);
+    let policy = process(
+        &all_but(Operation::Monitor),
+        Constraint::Any,
+        Delegation::Delegable,
+    );
     assert_eq!(
         run(&program, "main", &policy),
         results(&program, &["ok", "ok", "denied", "ok", "denied"])
@@ -151,12 +168,12 @@ fn checks_the_module_of_the_spawn_mfa() {
     let ops = CapabilityKind::Process.operations();
     // `erlang:spawn/1` starts a fun as `erlang:apply/2` (`erlang.erl:10601-10602`),
     // so the check sees the module `erlang`, not the module of the fun.
-    let probe_only = process(ops, only(&["capability_probe"]), true);
+    let probe_only = process(ops, only(&["capability_probe"]), Delegation::Delegable);
     assert_eq!(
         run(&program, "modules", &probe_only),
         results(&program, &["ok", "denied"])
     );
-    let erlang_only = process(ops, only(&["erlang"]), true);
+    let erlang_only = process(ops, only(&["erlang"]), Delegation::Delegable);
     assert_eq!(
         run(&program, "modules", &erlang_only),
         results(&program, &["denied", "ok"])
@@ -171,7 +188,11 @@ fn checks_the_module_of_the_spawn_mfa() {
 #[test]
 fn gives_a_child_only_the_delegable_capabilities() {
     let program = program();
-    let use_only = process(CapabilityKind::Process.operations(), Constraint::Any, false);
+    let use_only = process(
+        CapabilityKind::Process.operations(),
+        Constraint::Any,
+        Delegation::NotDelegable,
+    );
     assert_eq!(
         run(&program, "main", &use_only),
         results(&program, &["ok"; 5])
@@ -215,7 +236,7 @@ fn denies_a_request_for_more_than_the_caller_can_delegate() {
     let policy = process(
         &[Operation::Spawn, Operation::Monitor],
         only(&["capability_probe"]),
-        true,
+        Delegation::Delegable,
     );
     assert_eq!(
         run(&program, "widen", &policy),
@@ -265,7 +286,7 @@ fn makes_only_capabilities_that_their_kind_permits() {
         CapabilityKind::Env,
         &[Operation::Spawn],
         Constraint::Any,
-        true,
+        Delegation::Delegable,
     )
     .unwrap_err();
     assert_eq!(
@@ -276,7 +297,7 @@ fn makes_only_capabilities_that_their_kind_permits() {
         CapabilityKind::Terminal,
         &[Operation::Write],
         Constraint::Only(names.clone()),
-        true,
+        Delegation::Delegable,
     )
     .unwrap_err();
     assert_eq!(
@@ -288,7 +309,7 @@ fn makes_only_capabilities_that_their_kind_permits() {
             CapabilityKind::Env,
             &[Operation::Read],
             Constraint::Only(names),
-            false
+            Delegation::NotDelegable
         )
         .is_ok()
     );

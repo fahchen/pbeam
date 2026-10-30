@@ -408,11 +408,10 @@ impl PersistentTerms {
     pub(super) fn put_cost(&self, key: &Term, value: &Term) -> Option<usize> {
         match &self.buckets[self.lookup(key)] {
             Some((_, existing)) if existing == value => None,
-            Some(_) => Some(0),
             None if 100 * self.num_entries >= LOAD_FACTOR * self.buckets.len() => {
                 Some(3 * self.buckets.len())
             }
-            None => Some(0),
+            Some(_) | None => Some(0),
         }
     }
 
@@ -558,7 +557,9 @@ impl PersistentTerms {
     /// ```
     fn lookup(&self, key: &Term) -> usize {
         let mask = self.buckets.len() - 1;
-        let mut slot = internal_hash(key) as usize & mask;
+        let mut slot = usize::try_from(internal_hash(key))
+            .expect("a u64 fits in usize on a 64-bit host")
+            & mask;
         while let Some((existing, _)) = &self.buckets[slot] {
             if existing == key {
                 break;

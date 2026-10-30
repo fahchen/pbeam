@@ -2,6 +2,10 @@
 //! two scheduler threads. Each pair of roots of `info_requests` runs on two
 //! threads, and each root returns `ok` when its result is the result of the
 //! pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 #[path = "../common/mod.rs"]
 mod common;

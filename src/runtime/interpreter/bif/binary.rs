@@ -5,7 +5,10 @@
 //! `binary:copy/1,2`.
 
 use super::BifResult::Value;
-use super::*;
+use super::{
+    BeamError, BifContext, BifResult, ExceptionClass, ProcessState, Scheduler, Term, erlang,
+};
+use super::{to_i64, to_u64, to_usize};
 use crate::runtime::binary_pattern::CompiledPattern;
 use crate::term::Binary;
 
@@ -164,26 +167,26 @@ impl Bm {
     /// assert_eq!(bm.goodshift, vec![2, 2, 4, 1]);
     /// ```
     fn new(needle: &[u8]) -> Bm {
-        let m = needle.len() as i64;
+        let m = to_i64(needle.len());
         let mut badshift = Box::new([m; 256]);
         for (i, byte) in needle.iter().enumerate().take(needle.len() - 1) {
-            badshift[*byte as usize] = m - i as i64 - 1;
+            badshift[usize::from(*byte)] = m - to_i64(i) - 1;
         }
         let suffixes = suffixes(needle);
         let mut goodshift = vec![m; needle.len()];
         let mut j = 0;
         for i in (-1..m).rev() {
-            if i == -1 || suffixes[i as usize] == i + 1 {
+            if i == -1 || suffixes[to_usize(i)] == i + 1 {
                 while j < m - 1 - i {
-                    if goodshift[j as usize] == m {
-                        goodshift[j as usize] = m - 1 - i;
+                    if goodshift[to_usize(j)] == m {
+                        goodshift[to_usize(j)] = m - 1 - i;
                     }
                     j += 1;
                 }
             }
         }
         for i in 0..m - 1 {
-            goodshift[(m - 1 - suffixes[i as usize]) as usize] = m - 1 - i;
+            goodshift[to_usize(m - 1 - suffixes[to_usize(i)])] = m - 1 - i;
         }
         Bm {
             needle: needle.to_vec(),
@@ -208,28 +211,28 @@ impl Bm {
     /// assert_eq!(bm.skip(b"xxxxxxxxxxab", 0, 11, 100), (10, 99));
     /// ```
     fn skip(&self, haystack: &[u8], j: i64, available: i64, reds: u64) -> (i64, u64) {
-        let last = self.needle.len() as i64 - 1;
+        let last = to_i64(self.needle.len()) - 1;
         let limit = reds
             .wrapping_sub(1)
-            .wrapping_mul(MEMCHR_FACTOR as u64)
+            .wrapping_mul(MEMCHR_FACTOR.cast_unsigned())
             .wrapping_add(1);
-        let read = if (available as u64) < limit {
+        let read = if to_u64(available) < limit {
             available
         } else {
-            limit as i64
+            limit.cast_signed()
         };
-        let start = (j + last) as usize;
-        let window = &haystack[start..start + read as usize];
+        let start = to_usize(j + last);
+        let window = &haystack[start..start + to_usize(read)];
         match window
             .iter()
-            .position(|byte| *byte == self.needle[last as usize])
+            .position(|byte| *byte == self.needle[to_usize(last)])
         {
-            None => (j + read, reds.wrapping_sub((read / MEMCHR_FACTOR) as u64)),
+            None => (j + read, reds.wrapping_sub(to_u64(read / MEMCHR_FACTOR))),
             Some(at) => {
-                let at = at as i64;
+                let at = to_i64(at);
                 (
                     j + at,
-                    reds.wrapping_sub(((last + at) / MEMCHR_FACTOR) as u64),
+                    reds.wrapping_sub(to_u64((last + at) / MEMCHR_FACTOR)),
                 )
             }
         }
@@ -245,8 +248,8 @@ impl Bm {
     /// assert_eq!(Bm::new(b"ab").compare(b"xab", 1), -1);
     /// ```
     fn compare(&self, haystack: &[u8], j: i64) -> i64 {
-        let mut i = self.needle.len() as i64 - 1;
-        while i >= 0 && self.needle[i as usize] == haystack[(i + j) as usize] {
+        let mut i = to_i64(self.needle.len()) - 1;
+        while i >= 0 && self.needle[to_usize(i)] == haystack[to_usize(i + j)] {
             i -= 1;
         }
         i
@@ -262,9 +265,9 @@ impl Bm {
     /// assert_eq!(Bm::new(b"ab").shift(b"xx", 1, 0), 2);
     /// ```
     fn shift(&self, haystack: &[u8], i: i64, j: i64) -> i64 {
-        let blen = self.needle.len() as i64;
-        let bad = self.badshift[haystack[(i + j) as usize] as usize] - blen + 1 + i;
-        self.goodshift[i as usize].max(bad)
+        let blen = to_i64(self.needle.len());
+        let bad = self.badshift[usize::from(haystack[to_usize(i + j)])] - blen + 1 + i;
+        self.goodshift[to_usize(i)].max(bad)
     }
 
     /// Find the first match from [`Find::pos`] to [`Find::end`], as
@@ -279,8 +282,8 @@ impl Bm {
     /// assert!(matches!(bm.first(&mut find, b"xab", &mut reds), Search::Found(1, 2)));
     /// ```
     fn first(&self, find: &mut Find, haystack: &[u8], reds: &mut u64) -> Search {
-        let blen = self.needle.len() as i64;
-        let len = find.end as i64;
+        let blen = to_i64(self.needle.len());
+        let len = to_i64(find.end);
         let available = len - (blen - 1) - find.pos;
         if available <= 0 {
             return Search::NotFound;
@@ -299,7 +302,7 @@ impl Bm {
             let i = self.compare(haystack, j);
             if i < 0 {
                 *reds = steps;
-                return Search::Found(j as u64, blen as u64);
+                return Search::Found(to_u64(j), to_u64(blen));
             }
             j += self.shift(haystack, i, j);
         }
@@ -318,8 +321,8 @@ impl Bm {
     /// assert_eq!(find.matches, [(0, 2), (3, 2)]);
     /// ```
     fn all(&self, find: &mut Find, haystack: &[u8], reds: &mut u64) -> SearchAll {
-        let blen = self.needle.len() as i64;
-        let len = find.end as i64;
+        let blen = to_i64(self.needle.len());
+        let len = to_i64(find.end);
         let mut j = find.pos;
         let mut steps = *reds;
         let mut i = -1;
@@ -341,7 +344,7 @@ impl Bm {
             }
             i = self.compare(haystack, j);
             if i < 0 {
-                find.matches.push((j as u64, blen as u64));
+                find.matches.push((to_u64(j), to_u64(blen)));
                 j += blen;
             } else {
                 j += self.shift(haystack, i, j);
@@ -366,20 +369,20 @@ impl Bm {
 /// assert_eq!(suffixes(b"abab"), vec![0, 2, 0, 4]);
 /// ```
 fn suffixes(x: &[u8]) -> Vec<i64> {
-    let m = x.len() as i64;
+    let m = to_i64(x.len());
     let mut suffixes = vec![0; x.len()];
     suffixes[x.len() - 1] = m;
     let (mut f, mut g) = (0, m - 1);
     for i in (0..m - 1).rev() {
-        if i > g && suffixes[(i + m - 1 - f) as usize] < i - g {
-            suffixes[i as usize] = suffixes[(i + m - 1 - f) as usize];
+        if i > g && suffixes[to_usize(i + m - 1 - f)] < i - g {
+            suffixes[to_usize(i)] = suffixes[to_usize(i + m - 1 - f)];
         } else {
             g = g.min(i);
             f = i;
-            while g >= 0 && x[g as usize] == x[(g + m - 1 - f) as usize] {
+            while g >= 0 && x[to_usize(g)] == x[to_usize(g + m - 1 - f)] {
                 g -= 1;
             }
-            suffixes[i as usize] = f - g;
+            suffixes[to_usize(i)] = f - g;
         }
     }
     suffixes
@@ -410,7 +413,7 @@ fn ac_trie(needles: &[&[u8]]) -> Vec<AcNode> {
     for (number, needle) in (1..).zip(needles) {
         let mut current = ROOT;
         for (depth, byte) in (1..).zip(needle.iter()) {
-            let byte = *byte as usize;
+            let byte = usize::from(*byte);
             if trie[current].next[byte] == ROOT {
                 trie.push(node(depth));
                 trie[current].next[byte] = trie.len() - 1;
@@ -462,7 +465,7 @@ fn ac_trie(needles: &[&[u8]]) -> Vec<AcNode> {
 /// assert_eq!(ac_next(&ac_trie(&[b"a", b"b"]), ROOT, b'a'), 1);
 /// ```
 fn ac_next(trie: &[AcNode], mut node: usize, byte: u8) -> usize {
-    let byte = byte as usize;
+    let byte = usize::from(byte);
     while trie[node].next[byte] == ROOT && node != ROOT {
         node = trie[node].failure;
     }
@@ -501,14 +504,14 @@ fn ac_end(trie: &[AcNode], mut node: usize) -> usize {
 /// ```
 fn ac_first(trie: &[AcNode], find: &mut Find, haystack: &[u8], reds: &mut u64) -> Search {
     let mut steps = *reds;
-    let mut i = find.pos as u64;
+    let mut i = to_u64(find.pos);
     while i < find.end {
         if steps == 0 {
-            find.pos = i as i64;
+            find.pos = to_i64(i);
             return Search::Restart;
         }
         steps -= 1;
-        find.node = ac_next(trie, find.node, haystack[i as usize]);
+        find.node = ac_next(trie, find.node, haystack[to_usize(i)]);
         i += 1;
         let node = &trie[find.node];
         if find
@@ -552,14 +555,14 @@ fn ac_first(trie: &[AcNode], find: &mut Find, haystack: &[u8], reds: &mut u64) -
 /// ```
 fn ac_all(trie: &[AcNode], find: &mut Find, haystack: &[u8], reds: &mut u64) -> SearchAll {
     let mut steps = *reds;
-    let mut i = find.pos as u64;
+    let mut i = to_u64(find.pos);
     while i < find.end {
         steps = steps.wrapping_sub(1);
         if steps == 0 {
-            find.pos = i as i64;
+            find.pos = to_i64(i);
             return SearchAll::Restart;
         }
-        find.node = ac_next(trie, find.node, haystack[i as usize]);
+        find.node = ac_next(trie, find.node, haystack[to_usize(i)]);
         i += 1;
         let mut node = find.node;
         while trie[node].end != 0 {
@@ -630,23 +633,22 @@ pub(super) fn compile_pattern(
 /// needle is a bitstring with at least one byte and a whole number of bytes,
 /// and the argument is one needle or a proper list of needles.
 fn compile_source(pattern: &Term) -> Option<CompiledPattern> {
-    match pattern {
-        Term::Binary(binary) => Some(CompiledPattern::Bm(compile_needle(binary)?)),
-        _ => {
-            let mut needles = Vec::new();
-            for needle in pattern.proper_list()? {
-                let Term::Binary(binary) = needle else {
-                    return None;
-                };
-                needles.push(compile_needle(binary)?);
-            }
-            match needles.len() {
-                0 => None,
-                1 => Some(CompiledPattern::Bm(
-                    needles.pop().expect("the list has one needle"),
-                )),
-                _ => Some(CompiledPattern::Ac(needles)),
-            }
+    if let Term::Binary(binary) = pattern {
+        Some(CompiledPattern::Bm(compile_needle(binary)?))
+    } else {
+        let mut needles = Vec::new();
+        for needle in pattern.proper_list()? {
+            let Term::Binary(binary) = needle else {
+                return None;
+            };
+            needles.push(compile_needle(binary)?);
+        }
+        match needles.len() {
+            0 => None,
+            1 => Some(CompiledPattern::Bm(
+                needles.pop().expect("the list has one needle"),
+            )),
+            _ => Some(CompiledPattern::Ac(needles)),
         }
     }
 }
@@ -792,10 +794,10 @@ fn scope(option: &[Term], size: u64) -> Option<(u64, u64)> {
     if !scope.is_static("scope") || *pos < 0 {
         return None;
     }
-    let (mut pos, mut len) = (*pos as u64, *len as u64);
-    if (len as i64) < 0 {
+    let (mut pos, mut len) = (pos.cast_unsigned(), len.cast_unsigned());
+    if len.cast_signed() < 0 {
         len = len.wrapping_neg();
-        if (len as i64) < 0 {
+        if len.cast_signed() < 0 {
             return None;
         }
         pos = pos.wrapping_sub(len);
@@ -848,7 +850,7 @@ fn not_found(flags: u8, subject: &Binary) -> Term {
 /// assert_eq!(parts, Term::list_from(vec![Term::binary(b"a".to_vec()), Term::binary(b"b".to_vec())]));
 /// ```
 fn split_once(flags: u8, subject: &Binary, pos: u64, len: u64) -> Term {
-    let (pos, after) = (pos as usize, (pos + len) as usize);
+    let (pos, after) = (to_usize(pos), to_usize(pos + len));
     let size = subject.bit_size();
     // ERTS puts sub-binaries of the subject in the result
     // (`do_split_single_result`, `erl_bif_binary.c:1753-1833`), so each part
@@ -883,8 +885,8 @@ fn split_once(flags: u8, subject: &Binary, pos: u64, len: u64) -> Term {
 fn split_all(find: &mut Find, subject: &Binary, reds: &mut u64) -> Option<Term> {
     let matches = &find.matches;
     let build = find.build.get_or_insert_with(|| Build {
-        head: matches.len() as i64 - 1,
-        end_pos: (subject.bit_size() / 8) as u64,
+        head: to_i64(matches.len()) - 1,
+        end_pos: to_u64(subject.bit_size() / 8),
         parts: Vec::new(),
     });
     let mut trim = find.flags & (TRIM | TRIM_ALL);
@@ -896,7 +898,7 @@ fn split_all(find: &mut Find, subject: &Binary, reds: &mut u64) -> Option<Term> 
     // after a trap, and `Binary::bits` needs a range that does not go
     // backwards.
     let part_at =
-        |start: u64, end: u64| subject.bits(start as usize * 8, end.max(start) as usize * 8);
+        |start: u64, end: u64| subject.bits(to_usize(start) * 8, to_usize(end.max(start)) * 8);
     while build.head >= 0 {
         steps = steps.wrapping_sub(1);
         if steps == 0 {
@@ -905,7 +907,7 @@ fn split_all(find: &mut Find, subject: &Binary, reds: &mut u64) -> Option<Term> 
             }
             return None;
         }
-        let (pos, len) = matches[build.head as usize];
+        let (pos, len) = matches[to_usize(build.head)];
         let part = part_at(pos + len, build.end_pos);
         if !(part.bit_size() == 0 && trim != 0) {
             build.parts.push(Term::Binary(part));
@@ -948,7 +950,7 @@ fn match_all(find: &mut Find, reds: &mut u64) -> Option<Term> {
     });
     let mut steps = *reds;
     if build.end_pos == 0 {
-        while (build.head as usize) < matches.len() {
+        while to_usize(build.head) < matches.len() {
             steps = steps.wrapping_sub(1);
             if steps == 0 {
                 return None;
@@ -956,17 +958,17 @@ fn match_all(find: &mut Find, reds: &mut u64) -> Option<Term> {
             build.head += 1;
         }
         build.end_pos = 1;
-        build.head = matches.len() as i64 - 1;
+        build.head = to_i64(matches.len()) - 1;
     }
     while build.head >= 0 {
         steps = steps.wrapping_sub(1);
         if steps == 0 {
             return None;
         }
-        let (pos, len) = matches[build.head as usize];
+        let (pos, len) = matches[to_usize(build.head)];
         build.parts.push(Term::tuple(vec![
-            Term::Integer(pos as i64),
-            Term::Integer(len as i64),
+            Term::Integer(to_i64(pos)),
+            Term::Integer(to_i64(len)),
         ]));
         build.head -= 1;
     }
@@ -995,23 +997,23 @@ impl Find {
     fn to_term(&self) -> Term {
         let (node, start) = self
             .candidate
-            .map_or((-1, 0), |(node, start)| (node as i64, start));
+            .map_or((-1, 0), |(node, start)| (to_i64(node), start));
         let (head, end_pos, parts) = self.build.as_ref().map_or((-2, 0, Vec::new()), |build| {
             (build.head, build.end_pos, build.parts.clone())
         });
         let matches = self
             .matches
             .iter()
-            .flat_map(|(pos, len)| [Term::Integer(*pos as i64), Term::Integer(*len as i64)]);
+            .flat_map(|(pos, len)| [Term::Integer(to_i64(*pos)), Term::Integer(to_i64(*len))]);
         let integers = [
             i64::from(self.flags),
-            self.end as i64,
+            to_i64(self.end),
             self.pos,
-            self.node as i64,
+            to_i64(self.node),
             node,
-            start as i64,
+            to_i64(start),
             head,
-            end_pos as i64,
+            to_i64(end_pos),
         ];
         let mut fields: Vec<Term> = integers.into_iter().map(Term::Integer).collect();
         fields.push(Term::list_from(matches));
@@ -1054,23 +1056,23 @@ impl Find {
         ] = <&[Term; 10]>::try_from(state).expect("a binary_find_trap state has 10 fields");
         let matches = list(matches)
             .chunks(2)
-            .map(|pair| (integer(&pair[0]) as u64, integer(&pair[1]) as u64))
+            .map(|pair| (to_u64(integer(&pair[0])), to_u64(integer(&pair[1]))))
             .collect();
         let candidate =
-            usize::try_from(integer(candidate)).map(|node| (node, integer(start) as u64));
+            usize::try_from(integer(candidate)).map(|node| (node, to_u64(integer(start))));
         // The kind of the result follows the flags of the state: the parts
         // of a split build and the tuples of a matches build share the same
         // fields, and the build function of the kind reads them.
         let build = (integer(head) >= -1).then(|| Build {
             head: integer(head),
-            end_pos: integer(end_pos) as u64,
+            end_pos: to_u64(integer(end_pos)),
             parts: list(parts),
         });
         Find {
-            flags: integer(flags) as u8,
-            end: integer(end) as u64,
+            flags: u8::try_from(integer(flags)).expect("a state integer of the flags is a byte"),
+            end: to_u64(integer(end)),
             pos: integer(pos),
-            node: integer(node) as usize,
+            node: to_usize(integer(node)),
             candidate: candidate.ok(),
             matches,
             build,
@@ -1185,6 +1187,10 @@ pub(super) fn matches_2(
 /// ```rust,ignore
 /// let result = find_first_turn(&mut process, &subject, &pattern, None, MATCH)?;
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "result of this helper is the tail of BIF entries that return `Result<BifResult, BeamError>` like every BIF"
+)]
 fn find_first_turn(
     process: &mut ProcessState,
     stored: Option<&CompiledPattern>,
@@ -1200,7 +1206,7 @@ fn find_first_turn(
         // A bitstring subject raises `badarg` (`parse_match_opts_list` and
         // `parse_split_opts_list`, `erl_bif_binary.c:1281-1284`, `1354-1356`).
         bytes.bytes().and_then(|whole| {
-            let size = whole.len() as u64;
+            let size = to_u64(whole.len());
             match options_term {
                 Some(term) if kind != 0 => {
                     match_options(term, size).map(|(start, end)| (0, start, end))
@@ -1215,19 +1221,20 @@ fn find_first_turn(
     let mut find = Find {
         flags: flags | kind,
         end,
-        pos: start as i64,
+        pos: to_i64(start),
         node: ROOT,
         candidate: None,
         matches: Vec::new(),
         build: None,
     };
-    Ok(match find_turn(process, &compiled, &mut find, bytes)? {
-        Some(parts) => Value(parts),
-        None => {
+    Ok(
+        if let Some(parts) = find_turn(process, &compiled, &mut find, bytes) {
+            Value(parts)
+        } else {
             process.bump_all_reductions();
             find_trap_result(subject, &find, pattern)
-        }
-    })
+        },
+    )
 }
 
 /// Continue `binary:match/2` or `binary:split/2,3` in the export `erlang:binary_find_trap/3`, as
@@ -1241,6 +1248,10 @@ fn find_first_turn(
 /// ```rust,ignore
 /// let result = find_trap(&mut process, &subject, b"a,b", &state, &pattern)?;
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "trap export arm of `bif_trap`; every trap arm returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn find_trap(
     process: &mut ProcessState,
     stored: Option<&CompiledPattern>,
@@ -1251,7 +1262,7 @@ pub(super) fn find_trap(
 ) -> Result<BifResult, BeamError> {
     let compiled = compile(pattern, stored).expect("the first call checked the pattern");
     let mut find = Find::from_term(state);
-    Ok(match find_turn(process, &compiled, &mut find, bytes)? {
+    Ok(match find_turn(process, &compiled, &mut find, bytes) {
         Some(parts) => Value(parts),
         None => find_trap_result(subject, &find, pattern),
     })
@@ -1283,14 +1294,14 @@ fn find_trap_result(subject: &Term, find: &Find, pattern: &Term) -> BifResult {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(find_turn(&mut process, &compiled, &mut find, b"a,b")?.is_some());
+/// assert!(find_turn(&mut process, &compiled, &mut find, b"a,b").is_some());
 /// ```
 fn find_turn(
     process: &mut ProcessState,
     pattern: &Pattern,
     find: &mut Find,
     subject: &Binary,
-) -> Result<Option<Term>, BeamError> {
+) -> Option<Term> {
     // `get_reds` reads the budget into a `Uint`, so a negative budget does
     // the whole search in the call (`erl_bif_binary.c:110-121`).
     let initial = process
@@ -1335,8 +1346,8 @@ fn find_turn(
                 Search::NotFound if find.flags & MATCH != 0 => Some(Term::static_atom("nomatch")),
                 Search::NotFound => Some(not_found(find.flags, subject)),
                 Search::Found(pos, len) if find.flags & MATCH != 0 => Some(Term::tuple(vec![
-                    Term::Integer(pos as i64),
-                    Term::Integer(len as i64),
+                    Term::Integer(to_i64(pos)),
+                    Term::Integer(to_i64(len)),
                 ])),
                 Search::Found(pos, len) => Some(split_once(find.flags, subject, pos, len)),
             }
@@ -1346,7 +1357,7 @@ fn find_turn(
         let used = initial.wrapping_sub(reds) / LOOP_FACTOR;
         process.bump_reductions(i32::try_from(used).unwrap_or(i32::MAX));
     }
-    Ok(parts)
+    parts
 }
 
 /// Run `binary:at/2` as ERTS `binary_at_2` does
@@ -1520,7 +1531,7 @@ pub(super) fn copy(process: &mut ProcessState, subject: &Term, count: &Term) -> 
     // A binary holds at most `usize::MAX` bytes, so its bit size fits in the
     // low 61 bits of a `u64` and the sums below cannot wrap a `u64` for a
     // count under the ERTS limit.
-    let bits = bytes.len() as u64 * 8;
+    let bits = to_u64(bytes.len()) * 8;
     if count == 0 || bits == 0 {
         return Value(Term::binary(Vec::new()));
     }
@@ -1531,7 +1542,7 @@ pub(super) fn copy(process: &mut ProcessState, subject: &Term, count: &Term) -> 
         };
     }
     let bit_size = bits * count;
-    let mut copied = Vec::with_capacity((bit_size / 8) as usize);
+    let mut copied = Vec::with_capacity(to_usize(bit_size / 8));
     for _ in 0..count {
         copied.extend_from_slice(bytes);
     }
@@ -1614,7 +1625,7 @@ pub(super) fn decode_unsigned(subject: &Term, endianness: &Term) -> BifResult {
 /// ```
 pub(super) fn referenced_byte_size(subject: &Term) -> BifResult {
     match subject {
-        Term::Binary(bytes) => Value(Term::Integer(bytes.referenced_bytes() as i64)),
+        Term::Binary(bytes) => Value(Term::Integer(to_i64(bytes.referenced_bytes()))),
         _ => BifResult::badarg(),
     }
 }
@@ -1646,6 +1657,16 @@ fn list_error(count: usize, tail: &Term) -> Option<BifResult> {
     (!tail.is_nil() || count == 0).then(BifResult::badarg)
 }
 
+/// The end of the binaries that `binary:longest_common_prefix/1` and
+/// `binary:longest_common_suffix/1` compare.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CommonEnd {
+    /// The first bytes: `binary:longest_common_prefix/1`.
+    Prefix,
+    /// The last bytes: `binary:longest_common_suffix/1`.
+    Suffix,
+}
+
 /// Start `binary:longest_common_prefix/1` (`suffix` false) or
 /// `binary:longest_common_suffix/1` (`suffix` true) as
 /// `start_longest_common` does (`erl_bif_binary.c:2182-2239`). Each element
@@ -1661,7 +1682,7 @@ fn list_error(count: usize, tail: &Term) -> Option<BifResult> {
 /// let list = Term::list_from([Term::binary(b"ab".to_vec()), Term::binary(b"ac".to_vec())]);
 /// assert!(matches!(longest_common(&mut process, &list, false), BifResult::Value(Term::Integer(1))));
 /// ```
-pub(super) fn longest_common(process: &mut ProcessState, list: &Term, suffix: bool) -> BifResult {
+pub(super) fn longest_common(process: &mut ProcessState, list: &Term, end: CommonEnd) -> BifResult {
     let mut binaries = Vec::new();
     let mut smallest = u64::MAX;
     let mut tail = list;
@@ -1669,7 +1690,7 @@ pub(super) fn longest_common(process: &mut ProcessState, list: &Term, suffix: bo
         let Some(bytes) = head.binary_bytes() else {
             return BifResult::badarg();
         };
-        smallest = smallest.min(bytes.len() as u64 * 8);
+        smallest = smallest.min(to_u64(bytes.len()) * 8);
         binaries.push(head.clone());
         tail = rest;
     }
@@ -1677,9 +1698,9 @@ pub(super) fn longest_common(process: &mut ProcessState, list: &Term, suffix: bo
         return error;
     }
     if smallest == 0 || binaries.len() == 1 {
-        return Value(Term::Integer((smallest / 8) as i64));
+        return Value(Term::Integer(to_i64(smallest / 8)));
     }
-    longest_common_turn(process, &binaries, 1, smallest, 0, suffix)
+    longest_common_turn(process, &binaries, 1, smallest, 0, end)
 }
 
 /// Run one turn of `binary:longest_common_prefix/1` or
@@ -1697,7 +1718,7 @@ pub(super) fn longest_common(process: &mut ProcessState, list: &Term, suffix: bo
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = longest_common_turn(&mut process, &binaries, 1, 16, 0, false);
+/// let result = longest_common_turn(&mut process, &binaries, 1, 16, 0, CommonEnd::Prefix);
 /// ```
 pub(super) fn longest_common_turn(
     process: &mut ProcessState,
@@ -1705,7 +1726,7 @@ pub(super) fn longest_common_turn(
     mut index: usize,
     mut smallest: u64,
     mut position: u64,
-    suffix: bool,
+    end: CommonEnd,
 ) -> BifResult {
     let bytes = |index: usize| {
         binaries[index]
@@ -1717,23 +1738,24 @@ pub(super) fn longest_common_turn(
     let initial = process
         .bif_reductions_unsigned()
         .wrapping_mul(LOOP_FACTOR)
-        .max(1) as i64;
+        .max(1)
+        .cast_signed();
     let mut reds = initial;
     while position < smallest {
         if reds < 0 {
             process.bump_all_reductions();
             return BifResult::TrapBif {
                 module: "erlang",
-                function: if suffix {
+                function: if end == CommonEnd::Suffix {
                     "binary_longest_suffix_trap"
                 } else {
                     "binary_longest_prefix_trap"
                 },
                 arguments: vec![
                     Term::tuple(binaries.to_vec()),
-                    Term::Integer(index as i64),
-                    Term::Integer(smallest as i64),
-                    Term::Integer(position as i64),
+                    Term::Integer(to_i64(index)),
+                    Term::Integer(to_i64(smallest)),
+                    Term::Integer(to_i64(position)),
                 ],
             };
         }
@@ -1741,9 +1763,9 @@ pub(super) fn longest_common_turn(
         while reds >= 0 && position < smallest {
             // The window of `stride` bits at `position` from the start, or
             // from the end for a suffix.
-            let (start, len) = ((position / 8) as usize, (stride / 8) as usize);
+            let (start, len) = (to_usize(position / 8), to_usize(stride / 8));
             let (first, other) = (bytes(0), bytes(index));
-            let (first, other) = if suffix {
+            let (first, other) = if end == CommonEnd::Suffix {
                 (
                     &first[first.len() - start - len..first.len() - start],
                     &other[other.len() - start - len..other.len() - start],
@@ -1752,17 +1774,17 @@ pub(super) fn longest_common_turn(
                 (&first[start..start + len], &other[start..start + len])
             };
             let pairs = first.iter().zip(other);
-            let mismatch = if suffix {
+            let mismatch = if end == CommonEnd::Suffix {
                 pairs.rev().position(|(a, b)| a != b)
             } else {
                 pairs.into_iter().position(|(a, b)| a != b)
             };
             if let Some(offset) = mismatch {
-                stride = offset as u64 * 8;
+                stride = to_u64(offset) * 8;
                 smallest = position + stride;
             }
             index += 1;
-            reds -= stride as i64;
+            reds -= to_i64(stride);
             if index == binaries.len() {
                 position += stride;
                 index = 1;
@@ -1770,9 +1792,10 @@ pub(super) fn longest_common_turn(
             }
         }
     }
-    process
-        .bump_reductions(i32::try_from((initial - reds) / LOOP_FACTOR as i64).unwrap_or(i32::MAX));
-    Value(Term::Integer((position / 8) as i64))
+    process.bump_reductions(
+        i32::try_from((initial - reds) / LOOP_FACTOR.cast_signed()).unwrap_or(i32::MAX),
+    );
+    Value(Term::Integer(to_i64(position / 8)))
 }
 
 #[cfg(test)]

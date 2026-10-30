@@ -4,6 +4,10 @@ use super::*;
 
 /// Return the shared array of bytes of a binary term. A sub-binary keeps the
 /// array of its source, so the test compares this array.
+#[expect(
+    clippy::rc_buffer,
+    reason = "`Binary` shares byte arrays as `Arc<Vec<u8>>` because `append_in_place` grows the vector through `Arc::get_mut`; an `Arc<[u8]>` cannot grow"
+)]
 fn array(term: &Term) -> &Arc<Vec<u8>> {
     let Term::Binary(bytes) = term else {
         panic!("not a binary: {term:?}");
@@ -161,9 +165,9 @@ fn gives_no_byte_for_a_binary_of_no_bits() {
     // A binary of 0 bits at the end of its array has no byte, as an ERTS
     // bitstring of 0 bits is empty.
     let source = Binary::from(&[1, 2]);
-    assert!(source.bits(16, 16).bit_bytes().is_empty());
+    assert_eq!(source.bits(16, 16).bit_bytes(), []);
     assert_eq!(source.bits(16, 16).bit_bytes(), &[]);
-    assert!(Binary::from(Vec::new()).bits(0, 0).bit_bytes().is_empty());
+    assert_eq!(Binary::from(Vec::new()).bits(0, 0).bit_bytes(), []);
 }
 
 #[test]
@@ -231,7 +235,7 @@ fn takes_the_bytes_of_the_last_holder_with_no_copy() {
     assert_eq!(binary.take_bytes(), b"ab".to_vec());
     assert_eq!(copy, Binary::from(b"ab".to_vec()));
     // An empty binary is the value of the state after the take.
-    assert!(Binary::default().bit_bytes().is_empty());
+    assert_eq!(Binary::default().bit_bytes(), []);
     assert_eq!(Binary::default(), Binary::from(Vec::new()));
     // A sub-binary that owns the array of its source gives only its own
     // bytes.
@@ -400,7 +404,7 @@ fn joins_the_arrays_of_a_chunked_prefix_in_one_array() {
     assert_eq!(second.bit_bytes()[5], 2);
     assert_eq!(second.bit_bytes()[4100], 3);
     // The joined array is built once and shared by each later read.
-    let joined = second.backing().clone();
+    let joined = Arc::clone(second.backing());
     assert!(joined.is_empty());
     assert_eq!(second.backing().len(), 0);
     assert_eq!(second.to_bytes(), second.to_bytes());
@@ -506,7 +510,8 @@ fn reads_a_byte_range_of_an_appended_binary_from_the_chunks_of_the_range() {
     assert_eq!(chunk_span(ends, 3995, 4000), 998..1000);
     assert_eq!(chunk_span(ends, 4, 8), 1..2);
     assert_eq!(chunk_span(ends, 7, 7), 0..0);
-    assert!(binary.byte_runs(7, 7).is_empty());
+    let no_runs: [&[u8]; 0] = [];
+    assert_eq!(binary.byte_runs(7, 7), no_runs);
 }
 
 /// Return the bitstring of the first `size` bits of `bytes`, at offset 0.

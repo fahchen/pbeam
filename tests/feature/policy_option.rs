@@ -1,3 +1,10 @@
+//! Checks the `--policy` option of the `pbeam` binary and the capability checks that it enables or
+//! skips.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::{
     process::{Command, Stdio},
     time::Duration,

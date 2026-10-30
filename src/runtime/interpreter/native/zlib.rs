@@ -29,7 +29,7 @@ use zlib_rs::{
     Method, Status, Strategy,
 };
 
-use super::*;
+use super::{BeamError, BifResult, Binding, ExceptionClass, Job, Scheduler, Term};
 use crate::runtime::resources::lock;
 use crate::term::{Binary, ProcessId, Reference};
 
@@ -418,8 +418,8 @@ impl ZStream {
                 let before_in = deflate.total_in();
                 let before_out = deflate.total_out();
                 let status = deflate.compress(input, output, flush);
-                let consumed = (deflate.total_in() - before_in) as usize;
-                let produced = (deflate.total_out() - before_out) as usize;
+                let consumed = to_usize(deflate.total_in() - before_in);
+                let produced = to_usize(deflate.total_out() - before_out);
                 if status == Ok(Status::StreamEnd) {
                     self.deflate_finished = true;
                 }
@@ -435,7 +435,7 @@ impl ZStream {
                 };
                 if self.inflate_learned_bits.is_none()
                     && self.inflate_window_bits >= 0
-                    && self.inflate_window_bits & 15 == 0
+                    && self.inflate_window_bits.trailing_zeros() >= 4
                 {
                     // The header can arrive in parts, so keep its first two
                     // bytes until the window size is known.
@@ -452,8 +452,8 @@ impl ZStream {
                 let before_in = inflate.total_in();
                 let before_out = inflate.total_out();
                 let status = inflate.decompress(input, output, flush);
-                let consumed = (inflate.total_in() - before_in) as usize;
-                let produced = (inflate.total_out() - before_out) as usize;
+                let consumed = to_usize(inflate.total_in() - before_in);
+                let produced = to_usize(inflate.total_out() - before_out);
                 (status_step(status), consumed, produced)
             }
             // The callers check the state before the codec call.
@@ -804,11 +804,11 @@ fn set_controller_nif(
         return Ok(BifResult::badarg());
     };
     let mut stream = lock(&stream);
-    let native = if stream.controller != current {
-        Native::Raise("not_on_controlling_process")
-    } else {
+    let native = if stream.controller == current {
         stream.controller = *pid;
         Native::Atom("ok")
+    } else {
+        Native::Raise("not_on_controlling_process")
     };
     result(scheduler, native)
 }
@@ -1102,6 +1102,12 @@ fn codec_nif(
     result(scheduler, native)
 }
 
+/// Convert the byte count of one call, which the length of a slice bounds,
+/// to `usize`.
+fn to_usize(count: u64) -> usize {
+    usize::try_from(count).expect("the bytes of one call fit in usize")
+}
+
 /// Run one chunking call, as `zlib_codec` and `zlib_flush_queue`
 /// (`zlib_nif.c:339-471`) do: compress or decompress the queued input up to
 /// `input_chunk_size` bytes, write at most `output_chunk_size` bytes,
@@ -1130,11 +1136,13 @@ fn codec(
     if output_chunk_size < 0 {
         return Native::Atom("mem_error");
     }
-    let size = output_chunk_size as usize;
+    let size = usize::try_from(output_chunk_size).expect("a negative size returned above");
     let mut output = vec![0u8; size];
     // A negative `InputChunkSize` becomes the large `size_t` of the C
     // conversion (`zlib_nif.c:339-345`).
-    let input_limit = input_chunk_size as usize;
+    let input_limit = isize::try_from(input_chunk_size)
+        .expect("an isize holds an i32 on every supported target")
+        .cast_unsigned();
     let mut queue = std::mem::take(&mut stream.queue);
     let mut consumed = 0;
     let mut produced = 0;
@@ -1320,14 +1328,14 @@ fn inflate_init_nif(
 /// ```
 fn inflate_state(window_bits: i32, learned: Option<i32>) -> Inflate {
     if window_bits < 0 {
-        return Inflate::new(false, (-window_bits) as u8);
+        return Inflate::new(false, (-window_bits).to_le_bytes()[0]);
     }
     let window = window_bits & 15;
     if window != 0 {
-        return Inflate::new(true, window_bits as u8);
+        return Inflate::new(true, window_bits.to_le_bytes()[0]);
     }
     let Some(bits) = learned else {
-        return Inflate::new(true, window_bits as u8);
+        return Inflate::new(true, window_bits.to_le_bytes()[0]);
     };
     let configured = if window_bits < 16 {
         bits
@@ -1336,7 +1344,7 @@ fn inflate_state(window_bits: i32, learned: Option<i32>) -> Inflate {
     } else {
         32 + bits
     };
-    Inflate::new(true, configured as u8)
+    Inflate::new(true, configured.to_le_bytes()[0])
 }
 
 /// Return the window size of the header of `input`, when `window_bits`
@@ -1480,13 +1488,13 @@ fn get_stash_nif(scheduler: &mut Scheduler, stream: &Term) -> Result<BifResult, 
         return Ok(BifResult::badarg());
     };
     let stream = lock(&stream);
-    let native = if stream.controller != current {
-        Native::Raise("not_on_controlling_process")
-    } else {
+    let native = if stream.controller == current {
         match &stream.stash {
             Some(term) => Native::Stash(term.clone()),
             None => Native::Atom("empty"),
         }
+    } else {
+        Native::Raise("not_on_controlling_process")
     };
     result(scheduler, native)
 }

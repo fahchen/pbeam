@@ -16,7 +16,7 @@ use std::ops::Bound;
 use std::sync::Arc;
 
 use crate::error::BeamError;
-use crate::term::{AtomTable, Term};
+use crate::term::{AtomTable, Direction, Term};
 
 /// The keys of an `ordered_set` table in the ERTS term order, as the tree
 /// orders them with `cmp_key_eq` (`erl_db_tree.c:758-761`). Two keys that
@@ -181,11 +181,12 @@ impl KeyOrder {
     /// (`src/term/order.rs`).
     pub(super) fn find(&self, atoms: &AtomTable, key: &Term) -> Result<Option<&Term>, BeamError> {
         let probe = Probe::new(|stored: &Term| key.compare(stored, atoms));
-        let found = self.keys.get(&probe as &dyn Locate).map(|key| &key.term);
+        let place: &dyn Locate = &probe;
+        let found = self.keys.get(place).map(|key| &key.term);
         probe.result(found)
     }
 
-    /// Return the keys above `key` up when `forward` is true, else the keys
+    /// Return the keys above `key` up for [`Direction::Forward`], else the keys
     /// below `key` down, as `find_next` and `find_prev` step
     /// (`erl_db_tree.c:3659-3762`). The key `key` does not have to be in the
     /// order.
@@ -197,11 +198,11 @@ impl KeyOrder {
         &'a self,
         atoms: &AtomTable,
         key: &Term,
-        forward: bool,
+        direction: Direction,
     ) -> Result<Box<dyn Iterator<Item = &'a Term> + 'a>, BeamError> {
         let probe = Probe::new(|stored: &Term| key.compare(stored, atoms));
-        let place = &probe as &dyn Locate;
-        let keys: Box<dyn Iterator<Item = &'a Term>> = if forward {
+        let place: &dyn Locate = &probe;
+        let keys: Box<dyn Iterator<Item = &'a Term>> = if direction == Direction::Forward {
             let range = (Bound::Excluded(place), Bound::Unbounded);
             Box::new(self.keys.range::<dyn Locate, _>(range).map(|key| &key.term))
         } else {
@@ -237,7 +238,7 @@ impl KeyOrder {
                 Ordering::Less
             })
         });
-        let place = &probe as &dyn Locate;
+        let place: &dyn Locate = &probe;
         let before = self
             .keys
             .range::<dyn Locate, _>((Bound::Unbounded, Bound::Excluded(place)))
@@ -258,7 +259,8 @@ impl KeyOrder {
     /// Remove the key `key`.
     pub(super) fn remove(&mut self, atoms: &AtomTable, key: &Term) {
         let probe = Probe::new(|stored: &Term| key.compare(stored, atoms));
-        self.keys.remove(&probe as &dyn Locate);
+        let place: &dyn Locate = &probe;
+        self.keys.remove(place);
     }
 }
 

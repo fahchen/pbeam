@@ -1,3 +1,9 @@
+//! Runs receive timeouts and the timer BIFs on PBeam and compares them with the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 #[path = "../common/mod.rs"]
 mod common;
 
@@ -78,7 +84,7 @@ fn runs_receive_timeouts_as_pinned_erts() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     assert_eq!(
         reference.stdout,
         b"[[timeout,early,timeout,other,late,none],[timeout,{error,timeout_value},{error,timeout_value},{error,timeout_value},{error,timeout_value},{error,timeout_value},{error,timeout_value},{error,timeout_value}],[ok,ok,other,none]]\n"
@@ -187,7 +193,7 @@ fn runs_erlang_start_timer_and_cancel_timer_as_pinned_erts() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     assert_eq!(
         reference.stdout,
         b"[[true,true,none,[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}]],[true,false,false,{error,badarg},none],[true,false,ok,ok,ok,true,ok,false,ok,false,false,false,none,[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}]],[false,false,named,none],[[1,2,3,4,40,50,60],recv,bif],[ok,ok,{error,badarg},{error,badarg}]]\n"
@@ -234,7 +240,7 @@ fn runs_erlang_send_after_as_pinned_erts() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     assert_eq!(
         reference.stdout,
         b"[true,true,b,a,true,named,none,[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}]]\n"
@@ -308,7 +314,7 @@ fn runs_the_absolute_timer_bifs_and_read_timer_as_pinned_erts() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     assert_eq!(
         reference.stdout,
         b"[[true,true,true,true,none,[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}]],[true,true,true,true,true,none,[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,badarg}]],[true,true,true,false,false,false,{error,badarg},none]]\n"

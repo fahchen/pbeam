@@ -1,3 +1,9 @@
+//! Checks the stack trace frames of `error/1` and `raise/3` on PBeam against the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};
@@ -35,6 +41,10 @@ fn reference() -> String {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "case table: one expected stack trace for each probe call, and the entries share the frame helpers"
+)]
 fn keeps_the_stack_trace_frames_of_error_1_and_raise_3_as_pinned_erts() {
     // `system_flag(backtrace_depth, Depth)` returns the old depth and sets
     // at most 64 (`bif.c:5108-5115`, `error.h:206`). The stack trace of
@@ -79,7 +89,7 @@ fn keeps_the_stack_trace_frames_of_error_1_and_raise_3_as_pinned_erts() {
     );
     let all = vec![
         f(1),
-        located.clone(),
+        located,
         tuple(vec![atom("fun"), list(vec![atom("x")]), nil()]),
         tuple(vec![
             atom("fun"),

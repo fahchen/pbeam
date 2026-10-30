@@ -1,3 +1,10 @@
+//! Runs the `gen_tcp` calls (listen, accept, connect, peer name, local family) through the `pbeam`
+//! binary and compares them with the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::{
     io::{BufRead, BufReader, Read, Write},
     net::TcpStream,
@@ -67,7 +74,7 @@ fn runs_the_gen_tcp_calls_of_thousand_island_as_pinned_erts() {
     for (name, command) in [("ERTS", &mut erts), ("PBeam", &mut pbeam)] {
         assert_eq!(
             with_client(name, command),
-            (expected.into(), "".into(), Some(0)),
+            (expected.into(), String::new(), Some(0)),
             "{name}"
         );
     }
@@ -321,7 +328,7 @@ fn runs_the_local_family_as_pinned_erts() {
                 String::from_utf8_lossy(&output.stderr).into_owned(),
                 output.status.code()
             ),
-            (expected.clone(), "".into(), Some(0)),
+            (expected.clone(), String::new(), Some(0)),
             "{name}"
         );
     }

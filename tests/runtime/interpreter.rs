@@ -16,9 +16,9 @@ use crate::{
     },
     runtime::{
         capability::{AllowAll, Capability, Policy},
-        ets::{Access, Busy, Table, TableType},
+        ets::{Access, Busy, InsertKind, Table, TableType},
         import_kind,
-        process::{ProcessState, Start, tests::frame},
+        process::{CallKind, ProcessState, Start, tests::frame},
     },
     term::{
         Atom, AtomTable, Binary, Lambda, MatchState, ProcessId, Reference, debug_term, test_atom,
@@ -49,7 +49,7 @@ fn a_delivery_at_idle_lets_the_run_wait_again() {
         0,
         readers.remove(0),
     );
-    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.start(frame(), vec![], allow_all());
     let root = ProcessId(0);
     scheduler.process_mut(root).unwrap().waiting = true;
     node.send_message(0, Some(root), Term::Integer(1), root, None);
@@ -233,7 +233,7 @@ fn fixture_imports() -> Vec<Import> {
 
 /// Return the `call_ext` of `module:name/arity` in a hand-built fixture
 /// module, whose import table [`fixture_imports`] gives.
-fn external(module: &str, name: &str, arity: u32, tail: bool, deallocate: u32) -> Instruction {
+fn external(module: &str, name: &str, arity: u32, call: CallKind, deallocate: u32) -> Instruction {
     let import = FIXTURE_IMPORTS.with_borrow_mut(|imports| {
         let found = imports.iter().position(|import| {
             (import.module.as_str(), import.name.as_str(), import.arity) == (module, name, arity)
@@ -250,13 +250,13 @@ fn external(module: &str, name: &str, arity: u32, tail: bool, deallocate: u32) -
     });
     Instruction::CallExternal {
         import: u32::try_from(import).expect("a test makes fewer than 2^32 imports"),
-        tail,
+        tail: call.is_tail(),
         deallocate,
     }
 }
 
-fn erlang_call(name: &str, arity: u32, tail: bool) -> Instruction {
-    external("erlang", name, arity, tail, 0)
+fn erlang_call(name: &str, arity: u32, call: CallKind) -> Instruction {
+    external("erlang", name, arity, call, 0)
 }
 
 fn atom(name: &str) -> Operand {
@@ -272,7 +272,7 @@ fn run_with_child(body: Vec<Instruction>) -> Result<Term, crate::BeamError> {
             arity: 1,
         },
         Instruction::Label(11),
-        erlang_call("exit", 1, true),
+        erlang_call("exit", 1, CallKind::Tail),
     ];
     let exports = HashMap::from([(("main".into(), 0), 2), (("child".into(), 1), 11)]);
     program_with_names(fixture_instructions(0, body, extra), exports)
@@ -285,7 +285,7 @@ fn spawn_link_child(arguments: Term) -> Vec<Instruction> {
         Instruction::Move(atom("fixture"), Operand::X(0)),
         Instruction::Move(atom("child"), Operand::X(1)),
         Instruction::Move(Operand::Value(arguments), Operand::X(2)),
-        erlang_call("spawn_link", 3, false),
+        erlang_call("spawn_link", 3, CallKind::Body),
     ]
 }
 
@@ -353,7 +353,7 @@ fn calls_an_external_fun_of_a_missing_function_as_call_ext() {
             Instruction::Move(atom("missing"), Operand::X(0)),
             Instruction::Move(atom("run"), Operand::X(1)),
             Instruction::Move(Operand::Value(Term::Integer(0)), Operand::X(2)),
-            erlang_call("make_fun", 3, false),
+            erlang_call("make_fun", 3, CallKind::Body),
             Instruction::CallFun {
                 arity: 0,
                 function: Operand::X(0),
@@ -394,9 +394,7 @@ fn replaces_the_caller_frame_for_a_fun_call_in_a_tail_position() {
     let mut scheduler = Scheduler::new((*program.atoms).clone());
     scheduler.code = CodeTable::new(program.modules.clone());
     let frame = scheduler.code.frame("fun_probe", label, 1).unwrap();
-    scheduler
-        .start(frame, vec![Term::Integer(1)], Vec::new())
-        .unwrap();
+    scheduler.start(frame, vec![Term::Integer(1)], Vec::new());
     scheduler.schedule_next().unwrap();
     assert!(matches!(
         program.run(&mut scheduler).unwrap(),
@@ -466,13 +464,13 @@ fn reports_process_exits_and_link_exits() {
     let error = |body| run_with_child(body).unwrap_err().to_string();
     let exit = error(vec![
         Instruction::Move(atom("boom"), Operand::X(0)),
-        erlang_call("exit", 1, false),
+        erlang_call("exit", 1, CallKind::Body),
     ]);
     assert!(exit.contains("root process exited with boom"), "{exit}");
     assert!(
         error(vec![
             Instruction::Move(atom("undef"), Operand::X(0)),
-            erlang_call("nif_error", 1, false),
+            erlang_call("nif_error", 1, CallKind::Body),
         ])
         .contains(
             "root process exited with {undef,[{erlang,nif_error,[undef],\
@@ -502,14 +500,14 @@ fn reports_process_exits_and_link_exits() {
     // `erlang:is_alive/0` is not a BIF: it runs the code of the `erlang`
     // module, which this program does not load.
     assert!(
-        error(vec![erlang_call("is_alive", 0, false)])
+        error(vec![erlang_call("is_alive", 0, CallKind::Body)])
             .contains("unresolved external MFA erlang:is_alive/0")
     );
     // An external call of `erlang:yield/0` that the loader did not turn
     // into `Instruction::Yield`, as through `apply`, runs the code of the
     // `erlang` module, as in ERTS.
     assert!(
-        error(vec![erlang_call("yield", 0, false)])
+        error(vec![erlang_call("yield", 0, CallKind::Body)])
             .contains("unresolved external MFA erlang:yield/0")
     );
 }
@@ -523,7 +521,7 @@ fn spawns_with_link_and_monitor_options_and_rejects_other_options() {
             Operand::Value(Term::list_from(options)),
             Operand::X(3),
         ));
-        body.push(erlang_call("spawn_opt", 4, false));
+        body.push(erlang_call("spawn_opt", 4, CallKind::Body));
         body
     };
     let spawn_opt = |options: Vec<Term>| {
@@ -594,7 +592,10 @@ fn spawns_with_link_and_monitor_options_and_rejects_other_options() {
 #[test]
 fn returns_a_tail_called_bif_value_and_drops_messages_to_missing_processes() {
     assert!(matches!(
-        run_with_child(vec![erlang_call("make_ref", 0, true), Instruction::Return]),
+        run_with_child(vec![
+            erlang_call("make_ref", 0, CallKind::Tail),
+            Instruction::Return
+        ]),
         Ok(Term::Reference(_))
     ));
     assert_eq!(
@@ -841,7 +842,7 @@ fn calls_a_module_export_without_a_bif_search() {
     // The run then reaches the export lookup with no search of `BIFS`.
     let body = vec![
         Instruction::Move(Operand::Value(Term::Integer(1)), Operand::X(0)),
-        external("fixture", "guest", 1, false, 0),
+        external("fixture", "guest", 1, CallKind::Body, 0),
         Instruction::Return,
     ];
     let extra = vec![
@@ -895,7 +896,7 @@ fn import_target(scheduler: &Scheduler, import: &Instruction) -> Option<usize> {
     };
     let module = scheduler.code.get("fixture").expect("fixture is loaded");
     let loaded = scheduler.code.loaded_by_id(module.id).unwrap();
-    loaded.imports[*import as usize]
+    loaded.imports[usize::try_from(*import).expect("a u32 fits in usize")]
         .get()
         .map(|target| target.frame().next_instruction)
 }
@@ -905,7 +906,7 @@ fn import_target(scheduler: &Scheduler, import: &Instruction) -> Option<usize> {
 /// `guest/1`, and the number of calls of `CodeTable::export_frame` in the
 /// run.
 fn run_guest_calls(calls: usize) -> (Scheduler, usize, usize) {
-    let guest = external("fixture", "guest", 1, false, 0);
+    let guest = external("fixture", "guest", 1, CallKind::Body, 0);
     let mut body = vec![Instruction::Move(
         Operand::Value(Term::Integer(1)),
         Operand::X(0),
@@ -938,7 +939,7 @@ fn keeps_the_export_target_of_an_import_after_its_first_call() {
     // module code finds the export and keeps it in the slot of the import,
     // so the second call reads the slot and makes no lookup by name. Each
     // of the two calls enters `guest/1`, which starts after label 11.
-    let guest = external("fixture", "guest", 1, false, 0);
+    let guest = external("fixture", "guest", 1, CallKind::Body, 0);
     let (_, _, one_call) = run_guest_calls(1);
     let (scheduler, start, two_calls) = run_guest_calls(2);
     assert_eq!(import_target(&scheduler, &guest), Some(start));
@@ -955,7 +956,7 @@ fn keeps_no_export_target_for_an_import_with_no_export() {
     // load of the module sets the code address in the ERTS export entry
     // (`jit/asm_load.c:1180-1196`). A run with no code server stops at the
     // call (see `undefined_function`).
-    let absent = external("absent", "run", 0, false, 0);
+    let absent = external("absent", "run", 0, CallKind::Body, 0);
     let program = make_program(vec![absent.clone(), Instruction::Return], 0);
     let (scheduler, result) = run_in_scheduler(&program);
     assert_eq!(
@@ -1425,6 +1426,10 @@ fn raises_or_jumps_when_put_map_exact_gets_no_map_or_no_key() {
         "root process exited with {{badmap,foo},[]}"
     );
     assert_eq!(run(3, atom("foo")).unwrap().term, test_atom("failed"));
+}
+
+#[test]
+fn raises_or_jumps_when_put_map_exact_gets_a_key_that_a_map_cannot_hold() {
     // A key of a type that a PBeam map cannot hold is a missing key.
     let tuple_key = |fail_label| {
         make_program(
@@ -1449,6 +1454,10 @@ fn raises_or_jumps_when_put_map_exact_gets_no_map_or_no_key() {
         "root process exited with {{badkey,{}},[]}"
     );
     assert_eq!(tuple_key(3).unwrap().term, test_atom("failed"));
+}
+
+#[test]
+fn raises_badkey_when_put_map_exact_gets_a_missing_reference_key() {
     // A reference is a key of the map, so a missing reference key raises
     // `{badkey, Ref}` as another missing key does.
     let references = make_program(
@@ -1472,6 +1481,10 @@ fn raises_or_jumps_when_put_map_exact_gets_no_map_or_no_key() {
     .execute("fixture", "main", &[]);
     let error = references.unwrap_err().to_string();
     assert!(error.contains("badkey,#Ref<0.0.1.1>"), "{error}");
+}
+
+#[test]
+fn changes_a_map_with_alias_reference_keys_by_put_map_exact() {
     // An alias reference has a PBeam order, so the exact change finds two
     // alias keys as it finds two references (`src/term/order.rs`).
     let alias = |number| Term::Reference(crate::Reference(number).pid_reference());
@@ -1730,7 +1743,7 @@ fn reports_a_maps_from_list_key_that_the_map_form_does_not_support() {
     let from_list = make_program(
         vec![
             Instruction::Move(Operand::Value(Term::list_from(vec![pair])), Operand::X(0)),
-            external("maps", "from_list", 1, true, 0),
+            external("maps", "from_list", 1, CallKind::Tail, 0),
             Instruction::Return,
         ],
         0,
@@ -1756,7 +1769,7 @@ fn reports_a_maps_put_key_that_the_map_form_does_not_support() {
             ),
             Instruction::Move(Operand::Value(Term::Integer(0)), Operand::X(1)),
             Instruction::Move(Operand::Value(Term::Map(Map::new())), Operand::X(2)),
-            external("maps", "put", 3, true, 0),
+            external("maps", "put", 3, CallKind::Tail, 0),
             Instruction::Return,
         ],
         0,
@@ -1789,7 +1802,7 @@ fn runs_maps_update_as_a_bif_and_names_a_key_that_the_map_does_not_hold() {
                 Instruction::Move(Operand::Value(key), Operand::X(0)),
                 Instruction::Move(Operand::Value(value), Operand::X(1)),
                 Instruction::Move(map, Operand::X(2)),
-                external("maps", "update", 3, true, 0),
+                external("maps", "update", 3, CallKind::Tail, 0),
                 Instruction::Return,
             ],
             0,
@@ -1851,7 +1864,7 @@ fn runs_maps_values_as_a_bif_and_raises_badmap_for_a_term_that_is_not_a_map() {
         make_program(
             vec![
                 Instruction::Move(Operand::Value(argument), Operand::X(0)),
-                external("maps", "values", 1, true, 0),
+                external("maps", "values", 1, CallKind::Tail, 0),
                 Instruction::Return,
             ],
             0,
@@ -1880,7 +1893,7 @@ fn runs_maps_keys_as_a_bif_and_reports_unsupported_arguments() {
         make_program(
             vec![
                 Instruction::Move(Operand::Value(argument), Operand::X(0)),
-                external("maps", "keys", 1, true, 0),
+                external("maps", "keys", 1, CallKind::Tail, 0),
                 Instruction::Return,
             ],
             0,
@@ -1926,7 +1939,7 @@ fn runs_a_table_bif_before_a_loaded_module_that_exports_the_same_mfa() {
                 )),
                 Operand::X(0),
             ),
-            external("maps", "keys", 1, true, 0),
+            external("maps", "keys", 1, CallKind::Tail, 0),
             Instruction::Return,
         ],
         0,
@@ -1967,7 +1980,7 @@ fn never_runs_the_stub_of_a_table_bif_that_pbeam_does_not_implement() {
             Instruction::Move(atom("a"), Operand::X(0)),
             Instruction::Move(Operand::Value(Term::Integer(1)), Operand::X(1)),
             Instruction::Move(Operand::Value(Term::nil()), Operand::X(2)),
-            external("erl_ddll", "try_load", 3, true, 0),
+            external("erl_ddll", "try_load", 3, CallKind::Tail, 0),
             Instruction::Return,
         ],
         0,
@@ -2049,7 +2062,7 @@ fn converts_unicode_chardata_and_rejects_other_encodings() {
             vec![
                 Instruction::Move(Operand::Value(chardata), Operand::X(0)),
                 Instruction::Move(Operand::Value(Term::static_atom(encoding)), Operand::X(1)),
-                external("unicode", "characters_to_binary", 2, true, 0),
+                external("unicode", "characters_to_binary", 2, CallKind::Tail, 0),
                 Instruction::Return,
             ],
             0,
@@ -2390,7 +2403,7 @@ fn waits_or_continues_at_a_receive_timeout_and_raises_timeout_value() {
                 Operand::Value(Term::list_from(vec![test_atom("monitor")])),
                 Operand::X(3),
             ),
-            erlang_call("spawn_opt", 4, false),
+            erlang_call("spawn_opt", 4, CallKind::Body),
             Instruction::Label(5),
             Instruction::LoopReceive {
                 fail_label: 6,
@@ -2547,7 +2560,7 @@ fn rejects_call_stack_and_return_errors() {
         make_program(
             vec![
                 Instruction::Allocate { stack_size: 1 },
-                external("absent", "run", 0, true, 0)
+                external("absent", "run", 0, CallKind::Tail, 0)
             ],
             0
         )
@@ -2679,7 +2692,7 @@ fn rejects_unresolved_exports_and_function_labels() {
             .contains("unresolved external MFA missing:run/0")
     );
     assert!(
-        CodeTable::new(program.modules.clone())
+        CodeTable::new(program.modules)
             .mfa_frame("external", "missing", 0)
             .unwrap_err()
             .to_string()
@@ -2747,7 +2760,7 @@ fn gives_an_invariant_error_for_a_match_context_outside_binary_matching() {
     };
     let escape = "invariant error: the match context in X(0) reached an instruction that \
                   is not a binary match";
-    assert_eq!(run(vec![erlang_call("hd", 1, false)]), escape);
+    assert_eq!(run(vec![erlang_call("hd", 1, CallKind::Body)]), escape);
     assert_eq!(
         run(vec![Instruction::TestFunctionArity {
             fail_label: 1,
@@ -2766,7 +2779,10 @@ fn gives_an_invariant_error_for_a_match_context_outside_binary_matching() {
         escape
     );
     // An external call to a loaded function also checks its arguments.
-    assert_eq!(run(vec![external("fixture", "child", 1, false, 0)]), escape);
+    assert_eq!(
+        run(vec![external("fixture", "child", 1, CallKind::Body, 0)]),
+        escape
+    );
     assert_eq!(
         run(vec![Instruction::BinaryMatchResume {
             source: atom("a"),
@@ -3057,6 +3073,48 @@ fn sets_the_position_after_a_failed_equal_command_as_the_jit_read() {
         position(&[1, 0], vec![ensure(16), byte(), equal(8)], true),
         Ok(Term::Integer(16))
     );
+}
+
+#[test]
+fn sets_the_position_after_a_failed_equal_command_of_wide_reads_as_the_jit_read() {
+    let ensure = |size| BinaryMatchCommand::EnsureAtLeast {
+        size,
+        unit: std::num::NonZeroU64::new(1).unwrap(),
+    };
+    let equal = |size| BinaryMatchCommand::Equal { size, value: 1 };
+    let skip = |size| BinaryMatchCommand::Skip { size };
+    // Run the commands on `bytes` and return the position at the fail
+    // label.
+    let position = |bytes: &[u8], commands, test_heap| {
+        make_program(
+            vec![
+                Instruction::Move(Operand::Value(Term::binary(bytes.to_vec())), Operand::X(0)),
+                Instruction::BinaryMatchStart {
+                    fail_label: 1,
+                    source: Operand::X(0),
+                    destination: Operand::X(1),
+                },
+                Instruction::BinaryMatch {
+                    fail_label: 3,
+                    context: Operand::X(1),
+                    commands,
+                    test_heap,
+                },
+                Instruction::Move(atom("matched"), Operand::X(0)),
+                Instruction::Return,
+                Instruction::Label(3),
+                Instruction::BinaryGetPosition {
+                    context: Operand::X(1),
+                    destination: Operand::X(0),
+                },
+                Instruction::Return,
+            ],
+            0,
+        )
+        .execute("fixture", "main", &[])
+        .map(|host| host.term)
+        .map_err(|error| error.to_string())
+    };
     // 32 and 40 bits do not fit in one read of 64 bits: 32.
     assert_eq!(
         position(&[0; 9], vec![ensure(72), equal(32), equal(40)], false),
@@ -3233,7 +3291,7 @@ fn reads_bif_arguments_into_a_fixed_buffer_and_reports_invalid_operands() {
     let arguments =
         read_bif_arguments(&process, &operands).expect("two set operands are valid arguments");
     assert_eq!(
-        arguments.with(|terms| terms.to_vec()),
+        arguments.with(<[&crate::term::Term]>::to_vec),
         vec![&Term::Integer(7), &Term::Integer(9)]
     );
     assert!(read_bif_arguments(&process, &[Operand::X(1)]).is_err());
@@ -3247,7 +3305,7 @@ fn reads_bif_arguments_into_a_fixed_buffer_and_reports_invalid_operands() {
     let owned = read_owned_bif_arguments(&process, &operands)
         .expect("two set operands are valid arguments");
     assert_eq!(
-        owned.with(|terms| terms.to_vec()),
+        owned.with(<[crate::term::Term]>::to_vec),
         vec![Term::Integer(7), Term::Integer(9)]
     );
     assert!(read_owned_bif_arguments(&process, &[Operand::X(1)]).is_err());
@@ -3274,10 +3332,10 @@ fn borrows_literal_and_register_operands_without_a_copy() {
         unreachable!("the fixture holds terms");
     };
     let read =
-        |operand: &Operand| read_operand(operand, &registers, &stack).unwrap() as *const Term;
-    assert_eq!(read(&literal), literal_term as *const Term);
-    assert_eq!(read(&Operand::X(0)), x0 as *const Term);
-    assert_eq!(read(&Operand::Y(0)), y0 as *const Term);
+        |operand: &Operand| std::ptr::from_ref(read_operand(operand, &registers, &stack).unwrap());
+    assert_eq!(read(&literal), std::ptr::from_ref(literal_term));
+    assert_eq!(read(&Operand::X(0)), std::ptr::from_ref(x0));
+    assert_eq!(read(&Operand::Y(0)), std::ptr::from_ref(y0));
 }
 
 #[test]
@@ -3348,7 +3406,7 @@ fn puts_a_new_atom_into_the_atom_table_of_the_run() {
                 )),
                 Operand::X(0),
             ),
-            erlang_call("list_to_atom", 1, true),
+            erlang_call("list_to_atom", 1, CallKind::Tail),
             Instruction::Return,
         ],
         0,
@@ -3379,7 +3437,7 @@ fn returns_the_iovec_of_a_binary_and_of_a_list() {
         make_program(
             vec![
                 Instruction::Move(Operand::Value(argument), Operand::X(0)),
-                erlang_call("iolist_to_iovec", 1, true),
+                erlang_call("iolist_to_iovec", 1, CallKind::Tail),
                 Instruction::Return,
             ],
             0,
@@ -3404,7 +3462,7 @@ fn finds_a_live_catch_tag_after_other_slots_and_skips_a_cleared_tag() {
     let run = |body| make_program(body, 0).execute("fixture", "main", &[]);
     let nif_error = [
         Instruction::Move(atom("undef"), Operand::X(0)),
-        erlang_call("nif_error", 1, false),
+        erlang_call("nif_error", 1, CallKind::Body),
     ];
     // y0 is empty, so the scan must look past it to the tag in y1.
     let mut body = vec![
@@ -3561,7 +3619,7 @@ fn raises_the_exception_of_a_bif_instruction_and_rejects_a_trap() {
     // demonitor(Ref, [flush]) of a reference with no monitor traps. No
     // compiler emits it as a `bif` instruction.
     let body = vec![
-        erlang_call("make_ref", 0, false),
+        erlang_call("make_ref", 0, CallKind::Body),
         Instruction::Bif {
             fail_label: 0,
             bif: BifId::ErlangDemonitor2,
@@ -3626,12 +3684,12 @@ fn returns_the_local_node_for_node_0_and_a_pid() {
 fn traps_a_tail_called_demonitor_flush_into_erts_internal() {
     let mut program = make_program(
         vec![
-            erlang_call("make_ref", 0, false),
+            erlang_call("make_ref", 0, CallKind::Body),
             Instruction::Move(
                 Operand::Value(Term::list_from(vec![test_atom("flush")])),
                 Operand::X(1),
             ),
-            erlang_call("demonitor", 2, true),
+            erlang_call("demonitor", 2, CallKind::Tail),
             Instruction::Return,
         ],
         0,
@@ -3671,16 +3729,16 @@ fn removes_an_active_monitor_without_a_trap() {
     // without flushing.
     let mut body = spawn_link_child(Term::list_from(vec![test_atom("normal")]));
     body.pop();
-    body.push(erlang_call("spawn", 3, false));
+    body.push(erlang_call("spawn", 3, CallKind::Body));
     body.extend([
         Instruction::Move(Operand::X(0), Operand::X(1)),
         Instruction::Move(atom("process"), Operand::X(0)),
-        erlang_call("monitor", 2, false),
+        erlang_call("monitor", 2, CallKind::Body),
         Instruction::Move(
             Operand::Value(Term::list_from(vec![test_atom("flush")])),
             Operand::X(1),
         ),
-        erlang_call("demonitor", 2, true),
+        erlang_call("demonitor", 2, CallKind::Tail),
         Instruction::Return,
     ]);
     assert_eq!(run_with_child(body).unwrap(), test_atom("true"));
@@ -3847,7 +3905,7 @@ fn applies_erlang_apply_3_as_the_i_apply_instruction() {
         test_atom("apply"),
         Term::list_from(vec![test_atom("fixture"), test_atom("id"), xyz()]),
     );
-    body.push(erlang_call("apply", 3, true));
+    body.push(erlang_call("apply", 3, CallKind::Tail));
     assert_eq!(run_with_apply_targets(body).unwrap(), tuple);
     // An apply of `erlang:apply` with a list that is not three elements
     // calls `erlang:apply/2`. ERTS 29.1.1 raises `badarg` for
@@ -3857,7 +3915,7 @@ fn applies_erlang_apply_3_as_the_i_apply_instruction() {
         test_atom("apply"),
         Term::list_from(vec![test_atom("fixture"), test_atom("id")]),
     );
-    body.push(erlang_call("apply", 3, true));
+    body.push(erlang_call("apply", 3, CallKind::Tail));
     assert_eq!(
         run_with_apply_targets(body).unwrap_err().to_string(),
         bif_badarg_exit("erlang", "apply", &["fixture", "id"], ERTS_ERRORS)
@@ -3871,7 +3929,7 @@ fn applies_erlang_apply_3_as_the_i_apply_instruction() {
         test_atom("missing"),
         Term::list_from(vec![test_atom("x"); 1023]),
     );
-    body.push(erlang_call("apply", 3, true));
+    body.push(erlang_call("apply", 3, CallKind::Tail));
     let program = apply_targets_program(body);
     // The atoms of the `undef` frame come from the atom table of the run,
     // which holds the atoms of the hand-built code.
@@ -3890,7 +3948,7 @@ fn applies_erlang_apply_3_as_the_i_apply_instruction() {
         test_atom("missing"),
         Term::list_from(vec![test_atom("x"); 1024]),
     );
-    body.push(erlang_call("apply", 3, true));
+    body.push(erlang_call("apply", 3, CallKind::Tail));
     // ERTS 29.1.1 gives the BIF frame
     // {erlang, apply, [fixture, missing, L1024], [{error_info, #{module => erl_erts_errors}}]}.
     assert_eq!(
@@ -3955,7 +4013,7 @@ fn rejects_an_apply_with_a_stack_mismatch_and_raises_badarg() {
 /// Run `main/0` as a tail `call_ext` of `module:name` with `arguments`
 /// in `x0` onwards.
 fn call_ext_with(module: &str, name: &str, arguments: Vec<Term>) -> Result<Term, crate::BeamError> {
-    let arity = arguments.len() as u32;
+    let arity = u32::try_from(arguments.len()).expect("a fixture call has few arguments");
     let mut body: Vec<Instruction> = arguments
         .into_iter()
         .zip(0..)
@@ -3963,7 +4021,7 @@ fn call_ext_with(module: &str, name: &str, arguments: Vec<Term>) -> Result<Term,
             Instruction::Move(Operand::Value(argument), Operand::X(register))
         })
         .collect();
-    body.push(external(module, name, arity, true, 0));
+    body.push(external(module, name, arity, CallKind::Tail, 0));
     body.push(Instruction::Return);
     make_program(body, 0)
         .execute("fixture", "main", &[])
@@ -3985,7 +4043,7 @@ fn puts_and_gets_process_dictionary_values_as_pinned_erts() {
         [
             Instruction::Move(atom("k"), Operand::X(0)),
             Instruction::Move(Operand::Value(Term::Integer(value)), Operand::X(1)),
-            erlang_call("put", 2, false),
+            erlang_call("put", 2, CallKind::Body),
         ]
     };
     let mut body = vec![Instruction::Allocate { stack_size: 3 }];
@@ -4027,7 +4085,7 @@ fn starts_a_spawned_process_with_an_empty_dictionary() {
     let mut body = vec![
         Instruction::Move(atom("k"), Operand::X(0)),
         Instruction::Move(atom("parent"), Operand::X(1)),
-        erlang_call("put", 2, false),
+        erlang_call("put", 2, CallKind::Body),
         Instruction::Move(atom("fixture"), Operand::X(0)),
         Instruction::Move(atom("fresh"), Operand::X(1)),
         Instruction::Move(Operand::Value(Term::nil()), Operand::X(2)),
@@ -4035,7 +4093,7 @@ fn starts_a_spawned_process_with_an_empty_dictionary() {
             Operand::Value(Term::list_from(vec![test_atom("monitor")])),
             Operand::X(3),
         ),
-        erlang_call("spawn_opt", 4, false),
+        erlang_call("spawn_opt", 4, CallKind::Body),
     ];
     body.extend(wait_forever());
     let extra = vec![
@@ -4046,7 +4104,7 @@ fn starts_a_spawned_process_with_an_empty_dictionary() {
         },
         Instruction::Label(11),
         get_bif("k", Operand::X(0)),
-        erlang_call("exit", 1, true),
+        erlang_call("exit", 1, CallKind::Tail),
     ];
     let exports = HashMap::from([(("main".into(), 0), 2), (("fresh".into(), 0), 11)]);
     let program = program_of(fixture_instructions(0, body, extra), exports);
@@ -4316,7 +4374,7 @@ fn reads_the_current_stacktrace_of_the_calling_process() {
             destination: Operand::X(0),
         },
         Instruction::Move(atom("current_stacktrace"), Operand::X(1)),
-        erlang_call("process_info", 2, false),
+        erlang_call("process_info", 2, CallKind::Body),
         Instruction::Move(Operand::X(0), Operand::X(1)),
         element_bif(2, Operand::X(0), Operand::X(0)),
         Instruction::PutTuple {
@@ -4344,7 +4402,6 @@ fn reads_the_current_stacktrace_of_the_calling_process() {
     let process_info =
         |process: Term, item: Term| call_ext_with("erlang", "process_info", vec![process, item]);
     let root = || Term::Pid(crate::ProcessId(0));
-    let dictionary = || Term::tuple(vec![test_atom("dictionary"), test_atom("k")]);
     // ERTS 29.1.1 checks the item before the process. It raises badarg for
     // process_info(a, current_stacktrace), process_info(a, bogus_item),
     // process_info(self(), bogus_item), process_info(self(), 5),
@@ -4380,6 +4437,14 @@ fn reads_the_current_stacktrace_of_the_calling_process() {
             bif_badarg_exit("erlang", "process_info", &texts, ERTS_ERRORS)
         );
     }
+}
+
+#[test]
+fn reads_process_info_of_a_process_that_is_not_alive_and_of_the_caller_items() {
+    let process_info =
+        |process: Term, item: Term| call_ext_with("erlang", "process_info", vec![process, item]);
+    let root = || Term::Pid(crate::ProcessId(0));
+    let dictionary = || Term::tuple(vec![test_atom("dictionary"), test_atom("k")]);
     // ERTS 29.1.1: a process that is not alive gives undefined for each
     // valid item, also a list of items (`erl_bif_info.c:1384-1386`).
     for item in [
@@ -4438,9 +4503,9 @@ fn rejects_the_current_stacktrace_of_another_process() {
             Operand::Value(Term::list_from(vec![test_atom("normal")])),
             Operand::X(2),
         ),
-        erlang_call("spawn", 3, false),
+        erlang_call("spawn", 3, CallKind::Body),
         Instruction::Move(atom("current_stacktrace"), Operand::X(1)),
-        erlang_call("process_info", 2, true),
+        erlang_call("process_info", 2, CallKind::Tail),
         Instruction::Return,
     ])
     .unwrap_err();
@@ -4579,7 +4644,7 @@ fn exits_in_the_next_turn_after_a_switch_at_the_return_of_the_last_frame() {
                 Operand::Value(Term::list_from(vec![test_atom("monitor")])),
                 Operand::X(3),
             ),
-            erlang_call("spawn_opt", 4, false),
+            erlang_call("spawn_opt", 4, CallKind::Body),
             Instruction::Bif {
                 fail_label: 0,
                 bif: BifId::ErlangSelf0,
@@ -4593,7 +4658,7 @@ fn exits_in_the_next_turn_after_a_switch_at_the_return_of_the_last_frame() {
             },
             Instruction::Move(atom("fixture"), Operand::X(0)),
             Instruction::Move(atom("sender"), Operand::X(1)),
-            erlang_call("spawn", 3, false),
+            erlang_call("spawn", 3, CallKind::Body),
         ];
         let function = |name: &str, arity, label| {
             [
@@ -4669,7 +4734,7 @@ fn rejects_integer_conversions_of_a_bignum_with_no_reductions_left() {
     ] {
         let body = vec![
             Instruction::Move(Operand::Value(Term::Integer(4000)), Operand::X(0)),
-            erlang_call("bump_reductions", 1, false),
+            erlang_call("bump_reductions", 1, CallKind::Body),
             Instruction::Bif {
                 fail_label: 0,
                 bif,
@@ -4699,7 +4764,7 @@ fn shares_the_stored_term_of_an_ets_lookup() {
     // decision R3 of #450 (row "Message copy" of docs/erts-differences.md).
     let program = make_program(vec![], 0);
     let mut scheduler = Scheduler::new((*program.atoms).clone());
-    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.start(frame(), vec![], allow_all());
     scheduler.schedule_next().unwrap();
     let owner = scheduler.current_process_mut().id;
     let id = Term::Reference(Reference(0));
@@ -4712,12 +4777,9 @@ fn shares_the_stored_term_of_an_ets_lookup() {
     // cons cell of the inserted term.
     let value = Term::list_from([Term::Integer(2), Term::Integer(3)]);
     let object = Term::tuple(vec![Term::Integer(1), value.clone()]);
-    program
-        .bif(&mut scheduler, "ets", "insert", vec![id.clone(), object])
-        .unwrap();
-    let result = program
-        .bif(&mut scheduler, "ets", "lookup", vec![id, Term::Integer(1)])
-        .unwrap();
+    BeamProgram::bif(&mut scheduler, "ets", "insert", &[id.clone(), object]).unwrap();
+    let result =
+        BeamProgram::bif(&mut scheduler, "ets", "lookup", &[id, Term::Integer(1)]).unwrap();
     let BifResult::Value(objects) = result else {
         panic!("ets:lookup/2 did not return a value");
     };
@@ -4737,7 +4799,7 @@ fn resumes_a_list_insert_without_a_walk_of_the_checked_objects() {
     // the whole list again panics or raises `badarg`.
     let program = make_program(vec![], 0);
     let mut scheduler = Scheduler::new((*program.atoms).clone());
-    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.start(frame(), vec![], allow_all());
     scheduler.schedule_next().unwrap();
     let owner = scheduler.current_process_mut().id;
     let id = Term::Reference(Reference(0));
@@ -4759,9 +4821,7 @@ fn resumes_a_list_insert_without_a_walk_of_the_checked_objects() {
         Term::nil(),
         Term::tuple(vec![rest.clone()]),
     ];
-    let result = program
-        .bif_trap(&mut scheduler, "ets", "insert", arguments)
-        .unwrap();
+    let result = BeamProgram::bif_trap(&mut scheduler, "ets", "insert", arguments).unwrap();
     let BifResult::TrapBif { arguments, .. } = result else {
         panic!("the check did not yield");
     };
@@ -4780,7 +4840,7 @@ fn resumes_a_list_insert_without_a_walk_of_the_checked_objects() {
     table.busy = Some(Busy::new(
         owner,
         vec![vec![object.clone()], vec![object]],
-        false,
+        InsertKind::Insert,
     ));
     ets.reserve_result(owner);
     drop(ets);
@@ -4793,9 +4853,7 @@ fn resumes_a_list_insert_without_a_walk_of_the_checked_objects() {
         Term::list_from([Term::Integer(0)]),
         Term::Integer(2),
     ];
-    let result = program
-        .bif_trap(&mut scheduler, "ets", "insert", arguments)
-        .unwrap();
+    let result = BeamProgram::bif_trap(&mut scheduler, "ets", "insert", arguments).unwrap();
     assert!(matches!(result, BifResult::Value(value) if value == Term::static_atom("true")));
     // A process of another scheduler can complete the insert before a
     // resume: the step then finds no busy insert and no result, and the
@@ -4809,9 +4867,7 @@ fn resumes_a_list_insert_without_a_walk_of_the_checked_objects() {
         Term::list_from([Term::Integer(0)]),
         Term::Integer(2),
     ];
-    let result = program
-        .bif_trap(&mut scheduler, "ets", "insert", arguments)
-        .unwrap();
+    let result = BeamProgram::bif_trap(&mut scheduler, "ets", "insert", arguments).unwrap();
     assert!(matches!(result, BifResult::TrapBif { .. }));
 }
 
@@ -4824,7 +4880,7 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
     // in a later turn (`erl_db.c:2223-2253`).
     let program = make_program(vec![], 0);
     let mut scheduler = Scheduler::new((*program.atoms).clone());
-    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.start(frame(), vec![], allow_all());
     scheduler.schedule_next().unwrap();
     let caller = scheduler.current_process_mut().id;
     let id = Term::Reference(Reference(0));
@@ -4840,9 +4896,12 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
             .busy = Some(Busy::new(
             ProcessId(99),
             vec![vec![Term::Integer(5)]],
-            false,
+            InsertKind::Insert,
         ));
     };
+    let mut table = Table::new(caller, Access::Public, 1, TableType::Set);
+    table.busy = None;
+    scheduler.ets.exclusive().create(Reference(0), None, table);
     let type_atom = program.atom("type").expect("the atom type exists");
     let arguments = [
         ("lookup", vec![id.clone(), Term::Integer(5)]),
@@ -4868,20 +4927,12 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
         // (`erl_db.c:2050-2055`).
         (
             "insert",
-            vec![
-                id.clone(),
-                Term::list_from([object.clone(), object.clone()]),
-            ],
+            vec![id, Term::list_from([object.clone(), object])],
         ),
     ];
-    let mut table = Table::new(caller, Access::Public, 1, TableType::Set);
-    table.busy = None;
-    scheduler.ets.exclusive().create(Reference(0), None, table);
     for (function, arguments) in &arguments {
         busy(&mut scheduler);
-        let result = program
-            .bif(&mut scheduler, "ets", function, arguments.clone())
-            .unwrap();
+        let result = BeamProgram::bif(&mut scheduler, "ets", function, arguments).unwrap();
         assert!(
             matches!(result, BifResult::TrapBif { function: name, .. } if name == *function),
             "ets:{function}/2 did not complete the insert and run again"
@@ -4889,82 +4940,142 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
     }
     // The retry of each call runs on a table without a busy insert.
     for (function, arguments) in &arguments {
-        let result = program
-            .bif_trap(&mut scheduler, "ets", function, arguments.clone())
-            .unwrap();
+        let result =
+            BeamProgram::bif_trap(&mut scheduler, "ets", function, arguments.clone()).unwrap();
         assert!(
             matches!(result, BifResult::Value(_) | BifResult::Raise { .. }),
             "ets:{function}/2 did not run again"
         );
     }
+}
+
+#[test]
+fn completes_a_busy_list_insert_before_a_short_list_insert() {
+    // `handle_lacking_permission` completes the list insert of a table with
+    // `DB_BUSY` before the operation of the process that uses it, and it
+    // charges the units of the work to that process (`erl_db.c:769-798`,
+    // `2152-2197`). The operation of the process then traps and runs again
+    // in a later turn (`erl_db.c:2223-2253`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let caller = scheduler.current_process_mut().id;
+    let id = Term::Reference(Reference(0));
+    let object = Term::tuple(vec![Term::Integer(5), Term::Integer(6)]);
+    // The table runs the list insert of another process: the walk of its
+    // one object did not finish (`erl_db.c:2310-2319`).
+    let busy = |scheduler: &mut Scheduler| {
+        scheduler
+            .ets
+            .exclusive()
+            .table_by_id(Reference(0))
+            .expect("the table is live")
+            .busy = Some(Busy::new(
+            ProcessId(99),
+            vec![vec![Term::Integer(5)]],
+            InsertKind::Insert,
+        ));
+    };
+    let mut table = Table::new(caller, Access::Public, 1, TableType::Set);
+    table.busy = None;
+    scheduler.ets.exclusive().create(Reference(0), None, table);
     // A short list insert that the units cover runs `can_insert_without_yield`
     // (`erl_db.c:2002-2014`), also in the turn that follows a trap in the
     // take of the table (`erl_db.c:1963-1994`).
     scheduler.current_process_mut().fcalls = 1;
     busy(&mut scheduler);
-    let result = program
-        .bif_trap(
-            &mut scheduler,
-            "ets",
-            "insert",
-            vec![
-                id.clone(),
-                Term::list_from([object.clone(), object.clone()]),
-                Term::Integer(2),
-                Term::Integer(1),
-                Term::static_atom("false"),
-                Term::Integer(2),
-            ],
-        )
-        .unwrap();
+    let result = BeamProgram::bif_trap(
+        &mut scheduler,
+        "ets",
+        "insert",
+        vec![
+            id.clone(),
+            Term::list_from([object.clone(), object.clone()]),
+            Term::Integer(2),
+            Term::Integer(1),
+            Term::static_atom("false"),
+            Term::Integer(2),
+        ],
+    )
+    .unwrap();
     assert!(
         matches!(result, BifResult::TrapBif { .. }),
         "the short list insert did not complete the insert of the other process"
     );
-    let result = program
-        .bif_trap(
-            &mut scheduler,
-            "ets",
-            "insert",
-            vec![
-                id.clone(),
-                Term::list_from([object.clone(), object.clone()]),
-                Term::Integer(2),
-                Term::Integer(1),
-                Term::static_atom("false"),
-                Term::Integer(2),
-            ],
-        )
-        .unwrap();
+    let result = BeamProgram::bif_trap(
+        &mut scheduler,
+        "ets",
+        "insert",
+        vec![
+            id,
+            Term::list_from([object.clone(), object]),
+            Term::Integer(2),
+            Term::Integer(1),
+            Term::static_atom("false"),
+            Term::Integer(2),
+        ],
+    )
+    .unwrap();
     assert!(
         matches!(result, BifResult::Value(value) if value == Term::static_atom("true")),
         "the short list insert did not take the objects without a copy"
     );
+}
+
+#[test]
+fn completes_a_busy_list_insert_before_ets_match() {
+    // `handle_lacking_permission` completes the list insert of a table with
+    // `DB_BUSY` before the operation of the process that uses it, and it
+    // charges the units of the work to that process (`erl_db.c:769-798`,
+    // `2152-2197`). The operation of the process then traps and runs again
+    // in a later turn (`erl_db.c:2223-2253`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let caller = scheduler.current_process_mut().id;
+    let id = Term::Reference(Reference(0));
+    // The table runs the list insert of another process: the walk of its
+    // one object did not finish (`erl_db.c:2310-2319`).
+    let busy = |scheduler: &mut Scheduler| {
+        scheduler
+            .ets
+            .exclusive()
+            .table_by_id(Reference(0))
+            .expect("the table is live")
+            .busy = Some(Busy::new(
+            ProcessId(99),
+            vec![vec![Term::Integer(5)]],
+            InsertKind::Insert,
+        ));
+    };
+    let mut table = Table::new(caller, Access::Public, 1, TableType::Set);
+    table.busy = None;
+    scheduler.ets.exclusive().create(Reference(0), None, table);
     // `ets:match/2,3` completes the insert of the busy table before it
     // reads the objects, so it sees each of them (`erl_db.c:769-787`).
     scheduler.current_process_mut().fcalls = 1;
     busy(&mut scheduler);
     let pattern = Term::static_atom("_");
-    let result = program
-        .bif(
-            &mut scheduler,
-            "ets",
-            "match",
-            vec![id.clone(), pattern.clone()],
-        )
-        .unwrap();
+    let result = BeamProgram::bif(
+        &mut scheduler,
+        "ets",
+        "match",
+        &[id.clone(), pattern.clone()],
+    )
+    .unwrap();
     assert!(
         matches!(result, BifResult::TrapBif { .. }),
         "ets:match/2 did not complete the insert of the other process"
     );
-    let result = program
-        .bif_trap(
-            &mut scheduler,
-            "ets",
-            "match",
-            vec![id.clone(), pattern.clone()],
-        )
-        .unwrap();
+    let result = BeamProgram::bif_trap(
+        &mut scheduler,
+        "ets",
+        "match",
+        vec![id.clone(), pattern.clone()],
+    )
+    .unwrap();
     assert!(matches!(
         result,
         BifResult::Value(_) | BifResult::Raise { .. }
@@ -4972,26 +5083,24 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
     // `ets:match/3` with a limit does the same.
     scheduler.current_process_mut().fcalls = 1;
     busy(&mut scheduler);
-    let result = program
-        .bif(
-            &mut scheduler,
-            "ets",
-            "match",
-            vec![id.clone(), pattern.clone(), Term::Integer(10)],
-        )
-        .unwrap();
+    let result = BeamProgram::bif(
+        &mut scheduler,
+        "ets",
+        "match",
+        &[id.clone(), pattern.clone(), Term::Integer(10)],
+    )
+    .unwrap();
     assert!(
         matches!(result, BifResult::TrapBif { .. }),
         "ets:match/3 did not complete the insert of the other process"
     );
-    let result = program
-        .bif_trap(
-            &mut scheduler,
-            "ets",
-            "match",
-            vec![id.clone(), pattern.clone(), Term::Integer(10)],
-        )
-        .unwrap();
+    let result = BeamProgram::bif_trap(
+        &mut scheduler,
+        "ets",
+        "match",
+        vec![id.clone(), pattern.clone(), Term::Integer(10)],
+    )
+    .unwrap();
     assert!(matches!(
         result,
         BifResult::Value(_) | BifResult::Raise { .. }
@@ -4999,51 +5108,94 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
     // The resume of `ets:match/3` does the same (`ets:select_trap/7`).
     scheduler.current_process_mut().fcalls = 1;
     busy(&mut scheduler);
-    let result = program
-        .bif_trap(
-            &mut scheduler,
-            "ets",
-            "select_trap",
-            vec![
-                id.clone(),
-                pattern,
-                Term::Integer(0),
-                Term::Integer(0),
-                Term::nil(),
-                Term::Integer(0),
-                Term::Integer(0),
-            ],
-        )
-        .unwrap();
+    let result = BeamProgram::bif_trap(
+        &mut scheduler,
+        "ets",
+        "select_trap",
+        vec![
+            id,
+            pattern,
+            Term::Integer(0),
+            Term::Integer(0),
+            Term::nil(),
+            Term::Integer(0),
+            Term::Integer(0),
+        ],
+    )
+    .unwrap();
     assert!(
         matches!(result, BifResult::TrapBif { .. }),
         "ets:select_trap/7 did not complete the insert of the other process"
     );
+}
+
+#[test]
+fn completes_a_busy_list_insert_before_a_list_with_bad_objects() {
+    // `handle_lacking_permission` completes the list insert of a table with
+    // `DB_BUSY` before the operation of the process that uses it, and it
+    // charges the units of the work to that process (`erl_db.c:769-798`,
+    // `2152-2197`). The operation of the process then traps and runs again
+    // in a later turn (`erl_db.c:2223-2253`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let caller = scheduler.current_process_mut().id;
+    let id = Term::Reference(Reference(0));
+    // The table runs the list insert of another process: the walk of its
+    // one object did not finish (`erl_db.c:2310-2319`).
+    let busy = |scheduler: &mut Scheduler| {
+        scheduler
+            .ets
+            .exclusive()
+            .table_by_id(Reference(0))
+            .expect("the table is live")
+            .busy = Some(Busy::new(
+            ProcessId(99),
+            vec![vec![Term::Integer(5)]],
+            InsertKind::Insert,
+        ));
+    };
+    let mut table = Table::new(caller, Access::Public, 1, TableType::Set);
+    table.busy = None;
+    scheduler.ets.exclusive().create(Reference(0), None, table);
     // A list whose objects are bad raises `badarg`, and it completes the
     // list insert of a busy table first, as ERTS takes the table before it
     // raises the error (`erl_db.c:2036-2047`).
     scheduler.current_process_mut().fcalls = 1;
     busy(&mut scheduler);
     let bad = Term::list_from([Term::Integer(1), Term::Integer(1)]);
-    let result = program
-        .bif(
-            &mut scheduler,
-            "ets",
-            "insert",
-            vec![id.clone(), bad.clone()],
-        )
-        .unwrap();
+    let result =
+        BeamProgram::bif(&mut scheduler, "ets", "insert", &[id.clone(), bad.clone()]).unwrap();
     assert!(
         matches!(result, BifResult::TrapBif { .. }),
         "the bad list did not complete the insert of the other process"
     );
-    let result = program
-        .bif_trap(&mut scheduler, "ets", "insert", vec![id.clone(), bad])
-        .unwrap();
+    let result = BeamProgram::bif_trap(&mut scheduler, "ets", "insert", vec![id, bad]).unwrap();
     assert!(
         matches!(result, BifResult::Raise { .. }),
         "the bad list did not raise badarg"
     );
+}
+
+#[test]
+fn completes_a_busy_list_insert_before_the_last_object_of_a_plain_list_insert() {
+    // `handle_lacking_permission` completes the list insert of a table with
+    // `DB_BUSY` before the operation of the process that uses it, and it
+    // charges the units of the work to that process (`erl_db.c:769-798`,
+    // `2152-2197`). The operation of the process then traps and runs again
+    // in a later turn (`erl_db.c:2223-2253`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let caller = scheduler.current_process_mut().id;
+    let id = Term::Reference(Reference(0));
+    // The table runs the list insert of another process: the walk of its
+    // one object did not finish (`erl_db.c:2310-2319`).
+    let mut table = Table::new(caller, Access::Public, 1, TableType::Set);
+    table.busy = None;
+    scheduler.ets.exclusive().create(Reference(0), None, table);
     // A plain list insert that uses the last of its budget on its last
     // object traps with all units of the insert charged, and it returns
     // `true` in its next turn (`erl_db.c:1936-1940`, `2180-2196`).
@@ -5064,7 +5216,7 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
             vec![Term::Integer(1), Term::Integer(1)],
             vec![Term::Integer(2), Term::Integer(2)],
         ],
-        false,
+        InsertKind::Insert,
     ));
     scheduler.ets.shared().reserve_result(caller);
     scheduler
@@ -5072,27 +5224,46 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
         .exclusive()
         .table_by_id(Reference(0))
         .expect("the table is live")
-        .step_busy(&scheduler.atoms.clone(), 4);
+        .step_busy(&Arc::clone(&scheduler.atoms), 4);
     scheduler.current_process_mut().fcalls = 1;
-    let result = program
-        .bif_trap(
-            &mut scheduler,
-            "ets",
-            "insert",
-            vec![
-                id.clone(),
-                Term::list_from([objects(1), objects(2)]),
-                Term::Integer(8),
-                Term::Integer(1),
-                Term::static_atom("false"),
-                Term::Integer(2),
-            ],
-        )
-        .unwrap();
+    let result = BeamProgram::bif_trap(
+        &mut scheduler,
+        "ets",
+        "insert",
+        vec![
+            id,
+            Term::list_from([objects(1), objects(2)]),
+            Term::Integer(8),
+            Term::Integer(1),
+            Term::static_atom("false"),
+            Term::Integer(2),
+        ],
+    )
+    .unwrap();
     assert!(
         matches!(result, BifResult::Value(value) if value == Term::static_atom("true")),
         "the insert that charged all of its units did not return true"
     );
+}
+
+#[test]
+fn gives_the_result_of_a_list_insert_that_ended_in_another_turn() {
+    // `handle_lacking_permission` completes the list insert of a table with
+    // `DB_BUSY` before the operation of the process that uses it, and it
+    // charges the units of the work to that process (`erl_db.c:769-798`,
+    // `2152-2197`). The operation of the process then traps and runs again
+    // in a later turn (`erl_db.c:2223-2253`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let caller = scheduler.current_process_mut().id;
+    let id = Term::Reference(Reference(0));
+    // The table runs the list insert of another process: the walk of its
+    // one object did not finish (`erl_db.c:2310-2319`).
+    let mut table = Table::new(caller, Access::Public, 1, TableType::Set);
+    table.busy = None;
+    scheduler.ets.exclusive().create(Reference(0), None, table);
     // A list insert that ended in another turn gives its result to the
     // process that started it, also after the table went away
     // (`erl_db.c:2142-2150`, `2223-2244`).
@@ -5100,25 +5271,44 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
     let caller = scheduler.current_process_mut().id;
     scheduler.ets.shared().reserve_result(caller);
     (scheduler.ets.exclusive()).put_result(caller, Term::static_atom("true"));
-    let result = program
-        .bif_trap(
-            &mut scheduler,
-            "ets",
-            "insert",
-            vec![
-                id.clone(),
-                Term::Integer(7),
-                Term::Integer(5),
-                Term::Integer(1),
-                Term::static_atom("false"),
-                Term::Integer(2),
-            ],
-        )
-        .unwrap();
+    let result = BeamProgram::bif_trap(
+        &mut scheduler,
+        "ets",
+        "insert",
+        vec![
+            id,
+            Term::Integer(7),
+            Term::Integer(5),
+            Term::Integer(1),
+            Term::static_atom("false"),
+            Term::Integer(2),
+        ],
+    )
+    .unwrap();
     assert!(
         matches!(result, BifResult::Value(value) if value == Term::static_atom("true")),
         "the process did not read the result of the insert that ended"
     );
+}
+
+#[test]
+fn completes_a_busy_list_insert_of_its_own_table_step_by_step() {
+    // `handle_lacking_permission` completes the list insert of a table with
+    // `DB_BUSY` before the operation of the process that uses it, and it
+    // charges the units of the work to that process (`erl_db.c:769-798`,
+    // `2152-2197`). The operation of the process then traps and runs again
+    // in a later turn (`erl_db.c:2223-2253`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let caller = scheduler.current_process_mut().id;
+    let id = Term::Reference(Reference(0));
+    // The table runs the list insert of another process: the walk of its
+    // one object did not finish (`erl_db.c:2310-2319`).
+    let mut table = Table::new(caller, Access::Public, 1, TableType::Set);
+    table.busy = None;
+    scheduler.ets.exclusive().create(Reference(0), None, table);
     // The process that runs the insert takes its own table: the steps of
     // the walk and of the insert are its own (`erl_db.c:2077-2107`).
     scheduler.ets.exclusive().create(
@@ -5132,63 +5322,125 @@ fn completes_a_busy_list_insert_before_the_operation_of_a_process() {
         .exclusive()
         .table_by_id(Reference(0))
         .expect("the table is live")
-        .busy = Some(Busy::new(caller, vec![vec![Term::Integer(5)]], false));
+        .busy = Some(Busy::new(
+        caller,
+        vec![vec![Term::Integer(5)]],
+        InsertKind::Insert,
+    ));
     scheduler.ets.shared().reserve_result(caller);
-    let result = program
-        .bif(
-            &mut scheduler,
-            "ets",
-            "lookup",
-            vec![id.clone(), Term::Integer(5)],
-        )
-        .unwrap();
+    let result =
+        BeamProgram::bif(&mut scheduler, "ets", "lookup", &[id, Term::Integer(5)]).unwrap();
     assert!(
         matches!(result, BifResult::Value(_)),
         "the process that runs the insert found the table busy"
     );
+}
+
+#[test]
+fn completes_a_busy_list_insert_of_another_process_before_its_own_call() {
+    // `handle_lacking_permission` completes the list insert of a table with
+    // `DB_BUSY` before the operation of the process that uses it, and it
+    // charges the units of the work to that process (`erl_db.c:769-798`,
+    // `2152-2197`). The operation of the process then traps and runs again
+    // in a later turn (`erl_db.c:2223-2253`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let caller = scheduler.current_process_mut().id;
+    let id = Term::Reference(Reference(0));
+    let object = Term::tuple(vec![Term::Integer(5), Term::Integer(6)]);
+    // The table runs the list insert of another process: the walk of its
+    // one object did not finish (`erl_db.c:2310-2319`).
+    let busy = |scheduler: &mut Scheduler| {
+        scheduler
+            .ets
+            .exclusive()
+            .table_by_id(Reference(0))
+            .expect("the table is live")
+            .busy = Some(Busy::new(
+            ProcessId(99),
+            vec![vec![Term::Integer(5)]],
+            InsertKind::Insert,
+        ));
+    };
+    let mut table = Table::new(caller, Access::Public, 1, TableType::Set);
+    table.busy = None;
+    scheduler.ets.exclusive().create(Reference(0), None, table);
     // A list insert that takes the table of another list insert completes
     // it first, and its own call runs again (`erl_db.c:2077`, `2223-2253`).
     scheduler.current_process_mut().fcalls = 1;
     busy(&mut scheduler);
-    let result = program
-        .bif_trap(
-            &mut scheduler,
-            "ets",
-            "insert",
-            vec![
-                id.clone(),
-                Term::list_from([object.clone(), object.clone()]),
-                Term::Integer(0),
-                Term::Integer(1),
-                Term::static_atom("false"),
-                Term::Integer(2),
-            ],
-        )
-        .unwrap();
+    let result = BeamProgram::bif_trap(
+        &mut scheduler,
+        "ets",
+        "insert",
+        vec![
+            id,
+            Term::list_from([object.clone(), object]),
+            Term::Integer(0),
+            Term::Integer(1),
+            Term::static_atom("false"),
+            Term::Integer(2),
+        ],
+    )
+    .unwrap();
     assert!(
         matches!(result, BifResult::TrapBif { .. }),
         "the list insert did not complete the insert of the other process"
     );
+}
+
+#[test]
+fn runs_the_steps_of_a_list_insert_while_another_process_holds_the_table() {
+    // `handle_lacking_permission` completes the list insert of a table with
+    // `DB_BUSY` before the operation of the process that uses it, and it
+    // charges the units of the work to that process (`erl_db.c:769-798`,
+    // `2152-2197`). The operation of the process then traps and runs again
+    // in a later turn (`erl_db.c:2223-2253`).
+    let program = make_program(vec![], 0);
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let caller = scheduler.current_process_mut().id;
+    let id = Term::Reference(Reference(0));
+    let object = Term::tuple(vec![Term::Integer(5), Term::Integer(6)]);
+    // The table runs the list insert of another process: the walk of its
+    // one object did not finish (`erl_db.c:2310-2319`).
+    let busy = |scheduler: &mut Scheduler| {
+        scheduler
+            .ets
+            .exclusive()
+            .table_by_id(Reference(0))
+            .expect("the table is live")
+            .busy = Some(Busy::new(
+            ProcessId(99),
+            vec![vec![Term::Integer(5)]],
+            InsertKind::Insert,
+        ));
+    };
+    let mut table = Table::new(caller, Access::Public, 1, TableType::Set);
+    table.busy = None;
+    scheduler.ets.exclusive().create(Reference(0), None, table);
     // A list insert of the same table runs its own steps while another
     // process holds the table: it reads no result of its own there
     // (`erl_db.c:2223-2253`).
     scheduler.current_process_mut().fcalls = 1;
     busy(&mut scheduler);
-    let result = program
-        .bif_trap(
-            &mut scheduler,
-            "ets",
-            "insert",
-            vec![
-                id,
-                Term::list_from([object.clone(), object]),
-                Term::Integer(4),
-                Term::Integer(1),
-                Term::list_from([Term::Integer(0)]),
-                Term::Integer(2),
-            ],
-        )
-        .unwrap();
+    let result = BeamProgram::bif_trap(
+        &mut scheduler,
+        "ets",
+        "insert",
+        vec![
+            id,
+            Term::list_from([object.clone(), object]),
+            Term::Integer(4),
+            Term::Integer(1),
+            Term::list_from([Term::Integer(0)]),
+            Term::Integer(2),
+        ],
+    )
+    .unwrap();
     assert!(matches!(result, BifResult::TrapBif { .. }));
 }
 
@@ -5200,7 +5452,7 @@ fn shares_the_stored_term_of_a_persistent_term() {
     // (row "Message copy" of docs/erts-differences.md).
     let program = make_program(vec![], 0);
     let mut scheduler = Scheduler::new((*program.atoms).clone());
-    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.start(frame(), vec![], allow_all());
     scheduler.schedule_next().unwrap();
     let key = Term::tuple(vec![Term::Integer(7)]);
     let value = Term::Map(
@@ -5210,19 +5462,16 @@ fn shares_the_stored_term_of_a_persistent_term() {
         )
         .unwrap(),
     );
-    program
-        .bif(
-            &mut scheduler,
-            "persistent_term",
-            "put",
-            vec![key.clone(), value.clone()],
-        )
-        .unwrap();
+    BeamProgram::bif(
+        &mut scheduler,
+        "persistent_term",
+        "put",
+        &[key.clone(), value.clone()],
+    )
+    .unwrap();
     // The new table is visible after thread progress.
     while scheduler.persistent_term_progress() {}
-    let result = program
-        .bif(&mut scheduler, "persistent_term", "get", vec![key])
-        .unwrap();
+    let result = BeamProgram::bif(&mut scheduler, "persistent_term", "get", &[key]).unwrap();
     let BifResult::Value(stored) = result else {
         panic!("persistent_term:get/1 did not return a value");
     };
@@ -5233,11 +5482,10 @@ fn shares_the_stored_term_of_a_persistent_term() {
 fn resolves_a_persistent_term_trap_of_another_name_as_a_call() {
     let program = make_program(vec![], 0);
     let mut scheduler = Scheduler::new((*program.atoms).clone());
-    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.start(frame(), vec![], allow_all());
     scheduler.schedule_next().unwrap();
-    let error = program
-        .bif_trap(&mut scheduler, "persistent_term", "no_trap", vec![])
-        .unwrap_err();
+    let error =
+        BeamProgram::bif_trap(&mut scheduler, "persistent_term", "no_trap", vec![]).unwrap_err();
     assert!(error.to_string().contains("no_trap"), "{error}");
 }
 
@@ -5249,11 +5497,10 @@ fn rejects_a_bif_name_that_no_table_entry_holds() {
     // resolved the identity of a BIF.
     let program = make_program(vec![], 0);
     let mut scheduler = Scheduler::new((*program.atoms).clone());
-    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.start(frame(), vec![], allow_all());
     scheduler.schedule_next().unwrap();
     assert_eq!(
-        program
-            .bif(&mut scheduler, "erlang", "no_such_bif", vec![])
+        BeamProgram::bif(&mut scheduler, "erlang", "no_such_bif", &[])
             .unwrap_err()
             .to_string(),
         "unresolved external MFA erlang:no_such_bif/0"
@@ -5295,7 +5542,7 @@ fn loop_body(module: &BeamModule, function: &str) -> Vec<usize> {
     };
     // The loader replaces the fail label of the test with the index of the
     // instruction after the label, so the operand is the clause position.
-    let clause = fail_label as usize;
+    let clause = usize::try_from(fail_label).expect("a u32 fits in usize");
     let end = (clause..instructions.len())
         .find(|index| {
             matches!(
@@ -5547,15 +5794,12 @@ fn raises_the_reason_of_an_error_with_cause_that_no_call_path_converted() {
         1,
     )];
     let mut scheduler = Scheduler::new((*program.atoms).clone());
-    scheduler.code = CodeTable::new(program.modules.clone());
+    scheduler.code = CodeTable::new(program.modules);
     let frame = scheduler.code.frame("fun_probe", label, 1).unwrap();
-    scheduler
-        .start(frame, vec![Term::Integer(1)], Vec::new())
-        .unwrap();
+    scheduler.start(frame, vec![Term::Integer(1)], Vec::new());
     scheduler.schedule_next().unwrap();
-    let outcome = program
-        .finish_bif(&mut scheduler, BifResult::badopt(), false)
-        .unwrap();
+    let outcome =
+        BeamProgram::finish_bif(&mut scheduler, BifResult::badopt(), CallKind::Body).unwrap();
     let Some(Outcome::Exit { reason, .. }) = outcome else {
         panic!("the process exits: {outcome:?}");
     };
@@ -5580,19 +5824,16 @@ fn rejects_dirty_work_outside_a_nif_entry() {
         1,
     )];
     let mut scheduler = Scheduler::new((*program.atoms).clone());
-    scheduler.code = CodeTable::new(program.modules.clone());
+    scheduler.code = CodeTable::new(program.modules);
     let frame = scheduler.code.frame("fun_probe", label, 1).unwrap();
-    scheduler
-        .start(frame, vec![Term::Integer(1)], Vec::new())
-        .unwrap();
+    scheduler.start(frame, vec![Term::Integer(1)], Vec::new());
     scheduler.schedule_next().unwrap();
     let work = crate::runtime::dirty::Work::Write(crate::runtime::host::output::IovecWrite {
         fd: -1,
         groups: Vec::new(),
         bad_group: false,
     });
-    let error = program
-        .finish_bif(&mut scheduler, BifResult::Dirty(work), true)
+    let error = BeamProgram::finish_bif(&mut scheduler, BifResult::Dirty(work), CallKind::Tail)
         .unwrap_err();
     assert_eq!(
         error.to_string(),
@@ -5615,11 +5856,9 @@ fn resumes_a_trap_target_through_its_loaded_export() {
         1,
     )];
     let mut scheduler = Scheduler::new((*program.atoms).clone());
-    scheduler.code = CodeTable::new(program.modules.clone());
+    scheduler.code = CodeTable::new(program.modules);
     let frame = scheduler.code.frame("fun_probe", label, 1).unwrap();
-    scheduler
-        .start(frame, vec![Term::Integer(1)], Vec::new())
-        .unwrap();
+    scheduler.start(frame, vec![Term::Integer(1)], Vec::new());
     scheduler.schedule_next().unwrap();
     write(
         scheduler.current_process_mut(),
@@ -5627,9 +5866,9 @@ fn resumes_a_trap_target_through_its_loaded_export() {
         Term::Integer(1),
     )
     .unwrap();
-    let outcome = program
-        .resume_trap(&mut scheduler, "fun_probe", "tail_wait", 1, false)
-        .unwrap();
+    let outcome =
+        BeamProgram::resume_trap(&mut scheduler, "fun_probe", "tail_wait", 1, CallKind::Body)
+            .unwrap();
     assert!(outcome.is_none());
     let frames = &scheduler.current_process_mut().frames;
     assert_eq!(frames.len(), 2);
@@ -5645,7 +5884,7 @@ fn traps_a_call_that_meets_a_fixed_clear() {
     // (`handle_lacking_permission`, `erl_db.c:769-798`, `3300-3320`).
     let program = make_program(vec![], 0);
     let mut scheduler = Scheduler::new((*program.atoms).clone());
-    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.start(frame(), vec![], allow_all());
     scheduler.schedule_next().unwrap();
     let owner = scheduler.current_process_mut().id;
     let calls = [
@@ -5667,7 +5906,7 @@ fn traps_a_call_that_meets_a_fixed_clear() {
         ("delete", vec![]),
     ];
     for (number, (function, mut arguments)) in calls.into_iter().enumerate() {
-        let id = Reference(number as u64);
+        let id = Reference(u64::try_from(number).expect("a fixture index fits in u64"));
         let mut table = Table::new(owner, Access::Public, 1, TableType::Set);
         for key in 0..300 {
             table.insert(&scheduler.atoms, vec![Term::Integer(key)]);
@@ -5676,9 +5915,7 @@ fn traps_a_call_that_meets_a_fixed_clear() {
         table.step_clear(&scheduler.atoms, owner, 300, 8);
         scheduler.ets.exclusive().create(id, None, table);
         arguments.insert(0, Term::Reference(id));
-        let result = program
-            .bif(&mut scheduler, "ets", function, arguments)
-            .unwrap();
+        let result = BeamProgram::bif(&mut scheduler, "ets", function, &arguments).unwrap();
         assert!(
             matches!(result, BifResult::TrapBif { function: trapped, .. } if trapped == function),
             "{function}"
@@ -5693,7 +5930,7 @@ fn traps_a_select_continuation_that_meets_a_fixed_clear() {
     // (`erl_db.c:89-114`, `769-798`, `3965`).
     let program = make_program(vec![], 0);
     let mut scheduler = Scheduler::new((*program.atoms).clone());
-    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.start(frame(), vec![], allow_all());
     scheduler.schedule_next().unwrap();
     let owner = scheduler.current_process_mut().id;
     let mut table = Table::new(owner, Access::Public, 1, TableType::Set);
@@ -5711,9 +5948,13 @@ fn traps_a_select_continuation_that_meets_a_fixed_clear() {
         Term::nil(),
         Term::Integer(1),
     ]);
-    let result = program
-        .bif(&mut scheduler, "ets", "select", vec![continuation.clone()])
-        .unwrap();
+    let result = BeamProgram::bif(
+        &mut scheduler,
+        "ets",
+        "select",
+        std::slice::from_ref(&continuation),
+    )
+    .unwrap();
     assert!(matches!(
         result,
         BifResult::TrapBif { function: "select", arguments, .. }
@@ -5728,7 +5969,7 @@ fn schedules_a_waiting_process_for_the_fixation_cleanup() {
     // (`erts_schedule_ets_free_fixation`, `erl_db.c:5263-5301`).
     let program = make_program(vec![], 0);
     let mut scheduler = Scheduler::new((*program.atoms).clone());
-    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.start(frame(), vec![], allow_all());
     scheduler.schedule_next().unwrap();
     let fixer = ProcessId(1);
     let mut process = ProcessState::new(fixer, Start::Entry(frame()), Vec::new());
@@ -5761,14 +6002,14 @@ fn requeues_a_waiting_process_with_more_cleanup_than_a_turn() {
     // remains (`notify_sys_task_executed`, `erl_process.c:10989`).
     let program = make_program(vec![], 0);
     let mut scheduler = Scheduler::new((*program.atoms).clone());
-    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.start(frame(), vec![], allow_all());
     scheduler.schedule_next().unwrap();
     let fixer = ProcessId(1);
     let mut process = ProcessState::new(fixer, Start::Entry(frame()), Vec::new());
     process.waiting = true;
     scheduler.insert(process);
     scheduler.schedule_next().unwrap();
-    let turn = crate::runtime::scheduler::CONTEXT_REDS as u64;
+    let turn = u64::from(crate::runtime::scheduler::CONTEXT_REDS.cast_unsigned());
     for number in 0..=turn {
         let id = Reference(number);
         scheduler.ets.exclusive().create(
@@ -5795,7 +6036,7 @@ fn cleans_a_pending_fixation_when_the_process_is_scheduled() {
     // `erl_process.c:10932-10989`).
     let program = make_program(vec![], 0);
     let mut scheduler = Scheduler::new((*program.atoms).clone());
-    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.start(frame(), vec![], allow_all());
     scheduler.schedule_next().unwrap();
     let caller = scheduler.current_process_mut().id;
     scheduler.ets.exclusive().create(
@@ -5823,41 +6064,39 @@ fn helps_a_trapped_insert_from_internal_delete_all() {
     // the table busy (`handle_lacking_permission`, `erl_db.c:769-798`).
     let program = make_program(vec![], 0);
     let mut scheduler = Scheduler::new((*program.atoms).clone());
-    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.start(frame(), vec![], allow_all());
     scheduler.schedule_next().unwrap();
     let owner = scheduler.current_process_mut().id;
     let mut table = Table::new(owner, Access::Public, 1, TableType::Set);
     table.insert(&scheduler.atoms, vec![Term::Integer(1)]);
     // The insert belongs to another process, so the call helps it.
-    table.busy = Some(Busy::new(ProcessId(999), Vec::new(), false));
+    table.busy = Some(Busy::new(ProcessId(999), Vec::new(), InsertKind::Insert));
     scheduler.ets.exclusive().create(Reference(0), None, table);
-    let result = program
-        .bif(
-            &mut scheduler,
-            "ets",
-            "internal_delete_all",
-            vec![
-                Term::Reference(Reference(0)),
-                Term::static_atom("undefined"),
-            ],
-        )
-        .unwrap();
+    let result = BeamProgram::bif(
+        &mut scheduler,
+        "ets",
+        "internal_delete_all",
+        &[
+            Term::Reference(Reference(0)),
+            Term::static_atom("undefined"),
+        ],
+    )
+    .unwrap();
     // The help traps, and the next turn runs the clear
     // (`erl_db.c:773-787`).
     assert!(
         matches!(result, BifResult::TrapBif { function, .. } if function == "internal_delete_all")
     );
-    let result = program
-        .bif_trap(
-            &mut scheduler,
-            "ets",
-            "internal_delete_all",
-            vec![
-                Term::Reference(Reference(0)),
-                Term::static_atom("undefined"),
-            ],
-        )
-        .unwrap();
+    let result = BeamProgram::bif_trap(
+        &mut scheduler,
+        "ets",
+        "internal_delete_all",
+        vec![
+            Term::Reference(Reference(0)),
+            Term::static_atom("undefined"),
+        ],
+    )
+    .unwrap();
     assert!(matches!(result, BifResult::Value(value) if value == Term::Integer(1)));
 }
 
@@ -5868,22 +6107,21 @@ fn rejects_a_copied_list_insert_into_a_protected_bag_of_another_owner() {
     // (`erl_db.c:2072-2110`, `788-795`).
     let program = make_program(vec![], 0);
     let mut scheduler = Scheduler::new((*program.atoms).clone());
-    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.start(frame(), vec![], allow_all());
     scheduler.schedule_next().unwrap();
     let table = Table::new(ProcessId(999), Access::Protected, 1, TableType::Bag);
     scheduler.ets.exclusive().create(Reference(0), None, table);
     let object = Term::tuple(vec![Term::Integer(1)]);
-    let result = program
-        .bif(
-            &mut scheduler,
-            "ets",
-            "insert",
-            vec![
-                Term::Reference(Reference(0)),
-                Term::list_from([object.clone(), object]),
-            ],
-        )
-        .unwrap();
+    let result = BeamProgram::bif(
+        &mut scheduler,
+        "ets",
+        "insert",
+        &[
+            Term::Reference(Reference(0)),
+            Term::list_from([object.clone(), object]),
+        ],
+    )
+    .unwrap();
     assert!(
         matches!(result, BifResult::ErrorWithCause { cause, .. } if cause == Term::static_atom("access"))
     );
@@ -5896,7 +6134,7 @@ fn traps_the_initial_clear_with_the_table_reference() {
     // against another table (`erl_db.c:3268-3279`).
     let program = make_program(vec![], 0);
     let mut scheduler = Scheduler::new((*program.atoms).clone());
-    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.start(frame(), vec![], allow_all());
     scheduler.schedule_next().unwrap();
     let owner = scheduler.current_process_mut().id;
     let mut table = Table::new(owner, Access::Public, 1, TableType::Set);
@@ -5906,17 +6144,16 @@ fn traps_the_initial_clear_with_the_table_reference() {
     table.fix(owner);
     scheduler.ets.exclusive().create(Reference(0), None, table);
     scheduler.current_process_mut().fcalls = 1;
-    let result = program
-        .bif(
-            &mut scheduler,
-            "ets",
-            "internal_delete_all",
-            vec![
-                Term::Reference(Reference(0)),
-                Term::static_atom("undefined"),
-            ],
-        )
-        .unwrap();
+    let result = BeamProgram::bif(
+        &mut scheduler,
+        "ets",
+        "internal_delete_all",
+        &[
+            Term::Reference(Reference(0)),
+            Term::static_atom("undefined"),
+        ],
+    )
+    .unwrap();
     assert!(matches!(
         result,
         BifResult::TrapBif { function: "internal_delete_all", arguments, .. }
@@ -5931,13 +6168,13 @@ fn accepts_the_line_delimiter_of_the_line_type() {
     // `badarg` (`erl_bif_port.c:1537-1541`).
     let program = make_program(vec![], 0);
     let mut scheduler = Scheduler::new((*program.atoms).clone());
-    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.start(frame(), vec![], allow_all());
     scheduler.schedule_next().unwrap();
-    let result = program.bif(
+    let result = BeamProgram::bif(
         &mut scheduler,
         "erlang",
         "decode_packet",
-        vec![
+        &[
             Term::static_atom("line"),
             Term::binary(b"abc;rest".to_vec()),
             Term::list_from(vec![Term::tuple(vec![
@@ -5958,23 +6195,22 @@ fn rejects_a_line_delimiter_that_is_too_large() {
     // A delimiter above 255 raises `badarg` (`erl_bif_port.c:1537-1541`).
     let program = make_program(vec![], 0);
     let mut scheduler = Scheduler::new((*program.atoms).clone());
-    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.start(frame(), vec![], allow_all());
     scheduler.schedule_next().unwrap();
-    let result = program
-        .bif(
-            &mut scheduler,
-            "erlang",
-            "decode_packet",
-            vec![
-                Term::static_atom("line"),
-                Term::binary(b"abc;rest".to_vec()),
-                Term::list_from(vec![Term::tuple(vec![
-                    Term::static_atom("line_delimiter"),
-                    Term::Integer(256),
-                ])]),
-            ],
-        )
-        .unwrap();
+    let result = BeamProgram::bif(
+        &mut scheduler,
+        "erlang",
+        "decode_packet",
+        &[
+            Term::static_atom("line"),
+            Term::binary(b"abc;rest".to_vec()),
+            Term::list_from(vec![Term::tuple(vec![
+                Term::static_atom("line_delimiter"),
+                Term::Integer(256),
+            ])]),
+        ],
+    )
+    .unwrap();
     assert!(matches!(result, BifResult::Raise { .. }));
 }
 
@@ -5984,17 +6220,16 @@ fn rejects_a_packet_bitstring_that_is_not_a_byte() {
     // (`erts_get_aligned_binary_bytes`, `erl_bif_port.c:1550-1556`).
     let program = make_program(vec![], 0);
     let mut scheduler = Scheduler::new((*program.atoms).clone());
-    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.start(frame(), vec![], allow_all());
     scheduler.schedule_next().unwrap();
     let subject = Term::Binary(Binary::from(&[0x10_u8]).bits(0, 4));
-    let result = program
-        .bif(
-            &mut scheduler,
-            "erlang",
-            "decode_packet",
-            vec![Term::static_atom("http_bin"), subject, Term::nil()],
-        )
-        .unwrap();
+    let result = BeamProgram::bif(
+        &mut scheduler,
+        "erlang",
+        "decode_packet",
+        &[Term::static_atom("http_bin"), subject, Term::nil()],
+    )
+    .unwrap();
     assert!(matches!(result, BifResult::Raise { .. }));
 }
 
@@ -6005,12 +6240,10 @@ fn rejects_a_compile_pattern_bitstring_that_is_not_a_byte() {
     // hold that shape, so the test builds it in Rust.
     let program = make_program(vec![], 0);
     let mut scheduler = Scheduler::new((*program.atoms).clone());
-    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.start(frame(), vec![], allow_all());
     scheduler.schedule_next().unwrap();
     let needle = Term::Binary(Binary::from(&[0x10_u8]).bits(0, 4));
-    let result = program
-        .bif(&mut scheduler, "binary", "compile_pattern", vec![needle])
-        .unwrap();
+    let result = BeamProgram::bif(&mut scheduler, "binary", "compile_pattern", &[needle]).unwrap();
     assert!(matches!(result, BifResult::Raise { .. }));
 }
 
@@ -6021,13 +6254,13 @@ fn stops_at_an_integer_packet_type_that_pbeam_does_not_run() {
     // unsupported type.
     let program = make_program(vec![], 0);
     let mut scheduler = Scheduler::new((*program.atoms).clone());
-    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.start(frame(), vec![], allow_all());
     scheduler.schedule_next().unwrap();
-    let result = program.bif(
+    let result = BeamProgram::bif(
         &mut scheduler,
         "erlang",
         "decode_packet",
-        vec![Term::Integer(2), Term::binary(b"abc".to_vec()), Term::nil()],
+        &[Term::Integer(2), Term::binary(b"abc".to_vec()), Term::nil()],
     );
     let error = result.unwrap_err().to_string();
     assert!(
@@ -6042,20 +6275,19 @@ fn raises_badopt_for_an_unknown_packet_type() {
     // `badopt` cause (`erl_bif_port.c:1492-1511`).
     let program = make_program(vec![], 0);
     let mut scheduler = Scheduler::new((*program.atoms).clone());
-    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.start(frame(), vec![], allow_all());
     scheduler.schedule_next().unwrap();
-    let result = program
-        .bif(
-            &mut scheduler,
-            "erlang",
-            "decode_packet",
-            vec![
-                Term::tuple(vec![Term::Integer(1)]),
-                Term::binary(b"abc".to_vec()),
-                Term::nil(),
-            ],
-        )
-        .unwrap();
+    let result = BeamProgram::bif(
+        &mut scheduler,
+        "erlang",
+        "decode_packet",
+        &[
+            Term::tuple(vec![Term::Integer(1)]),
+            Term::binary(b"abc".to_vec()),
+            Term::nil(),
+        ],
+    )
+    .unwrap();
     assert!(matches!(result, BifResult::ErrorWithCause { .. }));
 }
 
@@ -6066,17 +6298,16 @@ fn rejects_an_unsupported_packet_type_bitstring_that_is_not_a_byte() {
     // (`erts_get_aligned_binary_bytes`, `erl_bif_port.c:1550-1556`).
     let program = make_program(vec![], 0);
     let mut scheduler = Scheduler::new((*program.atoms).clone());
-    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.start(frame(), vec![], allow_all());
     scheduler.schedule_next().unwrap();
     let subject = Term::Binary(Binary::from(&[0x10_u8]).bits(0, 4));
-    let result = program
-        .bif(
-            &mut scheduler,
-            "erlang",
-            "decode_packet",
-            vec![Term::static_atom("line"), subject, Term::nil()],
-        )
-        .unwrap();
+    let result = BeamProgram::bif(
+        &mut scheduler,
+        "erlang",
+        "decode_packet",
+        &[Term::static_atom("line"), subject, Term::nil()],
+    )
+    .unwrap();
     assert!(matches!(result, BifResult::Raise { .. }));
 }
 
@@ -6087,7 +6318,7 @@ fn rejects_a_select_delete_of_a_private_table_of_another_process() {
     // (`erl_db.c:3433-3475`, `769-798`).
     let program = make_program(vec![], 0);
     let mut scheduler = Scheduler::new((*program.atoms).clone());
-    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.start(frame(), vec![], allow_all());
     scheduler.schedule_next().unwrap();
     scheduler.ets.exclusive().create(
         Reference(0),
@@ -6099,14 +6330,13 @@ fn rejects_a_select_delete_of_a_private_table_of_another_process() {
         Term::nil(),
         Term::list_from([Term::static_atom("true")]),
     ])]);
-    let result = program
-        .bif(
-            &mut scheduler,
-            "ets",
-            "internal_select_delete",
-            vec![Term::Reference(Reference(0)), spec],
-        )
-        .unwrap();
+    let result = BeamProgram::bif(
+        &mut scheduler,
+        "ets",
+        "internal_select_delete",
+        &[Term::Reference(Reference(0)), spec],
+    )
+    .unwrap();
     assert!(
         matches!(result, BifResult::ErrorWithCause { cause, .. } if cause == Term::static_atom("access"))
     );
@@ -6119,7 +6349,7 @@ fn rejects_an_update_default_at_the_zero_key_position() {
     // position to replace, so the call raises `badarg` (`erl_db.c:1483-1484`).
     let program = make_program(vec![], 0);
     let mut scheduler = Scheduler::new((*program.atoms).clone());
-    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.start(frame(), vec![], allow_all());
     scheduler.schedule_next().unwrap();
     let owner = scheduler.current_process_mut().id;
     scheduler.ets.exclusive().create(
@@ -6128,19 +6358,18 @@ fn rejects_an_update_default_at_the_zero_key_position() {
         Table::new(owner, Access::Public, 0, TableType::Set),
     );
     let object = Term::tuple(vec![Term::Integer(1), Term::Integer(0)]);
-    let result = program
-        .bif(
-            &mut scheduler,
-            "ets",
-            "update_element",
-            vec![
-                Term::Reference(Reference(0)),
-                Term::Integer(1),
-                Term::tuple(vec![Term::Integer(2), Term::Integer(9)]),
-                object,
-            ],
-        )
-        .unwrap();
+    let result = BeamProgram::bif(
+        &mut scheduler,
+        "ets",
+        "update_element",
+        &[
+            Term::Reference(Reference(0)),
+            Term::Integer(1),
+            Term::tuple(vec![Term::Integer(2), Term::Integer(9)]),
+            object,
+        ],
+    )
+    .unwrap();
     assert!(matches!(result, BifResult::Raise { .. }));
 }
 
@@ -6150,7 +6379,7 @@ fn gives_the_owner_as_the_heir_of_a_table() {
     // gives the owner pid (`erl_db.c:5478-5479`, `5319-5337`).
     let program = make_program(vec![], 0);
     let mut scheduler = Scheduler::new((*program.atoms).clone());
-    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.start(frame(), vec![], allow_all());
     scheduler.schedule_next().unwrap();
     let owner = scheduler.current_process_mut().id;
     let heir = Term::Atom(scheduler.atoms.put("heir").unwrap());
@@ -6159,24 +6388,20 @@ fn gives_the_owner_as_the_heir_of_a_table() {
         Term::static_atom("named_table"),
         Term::tuple(vec![heir.clone(), Term::Pid(owner)]),
     ]);
-    let table = program
-        .bif(&mut scheduler, "ets", "new", vec![name.clone(), options])
-        .unwrap();
+    let table = BeamProgram::bif(&mut scheduler, "ets", "new", &[name, options]).unwrap();
     let BifResult::Value(table) = table else {
         panic!("ets:new/2 did not make a table");
     };
-    let item = program
-        .bif(
-            &mut scheduler,
-            "ets",
-            "info",
-            vec![table.clone(), heir.clone()],
-        )
-        .unwrap();
+    let item = BeamProgram::bif(
+        &mut scheduler,
+        "ets",
+        "info",
+        &[table.clone(), heir.clone()],
+    )
+    .unwrap();
     assert!(matches!(item, BifResult::Value(Term::Pid(pid)) if pid == owner));
-    let BifResult::Value(items) = program
-        .bif(&mut scheduler, "ets", "info", vec![table])
-        .unwrap()
+    let BifResult::Value(items) =
+        BeamProgram::bif(&mut scheduler, "ets", "info", &[table]).unwrap()
     else {
         panic!("ets:info/1 did not return a list");
     };
@@ -6273,13 +6498,11 @@ fn rejects_a_bitstring_in_the_byte_bifs() {
     // `mise run erts-eval`).
     let program = make_program(vec![], 0);
     let mut scheduler = Scheduler::new((*program.atoms).clone());
-    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.start(frame(), vec![], allow_all());
     scheduler.schedule_next().unwrap();
     let bitstring = || Term::Binary(Binary::from(vec![1, 2 << 4]).bits(0, 12));
     let mut call = |module, function, argument| {
-        program
-            .bif(&mut scheduler, module, function, vec![argument])
-            .unwrap()
+        BeamProgram::bif(&mut scheduler, module, function, &[argument]).unwrap()
     };
     let badarg = |result: BifResult| {
         matches!(
@@ -6333,24 +6556,23 @@ fn stops_a_list_to_bitstring_trap_with_a_unit_that_is_not_1_or_8() {
     // (`erl_iolist.c:864`), so another unit is an invariant error.
     let program = make_program(vec![], 0);
     let mut scheduler = Scheduler::new((*program.atoms).clone());
-    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.start(frame(), vec![], allow_all());
     scheduler.schedule_next().unwrap();
     let list = Term::list_from([Term::Integer(1)]);
-    let error = program
-        .bif_trap(
-            &mut scheduler,
-            "erts_internal",
-            "list_to_bitstring_continue",
-            vec![
-                Term::static_atom("size"),
-                list.clone(),
-                list,
-                Term::nil(),
-                Term::Integer(0),
-                Term::Integer(2),
-            ],
-        )
-        .unwrap_err();
+    let error = BeamProgram::bif_trap(
+        &mut scheduler,
+        "erts_internal",
+        "list_to_bitstring_continue",
+        vec![
+            Term::static_atom("size"),
+            list.clone(),
+            list,
+            Term::nil(),
+            Term::Integer(0),
+            Term::Integer(2),
+        ],
+    )
+    .unwrap_err();
     assert!(error.to_string().contains("unit 2"), "{error}");
 }
 
@@ -6368,7 +6590,7 @@ fn an_idle_wait_reads_the_clock_after_the_wake() {
         0,
         readers.remove(0),
     );
-    scheduler.start(frame(), vec![], allow_all()).unwrap();
+    scheduler.start(frame(), vec![], allow_all());
     let root = ProcessId(0);
     scheduler.process_mut(root).unwrap().waiting = true;
     let before = scheduler.timers.now();

@@ -1,3 +1,10 @@
+//! Runs the pinned `user_drv` server and the BIFs that it uses on PBeam and compares them with the
+//! pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::process::Command;
 
 use pbeam_runtime::{AtomTable, BeamProgram, Term};
@@ -41,7 +48,7 @@ fn runs_the_pinned_unicode_characters_to_binary_as_pinned_erts() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     assert_eq!(reference.stdout, b"<<\"Hello\\n\">>\n");
 }
 
@@ -73,7 +80,7 @@ fn runs_iolist_to_iovec_of_terms_that_are_not_lists_as_pinned_erts() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     assert_eq!(reference.stdout, b"[[],[],badarg]\n");
 }
 
@@ -162,7 +169,7 @@ fn runs_iolist_to_iovec_of_lists_as_pinned_erts() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     assert_eq!(
         String::from_utf8(reference.stdout).unwrap(),
         format!("{}\n", erl_w(&expected, program.atoms()))
@@ -218,7 +225,7 @@ fn runs_is_ne_exact_in_an_orelse_guard_as_pinned_erts() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     assert_eq!(reference.stdout, b"[match,match,no_match]\n");
 }
 
@@ -267,7 +274,7 @@ fn executes_the_pinned_user_drv_server_for_one_put_chars_sync_request() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     assert_eq!(
         reference.stdout,
         b"{[<<\"Hello, world!\\n\">>],ok}\n[[],[],badarg]\n"
@@ -297,6 +304,6 @@ fn builds_the_state_of_a_real_disabled_user_drv_in_pinned_erts() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     assert_eq!(reference.stdout, b"true\n");
 }

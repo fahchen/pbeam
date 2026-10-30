@@ -2,13 +2,27 @@
 //! can each trap (`erl_bif_lists.c:340-1083`).
 
 use super::BifResult::Value;
-use super::*;
+use super::{AtomTable, BeamError, BifResult, ProcessState, Term, to_i64};
 use std::cmp::Ordering;
 
 /// The most elements of a list that a naive scan keeps in its array
 /// (`SUBTRACT_LHS_THRESHOLD`, `SUBTRACT_RHS_THRESHOLD`,
 /// `erl_bif_lists.c:367-368`).
 const NAIVE_THRESHOLD: usize = 16;
+
+/// The list that a length stage counts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Side {
+    /// The left list of `--`.
+    Left,
+    /// The right list of `--`.
+    Right,
+}
+
+/// Return the reductions of the steps that a stage counted.
+fn reds(steps: usize) -> i32 {
+    i32::try_from(steps).expect("a stage counts at most the steps of its budget")
+}
 
 /// The stage of a subtraction (`ErtsSubtractCtxStage`,
 /// `erl_bif_lists.c:370-388`). The trap state keeps it as an integer.
@@ -244,9 +258,9 @@ impl Subtract {
     ) -> Result<BifResult, BeamError> {
         loop {
             let step = match self.stage {
-                Stage::LengthLeft => self.length(process, true)?,
+                Stage::LengthLeft => self.length(process, Side::Left)?,
                 Stage::NaiveLeft => self.naive_left(process)?,
-                Stage::LengthRight => self.length(process, false)?,
+                Stage::LengthRight => self.length(process, Side::Right)?,
                 Stage::NaiveRight => self.naive_right(process)?,
                 Stage::SetBuild => self.set_build(process, atoms)?,
                 Stage::SetFinish => self.set_finish(process, atoms)?,
@@ -281,9 +295,13 @@ impl Subtract {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let step = state.length(&mut process, true)?;
+    /// let step = state.length(&mut process, Side::Left)?;
     /// ```
-    fn length(&mut self, process: &mut ProcessState, left: bool) -> Result<Step, BeamError> {
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "stage method of `subtract`; every stage returns `Result<Step, BeamError>`"
+    )]
+    fn length(&mut self, process: &mut ProcessState, side: Side) -> Result<Step, BeamError> {
         const ELEMENTS_PER_RED: usize = 32;
         let budget = ELEMENTS_PER_RED * process.bif_reductions_or_zero();
         let mut elements = self.iterator.list_iter().expect("a stage walks a list");
@@ -292,9 +310,9 @@ impl Subtract {
         if !rest.is_list() {
             return Ok(Step::Badarg);
         }
-        process.bump_reductions((count / ELEMENTS_PER_RED) as i32);
+        process.bump_reductions(reds(count / ELEMENTS_PER_RED));
         self.iterator = rest;
-        if left {
+        if side == Side::Left {
             self.left_remaining += count;
         } else {
             self.right_remaining += count;
@@ -302,7 +320,7 @@ impl Subtract {
         if self.iterator.is_nonempty_list() {
             return Ok(Step::Trap);
         }
-        if left {
+        if side == Side::Left {
             if (1..=NAIVE_THRESHOLD).contains(&self.left_remaining) && self.right.is_nonempty_list()
             {
                 self.stage = Stage::NaiveLeft;
@@ -345,6 +363,10 @@ impl Subtract {
     /// ```rust,ignore
     /// let step = state.naive_left(&mut process)?;
     /// ```
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "stage method of `subtract`; every stage returns `Result<Step, BeamError>`"
+    )]
     fn naive_left(&mut self, process: &mut ProcessState) -> Result<Step, BeamError> {
         const CHECKS_PER_RED: usize = 16;
         let budget = CHECKS_PER_RED * process.bif_reductions_or_zero();
@@ -358,7 +380,7 @@ impl Subtract {
             checks += self.elements.len().max(1);
             self.iterator = next.clone();
         }
-        process.bump_reductions((checks.min(budget) / CHECKS_PER_RED) as i32);
+        process.bump_reductions(reds(checks.min(budget) / CHECKS_PER_RED));
         if self.iterator.is_nonempty_list() {
             return Ok(Step::Trap);
         }
@@ -385,6 +407,10 @@ impl Subtract {
     /// ```rust,ignore
     /// let step = state.naive_right(&mut process)?;
     /// ```
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "stage method of `subtract`; every stage returns `Result<Step, BeamError>`"
+    )]
     fn naive_right(&mut self, process: &mut ProcessState) -> Result<Step, BeamError> {
         const CHECKS_PER_RED: usize = 16;
         let budget = CHECKS_PER_RED * process.bif_reductions_or_zero();
@@ -396,7 +422,7 @@ impl Subtract {
                 None => self.result.push(value.clone()),
                 Some(found) => {
                     if self.elements.len() == 1 {
-                        process.bump_reductions((checks.min(budget) / CHECKS_PER_RED) as i32);
+                        process.bump_reductions(reds(checks.min(budget) / CHECKS_PER_RED));
                         let kept = std::mem::take(&mut self.result);
                         return Ok(Step::Done(Term::list_with_tail(kept, next.clone())));
                     }
@@ -406,7 +432,7 @@ impl Subtract {
             checks += self.elements.len();
             self.iterator = next.clone();
         }
-        process.bump_reductions((checks.min(budget) / CHECKS_PER_RED) as i32);
+        process.bump_reductions(reds(checks.min(budget) / CHECKS_PER_RED));
         if self.iterator.is_nonempty_list() {
             return Ok(Step::Trap);
         }
@@ -449,7 +475,7 @@ impl Subtract {
             self.iterator = next.clone();
             insertions += 1;
         }
-        process.bump_reductions((insertions / INSERTIONS_PER_RED) as i32);
+        process.bump_reductions(reds(insertions / INSERTIONS_PER_RED));
         if self.iterator.is_nonempty_list() {
             return Ok(Step::Trap);
         }
@@ -490,7 +516,7 @@ impl Subtract {
                 Err(_) => self.result.push(value.clone()),
                 Ok(found) => {
                     if self.right_remaining == 1 {
-                        process.bump_reductions((checks / CHECKS_PER_RED) as i32);
+                        process.bump_reductions(reds(checks / CHECKS_PER_RED));
                         let kept = std::mem::take(&mut self.result);
                         return Ok(Step::Done(Term::list_with_tail(kept, next.clone())));
                     }
@@ -505,7 +531,7 @@ impl Subtract {
             self.iterator = next.clone();
             checks += 1;
         }
-        process.bump_reductions((checks / CHECKS_PER_RED) as i32);
+        process.bump_reductions(reds(checks / CHECKS_PER_RED));
         if self.iterator.is_nonempty_list() {
             return Ok(Step::Trap);
         }
@@ -529,7 +555,7 @@ impl Subtract {
     fn find(&self, value: &Term, atoms: &AtomTable) -> Result<Result<usize, usize>, BeamError> {
         let (mut low, mut high) = (0, self.set.len());
         while low < high {
-            let middle = (low + high) / 2;
+            let middle = usize::midpoint(low, high);
             match self.set[middle].0.compare_exact(value, atoms)? {
                 Ordering::Less => low = middle + 1,
                 Ordering::Greater => high = middle,
@@ -549,19 +575,23 @@ impl Subtract {
     /// let terms = state.into_terms();
     /// let state = Subtract::from_terms(&terms.try_into().unwrap());
     /// ```
+    #[expect(
+        clippy::as_conversions,
+        reason = "a cast reads the discriminant of the fieldless `Stage`"
+    )]
     fn into_terms(self) -> Vec<Term> {
         let (set, counts): (Vec<_>, Vec<_>) = self
             .set
             .into_iter()
-            .map(|(element, count)| (element, Term::Integer(count as i64)))
+            .map(|(element, count)| (element, Term::Integer(to_i64(count))))
             .unzip();
         vec![
             Term::Integer(self.stage as i64),
             self.left,
             self.right,
             self.iterator,
-            Term::Integer(self.left_remaining as i64),
-            Term::Integer(self.right_remaining as i64),
+            Term::Integer(to_i64(self.left_remaining)),
+            Term::Integer(to_i64(self.right_remaining)),
             Term::list_from(self.elements),
             Term::list_from(set),
             Term::list_from(counts),

@@ -1,6 +1,6 @@
 use super::{
-    COMPOSITION_CANDIDATES, FilenameEncoding, Utf8Output, Utf8State, analyze_utf8, build_utf8,
-    code_points, filename_from_native, is_native_filename, native_filename, utf8_need,
+    COMPOSITION_CANDIDATES, CharEncoding, FilenameEncoding, Utf8Output, Utf8State, analyze_utf8,
+    build_utf8, code_points, filename_from_native, is_native_filename, native_filename, utf8_need,
 };
 use crate::term::{Binary, Term, test_atom};
 
@@ -14,14 +14,17 @@ fn binary(bytes: &[u8]) -> Term {
 fn convert(chardata: &Term) -> (Vec<u8>, Term, bool, Vec<u8>) {
     let mut output = Utf8Output::default();
     let mut left = i64::MAX;
-    let (rest, error) = build_utf8(chardata, &mut left, false, &mut output);
+    let (rest, error) = build_utf8(chardata, &mut left, CharEncoding::Unicode, &mut output);
     (output.bytes, rest, error, output.leftover)
 }
 
 /// Convert valid chardata and return its bytes.
-fn valid(chardata: Term) -> Vec<u8> {
-    assert!(utf8_need(&chardata, false).is_some(), "{chardata:?}");
-    let (bytes, rest, error, leftover) = convert(&chardata);
+fn valid(chardata: &Term) -> Vec<u8> {
+    assert!(
+        utf8_need(chardata, CharEncoding::Unicode).is_some(),
+        "{chardata:?}"
+    );
+    let (bytes, rest, error, leftover) = convert(chardata);
     assert_eq!((rest, error, leftover), (Term::nil(), false, Vec::new()));
     bytes
 }
@@ -30,17 +33,17 @@ fn valid(chardata: Term) -> Vec<u8> {
 fn converts_binaries_code_points_and_nested_lists_as_erts() {
     // Each expected value is the result of unicode:characters_to_binary/2
     // with the `unicode` encoding on ERTS 29.1.1.
-    assert_eq!(valid(binary(b"Hello, world!\n")), b"Hello, world!\n");
+    assert_eq!(valid(&binary(b"Hello, world!\n")), b"Hello, world!\n");
     assert_eq!(
-        valid(Term::list_from(vec![
+        valid(&Term::list_from(vec![
             binary(b"Hello, world!"),
             Term::Integer(10)
         ])),
         b"Hello, world!\n"
     );
-    assert_eq!(valid(Term::nil()), b"");
+    assert_eq!(valid(&Term::nil()), b"");
     assert_eq!(
-        valid(Term::list_from(vec![
+        valid(&Term::list_from(vec![
             Term::list_from(vec![binary(b""), Term::list_from(vec![Term::Integer(104)])]),
             Term::Integer(105),
         ])),
@@ -49,18 +52,18 @@ fn converts_binaries_code_points_and_nested_lists_as_erts() {
     for (code_point, expected) in [
         (233, &[195, 169][..]),
         (8364, &[226, 130, 172]),
-        (128512, &[240, 159, 152, 128]),
-        (1114111, &[244, 143, 191, 191]),
+        (128_512, &[240, 159, 152, 128]),
+        (1_114_111, &[244, 143, 191, 191]),
     ] {
         assert_eq!(
-            valid(Term::list_from(vec![Term::Integer(code_point)])),
+            valid(&Term::list_from(vec![Term::Integer(code_point)])),
             expected
         );
     }
     // A UTF-8 sequence can continue in the next binary, also across
     // nested and empty lists and empty binaries.
     assert_eq!(
-        valid(Term::list_from(vec![
+        valid(&Term::list_from(vec![
             binary(&[226]),
             Term::list_from(vec![binary(&[130]), Term::nil()]),
             binary(b""),
@@ -73,11 +76,11 @@ fn converts_binaries_code_points_and_nested_lists_as_erts() {
     // [97|<<"b">>] and <<"é"/utf8>> for [[<<195>>|<<169>>]].
     let improper = |elements: Vec<Term>, tail: Term| Term::list_with_tail(elements, tail);
     assert_eq!(
-        valid(improper(vec![Term::Integer(97)], binary(b"b"))),
+        valid(&improper(vec![Term::Integer(97)], binary(b"b"))),
         b"ab"
     );
     assert_eq!(
-        valid(Term::list_from(vec![improper(
+        valid(&Term::list_from(vec![improper(
             vec![binary(&[195])],
             binary(&[169])
         )])),
@@ -99,14 +102,14 @@ fn converts_deeply_nested_lists_without_recursion() {
     for _ in 0..100_000 {
         chardata = Term::list_from(vec![chardata]);
     }
-    assert_eq!(utf8_need(&chardata, false), Some(1));
-    assert_eq!(valid(chardata), b"a");
+    assert_eq!(utf8_need(&chardata, CharEncoding::Unicode), Some(1));
+    assert_eq!(valid(&chardata), b"a");
 }
 
 #[test]
 fn stops_at_chardata_that_erts_does_not_convert() {
     // ERTS 29.1.1 returns {error, <<>>, [Value]} for these code points.
-    for code_point in [-1, 55296, 1114112, 1 << 60] {
+    for code_point in [-1, 55296, 1_114_112, 1 << 60] {
         let chardata = Term::list_from(vec![Term::Integer(code_point)]);
         assert_eq!(
             convert(&chardata),
@@ -121,7 +124,7 @@ fn stops_at_chardata_that_erts_does_not_convert() {
         Term::list_with_tail(vec![big()], test_atom("x")),
         Term::list_from(vec![big(), test_atom("foo")]),
     ] {
-        assert_eq!(utf8_need(&chardata, false), Some(0));
+        assert_eq!(utf8_need(&chardata, CharEncoding::Unicode), Some(0));
         assert_eq!(
             convert(&chardata),
             (Vec::new(), chardata.clone(), true, Vec::new())
@@ -189,7 +192,7 @@ fn splits_the_walk_where_the_steps_end() {
     let chardata = Term::list_from(vec![inner, Term::Integer(99)]);
     let mut output = Utf8Output::default();
     let mut left = 1;
-    let (rest, error) = build_utf8(&chardata, &mut left, false, &mut output);
+    let (rest, error) = build_utf8(&chardata, &mut left, CharEncoding::Unicode, &mut output);
     assert_eq!(
         (rest, error, output.bytes),
         (
@@ -205,12 +208,22 @@ fn splits_the_walk_where_the_steps_end() {
     // past 0.
     let mut output = Utf8Output::default();
     let mut left = 1;
-    let (rest, error) = build_utf8(&binary("éa".as_bytes()), &mut left, false, &mut output);
+    let (rest, error) = build_utf8(
+        &binary("éa".as_bytes()),
+        &mut left,
+        CharEncoding::Unicode,
+        &mut output,
+    );
     assert_eq!((rest, error, left), (binary(b"a"), false, 0));
     // With latin1, each byte is one character, and a binary splits at any byte.
     let mut output = Utf8Output::default();
     let mut left = 1;
-    let (rest, _) = build_utf8(&binary(&[233, 97]), &mut left, true, &mut output);
+    let (rest, _) = build_utf8(
+        &binary(&[233, 97]),
+        &mut left,
+        CharEncoding::Latin1,
+        &mut output,
+    );
     assert_eq!(
         (rest, output.bytes),
         (binary(&[97]), "é".as_bytes().to_vec())
@@ -261,12 +274,16 @@ fn finds_terms_that_are_not_chardata_before_the_conversion() {
             Term::Integer(97),
         ]),
     ] {
-        assert_eq!(utf8_need(&chardata, false), None, "{chardata:?}");
+        assert_eq!(
+            utf8_need(&chardata, CharEncoding::Unicode),
+            None,
+            "{chardata:?}"
+        );
     }
     // A binary costs 1, or with latin1 the bytes of its UTF-8 form.
     let list = Term::list_from(vec![Term::Integer(97), binary(&[233, 97])]);
-    assert_eq!(utf8_need(&list, false), Some(2));
-    assert_eq!(utf8_need(&list, true), Some(4));
+    assert_eq!(utf8_need(&list, CharEncoding::Unicode), Some(2));
+    assert_eq!(utf8_need(&list, CharEncoding::Latin1), Some(4));
 }
 
 #[test]
@@ -298,10 +315,10 @@ fn accepts_the_file_names_that_erts_accepts_in_each_encoding() {
     }
     // A character above 255 is valid only in UTF-8, up to 0x10FFFF and
     // not from 0xD800 to 0xDFFF.
-    for character in [256, 0xD7FF, 0xE000, 0x10FFFF] {
+    for character in [256, 0xD7FF, 0xE000, 0x0010_FFFF] {
         assert_eq!(check(&list(&[character])), [false, true], "{character}");
     }
-    for character in [0, -1, 0xD800, 0xDFFF, 0x110000] {
+    for character in [0, -1, 0xD800, 0xDFFF, 0x0011_0000] {
         assert_eq!(check(&list(&[character])), [false, false], "{character}");
     }
     // A bignum, a binary, an atom, or a tuple in a list, and each term
@@ -365,7 +382,7 @@ fn writes_the_native_bytes_of_a_file_name_in_each_encoding() {
         ]
     );
     assert_eq!(
-        bytes(&list(&[1046, 0x10FFFF])),
+        bytes(&list(&[1046, 0x0010_FFFF])),
         [
             None,
             some(&[208, 150, 244, 143, 191, 191]),
@@ -422,7 +439,9 @@ fn converts_native_bytes_to_a_file_name_in_each_encoding() {
         assert!(convert(text.as_bytes(), FilenameEncoding::Utf8Mac).is_err());
     }
     for code_point in [767_i64, 773, 4024, 12443] {
-        let text = char::from_u32(code_point as u32).unwrap().to_string();
+        let text = char::from_u32(u32::try_from(code_point).unwrap())
+            .unwrap()
+            .to_string();
         assert_eq!(
             convert(text.as_bytes(), FilenameEncoding::Utf8Mac),
             Ok(list(&[code_point]))
@@ -436,15 +455,18 @@ fn rejects_a_bitstring_as_chardata() {
     // `unicode:characters_to_binary(B)` and for `[<<"a">>, B]` with
     // B = <<1:4>> (measured with `mise run erts-eval`).
     let bitstring = || Term::Binary(Binary::from(vec![1 << 4]).bits(0, 4));
-    assert_eq!(utf8_need(&bitstring(), false), None);
+    assert_eq!(utf8_need(&bitstring(), CharEncoding::Unicode), None);
     assert_eq!(
-        utf8_need(&Term::list_from(vec![binary(b"a"), bitstring()]), true),
+        utf8_need(
+            &Term::list_from(vec![binary(b"a"), bitstring()]),
+            CharEncoding::Latin1
+        ),
         None
     );
     assert_eq!(
         utf8_need(
             &Term::list_with_tail(vec![binary(b"a")], bitstring()),
-            false
+            CharEncoding::Unicode
         ),
         None
     );

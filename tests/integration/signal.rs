@@ -1,3 +1,6 @@
+//! Checks `os:set_signal` and the start dispositions of the host signals on PBeam against the
+//! pinned ERTS.
+
 use std::{
     env,
     ffi::c_int,
@@ -64,7 +67,7 @@ fn sets_the_host_signal_disposition_with_os_set_signal() {
         .output()
         .unwrap();
     assert!(erts.status.success());
-    assert!(erts.stdout.is_empty());
+    assert_eq!(erts.stdout, <[u8; 0]>::default());
     assert_eq!(
         String::from_utf8(erts.stderr).unwrap(),
         format!("[{}]\n", results.join(","))

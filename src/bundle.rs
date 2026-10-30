@@ -160,15 +160,13 @@ impl<'a> Bundle<'a> {
             &mut cursor,
             MAX_MODULES,
             MAX_ATOM_NAME_BYTES,
-            "module",
-            true,
+            TableKind::Module,
         )?;
         let resources = read_table(
             &mut cursor,
             MAX_RESOURCES,
             MAX_RESOURCE_NAME_BYTES,
-            "resource",
-            false,
+            TableKind::Resource,
         )?;
         if !cursor.is_empty() {
             return Err(error(format!(
@@ -448,7 +446,7 @@ fn add_blob<'a>(
     max_count: u32,
     kind: &str,
 ) -> Result<(), BeamError> {
-    if blobs.len() >= max_count as usize {
+    if blobs.len() >= usize::try_from(max_count).expect("a u32 fits in usize") {
         return Err(error(format!(
             "bundle {kind} table is full at {max_count} entries"
         )));
@@ -504,6 +502,25 @@ fn check_atom_name(name: &str, what: &str) -> Result<(), BeamError> {
     Ok(())
 }
 
+/// A table of a bundle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TableKind {
+    /// The module table: each name is an atom name, which may be empty.
+    Module,
+    /// The resource table: each name is not empty.
+    Resource,
+}
+
+impl TableKind {
+    /// Return the name of the table in an error message.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Module => "module",
+            Self::Resource => "resource",
+        }
+    }
+}
+
 /// Read one table: a count, then one name, one length, and one payload for
 /// each entry. The name set rejects a duplicate, and each length is checked
 /// against the remaining bytes before the payload is borrowed, so a declared
@@ -514,9 +531,9 @@ fn read_table<'a>(
     cursor: &mut Cursor<'a>,
     max_count: u32,
     max_name: usize,
-    kind: &str,
-    atom: bool,
+    table: TableKind,
 ) -> Result<Vec<Blob<'a>>, BeamError> {
+    let kind = table.label();
     let count = cursor.u32(&format!("{kind} count"))?;
     if count > max_count {
         return Err(error(format!(
@@ -526,7 +543,7 @@ fn read_table<'a>(
     let mut blobs = Vec::new();
     let mut names = HashSet::new();
     for index in 0..count {
-        let name = if atom {
+        let name = if table == TableKind::Module {
             cursor.atom_name(&format!("{kind} {index} name"))?
         } else {
             cursor.name(max_name, &format!("{kind} {index} name"))?
@@ -563,17 +580,25 @@ fn write_bundle(
 
 /// Write a length-prefixed text.
 fn write_text(out: &mut Vec<u8>, text: &str) {
-    out.extend_from_slice(&(text.len() as u16).to_le_bytes());
+    // The length keeps its low 16 bits.
+    let [b0, b1, ..] = text.len().to_le_bytes();
+    out.extend_from_slice(&[b0, b1]);
     out.extend_from_slice(text.as_bytes());
 }
 
 /// Write a table: its count, then one name, one length, and one payload for
 /// each entry.
 fn write_table(out: &mut Vec<u8>, blobs: &[Blob<'_>]) {
-    out.extend_from_slice(&(blobs.len() as u32).to_le_bytes());
+    // The count keeps its low 32 bits.
+    let [b0, b1, b2, b3, ..] = blobs.len().to_le_bytes();
+    out.extend_from_slice(&[b0, b1, b2, b3]);
     for blob in blobs {
         write_text(out, blob.name);
-        out.extend_from_slice(&(blob.bytes.len() as u64).to_le_bytes());
+        out.extend_from_slice(
+            &u64::try_from(blob.bytes.len())
+                .expect("a usize fits in u64")
+                .to_le_bytes(),
+        );
         out.extend_from_slice(blob.bytes);
     }
 }
@@ -627,15 +652,16 @@ impl<'a> Cursor<'a> {
     /// A `count` larger than the remaining bytes.
     fn take_u64(&mut self, count: u64, what: &str) -> Result<&'a [u8], BeamError> {
         let remaining = self.remaining();
-        if count > remaining as u64 {
+        if count > u64::try_from(remaining).expect("a usize fits in u64") {
             return Err(error(format!(
                 "bundle is truncated: {what} needs {count} bytes at offset {}, but {remaining} remain",
                 self.position
             )));
         }
-        // `count <= remaining`, and `remaining` is a `usize`, so the cast is
-        // exact on every target.
-        self.take(count as usize, what)
+        self.take(
+            usize::try_from(count).expect("count is at most the remaining usize"),
+            what,
+        )
     }
 
     /// Read a little-endian `u16`.

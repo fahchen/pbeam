@@ -16,6 +16,10 @@ fn elements(term: &Term) -> &[Term] {
 }
 
 /// Return the array of a tuple term.
+#[expect(
+    clippy::rc_buffer,
+    reason = "`Tuple` shares its elements as `Arc<Vec<Term>>` because `Arc::make_mut` copies and writes them (`set_tuple_element`); an `Arc<[Term]>` cannot do that"
+)]
 fn array(term: &Term) -> &Arc<Vec<Term>> {
     let Term::Tuple(tuple) = term else {
         panic!("not a tuple: {term:?}");
@@ -55,12 +59,12 @@ fn copies_the_array_of_a_shared_tuple_before_a_change() {
     );
     assert!(!Arc::ptr_eq(array(&source), array(&copy)));
     // A tuple that no other copy holds changes in place.
-    let in_place = Arc::as_ptr(array(&copy)) as usize;
+    let in_place = Arc::as_ptr(array(&copy)).addr();
     let Term::Tuple(fields) = &mut copy else {
         unreachable!()
     };
     Arc::make_mut(fields.arc_mut())[0] = Term::Integer(7);
-    assert_eq!(Arc::as_ptr(array(&copy)) as usize, in_place);
+    assert_eq!(Arc::as_ptr(array(&copy)).addr(), in_place);
     assert_eq!(elements(&copy)[0], Term::Integer(7));
 }
 

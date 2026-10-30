@@ -1,3 +1,10 @@
+//! Runs the `prim_tty` NIFs (resources, window size, locale, terminfo, termcap) on PBeam and
+//! compares them with the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::{
     env,
     ffi::OsStr,
@@ -169,7 +176,7 @@ fn raises_badarg_from_the_write_nif_binding_for_a_term_that_is_not_a_tty() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     assert_eq!(
         reference.stdout,
         b"[{badarg,prim_tty,write_nif},{badarg,prim_tty,write_nif},{badarg,prim_tty,write_nif},{badarg,prim_tty,write_nif}]\n"
@@ -1526,7 +1533,7 @@ fn erts_host_write_probe() -> Command {
 /// `standard_error`. It uses `-noinput`: under `-noshell`, `user_drv` starts
 /// its own cooked reader on fd 0 (user_sup.erl:129-130), and the select of
 /// the probe reader makes ERTS log "stealing control of fd=0" on stdout
-/// (erl_check_io.c:1608). Under `-noinput`, no other process reads fd 0
+/// (`erl_check_io.c:1608`). Under `-noinput`, no other process reads fd 0
 /// (user_sup.erl:135-136), as in PBeam.
 ///
 /// # Examples
@@ -1764,9 +1771,11 @@ fn open_stream(
             let (master, slave) = open_terminal(columns, rows);
             let mut quiet = mode(&slave);
             quiet.c_lflag &= !(libc::ECHO | libc::ICANON);
-            // SAFETY: `tcsetattr` reads one `termios` from the pointer.
             assert_eq!(
-                unsafe { libc::tcsetattr(slave.as_raw_fd(), libc::TCSANOW, &quiet) },
+                // SAFETY: `tcsetattr` reads one `termios` from the pointer.
+                // `quiet` is a live `termios` value that `mode` made, and
+                // `slave` owns an open terminal fd for the whole call.
+                unsafe { libc::tcsetattr(slave.as_raw_fd(), libc::TCSANOW, &raw const quiet) },
                 0
             );
             (master, slave)
@@ -1843,7 +1852,7 @@ fn open_terminal(columns: u16, rows: u16) -> (OwnedFd, OwnedFd) {
             &raw mut slave,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            &raw const size as *mut libc::winsize,
+            (&raw const size).cast_mut(),
         );
         assert_eq!(result, 0, "openpty failed");
         for fd in [master, slave] {

@@ -62,7 +62,7 @@ pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Option<ExitCode> {
         &executable,
         &bytes,
         &env::temp_dir(),
-        arguments.into_iter().collect(),
+        &arguments.into_iter().collect::<Vec<_>>(),
     )
 }
 
@@ -101,7 +101,7 @@ fn run_bundle(
     executable: &Path,
     bytes: &[u8],
     base: &Path,
-    arguments: Vec<OsString>,
+    arguments: &[OsString],
 ) -> Option<ExitCode> {
     let bundle_bytes = match trailer(bytes) {
         Trailer::Absent => return None,
@@ -115,7 +115,7 @@ fn run_bundle(
         Ok(directory) => directory,
         Err(message) => return Some(failure(&message)),
     };
-    Some(start(executable, &bundle, &directory, &arguments))
+    Some(start(executable, &bundle, &directory, arguments))
 }
 
 /// Return the bundle that the trailer at the end of `bytes` names.
@@ -132,7 +132,12 @@ fn trailer(bytes: &[u8]) -> Trailer<'_> {
     if &bytes[end..end + MAGIC.len()] != MAGIC {
         return Trailer::Absent;
     }
-    let length = u64::from_le_bytes(bytes[end + MAGIC.len()..].try_into().unwrap()) as usize;
+    let length = usize::try_from(u64::from_le_bytes(
+        bytes[end + MAGIC.len()..]
+            .try_into()
+            .expect("the trailer ends with 8 length bytes"),
+    ))
+    .expect("a u64 fits in usize on a 64-bit host");
     match end.checked_sub(length) {
         Some(start) => Trailer::Bundle(&bytes[start..end]),
         None => Trailer::Invalid,
@@ -411,6 +416,10 @@ fn remove(directory: &Path) {
 }
 
 /// Return [`ExitCode::FAILURE`] after a message on stderr.
+#[expect(
+    clippy::print_stderr,
+    reason = "the one-file executable reports a failure on stderr"
+)]
 fn failure(message: &str) -> ExitCode {
     eprintln!("pbeam: {message}");
     ExitCode::FAILURE
@@ -424,7 +433,7 @@ fn temp_directory(base: &Path) -> Result<PathBuf, String> {
         let directory = base.join(format!("pbeam-embedded-{}-{attempt}", std::process::id()));
         match fs::DirBuilder::new().mode(0o700).create(&directory) {
             Ok(()) => return Ok(directory),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => {
                 return Err(format!(
                     "cannot make {}: {error}",
@@ -456,6 +465,10 @@ fn bundle_path(directory: &Path, name: &str) -> Result<PathBuf, String> {
 /// in `releases/*/consolidated/`; both come before the lib directories, so
 /// a consolidated protocol comes before the unconsolidated protocol of the
 /// same name.
+#[expect(
+    clippy::unnecessary_debug_formatting,
+    reason = "the error message quotes the release path with `{:?}`, and the message must stay the same"
+)]
 fn resolve_module(root: &Path, module: &str) -> Result<PathBuf, String> {
     let file = format!("{module}.beam");
     let pbeam = root.join("pbeam").join(&file);

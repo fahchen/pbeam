@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    os::{fd::AsRawFd, unix::net::UnixStream},
+    os::unix::net::UnixStream,
     sync::Arc,
     time::Duration,
 };
@@ -204,7 +204,7 @@ impl ReleaseStack {
     /// ```
     fn pop(&mut self) -> Option<Release> {
         let item = self.chunks.last_mut()?.pop()?;
-        if self.chunks.last().is_some_and(|chunk| chunk.is_empty()) {
+        if self.chunks.last().is_some_and(std::vec::Vec::is_empty) {
             self.chunks.pop();
         }
         Some(item)
@@ -230,7 +230,7 @@ impl ReleaseStack {
     /// ```
     #[cfg(test)]
     fn len(&self) -> usize {
-        self.chunks.iter().map(|chunk| chunk.len()).sum()
+        self.chunks.iter().map(std::vec::Vec::len).sum()
     }
 
     /// Iterate over the items of the stack, oldest first. The live-byte walk
@@ -483,6 +483,40 @@ pub(super) struct Scheduler {
     wake: Option<UnixStream>,
 }
 
+/// Whether a spawn links the child to its parent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ChildLink {
+    /// The spawn does not link the child.
+    Unlinked,
+    /// The spawn links the child to its parent: `spawn_link`.
+    Linked,
+}
+
+impl From<bool> for ChildLink {
+    fn from(link: bool) -> Self {
+        if link { Self::Linked } else { Self::Unlinked }
+    }
+}
+
+/// The range of the values of `erlang:unique_integer([monotonic])`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum UniqueRange {
+    /// The values start at the smallest small integer.
+    Signed,
+    /// The `positive` option: the values start at 1.
+    Positive,
+}
+
+impl From<bool> for UniqueRange {
+    fn from(positive: bool) -> Self {
+        if positive {
+            Self::Positive
+        } else {
+            Self::Signed
+        }
+    }
+}
+
 impl Scheduler {
     /// Return a scheduler with no processes and the atom table of the run.
     /// The table is a copy of the table of the loaded program, so each atom
@@ -642,7 +676,7 @@ impl Scheduler {
     ///
     /// ```rust,ignore
     /// let mut scheduler = Scheduler::new(AtomTable::new());
-    /// scheduler.start(frame, vec![], AllowAll.initial())?;
+    /// scheduler.start(frame, vec![], AllowAll.initial());
     /// assert_eq!(scheduler.schedule_next(), Some(ProcessId(0)));
     /// ```
     pub(super) fn start(
@@ -650,8 +684,8 @@ impl Scheduler {
         start: impl Into<Start>,
         arguments: Vec<Term>,
         capabilities: Vec<Capability>,
-    ) -> Result<(), BeamError> {
-        self.start_with_id(ROOT, 0, start.into(), arguments, capabilities)
+    ) {
+        self.start_with_id(ROOT, 0, start.into(), arguments, capabilities);
     }
 
     /// Create the root process with the pid `id` and the root slot `slot`
@@ -666,7 +700,7 @@ impl Scheduler {
         start: Start,
         arguments: Vec<Term>,
         capabilities: Vec<Capability>,
-    ) -> Result<(), BeamError> {
+    ) {
         let mut root = ProcessState::new(id, start, arguments);
         root.root = Some(slot);
         self.node.add_root(slot);
@@ -675,7 +709,6 @@ impl Scheduler {
             .map(|capability| (Source::Launcher, capability));
         root.security = self.delegations.hold(id, issued);
         self.insert(root);
-        Ok(())
     }
 
     /// Create the system process `id` that starts at `start` with the
@@ -748,7 +781,7 @@ impl Scheduler {
         !self.current_process().security.is_boot()
             && self
                 .processes
-                .get(&target)
+                .get(target)
                 .is_some_and(|process| process.security.is_boot())
     }
 
@@ -766,7 +799,7 @@ impl Scheduler {
     /// ```
     pub(super) fn serve_io(&mut self, target: ProcessId) -> bool {
         self.processes
-            .get_mut(&target)
+            .get_mut(target)
             .filter(|process| process.exiting.is_none())
             .is_some_and(|process| process.security.serve_io())
     }
@@ -781,7 +814,7 @@ impl Scheduler {
     /// ```
     pub(super) fn serves_io(&self, target: ProcessId) -> bool {
         self.processes
-            .get(&target)
+            .get(target)
             .is_some_and(|process| process.security.serves_io())
     }
 
@@ -806,7 +839,7 @@ impl Scheduler {
     pub(super) fn schedule_pending_cleanups(&mut self) {
         let processes = self.ets.exclusive().take_pending_new();
         for id in processes {
-            if self.processes.get(&id).is_some() {
+            if self.processes.get(id).is_some() {
                 self.enqueue(id);
             } else if let Some(index) = self.remote_owner(id) {
                 self.node.schedule_cleanup(index, id);
@@ -832,7 +865,7 @@ impl Scheduler {
     /// ```
     fn enqueue(&mut self, id: ProcessId) {
         let current = self.processes.current_id() == Some(id);
-        let process = self.processes.get_mut(&id).expect("the process is alive");
+        let process = self.processes.get_mut(id).expect("the process is alive");
         let idle_dirty = process.dirty_running() && !process.mailbox.has_control_signals();
         if !process.in_run_queue && !current && !idle_dirty {
             process.in_run_queue = true;
@@ -853,7 +886,7 @@ impl Scheduler {
     /// signal and no cost. A process of another scheduler gets a
     /// `Resume` signal. A process that exited needs no resume.
     pub(super) fn resume(&mut self, id: ProcessId) {
-        if let Some(process) = self.processes.get_mut(&id) {
+        if let Some(process) = self.processes.get_mut(id) {
             process.suspended = false;
             self.activate(id);
         } else {
@@ -862,7 +895,7 @@ impl Scheduler {
     }
 
     fn activate(&mut self, id: ProcessId) {
-        let process = self.processes.get_mut(&id).expect("the process is alive");
+        let process = self.processes.get_mut(id).expect("the process is alive");
         if !process.suspended && std::mem::take(&mut process.waiting) {
             self.enqueue(id);
         }
@@ -894,6 +927,10 @@ impl Scheduler {
     /// scheduler.drain_release(RELEASE_BATCH);
     /// assert!(scheduler.release.is_empty());
     /// ```
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm for each `Release` kind of the bounded release work list; each arm moves a bounded number of terms"
+    )]
     fn drain_release(&mut self, budget: usize) {
         let mut moved = 0;
         let mut terms = Vec::new();
@@ -1144,7 +1181,7 @@ impl Scheduler {
             });
         };
         if let Some((process, phase)) = self.freed.remove(&id) {
-            self.exit_links(process, phase, CONTEXT_REDS)?;
+            self.exit_links(process, phase, CONTEXT_REDS);
             return Ok(Turn::Done);
         }
         if self.processes[&id].dirty_running() {
@@ -1232,7 +1269,7 @@ impl Scheduler {
                 Timer::Receive(id) => {
                     if self
                         .processes
-                        .get_mut(&id)
+                        .get_mut(id)
                         .is_some_and(ProcessState::time_out)
                     {
                         self.enqueue(id);
@@ -1338,7 +1375,7 @@ impl Scheduler {
         if self.check_io()? {
             return Ok(true);
         }
-        let wake = self.wake.as_ref().map(|wake| wake.as_raw_fd());
+        let wake = self.wake.as_ref().map(std::os::fd::AsRawFd::as_raw_fd);
         // Another thread sends into the inbox of the scheduler: another
         // scheduler, or a thread of a NIF library. Else only the poll thread
         // writes the wake socket, for the fds that it serves.
@@ -1371,17 +1408,17 @@ impl Scheduler {
         for &((fd, direction), _) in &owned {
             match direction {
                 poll::Direction::Write => writes.push(fd),
-                _ => reads.push(fd),
+                poll::Direction::Read => reads.push(fd),
             }
         }
         let (readiness, writable) = input::wait(&reads, &writes, timeout);
         if let (Some(wake), Some(fd)) = (&mut self.wake, wake)
-            && matches!(&readiness, Readiness::Ready(ready) if ready.contains(&fd))
+            && matches!(&readiness, Readiness::Ready(fds) if fds.contains(&fd))
         {
             Node::drain_wake(wake);
         }
         if dirty
-            && matches!(&readiness, Readiness::Ready(ready) if ready.contains(&self.dirty.wake_fd()))
+            && matches!(&readiness, Readiness::Ready(fds) if fds.contains(&self.dirty.wake_fd()))
         {
             self.dirty.clear_wake();
         }
@@ -1389,13 +1426,13 @@ impl Scheduler {
             Readiness::Ready(fds) => fds,
             Readiness::Pending | Readiness::Invalid => Vec::new(),
         };
-        let ready: Vec<poll::Ready> = poll::ready(&owned, &reads, &writable)
+        let served: Vec<poll::Ready> = poll::ready(&owned, &reads, &writable)
             .into_iter()
             .map(|(entry, _)| entry)
             .collect();
         // The scheduler serves its fds before the thread waits on them
         // again, so that the thread does not report them a second time.
-        let result = self.serve(&ready);
+        let result = self.serve(&served);
         self.node.poll.hand_back(index);
         result?;
         self.check_io()?;
@@ -1436,13 +1473,13 @@ impl Scheduler {
     fn serve(&mut self, ready: &[poll::Ready]) -> Result<(), BeamError> {
         // The writes go before the reads, as ERTS runs the output event of
         // one fd before its input event (`erl_check_io.c:2099-2110`).
-        let reads = ready
+        let inputs = ready
             .iter()
             .filter(|(_, direction)| *direction == poll::Direction::Read);
-        let writes = ready
+        let outputs = ready
             .iter()
             .filter(|(_, direction)| *direction == poll::Direction::Write);
-        for &(fd, direction) in writes.chain(reads) {
+        for &(fd, direction) in outputs.chain(inputs) {
             if fd == libc::STDIN_FILENO && direction == poll::Direction::Read {
                 let Some(select) = self.node.ttys().take_input_select() else {
                     continue;
@@ -1595,7 +1632,6 @@ impl Scheduler {
         loop {
             match read() {
                 Ok(bytes) if !bytes.is_empty() => return bytes[0],
-                Ok(_) => return 0,
                 Err(libc::EAGAIN) => {
                     // A read with no data is retried (`sys.c:1051-1071`).
                     // A second break stops the run while the read waits, as
@@ -1604,7 +1640,7 @@ impl Scheduler {
                         return 0;
                     }
                 }
-                Err(_) => return 0,
+                Ok(_) | Err(_) => return 0,
             }
         }
     }
@@ -1695,7 +1731,7 @@ impl Scheduler {
             match key {
                 b'a' | b'q' | b'*' => return Err(BeamError::Halt(0)),
                 b'c' | b'm' => return Ok(()),
-                b'\n' => continue,
+                b'\n' => {}
                 b'A' => {
                     return Err(error(
                         "unsupported break command A: PBeam writes no crash dump (see \"OS signals\" in docs/erts-differences.md)",
@@ -1887,11 +1923,11 @@ impl Scheduler {
         // `enqueue` puts a process whose call runs in the run queue only
         // when it has signals to handle, and only its turn handles them.
         self.processes
-            .get_mut(&id)
+            .get_mut(id)
             .expect("the process is alive")
             .in_run_queue = false;
         self.handle_signals(id, CONTEXT_REDS, CONTEXT_REDS, HandlingPoint::ScheduleIn)?;
-        let process = self.processes.get_mut(&id).expect("the process is alive");
+        let process = self.processes.get_mut(id).expect("the process is alive");
         if process.exiting.is_some() {
             process.dirty_call = None;
         }
@@ -1933,7 +1969,7 @@ impl Scheduler {
         {
             let Some(caller) = self
                 .processes
-                .get_mut(&process)
+                .get_mut(process)
                 .filter(|caller| caller.exiting.is_none())
             else {
                 continue;
@@ -1994,7 +2030,7 @@ impl Scheduler {
     /// ```
     fn deliver_timeout(&mut self, target: ProcessId, message: Term) {
         match self.remote_owner(target) {
-            Some(index) if !self.processes.contains_key(&target) => {
+            Some(index) if !self.processes.contains_key(target) => {
                 self.node.send_message(index, None, message, target, None);
             }
             _ => self.deliver(target, message),
@@ -2149,10 +2185,11 @@ impl Scheduler {
         reference: crate::term::Reference,
     ) -> Option<(&mut Code, &Arc<AtomTable>)> {
         if !self.regex_codes.0.contains_key(&reference) {
-            let bytes = lock(&self.node.resources.kind::<RegexSources>())
-                .0
-                .get(&reference)?
-                .clone();
+            let bytes = Arc::clone(
+                lock(&self.node.resources.kind::<RegexSources>())
+                    .0
+                    .get(&reference)?,
+            );
             if let Deserialized::Code(code) = pcre2::deserialize(&bytes) {
                 self.regex_codes.0.insert(reference, code);
             }
@@ -2279,7 +2316,7 @@ impl Scheduler {
     /// table, as its exit does.
     #[cfg(test)]
     pub(super) fn remove_process(&mut self, id: ProcessId) {
-        self.processes.remove(&id);
+        self.processes.remove(id);
         self.node.remove_process(id);
     }
 
@@ -2308,7 +2345,7 @@ impl Scheduler {
     /// assert!(scheduler.process(ProcessId(99)).is_none());
     /// ```
     pub(super) fn process(&self, id: ProcessId) -> Option<&ProcessState> {
-        self.processes.get(&id)
+        self.processes.get(id)
     }
 
     /// Return the index and the pid of each process of the node process
@@ -2341,7 +2378,7 @@ impl Scheduler {
     /// ```
     pub(super) fn live_process(&self, id: ProcessId) -> Option<&ProcessState> {
         self.processes
-            .get(&id)
+            .get(id)
             .filter(|process| process.exiting.is_none())
     }
 
@@ -2375,7 +2412,7 @@ impl Scheduler {
     /// process.mailbox.fetch();
     /// ```
     pub(super) fn process_mut(&mut self, id: ProcessId) -> Option<&mut ProcessState> {
-        self.processes.get_mut(&id)
+        self.processes.get_mut(id)
     }
 
     /// Use `reductions` of the budget of the current process as virtual
@@ -2656,24 +2693,27 @@ impl Scheduler {
     /// `make_unique_monotonic_integer_value` (`erl_bif_unique.c:693-734`)
     /// do. The counter starts at -1, so the first call has the raw value 0.
     /// The value of a call without `positive` is the raw value plus
-    /// `MIN_SMALL`; the value of a call with `positive` is the raw value
-    /// plus 1.
+    /// `MIN_SMALL`; the value of a call with [`UniqueRange::Positive`] is the
+    /// raw value plus 1.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(scheduler.unique_monotonic_integer(false)?, -(1 << 59));
-    /// assert_eq!(scheduler.unique_monotonic_integer(false)?, -(1 << 59) + 1);
-    /// assert_eq!(scheduler.unique_monotonic_integer(true)?, 3);
+    /// assert_eq!(scheduler.unique_monotonic_integer(UniqueRange::Signed)?, -(1 << 59));
+    /// assert_eq!(scheduler.unique_monotonic_integer(UniqueRange::Signed)?, -(1 << 59) + 1);
+    /// assert_eq!(scheduler.unique_monotonic_integer(UniqueRange::Positive)?, 3);
     /// ```
     ///
     /// # Errors
     ///
     /// A value above the small integer range is a runtime error: ERTS then
     /// gives a bignum, which PBeam does not have.
-    pub(super) fn unique_monotonic_integer(&mut self, positive: bool) -> Result<i64, BeamError> {
+    pub(super) fn unique_monotonic_integer(
+        &mut self,
+        range: UniqueRange,
+    ) -> Result<i64, BeamError> {
         let raw = self.node.next_unique_monotonic();
-        let value = if positive {
+        let value = if range == UniqueRange::Positive {
             raw.checked_add(1)
         } else {
             raw.checked_add(SMALL_INTEGER_MIN)
@@ -2706,7 +2746,7 @@ impl Scheduler {
     /// assert_eq!(scheduler.scheduler_count(), 1);
     /// ```
     pub(super) fn scheduler_count(&self) -> i64 {
-        self.node.configured_count() as i64
+        i64::try_from(self.node.configured_count()).expect("a scheduler count fits in i64")
     }
 
     /// Return the registered name of the process `id` from the name table of
@@ -2853,7 +2893,7 @@ impl Scheduler {
     /// scheduler.deliver(target, Term::static_atom("ok"));
     /// ```
     pub(super) fn deliver(&mut self, target: ProcessId, term: Term) {
-        let Some(process) = self.processes.get_mut(&target) else {
+        let Some(process) = self.processes.get_mut(target) else {
             return;
         };
         if process.exiting.is_some() {
@@ -2879,7 +2919,7 @@ impl Scheduler {
     /// scheduler.send_message(caller, target, Term::static_atom("ok"));
     /// ```
     pub(super) fn send_message(&mut self, from: ProcessId, target: ProcessId, term: Term) {
-        if !self.processes.contains_key(&target)
+        if !self.processes.contains_key(target)
             && let Some(index) = self.remote_owner(target)
         {
             self.deliver_remote(index, target, signals::Held::Message { from, term });
@@ -2891,7 +2931,7 @@ impl Scheduler {
     /// Put the message into the mailbox of the local process `target`, as
     /// [`Self::send_message`] does.
     fn send_message_local(&mut self, from: ProcessId, target: ProcessId, term: Term) {
-        let Some(process) = self.processes.get(&target) else {
+        let Some(process) = self.processes.get(target) else {
             return;
         };
         if process.exiting.is_some() {
@@ -2899,10 +2939,7 @@ impl Scheduler {
         }
         let pending = self.take_pending_monitor(target);
         let released = pending.is_some();
-        let process = self
-            .processes
-            .get_mut(&target)
-            .expect("the target is alive");
+        let process = self.processes.get_mut(target).expect("the target is alive");
         process.self_signals |= from == target;
         if let Some(pending) = pending {
             process
@@ -2968,7 +3005,7 @@ impl Scheduler {
     /// heir and the receiver of an ETS table (`erl_db.c:3100`, `4877`,
     /// `5330`).
     pub(super) fn ets_alive(&self, target: ProcessId) -> bool {
-        match self.processes.get(&target) {
+        match self.processes.get(target) {
             Some(process) => process.exiting.is_none(),
             None => self.remote_live_owner(target).is_some(),
         }
@@ -3053,7 +3090,11 @@ impl Scheduler {
                         let _ = self.send_signal_local(Some(requester), target, signal);
                     } else {
                         let refers = self.check_process_code(target, &module);
-                        self.send_message(target, requester, check_process_code_reply(tag, refers));
+                        self.send_message(
+                            target,
+                            requester,
+                            check_process_code_reply(tag, Term::from(refers)),
+                        );
                     }
                 }
                 Delivery::Signal {
@@ -3062,11 +3103,11 @@ impl Scheduler {
                     signal,
                 } => {
                     if let Err(signal) = self.send_signal_local(sender, target, signal) {
-                        self.dead_target_signal(target, *signal);
+                        self.dead_target_signal(target, &signal);
                     }
                 }
                 Delivery::Cleanup { target } => {
-                    if self.processes.get(&target).is_some() {
+                    if self.processes.get(target).is_some() {
                         self.enqueue(target);
                     }
                 }
@@ -3103,7 +3144,7 @@ impl Scheduler {
     ///
     /// ```rust,ignore
     /// let down = Some(Term::static_atom("DOWN"));
-    /// let (pid, monitor) = scheduler.spawn(Start::Entry(frame), vec![], down, false, StartFlags::default(), None)?.unwrap();
+    /// let (pid, monitor) = scheduler.spawn(Start::Entry(frame), vec![], down, ChildLink::Unlinked, StartFlags::default(), None)?.unwrap();
     /// assert!(monitor.is_some());
     /// ```
     pub(super) fn spawn(
@@ -3111,7 +3152,7 @@ impl Scheduler {
         start: Start,
         arguments: Vec<Term>,
         monitor: Option<Term>,
-        link: bool,
+        link: ChildLink,
         flags: StartFlags,
         restrictions: Option<&[Restriction]>,
     ) -> Result<Result<(ProcessId, Option<Reference>), Denied>, BeamError> {
@@ -3132,7 +3173,7 @@ impl Scheduler {
             Ok(Vec::new())
         } else {
             check(true, Operation::Spawn, Some(module.as_bytes()))
-                .and_then(|()| check(link, Operation::Link, None))
+                .and_then(|()| check(link == ChildLink::Linked, Operation::Link, None))
                 .and_then(|()| check(monitor.is_some(), Operation::Monitor, None))
                 .and_then(|()| parent.delegate(restrictions))
         };
@@ -3175,7 +3216,7 @@ impl Scheduler {
         } else {
             None
         };
-        if link {
+        if link == ChildLink::Linked {
             self.current_process_mut()
                 .links
                 .insert(LinkId::Process(child.id), 0);
@@ -3198,7 +3239,7 @@ impl Scheduler {
     /// scheduler.revoke_issued(&[CapabilityKind::Process]);
     /// ```
     pub(super) fn revoke_issued(&mut self, kinds: &[CapabilityKind]) {
-        let root = self.processes.get(&ROOT);
+        let root = self.processes.get(ROOT);
         let copies: Vec<_> = root.map_or_else(Vec::new, |root| {
             kinds
                 .iter()
@@ -3461,7 +3502,9 @@ impl Scheduler {
             std::process::id().to_string().as_bytes(),
         ]
         .concat();
-        block_hash(&node, self.timers.now() as u32)
+        // The seed is the low 32 bits of the time, as the C conversion keeps them.
+        let [b0, b1, b2, b3, ..] = self.timers.now().to_le_bytes();
+        block_hash(&node, u32::from_le_bytes([b0, b1, b2, b3]))
     }
 
     /// Remove a monitor that the current process holds, as the ERTS
@@ -3532,7 +3575,7 @@ impl Scheduler {
         id: ProcessId,
         reference: Reference,
     ) -> Option<OriginMonitor> {
-        let monitors = &mut self.processes.get_mut(&id)?.monitors;
+        let monitors = &mut self.processes.get_mut(id)?.monitors;
         let origin = monitors.get_mut(&reference)?;
         let monitor = origin.monitor.take()?;
         if origin.alias != Some(AliasMode::ExplicitUnalias) {
@@ -3609,7 +3652,7 @@ impl Scheduler {
             Term::Port(port) => return self.register_port(name, *port),
             _ => return Err("none"),
         };
-        if self.processes.get(id).is_none() && self.remote_owner(*id).is_none() {
+        if self.processes.get(*id).is_none() && self.remote_owner(*id).is_none() {
             return Err("notalive");
         }
         if self.registered_name_of(*id).is_some() {
@@ -3619,7 +3662,7 @@ impl Scheduler {
         if !self.name_insert(&name_text, *id) {
             return Err("none");
         }
-        if let Some(process) = self.processes.get_mut(id) {
+        if let Some(process) = self.processes.get_mut(*id) {
             process.registered_name = Some(name.clone());
         }
         Ok(())
@@ -3630,9 +3673,9 @@ impl Scheduler {
     fn register_port(&mut self, name: &Atom, port: PortId) -> Result<(), &'static str> {
         let cell = self.node.port(port);
         let slot = cell.as_ref().map(crate::runtime::port::lock);
-        if !slot
+        if slot
             .as_ref()
-            .is_some_and(|slot| slot.as_ref().is_some_and(|port| !port.closing))
+            .is_none_or(|slot| slot.as_ref().is_none_or(|port| port.closing))
         {
             return Err("none");
         }
@@ -3679,7 +3722,7 @@ impl Scheduler {
             return false;
         };
         if let Named::Process(id) = owner
-            && let Some(process) = self.processes.get_mut(&id)
+            && let Some(process) = self.processes.get_mut(id)
         {
             process.registered_name = None;
         }
@@ -3769,7 +3812,7 @@ impl Scheduler {
         // the message either (`erts_whereis_process`, register.c:356).
         let live = |scheduler: &Self, target: ProcessId| {
             target != id
-                && match scheduler.processes.get(&target) {
+                && match scheduler.processes.get(target) {
                     Some(process) => process.exiting.is_none(),
                     None => scheduler.node.live_owner(target).is_some(),
                 }
@@ -3846,6 +3889,10 @@ impl Scheduler {
     /// them, before the first step. ERTS stops the emulator with this text
     /// and a crash dump (`erl_process.c:14186-14188`); PBeam writes no crash
     /// dump.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "mirrors the first step of `erts_continue_exit_process` in `erl_process.c` (14186-14188 and the exit steps before the links); the steps share the locals of the original"
+    )]
     pub(super) fn finish_current(
         &mut self,
         reason: Term,
@@ -3867,41 +3914,40 @@ impl Scheduler {
             )));
         }
         let process = self.current_process_mut();
-        let mut next = match process.continue_exit.take() {
-            Some(next) => next,
-            None => {
-                // A root process stands for the `-eval` process of `erl`,
-                // whose exception `init:start_it/1` catches
-                // (init.erl:1552-1567), so it sends no report.
-                if std::mem::take(&mut process.log_exit) && process.root.is_none() {
-                    self.send_exit_report(id, &reason)?;
-                }
-                let process = self.current_process_mut();
-                process.bump_reductions(EXIT_REDUCTIONS);
-                self.set_exiting(id);
-                self.release_persistent_terms(id);
-                let process = self.current_process_mut();
-                if let ReceiveTimer::Set { key, .. } = process.receive_timer {
-                    self.timers.cancel(key);
-                }
-                // A root records its result when its exit starts, and the
-                // run ends only after the exit completes (see
-                // [`Self::exit_links`]).
-                if let Some(slot) = self.current_process().root {
-                    let normal = reason == Term::static_atom("normal");
-                    let result = match result {
-                        Some(result) if normal => Ok(result),
-                        _ => Err(reason.clone()),
-                    };
-                    self.node.root_result(slot, result);
-                }
-                // The exit takes the timer tree from the node after the
-                // process is exiting, so no timer joins it later.
-                let tree = self.node.take_receiver_timers(id);
-                let process = self.current_process_mut();
-                process.bif_timers = tree;
-                process.bif_timers.post_order().position()
+        let mut next = if let Some(next) = process.continue_exit.take() {
+            next
+        } else {
+            // A root process stands for the `-eval` process of `erl`,
+            // whose exception `init:start_it/1` catches
+            // (init.erl:1552-1567), so it sends no report.
+            if std::mem::take(&mut process.log_exit) && process.root.is_none() {
+                self.send_exit_report(id, &reason)?;
             }
+            let process = self.current_process_mut();
+            process.bump_reductions(EXIT_REDUCTIONS);
+            self.set_exiting(id);
+            self.release_persistent_terms(id);
+            let process = self.current_process_mut();
+            if let ReceiveTimer::Set { key, .. } = process.receive_timer {
+                self.timers.cancel(key);
+            }
+            // A root records its result when its exit starts, and the
+            // run ends only after the exit completes (see
+            // [`Self::exit_links`]).
+            if let Some(slot) = self.current_process().root {
+                let normal = reason == Term::static_atom("normal");
+                let result = match result {
+                    Some(result) if normal => Ok(result),
+                    _ => Err(reason.clone()),
+                };
+                self.node.root_result(slot, result);
+            }
+            // The exit takes the timer tree from the node after the
+            // process is exiting, so no timer joins it later.
+            let tree = self.node.take_receiver_timers(id);
+            let process = self.current_process_mut();
+            process.bif_timers = tree;
+            process.bif_timers.post_order().position()
         };
         let process = self.current_process_mut();
         let mut reds = process.fcalls;
@@ -3963,7 +4009,7 @@ impl Scheduler {
         self.schedule_out();
         let mut process = self
             .processes
-            .remove(&id)
+            .remove(id)
             .expect("the exiting process is alive");
         debug_assert!(!process.in_run_queue, "only the current process exits");
         self.node.remove_process(id);
@@ -3976,7 +4022,8 @@ impl Scheduler {
             self.switch_out_freed(process, ExitPhase::Links(None));
             return Ok(());
         }
-        self.exit_links(process, ExitPhase::Links(None), reds)
+        self.exit_links(process, ExitPhase::Links(None), reds);
+        Ok(())
     }
 
     /// Switch out the freed process `process`, whose exit continues at
@@ -4033,19 +4080,13 @@ impl Scheduler {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.exit_links(process, ExitPhase::Links(None), 3850)?;
+    /// scheduler.exit_links(process, ExitPhase::Links(None), 3850);
     /// ```
-    ///
-    /// # Errors
-    ///
-    /// The close of a port with queued output that the process owns (see
-    /// [`Self::port_link_exit`]).
-    fn exit_links(
-        &mut self,
-        mut process: ProcessState,
-        mut phase: ExitPhase,
-        mut reds: i32,
-    ) -> Result<(), BeamError> {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "mirrors the exit phases of `erts_continue_exit_process` in `erl_process.c`: one arm for each phase of the state machine, and each arm yields with the position of its walk"
+    )]
+    fn exit_links(&mut self, mut process: ProcessState, mut phase: ExitPhase, mut reds: i32) {
         let id = process.id;
         let reason = process
             .exiting
@@ -4065,7 +4106,7 @@ impl Scheduler {
                         };
                         if reds <= 0 {
                             self.switch_out_freed(process, ExitPhase::Links(position));
-                            return Ok(());
+                            return;
                         }
                         match linked {
                             LinkId::Process(linked) if unlinking == 0 => {
@@ -4099,7 +4140,7 @@ impl Scheduler {
                         };
                         if reds <= 0 {
                             self.switch_out_freed(process, ExitPhase::Monitors(position));
-                            return Ok(());
+                            return;
                         }
                         if let Some(OriginMonitor {
                             kind: "process",
@@ -4129,7 +4170,7 @@ impl Scheduler {
                     while let Some(&monitor) = process.monitored_by.get(done) {
                         if reds <= 0 {
                             self.switch_out_freed(process, ExitPhase::TargetMonitors(done));
-                            return Ok(());
+                            return;
                         }
                         match monitor {
                             TargetMonitor::Process(monitor) => self.send_monitor_down(
@@ -4160,9 +4201,9 @@ impl Scheduler {
                     ExitPhase::Signals
                 }
                 ExitPhase::Signals => {
-                    if !self.handle_exit_signals(&mut process, reds)? {
+                    if !self.handle_exit_signals(&mut process, reds) {
                         self.switch_out_freed(process, ExitPhase::Signals);
-                        return Ok(());
+                        return;
                     }
                     break;
                 }
@@ -4179,7 +4220,6 @@ impl Scheduler {
         // again. Its terms go to the release work list, so that the walk of a
         // large graph runs in bounded scheduler work and not in this step.
         self.release_process(process);
-        Ok(())
     }
 }
 

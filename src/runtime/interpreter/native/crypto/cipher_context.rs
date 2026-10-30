@@ -5,10 +5,13 @@
 //! safe `openssl` crate makes each OpenSSL call.
 
 use super::cipher::{
-    CipherFailure, FIRST_AEAD, Padding, cipher_index, cipher_init, cipher_options, fetch_cipher,
-    final_output, init_context,
+    CipherDirection, CipherFailure, FIRST_AEAD, Padding, cipher_index, cipher_init, cipher_options,
+    fetch_cipher, final_output, init_context,
 };
-use super::*;
+use super::{
+    BeamError, BifResult, CIPHERS, HashMap, Map, Reference, Scheduler, Term, atom_name, c_error,
+    c_error_text, iodata_bytes, lock,
+};
 use openssl::cipher_ctx::CipherCtx;
 
 /// The cipher contexts of the node, as the `evp_cipher_ctx` resources of
@@ -133,8 +136,14 @@ pub(super) fn ng_crypto_init_nif(
     let outcome = with_cipher(scheduler, &arguments[0], |state| {
         let encrypt = encrypt.ok_or(("badarg", 695, 3, "Expected true or false"))?;
         state.encrypt = i8::from(encrypt);
-        cipher_init(&mut state.context, encrypt, None, None, None)
-            .map_err(|_| ("error", 701, -1, "Can't initialize encflag"))?;
+        cipher_init(
+            &mut state.context,
+            CipherDirection::from(encrypt),
+            None,
+            None,
+            None,
+        )
+        .map_err(|_| ("error", 701, -1, "Can't initialize encflag"))?;
         Ok(())
     });
     match outcome {
@@ -142,7 +151,7 @@ pub(super) fn ng_crypto_init_nif(
             let message = "Expected cipher name atom";
             c_error(scheduler, "badarg", "api_ng.c", 707, 0, message)
         }
-        Some(Ok(_)) => Ok(BifResult::Value(arguments[0].clone())),
+        Some(Ok(())) => Ok(BifResult::Value(arguments[0].clone())),
         Some(Err(failure)) => cipher_result(scheduler, Err(failure)),
     }
 }
@@ -177,7 +186,7 @@ pub(super) fn ng_crypto_update_nif(
         (data.is_none(), 745, "expected binary"),
         (
             data.as_ref()
-                .is_some_and(|data| data.len() > i32::MAX as usize),
+                .is_some_and(|data| data.len() > super::INT_MAX),
             748,
             "too long data",
         ),
@@ -187,7 +196,9 @@ pub(super) fn ng_crypto_update_nif(
     }
     let data = data.unwrap_or_default();
     let output = with_cipher(scheduler, context, |state| {
-        state.size = state.size.wrapping_add(data.len() as u32);
+        state.size = state.size.wrapping_add(
+            u32::try_from(data.len()).expect("the check bounds data to INT_MAX bytes"),
+        );
         let mut output = Vec::new();
         state
             .context
@@ -211,7 +222,11 @@ pub(super) fn ng_crypto_final_nif(
 ) -> Result<BifResult, BeamError> {
     let output = with_cipher(scheduler, context, |state| {
         let mut output = Vec::new();
-        let (encrypt, padding, size) = (state.encrypt != 0, state.padding, state.size);
+        let (encrypt, padding, size) = (
+            CipherDirection::from(state.encrypt != 0),
+            state.padding,
+            state.size,
+        );
         let padded_size = &mut state.padded_size;
         final_output(
             &mut state.context,
@@ -240,7 +255,7 @@ pub(super) fn ng_crypto_get_data_nif(
 ) -> Result<BifResult, BeamError> {
     let data = with_cipher(scheduler, context, |state| {
         (
-            state.size as i32,
+            state.size.cast_signed(),
             state.padded_size,
             padding_name(state.padding),
             state.encrypt != 0,
@@ -315,8 +330,9 @@ fn aead_init(scheduler: &Scheduler, arguments: &[Term]) -> Result<AeadContext, C
         Term::Integer(length) => u32::try_from(*length).ok(),
         _ => None,
     };
-    let tag_length = tag_length.ok_or(("badarg", 109, 2, "Bad Tag length"))? as usize;
-    if tag_length > i32::MAX as usize || key.len() > i32::MAX as usize {
+    let tag_length = usize::try_from(tag_length.ok_or(("badarg", 109, 2, "Bad Tag length"))?)
+        .expect("a u32 fits in usize");
+    if tag_length > super::INT_MAX || key.len() > super::INT_MAX {
         return Err(("badarg", 113, 1, "key or tag too long"));
     }
     let index = cipher_index(scheduler, &arguments[0])
@@ -328,8 +344,14 @@ fn aead_init(scheduler: &Scheduler, arguments: &[Term]) -> Result<AeadContext, C
     let message = "The cipher is not supported in this libcrypto version";
     let cipher = fetch_cipher(index).ok_or(("notsup", 131, 0, message))?;
     let mut context = CipherCtx::new().expect("OpenSSL allocates each cipher context");
-    cipher_init(&mut context, encrypt, Some(&cipher), None, None)
-        .map_err(|_| ("error", 136, -1, "CipherInit failed"))?;
+    cipher_init(
+        &mut context,
+        CipherDirection::from(encrypt),
+        Some(&cipher),
+        None,
+        None,
+    )
+    .map_err(|_| ("error", 136, -1, "CipherInit failed"))?;
     context
         .set_key_length(key.len())
         .map_err(|_| ("badarg", 138, 1, "Bad Key length"))?;
@@ -381,13 +403,12 @@ fn aead_run(state: &mut AeadContext, arguments: &[Term]) -> Result<Option<Vec<u8
     let text = iodata_bytes(&arguments[2]).ok_or(("badarg", 251, 2, "non-binary text"))?;
     let aad = iodata_bytes(&arguments[3]).ok_or(("badarg", 256, 3, "non-binary AAD"))?;
     let tag_length = state.tag_length;
-    let (text, tag) = match state.encrypt {
-        true => (&text[..], None),
-        false => {
-            let length = text.len().checked_sub(tag_length);
-            let length = length.ok_or(("error", 270, -1, "Bad in data"))?;
-            (&text[..length], Some(&text[length..]))
-        }
+    let (text, tag) = if state.encrypt {
+        (&text[..], None)
+    } else {
+        let length = text.len().checked_sub(tag_length);
+        let length = length.ok_or(("error", 270, -1, "Bad in data"))?;
+        (&text[..length], Some(&text[length..]))
     };
     let context = &mut state.context;
     context
@@ -400,12 +421,19 @@ fn aead_run(state: &mut AeadContext, arguments: &[Term]) -> Result<Option<Vec<u8
         };
         set.map_err(|_| ("badarg", 286, 5, "Can't set tag"))?;
     }
-    let (line, message) = match state.ccm {
-        true => (288, "Can't set key or iv"),
-        false => (296, "Can't set key and iv"),
+    let (line, message) = if state.ccm {
+        (288, "Can't set key or iv")
+    } else {
+        (296, "Can't set key and iv")
     };
-    cipher_init(context, state.encrypt, None, Some(&state.key), Some(&iv))
-        .map_err(|_| ("error", line, -1, message))?;
+    cipher_init(
+        context,
+        CipherDirection::from(state.encrypt),
+        None,
+        Some(&state.key),
+        Some(&iv),
+    )
+    .map_err(|_| ("error", line, -1, message))?;
     if state.ccm {
         context
             .set_data_len(text.len())

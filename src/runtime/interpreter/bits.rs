@@ -9,7 +9,7 @@
 
 use num_bigint::{BigInt, Sign};
 
-use crate::term::Binary;
+use crate::term::{Binary, Endian};
 
 /// A byte buffer that grows by any number of bits.
 ///
@@ -42,7 +42,8 @@ impl BitWriter {
             return;
         }
         let chunk = chunk & (u8::MAX >> (8 - count));
-        let free = (8 - self.bits % 8) as u32 % 8;
+        let free =
+            u32::try_from(8 - self.bits % 8).expect("the free bits of a byte fit in `u32`") % 8;
         match self.bytes.last_mut() {
             Some(last) if free >= count => *last |= chunk << (free - count),
             Some(last) if free > 0 => {
@@ -68,7 +69,7 @@ impl BitWriter {
     pub(super) fn push_bytes(&mut self, bytes: &[u8]) {
         if self.bits.is_multiple_of(8) {
             self.bytes.extend_from_slice(bytes);
-            self.bits += bytes.len() as u64 * 8;
+            self.bits += u64::try_from(bytes.len()).expect("a slice length fits in `u64`") * 8;
         } else {
             for &byte in bytes {
                 self.push_bits(byte, 8);
@@ -107,7 +108,10 @@ impl BitWriter {
     pub(super) fn push_bit_bytes(&mut self, bits: &[u8], size: usize) {
         self.push_bytes(&bits[..size / 8]);
         if !size.is_multiple_of(8) {
-            self.push_bits(bits[size / 8] >> (8 - size % 8), (size % 8) as u32);
+            self.push_bits(
+                bits[size / 8] >> (8 - size % 8),
+                u32::try_from(size % 8).expect("a remainder of 8 fits in `u32`"),
+            );
         }
     }
 
@@ -122,12 +126,18 @@ impl BitWriter {
     ///
     /// ```rust,ignore
     /// let mut writer = BitWriter::default();
-    /// writer.push_integer(0xABC, 12, true); // <<16#ABC:12/little>>
-    /// writer.push_integer(0xD, 4, false);
+    /// writer.push_integer(0xABC, 12, Endian::Little); // <<16#ABC:12/little>>
+    /// writer.push_integer(0xD, 4, Endian::Big);
     /// assert_eq!(writer.into_bytes(), (vec![0xBC, 0xAD], 16));
     /// ```
-    pub(super) fn push_integer(&mut self, value: i64, bits: u64, little: bool) {
-        self.push_integer_bytes(|index| (value >> (index * 8).min(63)) as u8, bits, little);
+    #[expect(
+        clippy::as_conversions,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the byte keeps the low 8 bits of the two's complement integer"
+    )]
+    pub(super) fn push_integer(&mut self, value: i64, bits: u64, endian: Endian) {
+        self.push_integer_bytes(|index| (value >> (index * 8).min(63)) as u8, bits, endian);
     }
 
     /// Write the bignum `value` in `bits` bits, as `push_integer` writes a
@@ -138,10 +148,10 @@ impl BitWriter {
     ///
     /// ```rust,ignore
     /// let mut writer = BitWriter::default();
-    /// writer.push_bigint(&-(BigInt::from(1) << 64), 72, false);
+    /// writer.push_bigint(&-(BigInt::from(1) << 64), 72, Endian::Big);
     /// assert_eq!(writer.into_bytes(), (vec![0xFF, 0, 0, 0, 0, 0, 0, 0, 0], 72));
     /// ```
-    pub(super) fn push_bigint(&mut self, value: &BigInt, bits: u64, little: bool) {
+    pub(super) fn push_bigint(&mut self, value: &BigInt, bits: u64, endian: Endian) {
         let bytes = value.to_signed_bytes_le();
         let sign = if value.sign() == Sign::Minus { 0xFF } else { 0 };
         let byte_at = |index: u64| {
@@ -151,14 +161,17 @@ impl BitWriter {
                 .copied()
                 .unwrap_or(sign)
         };
-        self.push_integer_bytes(byte_at, bits, little);
+        self.push_integer_bytes(byte_at, bits, endian);
     }
 
     /// Write `bits` bits of the two's complement integer whose byte at
     /// `index`, from the least significant byte, is `byte_at(index)`.
-    fn push_integer_bytes(&mut self, byte_at: impl Fn(u64) -> u8, bits: u64, little: bool) {
-        let (whole, rest) = (bits / 8, (bits % 8) as u32);
-        if little {
+    fn push_integer_bytes(&mut self, byte_at: impl Fn(u64) -> u8, bits: u64, endian: Endian) {
+        let (whole, rest) = (
+            bits / 8,
+            u32::try_from(bits % 8).expect("a remainder of 8 fits in `u32`"),
+        );
+        if endian == Endian::Little {
             for index in 0..whole {
                 self.push_bits(byte_at(index), 8);
             }
@@ -166,7 +179,7 @@ impl BitWriter {
         if rest > 0 {
             self.push_bits(byte_at(whole), rest);
         }
-        if !little {
+        if endian == Endian::Big {
             for index in (0..whole).rev() {
                 self.push_bits(byte_at(index), 8);
             }

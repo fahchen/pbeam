@@ -99,8 +99,8 @@ pub(crate) fn getnameinfo(
     unsafe {
         std::ptr::copy_nonoverlapping(address.as_ptr(), (&raw mut storage).cast::<u8>(), length);
     }
-    let mut host = [0 as c_char; NAME_LEN];
-    let mut service = [0 as c_char; NAME_LEN];
+    let mut host = [0; NAME_LEN];
+    let mut service = [0; NAME_LEN];
     // SAFETY: `storage` holds `length` bytes of the address, and the call
     // writes at most `NAME_LEN` bytes to each buffer.
     let result = unsafe {

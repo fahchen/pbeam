@@ -12,6 +12,10 @@
 //! mise run erts-eval --pa $PWD/fixtures/nif 'nif_terms:mismatches("/tmp/pbeam1288/nif_terms")'
 //! []
 //! ```
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 #[path = "../common/mod.rs"]
 mod common;

@@ -12,7 +12,7 @@ use std::{collections::HashMap, path::PathBuf, process::Command, sync::OnceLock}
 /// let io = pinned_beam("io");
 /// let program = BeamProgram::load(&[&erlang, &io, PROBE])?;
 /// ```
-pub fn pinned_beam(module: &str) -> Vec<u8> {
+pub(super) fn pinned_beam(module: &str) -> Vec<u8> {
     std::fs::read(pinned_beam_path(module)).unwrap()
 }
 
@@ -28,7 +28,7 @@ pub fn pinned_beam(module: &str) -> Vec<u8> {
 /// let path = pinned_beam_path("prim_tty");
 /// assert!(path.ends_with("prim_tty.beam"));
 /// ```
-pub fn pinned_beam_path(module: &str) -> PathBuf {
+pub(super) fn pinned_beam_path(module: &str) -> PathBuf {
     pinned_beam_paths()
         .get(module)
         .unwrap_or_else(|| panic!("the pinned OTP code path has no module {module}"))

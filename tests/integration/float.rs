@@ -1,3 +1,10 @@
+//! Runs float literals, arithmetic, comparison and text on PBeam and compares them with the pinned
+//! ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 #[path = "../common/mod.rs"]
 mod common;
 
@@ -86,7 +93,7 @@ fn loads_float_literals_as_pinned_erts() {
         1.0e300,
         5.0e-324,
         -2.5e-10,
-        123456789.0,
+        123_456_789.0,
     ]
     .map(Term::Float);
     let mut expected: Vec<Term> = floats.into();

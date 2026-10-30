@@ -1,3 +1,9 @@
+//! Checks the argument errors and the status codes of `halt` on PBeam against the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamError, BeamProgram, HostTerm, Term};
@@ -59,7 +65,7 @@ fn raises_badarg_for_each_status_and_option_that_halt_rejects() {
     let Some(results) = pbeam
         .term
         .proper_list()
-        .map(|results| results.collect::<Vec<_>>())
+        .map(std::iter::Iterator::collect::<Vec<_>>)
     else {
         panic!("{pbeam:?}");
     };

@@ -1,3 +1,10 @@
+//! Runs the `tcp_inet` port requests (reply bytes, socket options, linger) on PBeam and compares
+//! them with the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::{
     io::{Read, Write},
     net::{SocketAddr, TcpStream},
@@ -11,7 +18,7 @@ use std::{
     time::Duration,
 };
 
-use pbeam_runtime::{AllowAll, AtomTable, BeamProgram, Term};
+use pbeam_runtime::{AllowAll, AtomTable, BeamProgram, RootAuthority, Term};
 
 #[path = "../common/mod.rs"]
 mod common;
@@ -36,7 +43,7 @@ const UDP_LOCAL: &[u8] = include_bytes!("../../fixtures/tcp/udp_local.beam");
 /// The pinned OTP modules that the probes call: `erlang` has
 /// `open_port/2`, `port_control/3`, `port_close/1`, and `port_info/1`,
 /// which call the `erts_internal` port BIFs, and `prim_inet` makes the
-/// requests of `gen_tcp` (prim_inet.erl). `gen_tcp:controlling_process/2`
+/// requests of `gen_tcp` (`prim_inet.erl`). `gen_tcp:controlling_process/2`
 /// calls `inet_db:lookup_socket/1` and `inet:tcp_controlling_process/2`.
 /// `timer` has `sleep/1`.
 const MODULES: [&str; 8] = [
@@ -693,7 +700,7 @@ fn command_client(path: PathBuf, stop: Arc<AtomicBool>) -> thread::JoinHandle<Ve
                 }
                 std::fs::write(&temporary, step).unwrap();
                 std::fs::rename(&temporary, &ack).unwrap();
-                done = step.to_owned();
+                step.clone_into(&mut done);
             }
             thread::sleep(Duration::from_millis(2));
         }
@@ -1062,7 +1069,7 @@ fn stops_the_open_of_an_inet_port_in_a_runtime_process_of_a_boot_run() {
             "unsupported",
             &[program.host_term(argument)],
             "processes_policy",
-            true,
+            RootAuthority::Boot,
         )
         .unwrap_err()
         .to_string();
@@ -1125,7 +1132,7 @@ fn runs_a_local_udp_inet_socket_as_pinned_erts() {
         format!("<<{}>>", bytes.join(","))
     };
     let [a, b, c] = names.each_ref().map(|name| bin(name));
-    let (hi, yo, zz, q, r) = (bin("hi"), bin("yo"), bin("zz"), bin("q"), bin("r"));
+    let (hi, yo, zz, qq, rr) = (bin("hi"), bin("yo"), bin("zz"), bin("q"), bin("r"));
     // Linux gives no address for the sender of an unbound socket, which
     // `inet_get_address` reads as `AF_UNSPEC` (inet_drv.c:4938-4941).
     let unbound = if cfg!(target_os = "linux") {
@@ -1134,7 +1141,7 @@ fn runs_a_local_udp_inet_socket_as_pinned_erts() {
         "{local,<<>>}"
     };
     let expected = format!(
-        "[{{ok,{{local,{a}}}}},ok,{{udp,{{local,{a}}},0,{hi}}},{{ok,{{{{local,{b}}},0,{yo}}}}},{{error,enotconn}},ok,{{ok,{{local,{a}}}}},{{ok,{{{{local,{c}}},0,{zz}}}}},{{ok,{{{{local,{a}}},0,[108,105]}}}},{{ok,{{local,<<>>}}}},{{ok,{{{unbound},0,{q}}}}},{{udp,{unbound},0,{r}}}]"
+        "[{{ok,{{local,{a}}}}},ok,{{udp,{{local,{a}}},0,{hi}}},{{ok,{{{{local,{b}}},0,{yo}}}}},{{error,enotconn}},ok,{{ok,{{local,{a}}}}},{{ok,{{{{local,{c}}},0,{zz}}}}},{{ok,{{{{local,{a}}},0,[108,105]}}}},{{ok,{{local,<<>>}}}},{{ok,{{{unbound},0,{qq}}}}},{{udp,{unbound},0,{rr}}}]"
     );
     assert_eq!(erts, expected, "ERTS");
     assert_eq!(pbeam, expected, "PBeam");

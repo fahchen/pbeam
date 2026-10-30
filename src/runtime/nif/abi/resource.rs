@@ -13,6 +13,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::{c_int, c_void};
+use std::fmt;
 use std::mem::MaybeUninit;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
@@ -124,6 +125,19 @@ pub struct Resource {
     words: usize,
 }
 
+impl fmt::Debug for Resource {
+    /// Write the magic reference and the number of words of the data.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The type and the address stay out: the type holds C callbacks,
+        // and the address is a raw pointer value of the C data.
+        formatter
+            .debug_struct("Resource")
+            .field("reference", &self.reference)
+            .field("words", &self.words)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Resource {
     /// Return the magic reference of the resource terms of the object.
     pub(crate) fn reference(&self) -> Reference {
@@ -150,7 +164,7 @@ impl Drop for Resource {
                 dtor(
                     &raw mut env,
                     std::ptr::with_exposed_provenance_mut(self.data),
-                )
+                );
             };
         }
         lock().remove(&self.data);
@@ -223,7 +237,7 @@ pub(super) fn allocate(kind: Arc<ResourceType>, size: usize) -> usize {
         object: Arc::downgrade(&object),
         kept: vec![object],
     };
-    references().insert((reference.0, atoms), entry.object.clone());
+    references().insert((reference.0, atoms), Weak::clone(&entry.object));
     lock().insert(data, entry);
     data
 }
@@ -292,7 +306,7 @@ fn monitors() -> std::sync::MutexGuard<'static, BTreeMap<(u64, usize), Monitored
 pub(super) fn add_monitor(data: usize, down: DownFn, reference: Reference) {
     let object = lock()
         .get(&data)
-        .map(|entry| entry.object.clone())
+        .map(|entry| Weak::clone(&entry.object))
         .unwrap_or_default();
     let key = (reference.0, node_of(&object));
     monitors().insert(key, Monitored { object, data, down });
@@ -314,7 +328,7 @@ fn node_of(object: &Weak<Resource>) -> usize {
 pub(super) fn demonitor(data: usize, monitor: Reference) -> bool {
     // The entry compares the address and does not take the object, so no
     // drop of the object runs its destructor while the table is locked.
-    let object = lock().get(&data).map(|entry| entry.object.clone());
+    let object = lock().get(&data).map(|entry| Weak::clone(&entry.object));
     let key = (monitor.0, object.as_ref().map_or(0, node_of));
     let mut monitors = monitors();
     let owned = monitors.get(&key).is_some_and(|entry| entry.data == data);
@@ -352,3 +366,7 @@ pub(crate) fn monitor_down(monitor: Reference, pid: ProcessId, node: &Node) {
 
 /// `ERL_NIF_RT_CREATE` of `ErlNifResourceFlags` (`erl_nif.h:188-192`).
 pub(super) const CREATE: c_int = 1;
+
+#[cfg(test)]
+#[path = "../../../../tests/runtime/nif/abi/resource.rs"]
+mod tests;

@@ -52,6 +52,10 @@ const SMALL_INTEGER_TAG_BITS: u32 = 4;
 /// The number of path elements in one ERTS bignum digit
 /// (`PATH_ELEMS_PER_DIGIT`, `erl_map.c:3635`). A path element has
 /// `SLOT_BITS` bits.
+#[expect(
+    clippy::as_conversions,
+    reason = "a const cannot call `try_from`, and the value is 16"
+)]
 const PATH_ELEMS_PER_DIGIT: usize = (u64::BITS / SLOT_BITS) as usize;
 
 /// One key operation of [`Map::update`].
@@ -81,12 +85,15 @@ fn flatmap_holds(pairs: &[(Term, Term)], key: &Term, atoms: &AtomTable) -> bool 
         .is_ok()
 }
 
-/// The direction of an `erts_internal:map_next/3` walk over a map.
-#[derive(Clone, Copy, PartialEq)]
+/// The direction of an ordered walk: an `erts_internal:map_next/3` walk over a
+/// map, and a walk over the keys of an `ordered_set` table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Direction {
-    /// The `iterator` mode: from the first pair of the map order onwards.
+    /// From the first element of the order onwards: the `iterator` mode of a
+    /// map walk, and `ets:first/1` and `ets:next/2`.
     Forward,
-    /// The list mode: from the last pair of the map order backwards.
+    /// From the last element of the order backwards: the list mode of a map
+    /// walk, and `ets:last/1` and `ets:prev/2`.
     Backward,
 }
 
@@ -137,7 +144,7 @@ enum Entry<'a> {
 /// the drop cannot move the `Arc` out of the term, so it takes the `Arc` out
 /// of the `Option` and calls `Arc::into_inner` (see [`Map::drain_into`]).
 /// Each other reader finds the form.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Map {
     /// The flatmap or hashmap form of the map. All copies of the map own
     /// one reference to it. `insert` and `get_mut` copy it first when
@@ -147,7 +154,7 @@ pub struct Map {
 }
 
 /// The two forms of a map. The number of keys selects the form.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(super) enum Repr {
     /// At most 32 pairs, sorted by the flatmap key order.
     Flat(Vec<(Term, Term)>),
@@ -156,7 +163,7 @@ pub(super) enum Repr {
 }
 
 /// A hash array mapped trie of map pairs.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(super) struct Hamt {
     /// The node at level 0.
     pub(super) root: Node,
@@ -176,7 +183,7 @@ pub(super) enum Form<'a> {
 /// `children` holds one child per set bit, in ascending slot order. A copy
 /// of a node copies the keys and values of its leaves, and shares its child
 /// nodes.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(super) struct Node {
     /// The occupied slots.
     pub(super) bitmap: u16,
@@ -185,7 +192,7 @@ pub(super) struct Node {
 }
 
 /// The child in one slot of a HAMT node.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(super) enum Child {
     /// A key and its value.
     Leaf(Term, Term),
@@ -306,11 +313,7 @@ impl Drain {
                 Child::Collision(pairs) => self.collision = pairs,
             }
         }
-        while self
-            .nodes
-            .last()
-            .is_some_and(|children| children.is_empty())
-        {
+        while self.nodes.last().is_some_and(std::vec::Vec::is_empty) {
             self.nodes.pop();
         }
         moved
@@ -326,7 +329,7 @@ impl Drain {
     /// assert!(!drain.is_empty());
     /// ```
     pub(crate) fn is_empty(&self) -> bool {
-        self.collision.is_empty() && self.nodes.iter().all(|children| children.is_empty())
+        self.collision.is_empty() && self.nodes.iter().all(std::vec::Vec::is_empty)
     }
 
     /// Account the nodes, the collision pairs, and the terms that this drain
@@ -474,7 +477,7 @@ impl Map {
     /// assert_ne!(map.identity(), Map::new().identity());
     /// ```
     pub(super) fn identity(&self) -> usize {
-        Arc::as_ptr(self.arc()) as usize
+        Arc::as_ptr(self.arc()).addr()
     }
 
     /// Return the handle of the form for a change. This is the receiver of
@@ -746,7 +749,7 @@ impl Map {
                 apply_hash(hamt, operations, hashes, atoms);
             }
             Repr::Flat(pairs) => {
-                if let Convert::Yes(hamt) = update_flat(pairs, operations, hashes, atoms)? {
+                if let Convert::Yes(hamt) = update_flat(pairs, operations, &hashes, atoms)? {
                     self.repr = Some(Arc::new(Repr::Hash(hamt)));
                 }
             }
@@ -771,7 +774,7 @@ impl Map {
         // `pairs` holds the flatmap pairs, or the pairs of the current collision child.
         let (mut pairs, mut nodes) = match &**self.arc() {
             Repr::Flat(pairs) => (pairs.iter(), Vec::new()),
-            Repr::Hash(hamt) => (Default::default(), vec![hamt.root.children.iter()]),
+            Repr::Hash(hamt) => (std::slice::Iter::default(), vec![hamt.root.children.iter()]),
         };
         std::iter::from_fn(move || {
             loop {
@@ -838,7 +841,7 @@ impl Map {
                 match child {
                     Child::Leaf(key, value) => pending.extend([key, value]),
                     Child::Node(node) => {
-                        nodes.extend(Arc::into_inner(node).map(|node| node.children))
+                        nodes.extend(Arc::into_inner(node).map(|node| node.children));
                     }
                     Child::Collision(pairs) => {
                         pending.extend(pairs.into_iter().flat_map(|(key, value)| [key, value]));
@@ -893,7 +896,7 @@ impl Map {
     ) -> Result<Option<Chunk<'_>>, BeamError> {
         let hamt = match &**self.arc() {
             Repr::Flat(pairs) => {
-                let size = pairs.len() as u64;
+                let size = u64::try_from(pairs.len()).expect("a usize fits in u64");
                 let path = path.small_integer().map(unsigned_val);
                 return Ok(path.filter(|path| *path <= size).map(|_| Chunk {
                     pairs: pairs.iter().map(|(key, value)| (key, value)).collect(),
@@ -914,7 +917,7 @@ impl Map {
                 (path, limit)
             }
             // A positive bignum of one digit.
-            Term::Integer(value) if *value > 0 => (*value as u64, usize::MAX),
+            Term::Integer(value) if *value > 0 => (value.cast_unsigned(), usize::MAX),
             _ => return Ok(None),
         };
         limit = limit.min(budget).min(hamt.size);
@@ -960,13 +963,6 @@ impl Map {
     /// assert_eq!(big.merge_steps(&big.clone()), Some(0));
     /// ```
     pub(crate) fn merge_steps(&self, other: &Map) -> Option<usize> {
-        let both_flat = matches!(
-            (&**self.arc(), &**other.arc()),
-            (Repr::Flat(_), Repr::Flat(_))
-        );
-        if both_flat || self.len() == 0 || other.len() == 0 {
-            return None;
-        }
         fn hashes(map: &Map) -> Vec<(u64, &Term)> {
             map.iter()
                 .map(|(key, _)| {
@@ -976,6 +972,14 @@ impl Map {
                     )
                 })
                 .collect()
+        }
+
+        let both_flat = matches!(
+            (&**self.arc(), &**other.arc()),
+            (Repr::Flat(_), Repr::Flat(_))
+        );
+        if both_flat || self.len() == 0 || other.len() == 0 {
+            return None;
         }
         // The tree of a flatmap is new (`map_merge_mixed`), so it shares no node.
         let roots = match (&**self.arc(), &**other.arc()) {
@@ -1023,6 +1027,14 @@ fn merge_walk(
     nodes: Option<(&Node, &Node)>,
     level: u32,
 ) -> usize {
+    fn slots<'a>(keys: &[(u64, &'a Term)], level: u32) -> [Vec<(u64, &'a Term)>; 16] {
+        let mut slots: [Vec<(u64, &Term)>; 16] = Default::default();
+        for &(hash, key) in keys {
+            slots[to_usize(slot(hash, level))].push((hash, key));
+        }
+        slots
+    }
+
     if nodes.is_some_and(|(first, second)| std::ptr::eq(first, second)) || level == HAMT_MAX_LEVEL {
         return 0;
     }
@@ -1030,13 +1042,6 @@ fn merge_walk(
         && first == second
     {
         return 0;
-    }
-    fn slots<'a>(keys: &[(u64, &'a Term)], level: u32) -> [Vec<(u64, &'a Term)>; 16] {
-        let mut slots: [Vec<(u64, &Term)>; 16] = Default::default();
-        for &(hash, key) in keys {
-            slots[slot(hash, level) as usize].push((hash, key));
-        }
-        slots
     }
     // The nodes of the two maps in a slot, when both maps have a node there.
     let below = |slot| {
@@ -1106,11 +1111,11 @@ fn apply_hash(
 fn update_flat(
     pairs: &mut Vec<(Term, Term)>,
     operations: Vec<(Insert, Term, Term)>,
-    hashes: Vec<Option<u64>>,
+    hashes: &[Option<u64>],
     atoms: &AtomTable,
 ) -> Result<Convert, Term> {
     let mut added: Vec<&Term> = Vec::new();
-    for ((kind, key, _), hash) in operations.iter().zip(&hashes) {
+    for ((kind, key, _), hash) in operations.iter().zip(hashes) {
         if hash.is_none() {
             return Err(key.clone());
         }
@@ -1191,7 +1196,7 @@ impl Hamt {
         limit: usize,
         direction: Direction,
     ) -> Result<Option<Chunk<'_>>, BeamError> {
-        let mut above: Vec<(Entries, usize)> = Vec::new();
+        let mut above: Vec<(Entries<'_>, usize)> = Vec::new();
         let mut entries = Entries::Node(&self.root);
         let mut position = loop {
             let position = path_element(path, above.len());
@@ -1217,7 +1222,9 @@ impl Hamt {
             }
             if remaining == 0 {
                 let elements = above.iter().map(|(_, child)| *child);
-                break Some(encode_path(elements.chain([position]).collect())?);
+                break Some(encode_path(
+                    &elements.chain([position]).collect::<Vec<_>>(),
+                )?);
             }
             // A chunk takes a whole collision node: it may hold more than 16 pairs.
             if let (0, Entries::Collision(collision)) = (position, entries) {
@@ -1350,7 +1357,7 @@ impl Hamt {
         loop {
             let slot = slot(hash, level);
             let bit = 1 << slot;
-            let index = (node.bitmap & (bit - 1)).count_ones() as usize;
+            let index = to_usize((node.bitmap & (bit - 1)).count_ones());
             if node.bitmap & bit == 0 {
                 node.bitmap |= bit;
                 node.children.insert(index, Child::Leaf(key, value));
@@ -1438,7 +1445,7 @@ impl Node {
         if self.bitmap & bit == 0 {
             return None;
         }
-        Some(&self.children[(self.bitmap & (bit - 1)).count_ones() as usize])
+        Some(&self.children[to_usize((self.bitmap & (bit - 1)).count_ones())])
     }
 
     /// Return true when the node uses all 16 slots. A hashmap root with all
@@ -1553,6 +1560,13 @@ pub(crate) fn flatmap_order(left: &Term, right: &Term, atoms: &AtomTable) -> Ord
     }
 }
 
+/// A `u32` count or slot as `usize`, which holds every `u32` on a 64-bit
+/// host.
+#[inline]
+fn to_usize(value: u32) -> usize {
+    usize::try_from(value).expect("a u32 fits in usize")
+}
+
 /// Return the slot that a hash selects at a HAMT level. Level 0 uses the
 /// lowest four bits.
 ///
@@ -1562,6 +1576,10 @@ pub(crate) fn flatmap_order(left: &Term, right: &Term, atoms: &AtomTable) -> Ord
 /// assert_eq!(slot(0x21, 0), 1);
 /// assert_eq!(slot(0x21, 1), 2);
 /// ```
+#[expect(
+    clippy::as_conversions,
+    reason = "the mask keeps four bits, so the cast keeps every value"
+)]
 fn slot(hash: u64, level: u32) -> u32 {
     ((hash >> (SLOT_BITS * level)) & SLOT_MASK) as u32
 }
@@ -1576,7 +1594,7 @@ fn slot(hash: u64, level: u32) -> u32 {
 /// assert_eq!(unsigned_val(-1), (1 << 60) - 1);
 /// ```
 fn unsigned_val(value: i64) -> u64 {
-    value as u64 & (u64::MAX >> SMALL_INTEGER_TAG_BITS)
+    value.cast_unsigned() & (u64::MAX >> SMALL_INTEGER_TAG_BITS)
 }
 
 /// Return the element of an `erts_internal:map_next/3` path at a node
@@ -1594,7 +1612,8 @@ fn path_element(path: u64, depth: usize) -> usize {
     if depth >= PATH_ELEMS_PER_DIGIT {
         return 0;
     }
-    ((path >> (SLOT_BITS as usize * depth)) & SLOT_MASK) as usize
+    usize::try_from((path >> (to_usize(SLOT_BITS) * depth)) & SLOT_MASK)
+        .expect("a path element is below 16")
 }
 
 /// Return the integer of the path elements of a next pair, root first, as
@@ -1603,8 +1622,8 @@ fn path_element(path: u64, depth: usize) -> usize {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(encode_path(vec![0xb, 2])?, 0x2b);
-/// assert!(encode_path(vec![0; 16]).is_err());
+/// assert_eq!(encode_path(&[0xb, 2])?, 0x2b);
+/// assert!(encode_path(&[0; 16]).is_err());
 /// ```
 ///
 /// # Errors
@@ -1616,13 +1635,12 @@ fn path_element(path: u64, depth: usize) -> usize {
 /// so the bignum is not in normal form: on ERTS 29.1.1, it is not equal to
 /// the integer of the same value. With 17 elements, a path into a collision
 /// node, the value is 2^64 or more, or the top digit is 0.
-fn encode_path(elements: Vec<usize>) -> Result<i64, BeamError> {
+fn encode_path(elements: &[usize]) -> Result<i64, BeamError> {
     let depth = elements.len();
     let value = if depth < PATH_ELEMS_PER_DIGIT {
-        let value = elements
-            .iter()
-            .rev()
-            .fold(0, |value, element| (value << SLOT_BITS) | *element as i64);
+        let value = elements.iter().rev().fold(0, |value, element| {
+            (value << SLOT_BITS) | i64::try_from(*element).expect("a path element is below 16")
+        });
         let bignum = depth + 1 >= PATH_ELEMS_PER_DIGIT;
         (!bignum || Term::Integer(value).small_integer().is_none()).then_some(value)
     } else {
@@ -1689,8 +1707,8 @@ fn map_hash(key: &Term) -> Option<u64> {
         | Term::Float(_)
         | Term::Pid(_)
         | Term::Port(_)
-        | Term::Resource(_) => {}
-        Term::Reference(_) => {}
+        | Term::Resource(_)
+        | Term::Reference(_) => {}
         Term::Cons(_) | Term::Tuple(_) | Term::Map(_) | Term::Fun(_) | Term::Record(_) => {
             let mut pending = vec![key];
             while let Some(term) = pending.pop() {
@@ -1701,8 +1719,8 @@ fn map_hash(key: &Term) -> Option<u64> {
                     | Term::Float(_)
                     | Term::Pid(_)
                     | Term::Port(_)
-                    | Term::Resource(_) => {}
-                    Term::Reference(_) => {}
+                    | Term::Resource(_)
+                    | Term::Reference(_) => {}
                     Term::Cons(cell) => pending.extend([&cell.tail, &cell.head]),
                     Term::Tuple(elements) => pending.extend(elements.iter()),
                     Term::Map(map) => {

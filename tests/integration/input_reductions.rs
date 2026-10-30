@@ -1,3 +1,6 @@
+//! Checks the reduction charge and the traps of the input dependent BIFs on PBeam against the
+//! pinned ERTS with one scheduler.
+
 use std::process::Command;
 
 use pbeam_runtime::{AtomTable, BeamProgram, Term};

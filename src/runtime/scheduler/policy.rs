@@ -348,7 +348,7 @@ impl Scheduler {
     pub(in crate::runtime) fn begin_policy_call(&mut self, frame: Frame, arguments: Vec<Term>) {
         let policy = self.policy.as_mut().expect("the run has a policy process");
         let id = policy.id;
-        let process = self.processes.get_mut(&id).expect("the process is alive");
+        let process = self.processes.get_mut(id).expect("the process is alive");
         process.frames = vec![frame];
         process.registers = arguments.into_iter().map(Some).collect();
         policy.start = process.reductions;
@@ -532,7 +532,7 @@ impl Scheduler {
         let initial_call = Term::tuple(vec![
             Term::Atom(self.atoms.put(module)?),
             Term::Atom(self.atoms.put(function)?),
-            Term::Integer(*arity as i64),
+            Term::Integer(i64::try_from(*arity).expect("an arity fits in i64")),
         ]);
         let parent = parent.map_or_else(|| Term::static_atom("none"), Term::Pid);
         let pairs = vec![

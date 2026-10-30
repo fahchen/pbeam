@@ -1,3 +1,10 @@
+//! Reads and writes an IO device from a pipe and from a terminal in raw mode, and compares the
+//! result with the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::{
     io::{self, Read, Write},
     os::fd::{FromRawFd, OwnedFd},

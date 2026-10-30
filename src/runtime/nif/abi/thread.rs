@@ -39,7 +39,7 @@ pub(crate) fn set(kind: c_int) {
 /// a thread of a dirty pool, and `ERL_NIF_THR_UNDEFINED` on each other
 /// thread, such as a thread of the library (`erl_nif.c:3586-3600`).
 #[unsafe(no_mangle)]
-pub extern "C" fn enif_thread_type() -> c_int {
+pub(crate) extern "C" fn enif_thread_type() -> c_int {
     KIND.get()
 }
 

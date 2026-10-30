@@ -3,7 +3,7 @@
 //! `srp_host_secret_nif/5` (`srp.c:26-300`) of OTP 29.1.1. The safe
 //! `openssl` crate makes each OpenSSL call.
 
-use super::*;
+use super::{BifResult, Term};
 use openssl::bn::{BigNum, BigNumContext};
 use openssl::error::ErrorStack;
 

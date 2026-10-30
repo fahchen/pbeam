@@ -2,6 +2,10 @@
 //! `sha256/1` declaration of an Elixir module computes the digest with the
 //! `openssl` crate, and the declarations are checked against the registry
 //! before a run.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use pbeam_runtime::{
     BeamError, BeamProgram, Binding, Job, Library, NativeResult, NifContext, Term, register_library,
@@ -17,6 +21,10 @@ const SHA256_ABC: [u8; 32] = [
 
 /// Return the SHA-256 digest of a binary argument, and `badarg` for any
 /// other argument, as a NIF of the declaration does.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "NIF function pointer; every NIF returns `Result<NativeResult, BeamError>`"
+)]
 fn sha256(context: &mut NifContext<'_>, arguments: &[Term]) -> Result<NativeResult, BeamError> {
     match arguments.first() {
         Some(Term::Binary(data)) => Ok(NativeResult::Value(Term::binary(

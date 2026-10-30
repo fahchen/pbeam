@@ -10,7 +10,7 @@
 
 use super::keygen::is_undefined;
 use super::pkey::{Failure, badarg, ec_group, failed, finish_in};
-use super::*;
+use super::{BeamError, BifResult, Id, PKey, Scheduler, Term, atom_name};
 use openssl::bn::{BigNum, BigNumContext, BigNumRef};
 use openssl::derive::Deriver;
 use openssl::dh::Dh;

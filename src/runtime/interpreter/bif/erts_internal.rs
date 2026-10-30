@@ -3,10 +3,15 @@
 use std::cmp::Ordering;
 
 use super::BifResult::Value;
-use super::erlang::signals_return;
-use super::*;
+use super::erlang::{c_int, signals_return};
+use super::{
+    Atom, AtomTable, BeamError, BifContext, BifResult, ExceptionClass, ProcessId, Scheduler,
+    SpawnOptions, Target, Term, boot_denial, code, create_process, denial, error, iolist, maps,
+    other_process_denial, print_term, resolve, to_i64, to_u64, to_usize,
+};
 use crate::beam::code::PrepareError;
 use crate::runtime::process::LinkId;
+use crate::runtime::scheduler::node::Named;
 use crate::runtime::scheduler::{Accept, PTAB_SIZE, check_process_code_reply};
 use crate::runtime::{
     capability::{CapabilityKind, Operation},
@@ -206,6 +211,10 @@ const PORT_REDUCTIONS: i32 = 40;
 /// ERTS `SysDriverOpts` and the port flags that `open_port` sets
 /// (`erl_bif_port.c:812-834`).
 #[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "mirrors the independent option flags of `SysDriverOpts` and the port flags that `open_port` sets (`erl_bif_port.c:812-834`)"
+)]
 struct PortSettings {
     /// The low and the high limit of `{busy_limits_port, L}`: 4096 and
     /// 8192 by default (`erl_bif_port.c:824-825`).
@@ -294,7 +303,7 @@ pub(super) fn open_port(
     name: &Term,
     settings: &Term,
 ) -> Result<BifResult, BeamError> {
-    let Some(settings) = port_settings(&context.scheduler.atoms, settings)? else {
+    let Some(settings) = port_settings(&context.scheduler.atoms, settings) else {
         return Ok(Value(Term::static_atom("badopt")));
     };
     let atoms = &context.scheduler.atoms;
@@ -311,7 +320,7 @@ pub(super) fn open_port(
         .as_ref()
         .filter(|directory| !directory.is_nil())
     {
-        Some(directory) => match native_name(atoms, directory, false) {
+        Some(directory) => match native_name(atoms, directory, EmptyName::Reject) {
             Some(directory) => Some(directory),
             None => return Ok(Value(Term::static_atom("badarg"))),
         },
@@ -358,10 +367,10 @@ pub(super) fn open_port(
     } else if is_gethost(&path) {
         spawn::serve(move |input, output| gethost::serve(&args, input, output))
     } else {
-        let arg0 = settings.arg0.as_deref().unwrap_or(&path);
+        let program_name = settings.arg0.as_deref().unwrap_or(&path);
         spawn::spawn(
             &path,
-            arg0,
+            program_name,
             &args,
             settings.streams,
             settings.read_write,
@@ -428,7 +437,7 @@ fn is_gethost(path: &[u8]) -> bool {
 /// A driver other than `tcp_inet` and `udp_inet`, a setting other than
 /// `binary`, a port without `binary`, and an open by a runtime process in
 /// a run with a policy return a runtime error: no capability kind permits a
-/// network effect yet (rows "tcp_inet ports" and "udp_inet ports" of
+/// network effect yet (rows "`tcp_inet` ports" and "`udp_inet` ports" of
 /// `docs/erts-differences.md`). A boot process opens the port, because the
 /// boot authority passes each check (row "Boot authority"), as the kernel
 /// start opens a `udp_inet` port in `inet_config:set_hostname/0`.
@@ -523,8 +532,10 @@ fn open_fd_port(
             "unsupported open_port/2 without the binary option: see \"Ports\" in docs/erts-differences.md",
         ));
     }
-    let (Ok(input), Ok(output)) = (i32::try_from(input as u64), i32::try_from(output as u64))
-    else {
+    let (Ok(input), Ok(output)) = (
+        i32::try_from(input.cast_unsigned()),
+        i32::try_from(output.cast_unsigned()),
+    ) else {
         return Ok(Value(Term::static_atom("einval")));
     };
     // `fd_start` refuses an fd at or above `sys_max_files()`, the soft
@@ -532,8 +543,10 @@ fn open_fd_port(
     // `in` or `out` keeps, which `open_port` gives as `einval`.
     let max = nix::sys::resource::getrlimit(nix::sys::resource::Resource::RLIMIT_NOFILE)
         .map_or(u64::MAX, |(soft, _)| soft);
-    if (settings.read_write.read && input as u64 >= max)
-        || (settings.read_write.write && output as u64 >= max)
+    if (settings.read_write.read
+        && u64::try_from(input).expect("the conversion above keeps a non-negative fd") >= max)
+        || (settings.read_write.write
+            && u64::try_from(output).expect("the conversion above keeps a non-negative fd") >= max)
     {
         return Ok(Value(Term::static_atom("einval")));
     }
@@ -595,19 +608,16 @@ fn open_fd_port(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let settings = port_settings(&list)?.unwrap();
+/// let settings = port_settings(&list).unwrap();
 /// assert!(settings.binary);
-/// assert!(port_settings(&Term::static_atom("foo"))?.is_none());
+/// assert!(port_settings(&Term::static_atom("foo")).is_none());
 /// ```
-///
-/// # Errors
-///
-/// An option that ERTS accepts and PBeam does not support returns a runtime
-/// error, also when a later element is not valid.
-fn port_settings(atoms: &AtomTable, settings: &Term) -> Result<Option<PortSettings>, BeamError> {
-    let Some(elements) = settings.proper_list() else {
-        return Ok(None);
-    };
+#[expect(
+    clippy::too_many_lines,
+    reason = "option table: one branch for each `open_port` option, as the option loop of `erl_bif_port.c` (850-1022); the branches share the state of the loop"
+)]
+fn port_settings(atoms: &AtomTable, settings: &Term) -> Option<PortSettings> {
+    let elements = settings.proper_list()?;
     let mut result = PortSettings {
         busy_limits: (4096, 8192),
         streams: Streams {
@@ -633,21 +643,19 @@ fn port_settings(atoms: &AtomTable, settings: &Term) -> Result<Option<PortSettin
         match element {
             Term::Tuple(pair) if pair.len() == 2 => {
                 let Term::Atom(option) = &pair[0] else {
-                    return Ok(None);
+                    return None;
                 };
                 if option.is_static("args") {
-                    let Some(args) = port_args(atoms, &pair[1]) else {
-                        return Ok(None);
-                    };
+                    let args = port_args(atoms, &pair[1])?;
                     result.args = Some(args);
                     continue;
                 } else if option.is_static("packet") {
                     // ERTS keeps the small integer in the C `int`
                     // `packet_bytes`, which holds its low 32 bits
                     // (`erl_bif_port.c:850-861`).
-                    match pair[1].small_integer().map(|size| size as i32) {
-                        Some(size @ (1 | 2 | 4)) => result.packet = size as usize,
-                        _ => return Ok(None),
+                    match pair[1].small_integer().map(c_int) {
+                        Some(size @ (1 | 2 | 4)) => result.packet = to_usize(size),
+                        _ => return None,
                     }
                     continue;
                 } else if option.is_static("line") {
@@ -656,22 +664,18 @@ fn port_settings(atoms: &AtomTable, settings: &Term) -> Result<Option<PortSettin
                     // (`erl_bif_port.c:862-869`, `1139-1140`;
                     // `io.c:3149-3155`).
                     match pair[1].small_integer() {
-                        Some(size) if size > 0 => result.line = Some(size as i32),
-                        _ => return Ok(None),
+                        Some(size) if size > 0 => result.line = Some(c_int(size)),
+                        _ => return None,
                     }
                     continue;
                 } else if option.is_static("env") {
                     // A later `env` replaces an earlier one
                     // (`erl_bif_port.c:870-880`).
-                    let Some(changes) = environment_changes(&pair[1]) else {
-                        return Ok(None);
-                    };
+                    let changes = environment_changes(&pair[1])?;
                     result.environment = changes;
                     continue;
                 } else if option.is_static("arg0") {
-                    let Some(arg0) = native_name(atoms, &pair[1], true) else {
-                        return Ok(None);
-                    };
+                    let arg0 = native_name(atoms, &pair[1], EmptyName::Allow)?;
                     result.arg0 = Some(arg0);
                     continue;
                 } else if option.is_static("cd") {
@@ -681,26 +685,21 @@ fn port_settings(atoms: &AtomTable, settings: &Term) -> Result<Option<PortSettin
                     result.parallelism = match &pair[1] {
                         Term::Atom(value) if value.is_static("true") => true,
                         Term::Atom(value) if value.is_static("false") => false,
-                        _ => return Ok(None),
+                        _ => return None,
                     };
                     continue;
                 } else if option.is_static("busy_limits_port") {
-                    let Some(limits) = busy_limits(&pair[1]) else {
-                        return Ok(None);
-                    };
+                    let limits = busy_limits(&pair[1])?;
                     result.busy_limits = limits;
                     continue;
                 } else if option.is_static("busy_limits_msgq") {
                     // PBeam runs each port signal at once and keeps no
                     // signal queue of a port, so the limits of the queue
                     // never make the port busy.
-                    if busy_limits(&pair[1]).is_none() {
-                        return Ok(None);
-                    }
+                    busy_limits(&pair[1])?;
                     continue;
-                } else {
-                    return Ok(None);
                 }
+                return None;
             }
             Term::Atom(option) => {
                 if option.is_static("use_stdio") {
@@ -716,38 +715,37 @@ fn port_settings(atoms: &AtomTable, settings: &Term) -> Result<Option<PortSettin
                 } else if option.is_static("line") {
                     result.line = Some(512);
                 } else if option.is_static("exit_status") {
-                    result.exit_status = true
+                    result.exit_status = true;
                 } else if option.is_static("in") {
                     result.read_write.read = true;
                 } else if option.is_static("out") {
                     result.read_write.write = true;
                 } else if option.is_static("eof") {
-                    result.eof = true
+                    result.eof = true;
                 } else if option.is_static("overlapped_io") {
                     // Only a Windows port uses it (`erl_sys_driver.h:56`).
                 } else if option.is_static("hide") {
                     // Only a Windows port hides its window
                     // (`erl_bif_port.c:997-998`, `hide_window`).
                 } else {
-                    return Ok(None);
+                    return None;
                 }
-                continue;
             }
-            _ => return Ok(None),
+            _ => return None,
         }
     }
     // Mutually exclusive settings (`erl_bif_port.c:1018-1022`).
     if (result.streams.stderr_to_stdout && !result.streams.use_stdio)
         || (result.line.is_some() && result.packet != 0)
     {
-        return Ok(None);
+        return None;
     }
     // Without `in` and `out` the port reads and writes
     // (`erl_bif_port.c:1015-1016`).
     if !result.read_write.read && !result.read_write.write {
         result.read_write = ReadWrite::both();
     }
-    Ok(Some(result))
+    Some(result)
 }
 
 /// Return the changes of the `Env` of `{env, Env}` in order, as
@@ -814,7 +812,9 @@ fn line_size(size: i32) -> Result<Lines, BeamError> {
 /// ```
 fn port_args(atoms: &AtomTable, args: &Term) -> Option<Vec<Vec<u8>>> {
     let elements = args.proper_list()?;
-    elements.map(|arg| native_name(atoms, arg, true)).collect()
+    elements
+        .map(|arg| native_name(atoms, arg, EmptyName::Allow))
+        .collect()
 }
 
 /// The name of a port of `open_port/2`.
@@ -848,13 +848,13 @@ fn port_name(atoms: &AtomTable, name: &Term) -> Option<PortName> {
     };
     match elements.as_ref() {
         [Term::Atom(kind), name] if kind.is_static("spawn_executable") => {
-            native_name(atoms, name, false).map(PortName::Executable)
+            native_name(atoms, name, EmptyName::Reject).map(PortName::Executable)
         }
         [Term::Atom(kind), name] if kind.is_static("spawn_driver") => {
-            native_name(atoms, name, false).map(PortName::Driver)
+            native_name(atoms, name, EmptyName::Reject).map(PortName::Driver)
         }
         [Term::Atom(kind), name] if kind.is_static("spawn") => {
-            native_name(atoms, name, false).map(PortName::Command)
+            native_name(atoms, name, EmptyName::Reject).map(PortName::Command)
         }
         [Term::Atom(kind), input, output] if kind.is_static("fd") => input
             .small_integer()
@@ -862,6 +862,15 @@ fn port_name(atoms: &AtomTable, name: &Term) -> Option<PortName> {
             .map(|(input, output)| PortName::Fd(input, output)),
         _ => None,
     }
+}
+
+/// Whether `[]` is a valid name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EmptyName {
+    /// `[]` is no name.
+    Reject,
+    /// `[]` is the empty name.
+    Allow,
 }
 
 /// Return the native bytes of a file name, as
@@ -883,7 +892,7 @@ fn port_name(atoms: &AtomTable, name: &Term) -> Option<PortName> {
 /// assert_eq!(native_name(&atoms, &Term::nil(), false), None);
 /// assert_eq!(native_name(&atoms, &Term::nil(), true), Some(Vec::new()));
 /// ```
-fn native_name(atoms: &AtomTable, name: &Term, allow_empty: bool) -> Option<Vec<u8>> {
+fn native_name(atoms: &AtomTable, name: &Term, empty: EmptyName) -> Option<Vec<u8>> {
     let characters;
     let name = match name {
         Term::Binary(bytes) => {
@@ -896,7 +905,7 @@ fn native_name(atoms: &AtomTable, name: &Term, allow_empty: bool) -> Option<Vec<
             characters = Term::list_from(text.map(|c| Term::Integer(u32::from(c).into())));
             &characters
         }
-        name if name.is_nil() && !allow_empty => return None,
+        name if name.is_nil() && empty == EmptyName::Reject => return None,
         name => name,
     };
     native_filename(name, filename_encoding())
@@ -939,25 +948,25 @@ pub(super) type Slot<'a> = Option<port::PortGuard<'a>>;
 /// that has it as its registered name (`lookup_port`, erl_bif_port.c:132-142).
 /// The caller locks the port once with
 /// [`lock_found`] and checks its state under that lock, as ERTS checks the
-/// state of a port under the port lock (`erts_port_lookup`, erl_port.h).
+/// state of a port under the port lock (`erts_port_lookup`, `erl_port.h`).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let found = found_port(scheduler, &Term::Port(port))?;
+/// let found = found_port(scheduler, &Term::Port(port));
 /// let mut slot = lock_found(&found);
 /// assert!(open(&mut slot).is_some());
 /// ```
-pub(super) fn found_port(scheduler: &mut Scheduler, port: &Term) -> Result<Found, BeamError> {
+pub(super) fn found_port(scheduler: &mut Scheduler, port: &Term) -> Found {
     let id = match port {
         Term::Port(id) => *id,
         Term::Atom(name) => match scheduler.name_owner(scheduler.atoms.name_of(name)) {
             Some(Named::Port(id)) => id,
-            _ => return Ok(None),
+            _ => return None,
         },
-        _ => return Ok(None),
+        _ => return None,
     };
-    Ok(scheduler.node.port(id).map(|cell| (id, cell)))
+    scheduler.node.port(id).map(|cell| (id, cell))
 }
 
 /// Lock the port of `found`.
@@ -1034,7 +1043,7 @@ pub(super) fn port_command(
     // One lock of the port covers the check, the capability, and the
     // write or the send of the `tcp_inet` driver with its messages, as the
     // port lock does in `erts_port_output` (io.c:1715-2088).
-    let found = found_port(scheduler, port)?;
+    let found = found_port(scheduler, port);
     let mut slot = lock_found(&found);
     // The data is checked after `force` and after the busy state
     // (erl_bif_port.c:195-198; `erts_port_output`, io.c:1752-1756).
@@ -1145,7 +1154,7 @@ fn output(
         Driver::Inet(tcp) => {
             let caller = scheduler.current_process_mut().id;
             let sent = tcp.send(&bytes, caller, scheduler.local_node_hash())?;
-            port_state.output += bytes.len() as u64;
+            port_state.output += to_u64(bytes.len());
             return Ok(match sent {
                 Output::Sent(events) => {
                     // A send that made the port busy starts its send timer
@@ -1159,11 +1168,11 @@ fn output(
     };
     // A packet that does not fit in its header fails with `EINVAL`
     // (`sys_drivers.c:1153-1158`).
-    let size = bytes.len() as u64;
+    let size = to_u64(bytes.len());
     let written = spawn.packets.frame(bytes).ok_or(libc::EINVAL);
     let written = written.and_then(|framed| spawn.write(&framed));
     Ok(match written {
-        Ok(_) => {
+        Ok(()) => {
             port_state.output += size;
             Written::Done
         }
@@ -1197,7 +1206,7 @@ pub(super) fn port_close(
     port: &Term,
 ) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
-    let found = found_port(scheduler, port)?;
+    let found = found_port(scheduler, port);
     let mut slot = lock_found(&found);
     let (Some(port_state), Some(&(id, _))) = (open(&mut slot), found.as_ref()) else {
         drop(slot);
@@ -1242,7 +1251,7 @@ pub(super) fn port_exit(
     port: &Term,
     reason: &Term,
 ) -> Result<BifResult, BeamError> {
-    let found = found_port(scheduler, port)?;
+    let found = found_port(scheduler, port);
     let mut slot = lock_found(&found);
     if let (Some(port_state), Some(&(id, _))) = (open(&mut slot), found.as_ref()) {
         if let Some(denied) = port_denial(scheduler, &port_state.name, Operation::Close)? {
@@ -1290,7 +1299,7 @@ pub(super) fn port_call(
     let valid = operation
         .small_integer()
         .is_some_and(|value| u32::try_from(value).is_ok());
-    let found = found_port(scheduler, port)?;
+    let found = found_port(scheduler, port);
     let mut slot = lock_found(&found);
     if let (Some(port_state), true) = (located(&mut slot), valid)
         && let Some(denied) = port_denial(scheduler, &port_state.name, Operation::Command)?
@@ -1352,7 +1361,7 @@ pub(super) fn port_bang(
     id: PortId,
     message: &Term,
 ) -> Result<Option<BifResult>, BeamError> {
-    let found = found_port(scheduler, &Term::Port(id))?;
+    let found = found_port(scheduler, &Term::Port(id));
     let mut slot = lock_found(&found);
     let Some(port_state) = open(&mut slot) else {
         return Ok(None);
@@ -1439,7 +1448,7 @@ const SPAWN_CONTROL: u32 = 0x04c7_6a00;
 /// not an integer from 0 to 2^32 - 1, data that is not iodata, and a
 /// request that the driver rejects give the atom `badarg` and use no
 /// reductions. The control of the spawn driver, `spawn_control`
-/// (sys_drivers.c:241, 731-756), rejects each command other than
+/// (`sys_drivers.c:241`, 731-756), rejects each command other than
 /// `ERTS_SPAWN_DRV_CONTROL_MAGIC_NUMBER` (`0x04c76a00`, sys.h:1467). That
 /// command, which `erl_child_setup` sends when the program exits, sets the
 /// exit state of the port in ERTS; PBeam does not run it.
@@ -1470,7 +1479,7 @@ pub(super) fn port_control(
     let command = operation
         .small_integer()
         .and_then(|value| u32::try_from(value).ok());
-    let found = found_port(scheduler, port)?;
+    let found = found_port(scheduler, port);
     let mut slot = lock_found(&found);
     let (Some(port_state), Some(command), Some(bytes), Some(&(id, _))) = (
         located(&mut slot),
@@ -1512,8 +1521,8 @@ pub(super) fn port_control(
             events = Some((0..count).map(|_| Event::Passive).collect());
             Accept::Queued(reply)
         }
-        Control::Active { read } => {
-            events = Some(tcp.activate(read));
+        Control::Active { activation } => {
+            events = Some(tcp.activate(activation));
             Accept::Queued(vec![OK])
         }
         Control::Badarg => {
@@ -1586,7 +1595,7 @@ pub(super) fn port_denial(
 /// The atom `capability_denied` in a full atom table.
 pub(super) fn port_info(context: &mut BifContext<'_>, port: &Term) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
-    let found = found_port(scheduler, port)?;
+    let found = found_port(scheduler, port);
     let mut slot = lock_found(&found);
     let info = match (found.as_ref(), located(&mut slot)) {
         (Some(&(id, _)), Some(port_state)) => {
@@ -1603,7 +1612,7 @@ pub(super) fn port_info(context: &mut BifContext<'_>, port: &Term) -> Result<Bif
             let items = PORT_INFO_ITEMS
                 .iter()
                 .map(|&name| port_item(id, port, name))
-                .collect::<Result<Vec<_>, _>>()?;
+                .collect::<Vec<_>>();
             Term::list_from(registered.into_iter().chain(items).collect::<Vec<_>>())
         }
         (_, _) if matches!(port, Term::Port(_) | Term::Atom(_)) => Term::static_atom("undefined"),
@@ -1651,9 +1660,9 @@ fn registered_item(name: Atom) -> Term {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let item = port_item(id, port, "links")?;
+/// let item = port_item(id, port, "links");
 /// ```
-fn port_item(id: PortId, port: &Port, name: &str) -> Result<Term, BeamError> {
+fn port_item(id: PortId, port: &Port, name: &str) -> Term {
     let value = match name {
         "name" => Term::list_from(port.name.iter().map(|&byte| Term::Integer(byte.into()))),
         // `erts_bld_port_info` conses each entry of the post-order walk to
@@ -1687,7 +1696,7 @@ fn port_item(id: PortId, port: &Port, name: &str) -> Result<Term, BeamError> {
             Driver::Inet(_) => Term::static_atom("undefined"),
         },
     };
-    Ok(Term::tuple(vec![Term::static_atom(name), value]))
+    Term::tuple(vec![Term::static_atom(name), value])
 }
 
 /// Run `erts_internal:port_info(Port, Item)`, which `erlang:port_info/2`
@@ -1718,7 +1727,7 @@ pub(super) fn port_info_item(
     item: &Term,
 ) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
-    let found = found_port(scheduler, port)?;
+    let found = found_port(scheduler, port);
     let mut slot = lock_found(&found);
     let info = match (found.as_ref(), located(&mut slot)) {
         (Some(&(id, _)), Some(port_state)) => {
@@ -1769,7 +1778,7 @@ pub(super) fn port_info_item(
                     .registered_port_name(id)
                     .map_or(Term::Nil, registered_item)
             } else {
-                port_item(id, port_state, name)?
+                port_item(id, port_state, name)
             }
         }
         (_, _) if matches!(port, Term::Port(_) | Term::Atom(_)) => Term::static_atom("undefined"),
@@ -1809,7 +1818,7 @@ pub(super) fn port_connect(
     pid: &Term,
 ) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
-    let found = found_port(scheduler, port)?;
+    let found = found_port(scheduler, port);
     let mut slot = lock_found(&found);
     let name = open(&mut slot).map(|port_state| port_state.name.clone());
     drop(slot);
@@ -1850,7 +1859,7 @@ fn connect_denial(
 }
 
 /// The reductions of a port connect (`ERTS_PORT_REDS_CONNECT`,
-/// `CONTEXT_REDS / 200`, erl_port.h:371).
+/// `CONTEXT_REDS / 200`, `erl_port.h:371`).
 const CONNECT_REDUCTIONS: i32 = 20;
 
 /// Run `erts_internal:prepare_loading(Module, Code)`, which
@@ -1946,7 +1955,7 @@ pub(super) fn list_to_integer(list: &Term, base: &Term) -> BifResult {
         return atom("not_a_list");
     };
     let base = match base.small_integer() {
-        Some(base @ 2..=36) => base as u32,
+        Some(base @ 2..=36) => u32::try_from(base).expect("the pattern bounds the base to 2..=36"),
         _ => return atom("badarg"),
     };
     let byte = |term: &Term| term.small_integer().map(|value| value.to_le_bytes()[0]);
@@ -1982,7 +1991,7 @@ pub(super) fn list_to_integer(list: &Term, base: &Term) -> BifResult {
             Value(Term::tuple(vec![Term::Integer(0), rest.clone()]))
         };
     }
-    let digits_per_small = DIGITS_PER_SMALL[base as usize - 2];
+    let digits_per_small = DIGITS_PER_SMALL[to_usize(base) - 2];
     let (mut value, mut count) = (0_i64, 0);
     while count <= digits_per_small {
         let Some((head, tail)) = rest.cons_cell() else {
@@ -2039,7 +2048,10 @@ pub(super) fn binary_to_integer(binary: &Term, base: &Term) -> BifResult {
     let Some(bytes) = binary.binary_bytes() else {
         return badarg();
     };
-    chars_to_integer(bytes, base as u32)
+    chars_to_integer(
+        bytes,
+        u32::try_from(base).expect("the filter bounds the base to 2..=36"),
+    )
 }
 
 /// Return the integer that the byte text `text` reads as in `base`, as
@@ -2074,7 +2086,7 @@ fn chars_to_integer(text: &[u8], base: u32) -> BifResult {
     if digits.is_empty() {
         return Value(Term::Integer(0));
     }
-    if digits.len() > DIGITS_PER_SMALL[base as usize - 2] as usize {
+    if digits.len() > to_usize(DIGITS_PER_SMALL[to_usize(base) - 2]) {
         return Value(Term::static_atom("big"));
     }
     let mut value = 0_i64;
@@ -2191,6 +2203,10 @@ const PTAB_REDS_MULTIPLIER: u64 = 25;
 /// # Errors
 ///
 /// A budget of the current process that is less than 0.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn processes_next(
     scheduler: &mut Scheduler,
     first: &Term,
@@ -2202,7 +2218,8 @@ pub(super) fn processes_next(
         return Ok(BifResult::badarg());
     };
     // `MAX(ERTS_BIF_REDS_LEFT(c_p), 1)` (`erl_ptab.c:1486`).
-    let max_pids = scheduler.current_process().bif_reductions_or_zero().max(1) as u64;
+    let max_pids = scheduler.current_process().bif_reductions_or_zero().max(1);
+    let max_pids = to_u64(max_pids);
     let limit = PTAB_SIZE.min(first.saturating_add(max_pids * PTAB_REDS_MULTIPLIER));
     if first > limit {
         return Ok(BifResult::badarg());
@@ -2211,18 +2228,18 @@ pub(super) fn processes_next(
         return Ok(Value(Term::static_atom("none")));
     }
     let hidden = super::erlang::hidden_policy(scheduler);
-    let found = scheduler.ptab_indexed(first, limit, max_pids as usize, |id| Some(id) != hidden);
+    let found = scheduler.ptab_indexed(first, limit, to_usize(max_pids), |id| Some(id) != hidden);
     let next = match found.last() {
-        Some((index, _)) if found.len() as u64 == max_pids => index + 1,
+        Some((index, _)) if to_u64(found.len()) == max_pids => index + 1,
         _ => limit,
     };
     let pids: Vec<Term> = found.into_iter().map(|(_, id)| Term::Pid(id)).collect();
     let scanned = (next - first) / PTAB_REDS_MULTIPLIER + 1;
     scheduler
         .current_process_mut()
-        .bump_reductions(scanned as i32);
+        .bump_reductions(i32::try_from(scanned).expect("the process table bounds the scan"));
     Ok(Value(Term::tuple(vec![
-        Term::Integer(next as i64),
+        Term::Integer(to_i64(next)),
         Term::list_from(pids),
     ])))
 }
@@ -2318,7 +2335,7 @@ pub(super) fn request_system_task(
         return Ok(Value(Term::static_atom("ok")));
     }
     let refers = scheduler.check_process_code(*target, module);
-    let reply = check_process_code_reply(id.clone(), refers);
+    let reply = check_process_code_reply(id.clone(), Term::from(refers));
     scheduler.send_message(caller, caller, reply);
     Ok(Value(Term::static_atom("ok")))
 }
@@ -2512,6 +2529,10 @@ pub(super) fn spawn_system_process(
 /// // The list of the bytes of "ab... ".
 /// ```
 pub(super) fn term_to_string(atoms: &AtomTable, term: &Term, limit: &Term) -> BifResult {
+    #[expect(
+        clippy::as_conversions,
+        reason = "`From` is not const, and `i32::MAX` fits in `i64`"
+    )]
     const INT_MAX: i64 = i32::MAX as i64;
     let limit = match limit {
         Term::Integer(limit) if (2..INT_MAX).contains(limit) => *limit,

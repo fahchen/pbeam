@@ -1,6 +1,10 @@
 //! The release build and the ERTS version check of `mix pbeam.build`: the
 //! task builds the release itself, and it stops on a release of another
 //! ERTS version.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::{
     fs,
@@ -34,6 +38,10 @@ fn run(command: &mut Command) -> (Option<i32>, String, String) {
 /// The copy of `mix.exs` names the PBeam source of the test run and the
 /// private release directory `directory/release`, so that the task writes
 /// no file of the repository build that other tests read.
+#[expect(
+    clippy::unnecessary_debug_formatting,
+    reason = "`{:?}` writes a path as a quoted string literal, which `mix.exs` reads as an Elixir string"
+)]
 fn copied_example(directory: &Path) -> PathBuf {
     let example = directory.join("plug_hello");
     fs::create_dir_all(&example).unwrap();

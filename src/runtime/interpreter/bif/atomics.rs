@@ -8,9 +8,9 @@ use num_bigint::{BigInt, Sign};
 use num_traits::ToPrimitive;
 
 use super::BifResult::Value;
-use super::*;
+use super::{BeamError, BifResult, ExceptionClass, Scheduler, Term, to_i64, to_u64, to_usize};
 use crate::runtime::atomics::{ATOMIC_BYTES, Array};
-use crate::term::Map;
+use crate::term::{Map, Signedness};
 use std::sync::Arc;
 
 /// The bit of the encoded options of `atomics:new/2` that selects signed
@@ -70,11 +70,15 @@ pub(super) fn new(
     // PBeam runs on 64-bit hosts, and the check above keeps the size of the
     // array in `usize`.
     let id = scheduler.make_magic_ref()?;
-    if !scheduler
-        .node()
-        .atomics
-        .create(id, options & OPT_SIGNED == OPT_SIGNED, size as usize)
-    {
+    if !scheduler.node().atomics.create(
+        id,
+        if options & OPT_SIGNED == OPT_SIGNED {
+            Signedness::Signed
+        } else {
+            Signedness::Unsigned
+        },
+        to_usize(size),
+    ) {
         return Ok(system_limit());
     }
     Ok(Value(Term::Reference(id)))
@@ -97,6 +101,10 @@ pub(super) fn new(
 /// # Errors
 ///
 /// A full atom table gives the error of [`Term::from_bigint`].
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn get(
     scheduler: &mut Scheduler,
     reference: &Term,
@@ -108,7 +116,7 @@ pub(super) fn get(
     let Some(position) = position(&array, index) else {
         return Ok(BifResult::badarg());
     };
-    Ok(Value(value(array.signed(), array.get(position))))
+    Ok(Value(value(array.signedness(), array.get(position))))
 }
 
 /// Run `atomics:put(Ref, Ix, Value)`: write `Value` to the atomic at the
@@ -127,6 +135,10 @@ pub(super) fn get(
 /// let result = put(&mut scheduler, &reference, &Term::Integer(1), &Term::Integer(-1))?;
 /// assert!(matches!(result, BifResult::Value(Term::Atom(_))));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn put(
     scheduler: &mut Scheduler,
     reference: &Term,
@@ -139,7 +151,7 @@ pub(super) fn put(
     let Some(position) = position(&array, index) else {
         return Ok(BifResult::badarg());
     };
-    let Some(bits) = value_bits(array.signed(), value) else {
+    let Some(bits) = value_bits(array.signedness(), value) else {
         return Ok(BifResult::badarg());
     };
     array.set(position, bits);
@@ -162,6 +174,10 @@ pub(super) fn put(
 /// let result = add(&mut scheduler, &reference, &Term::Integer(1), &Term::Integer(1))?;
 /// assert!(matches!(result, BifResult::Value(Term::Atom(_))));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn add(
     scheduler: &mut Scheduler,
     reference: &Term,
@@ -186,6 +202,10 @@ pub(super) fn add(
 /// (`erl_bif_atomics.c:187-198`) does. The checks and the `badarg` cases
 /// are those of [`add`], and the value has the form of [`get`]
 /// (`bld_atomic`, `erl_bif_atomics.c:125-146`).
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn add_get(
     scheduler: &mut Scheduler,
     reference: &Term,
@@ -201,13 +221,20 @@ pub(super) fn add_get(
     let Some(bits) = increment_bits(increment) else {
         return Ok(BifResult::badarg());
     };
-    Ok(Value(value(array.signed(), array.add_get(position, bits))))
+    Ok(Value(value(
+        array.signedness(),
+        array.add_get(position, bits),
+    )))
 }
 
 /// Run `atomics:exchange(Ref, Ix, Desired)`: write `Desired` to the atomic
 /// at the index and return the old value, as `atomics_exchange_3`
 /// (`erl_bif_atomics.c:200-212`) does. The checks and the `badarg` cases
 /// are those of [`put`], and the value has the form of [`get`].
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn exchange(
     scheduler: &mut Scheduler,
     reference: &Term,
@@ -220,10 +247,13 @@ pub(super) fn exchange(
     let Some(position) = position(&array, index) else {
         return Ok(BifResult::badarg());
     };
-    let Some(bits) = value_bits(array.signed(), desired) else {
+    let Some(bits) = value_bits(array.signedness(), desired) else {
         return Ok(BifResult::badarg());
     };
-    Ok(Value(value(array.signed(), array.exchange(position, bits))))
+    Ok(Value(value(
+        array.signedness(),
+        array.exchange(position, bits),
+    )))
 }
 
 /// Run `atomics:compare_exchange(Ref, Ix, Expected, Desired)`: write
@@ -232,6 +262,10 @@ pub(super) fn exchange(
 /// write gives `ok`, and a miss gives the value of the atomic in the form
 /// of [`get`]. `Expected` and `Desired` take the range of the array, as in
 /// [`put`], and each failed check raises `badarg`.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn compare_exchange(
     scheduler: &mut Scheduler,
     reference: &Term,
@@ -246,8 +280,8 @@ pub(super) fn compare_exchange(
         return Ok(BifResult::badarg());
     };
     let (Some(expected), Some(desired)) = (
-        value_bits(array.signed(), expected),
-        value_bits(array.signed(), desired),
+        value_bits(array.signedness(), expected),
+        value_bits(array.signedness(), desired),
     ) else {
         return Ok(BifResult::badarg());
     };
@@ -255,7 +289,7 @@ pub(super) fn compare_exchange(
     if was == expected {
         return Ok(Value(Term::static_atom("ok")));
     }
-    Ok(Value(value(array.signed(), was)))
+    Ok(Value(value(array.signedness(), was)))
 }
 
 /// Run `atomics:info(Ref)`: return the information map of the array, as
@@ -271,11 +305,15 @@ pub(super) fn compare_exchange(
 /// // `#{max => 9223372036854775807, memory => 48, min => -9223372036854775808, size => 1}`.
 /// assert!(matches!(info(&mut scheduler, &reference)?, BifResult::Value(Term::Map(_))));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn info(scheduler: &mut Scheduler, reference: &Term) -> Result<BifResult, BeamError> {
     let Some(array) = scheduler.node().atomics.array(reference) else {
         return Ok(BifResult::badarg());
     };
-    let (min, max) = if array.signed() {
+    let (min, max) = if array.signedness() == Signedness::Signed {
         (Term::Integer(i64::MIN), Term::Integer(i64::MAX))
     } else {
         (Term::Integer(0), Term::from_bigint(BigInt::from(u64::MAX)))
@@ -284,7 +322,10 @@ pub(super) fn info(scheduler: &mut Scheduler, reference: &Term) -> Result<BifRes
         (Term::static_atom("max"), max),
         (Term::static_atom("memory"), Term::Integer(array.memory())),
         (Term::static_atom("min"), min),
-        (Term::static_atom("size"), Term::Integer(array.len() as i64)),
+        (
+            Term::static_atom("size"),
+            Term::Integer(to_i64(array.len())),
+        ),
     ];
     // ponytail: each key is a static atom, so `from_pairs` cannot fail.
     let map = Map::from_pairs(pairs, &scheduler.atoms).expect("static atom keys fit each map form");
@@ -345,7 +386,11 @@ pub(super) fn counters_new(scheduler: &mut Scheduler, size: &Term) -> Result<Bif
         return Ok(system_limit());
     }
     let id = scheduler.make_ref()?;
-    if !scheduler.node().counters.create(id, true, size as usize) {
+    if !scheduler
+        .node()
+        .counters
+        .create(id, Signedness::Signed, to_usize(size))
+    {
         return Ok(system_limit());
     }
     Ok(Value(Term::Reference(id)))
@@ -362,6 +407,10 @@ pub(super) fn counters_new(scheduler: &mut Scheduler, size: &Term) -> Result<Bif
 /// ```rust,ignore
 /// assert_eq!(counters_get(&mut scheduler, &reference, &Term::Integer(1))?, BifResult::Value(Term::Integer(0)));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn counters_get(
     scheduler: &mut Scheduler,
     reference: &Term,
@@ -385,6 +434,10 @@ pub(super) fn counters_get(
 /// let result = counters_add(&mut scheduler, &reference, &Term::Integer(1), &Term::Integer(1))?;
 /// assert!(matches!(result, BifResult::Value(Term::Atom(_))));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn counters_add(
     scheduler: &mut Scheduler,
     reference: &Term,
@@ -413,6 +466,10 @@ pub(super) fn counters_add(
 /// let result = counters_put(&mut scheduler, &reference, &Term::Integer(1), &Term::Integer(-1))?;
 /// assert!(matches!(result, BifResult::Value(Term::Atom(_))));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn counters_put(
     scheduler: &mut Scheduler,
     reference: &Term,
@@ -442,6 +499,10 @@ pub(super) fn counters_put(
 /// // One counter on one scheduler holds `#{memory => 160, size => 1}`.
 /// assert!(matches!(counters_info(&mut scheduler, &reference)?, BifResult::Value(Term::Map(_))));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn counters_info(
     scheduler: &mut Scheduler,
     reference: &Term,
@@ -449,7 +510,7 @@ pub(super) fn counters_info(
     let Some(array) = scheduler.node().counters.array(reference) else {
         return Ok(BifResult::badarg());
     };
-    let size = array.len() as u64;
+    let size = to_u64(array.len());
     let per_line = CACHE_LINE_BYTES / ATOMIC_BYTES;
     let cache_lines = atomics_per_counter(scheduler) * size.div_ceil(per_line);
     let memory = COUNTERS_HEADER_BYTES + cache_lines * CACHE_LINE_BYTES;
@@ -471,7 +532,7 @@ pub(super) fn counters_info(
 /// Return the atomics of one counter in ERTS: one for each scheduler and
 /// one for the base value (`ATOMICS_PER_COUNTER`, `erl_bif_counters.c:50`).
 fn atomics_per_counter(scheduler: &Scheduler) -> u64 {
-    scheduler.scheduler_count() as u64 + 1
+    scheduler.scheduler_count().cast_unsigned() + 1
 }
 
 /// Return the counter array of `reference` and the position that `index`
@@ -538,7 +599,7 @@ fn system_limit() -> BifResult {
 /// ```
 fn position(array: &Array, index: &Term) -> Option<usize> {
     let index = to_uword(index).ok()?.checked_sub(1)?;
-    (index < array.len() as u64).then_some(index as usize)
+    (index < to_u64(array.len())).then_some(to_usize(index))
 }
 
 /// Return the bits of the value `term` for an array, as `get_value`
@@ -549,11 +610,11 @@ fn position(array: &Array, index: &Term) -> Option<usize> {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(value_bits(true, &Term::Integer(-1)), Some(-1));
-/// assert_eq!(value_bits(false, &Term::Integer(-1)), None);
+/// assert_eq!(value_bits(Signedness::Signed, &Term::Integer(-1)), Some(-1));
+/// assert_eq!(value_bits(Signedness::Unsigned, &Term::Integer(-1)), None);
 /// ```
-fn value_bits(signed: bool, term: &Term) -> Option<i64> {
-    if signed {
+fn value_bits(signedness: Signedness, term: &Term) -> Option<i64> {
+    if signedness == Signedness::Signed {
         signed_bits(term)
     } else {
         unsigned_bits(term)
@@ -603,8 +664,8 @@ fn signed_bits(term: &Term) -> Option<i64> {
 /// ```
 fn unsigned_bits(term: &Term) -> Option<i64> {
     match term {
-        Term::Integer(value) => u64::try_from(*value).ok().map(|value| value as i64),
-        Term::BigInt(value) => value.to_u64().map(|value| value as i64),
+        Term::Integer(value) => u64::try_from(*value).ok().map(u64::cast_signed),
+        Term::BigInt(value) => value.to_u64().map(u64::cast_signed),
         _ => None,
     }
 }
@@ -617,14 +678,14 @@ fn unsigned_bits(term: &Term) -> Option<i64> {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(value(true, -1), Term::Integer(-1));
-/// assert_eq!(value(false, -1), Term::from_bigint(BigInt::from(u64::MAX)));
+/// assert_eq!(value(Signedness::Signed, -1), Term::Integer(-1));
+/// assert_eq!(value(Signedness::Unsigned, -1), Term::from_bigint(BigInt::from(u64::MAX)));
 /// ```
-fn value(signed: bool, bits: i64) -> Term {
-    if signed {
+fn value(signedness: Signedness, bits: i64) -> Term {
+    if signedness == Signedness::Signed {
         Term::Integer(bits)
     } else {
-        Term::from_bigint(BigInt::from(bits as u64))
+        Term::from_bigint(BigInt::from(bits.cast_unsigned()))
     }
 }
 

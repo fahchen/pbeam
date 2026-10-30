@@ -16,8 +16,8 @@
 //! changes it.
 
 use super::{
-    BifContext, BifId, BifResult, dispatch_leaf, import_kind, is_heavy_bif, is_leaf, is_pbeam_bif,
-    mfa, resolve,
+    BifContext, BifId, BifResult, MessageQueue, dispatch_leaf, import_kind, is_heavy_bif, is_leaf,
+    is_pbeam_bif, mfa, resolve,
 };
 use crate::{
     beam::ImportKind,
@@ -39,6 +39,11 @@ const CALLS: u64 = 20_000_000;
 /// let ns = measure_pbeam("dispatch_probe", "floor_ext_loop", 1);
 /// assert!(ns > 0.0);
 /// ```
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "the probe reports an average of nanoseconds as `f64`"
+)]
 fn measure_pbeam(module: &str, name: &str, arity: u32) -> f64 {
     let start = Instant::now();
     let mut hits = 0u64;
@@ -60,6 +65,11 @@ fn measure_pbeam(module: &str, name: &str, arity: u32) -> f64 {
 /// let ns = measure_heavy("erlang", "put", 2);
 /// assert!(ns > 0.0);
 /// ```
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "the probe reports an average of nanoseconds as `f64`"
+)]
 fn measure_heavy(module: &str, name: &str, arity: u32) -> f64 {
     let start = Instant::now();
     let mut hits = 0u64;
@@ -271,7 +281,8 @@ fn binary_to_list_reads_the_chunks_of_an_appended_binary_with_no_join() {
     let mut binary = Binary::from(vec![7]);
     let mut bytes = vec![7_u8];
     for step in 1..3_000_u32 {
-        let suffix = vec![(step % 251) as u8; 1_000];
+        let suffix =
+            vec![u8::try_from(step % 251).expect("a remainder of 251 fits in `u8`"); 1_000];
         binary = Binary::concat(&binary, &suffix);
         bytes.extend(&suffix);
     }
@@ -301,8 +312,8 @@ fn binary_to_list_reads_the_chunks_of_an_appended_binary_with_no_join() {
         result = super::erlang::b2l_chunk(
             &mut process,
             source,
-            *offset as usize,
-            *rest as usize,
+            usize::try_from(*offset).expect("a trap keeps a non-negative offset"),
+            usize::try_from(*rest).expect("a trap keeps a non-negative rest"),
             list.clone(),
             4_000,
         );
@@ -528,15 +539,15 @@ fn charges_an_item_with_its_queue_or_dictionary_size() {
     // 7 messages and 5 entries each give floor(7 / 4) = 1 and
     // floor(5 / 4) = 1; `status` has no size-dependent cost.
     assert_eq!(
-        super::item_reductions(&item("messages"), &Term::nil(), 7, false),
+        super::item_reductions(&item("messages"), &Term::nil(), 7, MessageQueue::OnHeap),
         1
     );
     assert_eq!(
-        super::item_reductions(&item("dictionary"), &dictionary, 0, false),
+        super::item_reductions(&item("dictionary"), &dictionary, 0, MessageQueue::OnHeap),
         1
     );
     assert_eq!(
-        super::item_reductions(&item("status"), &Term::nil(), 7, false),
+        super::item_reductions(&item("status"), &Term::nil(), 7, MessageQueue::OnHeap),
         0
     );
 }

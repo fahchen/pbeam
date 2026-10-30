@@ -223,7 +223,7 @@ struct Call {
     /// The process that waits for the call.
     process: ProcessId,
     /// The identifier of the call in the inbox of its scheduler.
-    call: u64,
+    number: u64,
     /// The claim of the caller. The call runs only when the claim still
     /// exists.
     claim: Weak<AtomicBool>,
@@ -591,7 +591,7 @@ impl DirtyCalls {
             priority,
             Call {
                 process,
-                call,
+                number: call,
                 claim: Arc::downgrade(&claim.0),
                 work,
                 completions: self.completion_sender.clone(),
@@ -674,7 +674,7 @@ fn run_calls(shared: &Arc<Shared>, kind: c_int) {
     while let Some(taken) = shared.take() {
         let Call {
             process,
-            call,
+            number,
             claim,
             work,
             completions,
@@ -695,7 +695,7 @@ fn run_calls(shared: &Arc<Shared>, kind: c_int) {
         });
         let completion = Completion {
             process,
-            call,
+            call: number,
             output,
         };
         // The send fails only after the scheduler of the call dropped its

@@ -19,8 +19,12 @@ use super::Term;
 /// The elements of a BEAM tuple. All copies of the tuple own one reference
 /// to the array. `Arc::make_mut` copies it first when another copy also
 /// holds it. The last copy that drops releases it.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 #[repr(transparent)]
+#[expect(
+    clippy::rc_buffer,
+    reason = "`Tuple` shares its elements as `Arc<Vec<Term>>` because `Arc::make_mut` copies and writes them (`set_tuple_element`); an `Arc<[Term]>` cannot do that"
+)]
 pub struct Tuple(Option<Arc<Vec<Term>>>);
 
 impl Tuple {
@@ -53,6 +57,10 @@ impl Tuple {
     }
 
     /// Return the array of the tuple.
+    #[expect(
+        clippy::rc_buffer,
+        reason = "`Tuple` shares its elements as `Arc<Vec<Term>>` because `Arc::make_mut` copies and writes them (`set_tuple_element`); an `Arc<[Term]>` cannot do that"
+    )]
     pub(super) fn arc(&self) -> &Arc<Vec<Term>> {
         self.0
             .as_ref()
@@ -73,12 +81,16 @@ impl Tuple {
     /// assert_ne!(tuple.identity(), Tuple::from(vec![Term::Integer(1)]).identity());
     /// ```
     pub(super) fn identity(&self) -> usize {
-        Arc::as_ptr(self.arc()) as usize
+        Arc::as_ptr(self.arc()).addr()
     }
 
     /// Return the array of the tuple for a change. This is the receiver of
     /// `Arc::make_mut`: the caller copies the array first when another copy
     /// also holds it.
+    #[expect(
+        clippy::rc_buffer,
+        reason = "`Tuple` shares its elements as `Arc<Vec<Term>>` because `Arc::make_mut` copies and writes them (`set_tuple_element`); an `Arc<[Term]>` cannot do that"
+    )]
     pub(crate) fn arc_mut(&mut self) -> &mut Arc<Vec<Term>> {
         self.0
             .as_mut()

@@ -5,6 +5,10 @@ use std::sync::Arc;
 use super::*;
 
 /// Return the bytes of a part and the array of its binary.
+#[expect(
+    clippy::rc_buffer,
+    reason = "`Binary` shares byte arrays as `Arc<Vec<u8>>` because `append_in_place` grows the vector through `Arc::get_mut`; an `Arc<[u8]>` cannot grow"
+)]
 fn bytes(term: &Term) -> (&[u8], &Arc<Vec<u8>>) {
     let Term::Binary(binary) = term else {
         panic!("not a binary: {term:?}");
@@ -71,7 +75,7 @@ fn gives_split_parts_that_share_the_bytes_of_the_subject() {
     // The second part starts at the byte 4 of the subject.
     let (part, _) = bytes(&parts[1]);
     assert_eq!(
-        part.as_ptr() as usize - subject.bit_bytes().as_ptr() as usize,
+        part.as_ptr().addr() - subject.bit_bytes().as_ptr().addr(),
         4
     );
     // `trim` leaves an empty part at the end out.
@@ -121,7 +125,7 @@ fn gives_global_parts_that_share_the_bytes_of_the_subject() {
     // The parts start at the bytes 0, 2, and 4 of the subject.
     let offsets: Vec<usize> = parts
         .iter()
-        .map(|part| bytes(part).0.as_ptr() as usize - subject.bit_bytes().as_ptr() as usize)
+        .map(|part| bytes(part).0.as_ptr().addr() - subject.bit_bytes().as_ptr().addr())
         .collect();
     assert_eq!(offsets, [0, 2, 4]);
 }

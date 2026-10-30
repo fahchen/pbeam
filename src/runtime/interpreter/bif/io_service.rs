@@ -6,7 +6,10 @@
 //! with the `terminal` authority of that process (row "Boot authority" of
 //! `docs/erts-differences.md`).
 
-use super::*;
+use super::{
+    AtomTable, BeamError, BifResult, CapabilityKind, Operation, ProcessId, Scheduler, Term,
+    boot_denial,
+};
 use crate::runtime::capability::SecurityContext;
 
 /// Return the `error:capability_denied` exception for a message from the

@@ -59,7 +59,7 @@ pub(crate) fn shortest(value: f64) -> Vec<u8> {
         return text;
     }
     let (digits, scientific_exponent) = shortest_digits(value.abs());
-    let length = digits.len() as i32;
+    let length = i32::try_from(digits.len()).expect("a shortest float has at most 17 digits");
     let exponent = scientific_exponent - (length - 1);
     let output = digits
         .iter()
@@ -80,15 +80,25 @@ pub(crate) fn shortest(value: f64) -> Vec<u8> {
         let whole = length + exponent;
         if exponent >= 0 {
             text.extend_from_slice(&digits);
-            text.extend(std::iter::repeat_n(b'0', exponent as usize));
+            text.extend(std::iter::repeat_n(
+                b'0',
+                usize::try_from(exponent).expect("the exponent is not negative"),
+            ));
             text.extend_from_slice(b".0");
         } else if whole > 0 {
-            text.extend_from_slice(&digits[..whole as usize]);
+            text.extend_from_slice(
+                &digits[..usize::try_from(whole).expect("the whole part is positive")],
+            );
             text.push(b'.');
-            text.extend_from_slice(&digits[whole as usize..]);
+            text.extend_from_slice(
+                &digits[usize::try_from(whole).expect("the whole part is positive")..],
+            );
         } else {
             text.extend_from_slice(b"0.");
-            text.extend(std::iter::repeat_n(b'0', (-whole) as usize));
+            text.extend(std::iter::repeat_n(
+                b'0',
+                usize::try_from(-whole).expect("the whole part is not positive"),
+            ));
             text.extend_from_slice(&digits);
         }
     } else {
@@ -212,8 +222,18 @@ pub(crate) fn scientific_option(value: f64, decimals: i32) -> Option<Vec<u8>> {
     (text.len() < BUFFER_SIZE).then_some(text)
 }
 
+/// Whether `float_to_list/2` removes the trailing zeros of the decimals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TrailingZeros {
+    /// Keep the zeros: the default.
+    Keep,
+    /// Remove the zeros, but keep one zero after the point: the `compact`
+    /// option.
+    Trim,
+}
+
 /// Return the text of `float_to_list/2` with `{decimals, Decimals}`, and
-/// with `compact` when `compact` is true, or `None` when ERTS fails, as
+/// with `compact` when `zeros` is [`TrailingZeros::Trim`], or `None` when ERTS fails, as
 /// `sys_double_to_chars_fast` (`erl_sys_common_misc.c:161-273`) gives it.
 /// A negative `decimals` fails. A float above 2^53 or 19 decimals or more
 /// takes the C text `%.*f`, which fails at 256 bytes or more. Else the
@@ -224,14 +244,14 @@ pub(crate) fn scientific_option(value: f64, decimals: i32) -> Option<Vec<u8>> {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(fixed(1.5, 0, false), Some(b"2".to_vec()));
-/// assert_eq!(fixed(0.125, 2, false), Some(b"0.13".to_vec()));
-/// assert_eq!(fixed(1.0, 3, true), Some(b"1.0".to_vec()));
-/// assert_eq!(fixed(-0.0, 1, false), Some(b"-0.0".to_vec()));
-/// assert_eq!(fixed(1.0, -1, false), None);
-/// assert_eq!(fixed(1.0e300, 2, false), None);
+/// assert_eq!(fixed(1.5, 0, TrailingZeros::Keep), Some(b"2".to_vec()));
+/// assert_eq!(fixed(0.125, 2, TrailingZeros::Keep), Some(b"0.13".to_vec()));
+/// assert_eq!(fixed(1.0, 3, TrailingZeros::Trim), Some(b"1.0".to_vec()));
+/// assert_eq!(fixed(-0.0, 1, TrailingZeros::Keep), Some(b"-0.0".to_vec()));
+/// assert_eq!(fixed(1.0, -1, TrailingZeros::Keep), None);
+/// assert_eq!(fixed(1.0e300, 2, TrailingZeros::Keep), None);
 /// ```
-pub(crate) fn fixed(value: f64, decimals: i32, compact: bool) -> Option<Vec<u8>> {
+pub(crate) fn fixed(value: f64, decimals: i32, zeros: TrailingZeros) -> Option<Vec<u8>> {
     let decimals = usize::try_from(decimals).ok()?;
     let magnitude = value.abs();
     if magnitude > MAX_FAST_FLOAT || decimals >= POW10.len() {
@@ -243,7 +263,7 @@ pub(crate) fn fixed(value: f64, decimals: i32, compact: bool) -> Option<Vec<u8>>
         if text.len() >= BUFFER_SIZE {
             return None;
         }
-        if compact {
+        if zeros == TrailingZeros::Trim {
             trim_trailing_zeros(&mut text);
         }
         return Some(text);
@@ -254,18 +274,31 @@ pub(crate) fn fixed(value: f64, decimals: i32, compact: bool) -> Option<Vec<u8>>
     }
     if decimals == 0 {
         // `round_int64` is C `lround`, which rounds half away from zero.
-        text.extend_from_slice((magnitude.round() as u64).to_string().as_bytes());
+        #[expect(
+            clippy::as_conversions,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "the magnitude is at most 2^53 here, so the rounded float is an exact u64"
+        )]
+        let rounded = magnitude.round() as u64;
+        text.extend_from_slice(rounded.to_string().as_bytes());
         return Some(text);
     }
     let whole = magnitude.floor();
     let fraction = ((magnitude - whole) * POW10[decimals]).round();
+    #[expect(
+        clippy::as_conversions,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the whole part and the fraction are non-negative floats of at most 2^53 here, so the casts are exact"
+    )]
     let (whole, fraction) = if fraction >= POW10[decimals] {
         (whole as u64 + 1, 0)
     } else {
         (whole as u64, fraction as u64)
     };
     text.extend_from_slice(format!("{whole}.{fraction:0decimals$}").as_bytes());
-    if compact {
+    if zeros == TrailingZeros::Trim {
         trim_trailing_zeros(&mut text);
     }
     Some(text)
