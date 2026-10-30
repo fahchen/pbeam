@@ -398,16 +398,18 @@ socket_acceptors() ->
     Down = settle(Num, fun() -> exit(B, kill) end),
     _ = Connect(),
     Next = seq([fun() -> Event(D) end, fun() -> Call(D, accept) end, Num]),
-    [E, F, G, H] = [New(T) || T <- [e, f, g, h]],
-    Again = [Call(P, accept) || P <- [E, F, G, H]],
+    [E, F, G, H, I] = [New(T) || T <- [e, f, g, h, i]],
+    Again = [Call(P, accept) || P <- [E, F, G, H, I]],
     Exit = settle(Num, fun() -> exit(E, kill) end),
     _ = Connect(),
     Activated = seq([fun() -> Event(F) end, fun() -> Call(F, accept) end, Num]),
-    Current = seq([fun() -> Call(G, cancel) end, Num]),
+    Waiting = settle(Num, fun() -> exit(I, kill) end),
+    Info = fun() -> maps:with([num_acceptors, rstates], socket:info(L)) end,
+    Current = seq([Info, fun() -> Call(G, cancel) end, Info]),
     ok = socket:close(L),
     Closed = seq([fun() -> Event(H) end, fun() -> Call(H, accept) end]),
     io:format("~w~n", [{socket_acceptors, [Queued, First, Cancel, Down, Next, Again, Exit,
-                                           Activated, Current, Closed]}]),
+                                           Activated, Waiting, Current, Closed]}]),
     init:stop().
 
 %% Run `Kill` and give `num_acceptors` from `Num` once it changes: the

@@ -520,21 +520,18 @@ pub(super) fn cancel(
     *requestor = None;
     if direction == Direction::Write {
         state.write &= !bit;
-    } else {
-        state.read &= !bit;
     }
     let active = poll.cancel_select(fd(&state), direction);
-    // The next waiting acceptor becomes current
-    // (`essio_cancel_accept_current`, `unix_socket_syncio.c:5082-5113`).
-    let activated = if bit == ACCEPTING {
-        state.activate_next_acceptor()
-    } else {
-        None
-    };
-    drop(state);
-    if let Some((next, next_reference, fd)) = activated {
+    // The next waiting acceptor becomes current, and `accepting` goes only
+    // when no acceptor waits (`essio_cancel_accept_current`,
+    // `unix_socket_syncio.c:5082-5113`). The select runs under the socket
+    // lock, as `select` requires.
+    if bit == ACCEPTING
+        && let Some((next, next_reference, fd)) = state.activate_next_acceptor()
+    {
         select(scheduler, key, fd, Direction::Read, next, next_reference);
     }
+    drop(state);
     value(scheduler, if active { "ok" } else { "select_sent" })
 }
 

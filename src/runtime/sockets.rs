@@ -74,14 +74,16 @@ impl Sockets {
     /// the socket stays open, and the exit of a waiting acceptor removes it
     /// from the queue. Return the requestors to abort, the registry to send
     /// `{'$socket', del, Socket}` to, if the registry knows the socket and
-    /// the socket closed, and the acceptor that became current, which needs
-    /// a read select.
+    /// the socket closed, and whether an acceptor became current: its read
+    /// select sends `select_message` of its reference, and the caller starts
+    /// the poll thread.
     pub(super) fn monitor_down(
         &mut self,
         reference: Reference,
         pid: ProcessId,
         poll: &NodePoll,
-    ) -> (Vec<(ProcessId, Term)>, Option<ProcessId>, Option<Activated>) {
+        select_message: impl FnOnce(Term) -> Term,
+    ) -> (Vec<(ProcessId, Term)>, Option<ProcessId>, bool) {
         // PBeam keeps each socket until the end of the run.
         let socket = self
             .by_reference
@@ -132,15 +134,20 @@ impl Sockets {
         } else if socket.owner == Some(pid) {
             socket.owner = None;
             if socket.read & (CLOSING | CLOSED) != 0 {
-                return (Vec::new(), None, None);
+                return (Vec::new(), None, false);
             }
         } else {
-            let activated = if current_acceptor && socket.read & (CLOSING | CLOSED) == 0 {
-                socket.activate_next_acceptor()
-            } else {
-                None
-            };
-            return (Vec::new(), None, activated);
+            // The select runs under the socket lock, so that no close runs
+            // between the check and the select.
+            let activated = current_acceptor && socket.read & (CLOSING | CLOSED) == 0;
+            let selected = activated
+                && socket
+                    .activate_next_acceptor()
+                    .map(|(next, reference, fd)| {
+                        poll.select(fd, Direction::Read, next, select_message(reference));
+                    })
+                    .is_some();
+            return (Vec::new(), None, selected);
         }
         // A close cancels each select before the fd closes.
         let aborted = socket.stop(poll);
@@ -152,7 +159,11 @@ impl Sockets {
         let registered = socket.registered;
         drop(socket);
         self.counters.count(domain, kind, protocol, -1);
-        (aborted, registered.then_some(self.registry).flatten(), None)
+        (
+            aborted,
+            registered.then_some(self.registry).flatten(),
+            false,
+        )
     }
 }
 

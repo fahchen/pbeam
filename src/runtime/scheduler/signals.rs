@@ -99,24 +99,23 @@ impl Scheduler {
     /// does (`prim_socket_nif.c:7698-7702`). The load callback made both
     /// atoms (`prim_socket_nif.c:18842-18857`), so their `put` finds them.
     pub(in crate::runtime) fn socket_owner_down(&mut self, owner: ProcessId, socket: Reference) {
-        let (aborted, registry, activated) = lock(&self.node().resources.kind::<Sockets>())
-            .monitor_down(socket, owner, &self.node().poll);
         let tag = Term::Atom(self.atoms.put("$socket").expect("made at load"));
-        let socket = Term::tuple(vec![tag.clone(), Term::Reference(socket)]);
+        let socket_term = Term::tuple(vec![tag.clone(), Term::Reference(socket)]);
+        let select = Term::Atom(self.atoms.put("select").expect("made at load"));
+        let select_message =
+            |reference| Term::tuple(vec![tag.clone(), socket_term.clone(), select, reference]);
+        let (aborted, registry, selected) = lock(&self.node().resources.kind::<Sockets>())
+            .monitor_down(socket, owner, &self.node().poll, select_message);
+        if selected {
+            super::poll::NodePoll::start(self.node());
+        }
+        let socket = socket_term;
         for (requestor, reference) in aborted {
             let abort = Term::Atom(self.atoms.put("abort").expect("made at load"));
             let closed = Term::static_atom("closed");
             let info = Term::tuple(vec![reference, closed]);
             let message = Term::tuple(vec![tag.clone(), socket.clone(), abort, info]);
             self.send_message(owner, requestor, message);
-        }
-        if let Some((acceptor, reference, fd)) = activated {
-            let select = Term::Atom(self.atoms.put("select").expect("made at load"));
-            let message = Term::tuple(vec![tag.clone(), socket.clone(), select, reference]);
-            self.node()
-                .poll
-                .select(fd, super::poll::Direction::Read, acceptor, message);
-            super::poll::NodePoll::start(self.node());
         }
         if let Some(registry) = registry {
             let del = Term::Atom(self.atoms.put("del").expect("made at load"));

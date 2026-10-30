@@ -592,7 +592,7 @@ fn connects_listens_accepts_and_cancels_sockets_with_select_messages_as_pinned_e
 #[test]
 fn queues_the_acceptors_of_a_listen_socket_as_pinned_erts() {
     // `kernel_boot_probe:socket_acceptors/0` runs `socket:accept/2` with
-    // `nowait` from 8 processes on one listen socket: a waiting acceptor
+    // `nowait` from 9 processes on one listen socket: a waiting acceptor
     // goes into the queue, and a second call of it raises `{invalid,
     // state}` (`essio_accept_accepting_other`, unix_socket_syncio.c:
     // 2746-2758). The accept, the exit, and the close of the current
