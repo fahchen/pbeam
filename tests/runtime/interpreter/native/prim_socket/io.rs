@@ -31,6 +31,7 @@ fn resource(scheduler: &mut Scheduler, change: impl FnOnce(&mut SocketState)) ->
         meta: Term::static_atom("undefined"),
         connector: None,
         acceptor: None,
+        acceptors: std::collections::VecDeque::new(),
         reader: None,
         writer: None,
         counters: IoCounters::default(),
@@ -67,6 +68,7 @@ fn datagram(scheduler: &mut Scheduler) -> (Reference, Term) {
         meta: Term::static_atom("undefined"),
         connector: None,
         acceptor: None,
+        acceptors: std::collections::VecDeque::new(),
         reader: None,
         writer: None,
         counters: IoCounters::default(),
@@ -236,8 +238,9 @@ fn clears_the_current_reader_and_writer_at_their_exit() {
     });
     let poll = Arc::clone(&scheduler.node().poll);
     let sockets = scheduler.node().resources.kind::<Sockets>();
-    let (aborted, registry) = lock(&sockets).monitor_down(key, other, &poll);
-    assert!(aborted.is_empty() && registry.is_none());
+    let (aborted, registry, selected) =
+        lock(&sockets).monitor_down(key, other, &poll, |reference| reference);
+    assert!(aborted.is_empty() && registry.is_none() && !selected);
     let state = lock(&sockets).get(key).unwrap();
     let state = lock(&state);
     assert!(state.reader.is_none() && state.writer.is_none() && state.socket.is_some());

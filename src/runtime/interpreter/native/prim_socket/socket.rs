@@ -273,7 +273,15 @@ pub(super) fn info_1(scheduler: &mut Scheduler, socket: &Term) -> Result<BifResu
         ("counters", counters),
         ("num_readers", Term::Integer(socket.reader.is_some().into())),
         ("num_writers", Term::Integer(socket.writer.is_some().into())),
-        ("num_acceptors", Term::Integer(0)),
+        // The current acceptor and the waiting acceptors
+        // (`socket_info_reqs`, `prim_socket_nif.c:5218-5246`).
+        (
+            "num_acceptors",
+            Term::Integer(
+                i64::from(socket.acceptor.is_some())
+                    + i64::try_from(socket.acceptors.len()).expect("a queue length fits in i64"),
+            ),
+        ),
     ];
     let info = pairs(scheduler, &info)?;
     Ok(BifResult::Value(map(scheduler, info)))
@@ -437,6 +445,7 @@ pub(super) fn open_4(
                 meta: Term::static_atom("undefined"),
                 connector: None,
                 acceptor: None,
+                acceptors: std::collections::VecDeque::new(),
                 reader: None,
                 writer: None,
                 counters: IoCounters::default(),
@@ -903,12 +912,36 @@ pub(super) fn close(scheduler: &mut Scheduler, socket: &Term) -> Result<BifResul
             .send_signal(None, caller, Signal::SocketMonitor { socket: reference })
             .expect("the caller is alive");
     }
-    for (requestor, operation) in aborted {
-        let info = Term::tuple(vec![operation, Term::static_atom("closed")]);
-        let abort = socket_message(scheduler, reference, "abort", info)?;
+    send_aborts(scheduler, reference, aborted, &Term::static_atom("closed"))?;
+    Ok(BifResult::Value(Term::static_atom("ok")))
+}
+
+/// Send `{'$socket', Socket, abort, {Ref, Reason}}` from the current
+/// process to each requestor of `requestors`, as `esock_send_abort_msg`
+/// does (`prim_socket_nif.c`).
+///
+/// # Errors
+///
+/// A new atom in a full atom table gives the error of `AtomTable::put`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// send_aborts(scheduler, socket, vec![(acceptor, reference)], &Term::static_atom("closed"))?;
+/// ```
+pub(super) fn send_aborts(
+    scheduler: &mut Scheduler,
+    socket: Reference,
+    requestors: Vec<(ProcessId, Term)>,
+    reason: &Term,
+) -> Result<(), BeamError> {
+    let caller = scheduler.current_process().id;
+    for (requestor, operation) in requestors {
+        let info = Term::tuple(vec![operation, reason.clone()]);
+        let abort = socket_message(scheduler, socket, "abort", info)?;
         scheduler.send_message(caller, requestor, abort);
     }
-    Ok(BifResult::Value(Term::static_atom("ok")))
+    Ok(())
 }
 
 /// Run `prim_socket:nif_finalize_close(Socket)`, as `essio_fin_close` and

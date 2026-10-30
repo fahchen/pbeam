@@ -28,6 +28,7 @@ fn gives_badarg_for_a_request_that_is_not_an_integer() {
         meta: Term::static_atom("undefined"),
         connector: None,
         acceptor: None,
+        acceptors: std::collections::VecDeque::new(),
         reader: None,
         writer: None,
         counters: IoCounters::default(),

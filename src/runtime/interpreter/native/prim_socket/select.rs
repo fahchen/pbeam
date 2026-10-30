@@ -11,10 +11,12 @@
 use std::os::fd::AsRawFd;
 
 use super::socket::{
-    closed, errno_error, invalid, send_registry, sockaddr, socket_argument, socket_message,
+    closed, errno_error, invalid, send_aborts, send_registry, sockaddr, socket_argument,
+    socket_message,
 };
 use super::supports::atom;
 use super::{Arc, BeamError, BifResult, ExceptionClass, Scheduler, Term, error};
+use crate::runtime::port::inet::errno_name;
 use crate::runtime::resources::lock;
 use crate::runtime::scheduler::poll::{Direction, NodePoll};
 use crate::runtime::signal::Signal;
@@ -244,11 +246,17 @@ pub(super) fn listen(
 /// cancelled}}` and makes a new one; a select whose message went out gives
 /// `select_sent` (`unix_socket_syncio.c:2643-2737`).
 ///
+/// A call while another process is the current acceptor puts the caller
+/// into the acceptor queue and gives `select`; a second call of a waiting
+/// process raises `{invalid, state}` (`essio_accept_accepting_other`,
+/// `unix_socket_syncio.c:2746-2758`). An accept of the current acceptor
+/// makes the next waiting acceptor current with a read select, and an
+/// accept error sends `abort` with the errno to each waiting acceptor
+/// (`unix_socket_syncio.c:2596-2633`, `2703-2733`).
+///
 /// # Errors
 ///
-/// A call while another process is the current acceptor stops the run:
-/// PBeam has no acceptor queue (`essio_accept_accepting_other`). A new
-/// atom in a full atom table gives the error of `AtomTable::put`.
+/// A new atom in a full atom table gives the error of `AtomTable::put`.
 pub(super) fn accept(
     scheduler: &mut Scheduler,
     listen: &Term,
@@ -265,10 +273,22 @@ pub(super) fn accept(
     let current = match &state.acceptor {
         None => None,
         Some((acceptor, old)) if *acceptor == caller => Some(old.clone()),
+        // Another process waits in the queue with a monitor and no select;
+        // a second call of a waiting process raises `{invalid, state}`
+        // (`essio_accept_accepting_other`, `unix_socket_syncio.c:2746-2758`).
         Some(_) => {
-            return Err(error(
-                "prim_socket:nif_accept/2: a second acceptor process is not supported".to_owned(),
-            ));
+            if state
+                .acceptors
+                .iter()
+                .any(|(waiting, _)| *waiting == caller)
+            {
+                drop(state);
+                return invalid_state(scheduler);
+            }
+            state.acceptors.push_back((caller, reference.clone()));
+            drop(state);
+            monitor(scheduler, caller, key);
+            return value(scheduler, "select");
         }
     };
     let host = state
@@ -277,9 +297,12 @@ pub(super) fn accept(
         .expect("an open socket has a host socket");
     let failure = match host.accept() {
         Ok((accepted, _)) => {
-            if current.is_some() {
-                state.acceptor = None;
-                state.read &= !ACCEPTING;
+            // The next waiting acceptor becomes current
+            // (`unix_socket_syncio.c:2596-2633`).
+            if current.is_some()
+                && let Some((next, next_reference, fd)) = state.activate_next_acceptor()
+            {
+                select(scheduler, key, fd, Direction::Read, next, next_reference);
             }
             let inherited = (
                 state.domain,
@@ -294,12 +317,17 @@ pub(super) fn accept(
         Err(failure) => failure,
     };
     if !matches!(failure.raw_os_error(), Some(libc::EAGAIN)) {
+        let mut waiting = Vec::new();
         if current.is_some() {
-            // The current acceptor goes; `ACCEPTING` stays
-            // (`unix_socket_syncio.c:2714-2733`).
+            // The current acceptor goes, and each waiting acceptor gets an
+            // abort with the errno; `ACCEPTING` stays
+            // (`unix_socket_syncio.c:2703-2733`).
             state.acceptor = None;
+            waiting.extend(state.acceptors.drain(..));
         }
         drop(state);
+        let reason = atom(scheduler, &errno_name(&failure))?;
+        send_aborts(scheduler, key, waiting, &reason)?;
         return errno_error(scheduler, &failure);
     }
     let fd = fd(&state);
@@ -366,6 +394,7 @@ fn accepted_socket(
                 meta: Term::static_atom("undefined"),
                 connector: None,
                 acceptor: None,
+                acceptors: std::collections::VecDeque::new(),
                 reader: None,
                 writer: None,
                 counters: IoCounters::default(),
@@ -395,7 +424,9 @@ fn accepted_socket(
 /// not a reference. `connect` runs `essio_cancel_connect` and `accept` runs
 /// `essio_cancel_accept` (`unix_socket_syncio.c:4967-5132`): `ok` for an
 /// active select, `select_sent` for a select whose message went out, and
-/// `{error, not_found}` or `not_found` for another request. Another `Op`
+/// `{error, not_found}` or `not_found` for another request. The cancel of
+/// the current acceptor makes the next waiting acceptor current, and the
+/// cancel of a waiting acceptor removes it from the queue and gives `ok`. Another `Op`
 /// gives `{error, closed}` for a closed socket and `badarg` for an open
 /// one.
 ///
@@ -410,7 +441,7 @@ pub(super) fn cancel(
     operation: &Term,
     reference: &Term,
 ) -> Result<BifResult, BeamError> {
-    let Some((_, socket)) = socket_argument(scheduler, socket) else {
+    let Some((key, socket)) = socket_argument(scheduler, socket) else {
         return Ok(BifResult::badarg());
     };
     let (Term::Atom(operation), Term::Reference(_)) = (operation, reference) else {
@@ -452,6 +483,29 @@ pub(super) fn cancel(
     if open & (CLOSING | CLOSED) != 0 {
         return Ok(closed());
     }
+    // A waiting acceptor leaves the queue (`essio_cancel_accept_waiting`,
+    // `unix_socket_syncio.c:5054-5066`, `5119-5132`).
+    if bit == ACCEPTING
+        && let Some((current, _)) = requestor
+        && *current != caller
+    {
+        let position = state
+            .acceptors
+            .iter()
+            .position(|(waiting, old)| *waiting == caller && old == reference);
+        if let Some(position) = position {
+            state.acceptors.remove(position);
+        }
+        drop(state);
+        return value(
+            scheduler,
+            if position.is_some() {
+                "ok"
+            } else {
+                "not_found"
+            },
+        );
+    }
     let found = requestor
         .as_ref()
         .is_some_and(|(pid, old)| *pid == caller && old == reference);
@@ -466,10 +520,17 @@ pub(super) fn cancel(
     *requestor = None;
     if direction == Direction::Write {
         state.write &= !bit;
-    } else {
-        state.read &= !bit;
     }
     let active = poll.cancel_select(fd(&state), direction);
+    // The next waiting acceptor becomes current, and `accepting` goes only
+    // when no acceptor waits (`essio_cancel_accept_current`,
+    // `unix_socket_syncio.c:5082-5113`). The select runs under the socket
+    // lock, as `select` requires.
+    if bit == ACCEPTING
+        && let Some((next, next_reference, fd)) = state.activate_next_acceptor()
+    {
+        select(scheduler, key, fd, Direction::Read, next, next_reference);
+    }
     drop(state);
     value(scheduler, if active { "ok" } else { "select_sent" })
 }

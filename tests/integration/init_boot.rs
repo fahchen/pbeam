@@ -590,6 +590,29 @@ fn connects_listens_accepts_and_cancels_sockets_with_select_messages_as_pinned_e
 }
 
 #[test]
+fn queues_the_acceptors_of_a_listen_socket_as_pinned_erts() {
+    // `kernel_boot_probe:socket_acceptors/0` runs `socket:accept/2` with
+    // `nowait` from 9 processes on one listen socket: a waiting acceptor
+    // goes into the queue, and a second call of it raises `{invalid,
+    // state}` (`essio_accept_accepting_other`, unix_socket_syncio.c:
+    // 2746-2758). The accept, the exit, and the close of the current
+    // acceptor make the next acceptor current (`esock_activate_next_acceptor`,
+    // prim_socket_nif.c:17796-17870; unix_socket_syncio.c:2596-2633,
+    // 10583-10622), a cancel or an exit removes a waiting acceptor
+    // (unix_socket_syncio.c:5119-5132), a close aborts each waiting
+    // acceptor (unix_socket_syncio.c:4749-4758), and `num_acceptors` counts
+    // the current and the waiting acceptors (prim_socket_nif.c:5218-5246).
+    let (reference, status, node) =
+        run_kernel_boot("socket_acceptors", Inetrc::Unset, &["{socket_acceptors,"]);
+    assert_eq!(status, Some(0), "ERTS");
+    assert!(
+        reference.starts_with("{socket_acceptors,[[[select,select,select,select],4,"),
+        "{reference}"
+    );
+    assert_eq!(node, reference, "PBeam");
+}
+
+#[test]
 fn sends_and_receives_on_stream_sockets_as_pinned_erts() {
     // `kernel_boot_probe:socket_io/0` runs `socket:send/2,3,4`,
     // `socket:recv/1,2,3,4`, and `socket:cancel/2` with timeouts, `zero`,
@@ -824,8 +847,7 @@ fn sends_and_receives_with_gen_tcp_and_gen_udp_on_the_socket_backend_as_pinned_e
 
 #[test]
 fn stops_the_run_at_the_socket_calls_that_pbeam_does_not_support() {
-    // PBeam has no acceptor queue (`essio_accept_accepting_other`,
-    // unix_socket_syncio.c:2746-2757). ERTS connects with an
+    // ERTS connects with an
     // address that it did not decode (prim_socket_nif.c:6122-6143), and it
     // passes the flags of a recvfrom to `recvfrom(2)`
     // (unix_socket_syncio.c:3925-3927), which PBeam does only on inet and
@@ -833,10 +855,6 @@ fn stops_the_run_at_the_socket_calls_that_pbeam_does_not_support() {
     // `ioctl(2)` (unix_socket_syncio.c:5364-5602). These calls stop the run
     // with a runtime error (row "NIF stubs").
     let mut probes = vec![
-        (
-            "socket_acceptors",
-            "prim_socket:nif_accept/2: a second acceptor process is not supported",
-        ),
         (
             "socket_connect_invalid",
             "prim_socket:nif_connect/3: an address that does not decode is not supported",
