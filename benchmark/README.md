@@ -1,6 +1,6 @@
 # Benchmark of PBeam and the pinned ERTS
 
-This directory holds three scenarios that run the same compiled BEAM modules on the PBeam runtime and on the pinned ERTS. It reports the speed of each scenario as the ratio of the PBeam time to the ERTS time.
+This directory holds five scenarios that run the same compiled BEAM modules on the PBeam runtime and on the pinned ERTS. It reports the speed of each scenario as the ratio of the PBeam time to the ERTS time.
 
 The scenarios measure the runtime, not the build and not the boot. The beam files are the same files for the two runs, and the boot time is part of neither number.
 
@@ -11,6 +11,8 @@ The scenarios measure the runtime, not the build and not the boot. The beam file
 | Integer arithmetic loop | `bench_arith.erl` | One loop iteration: one comparison, four small-integer operations, and one local call | 500000 |
 | Spawn and message round trip | `bench_spawn.erl` | One `spawn/3`, one send of the child, and one receive of the parent | 20000 |
 | List build and sum | `bench_list.erl` | One list cell: one allocation by the build and one read by the sum | 400000 |
+| Map build and lookup | `bench_map.erl` | One key: one insert into the map and one lookup | 100000 |
+| Table insert and lookup | `bench_ets.erl` | One object: one insert into an ETS set table and one lookup | 100000 |
 
 Each module exports one function that takes the count as an integer, for example `bench_arith:loop/1`. The count is an argument, so the number of units is in `benchmark.rs` only.
 
@@ -41,5 +43,5 @@ The task runs `bash benchmark/run.sh`. The script prints the revision, the host,
 
 - A run-to-run difference of about 10 percent is usual, so compare numbers only from one session on one host.
 - The host runs the ERTS JIT. PBeam interprets the same instructions, so the ratio of an instruction-heavy scenario is the cost of the interpreter, not the cost of a missing JIT with an equal instruction cost.
-- The scenarios are short and self-contained. They do not measure I/O, ETS, binaries, or a process that runs on another scheduler thread.
+- The scenarios are short and self-contained. They do not measure I/O, binaries, or a process that runs on another scheduler thread.
 - The spawn scenario runs one child at a time, so it measures the cost of a process, a send, and a receive, and not the throughput of many live processes.

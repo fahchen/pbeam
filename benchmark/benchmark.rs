@@ -1,4 +1,4 @@
-//! The comparison of the PBeam runtime with the pinned ERTS on the three
+//! The comparison of the PBeam runtime with the pinned ERTS on the five
 //! scenarios of `benchmark/`.
 //!
 //! Run `mise run bench-compare`, or `bash benchmark/run.sh`. The runner
@@ -44,9 +44,9 @@ struct Scenario {
     count: usize,
 }
 
-/// The three scenarios of `benchmark/`. The counts keep one PBeam run below
+/// The five scenarios of `benchmark/`. The counts keep one PBeam run below
 /// a few hundred milliseconds, so the whole report stays short.
-const SCENARIOS: [Scenario; 3] = [
+const SCENARIOS: [Scenario; 5] = [
     Scenario {
         module: "bench_arith",
         function: "loop",
@@ -67,6 +67,20 @@ const SCENARIOS: [Scenario; 3] = [
         title: "List build and sum",
         unit: "list cell",
         count: 400_000,
+    },
+    Scenario {
+        module: "bench_map",
+        function: "build_lookup",
+        title: "Map build and lookup",
+        unit: "key",
+        count: 100_000,
+    },
+    Scenario {
+        module: "bench_ets",
+        function: "insert_lookup",
+        title: "Table insert and lookup",
+        unit: "object",
+        count: 100_000,
     },
 ];
 

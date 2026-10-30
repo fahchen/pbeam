@@ -37,5 +37,5 @@ mkdir -p "$beams"
   printf '\n'
 }
 
-erlc +deterministic -o "$beams" benchmark/bench_arith.erl benchmark/bench_spawn.erl benchmark/bench_list.erl
+erlc +deterministic -o "$beams" benchmark/*.erl
 cargo run --quiet --locked --release --example benchmark
