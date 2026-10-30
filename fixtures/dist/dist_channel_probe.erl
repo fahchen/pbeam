@@ -77,6 +77,7 @@ main() ->
     Ctrl ! {go, DH},
     receive {Ctrl, Results} -> show(controller, Results) end,
     show(handler, [erlang:dist_ctrl_put_data(DH, <<>>),
+                   erlang:dist_ctrl_put_data(DH, []),
                    erlang:dist_ctrl_put_data(DH, [[], <<>>]),
                    catch erlang:dist_ctrl_put_data(DH, [foo]),
                    catch erlang:dist_ctrl_put_data(DH, <<1:1>>),
