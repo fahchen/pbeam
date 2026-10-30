@@ -1,6 +1,8 @@
 //! Bodies of the `erlang` BIFs that do not fit on one table line.
 
 mod snifs;
+mod statistics;
+pub(super) use statistics::statistics;
 
 use super::BifResult::{Raise, Trap, Value};
 use super::MessageQueue;
