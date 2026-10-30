@@ -651,7 +651,9 @@ impl Inet {
                 data
             };
             stream.remain = 0;
-            if self.active == 0 {
+            // `{deliver, port}` gives the packet with `driver_output` also
+            // in passive mode (inet_drv.c:4287-4288).
+            if self.active == 0 && self.deliver != 0 {
                 events.extend(self.end_receive(Ok(data)));
                 return events;
             }
