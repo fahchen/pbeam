@@ -44,6 +44,8 @@ jobs:
             ~/.blaze
             ~/.cache/blaze
           key: blaze-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/blaze-version') }}
+          # The job fails until a blaze release loads the workspace (docs/blaze.md), and a failed job skips the save of its post step.
+          save-always: true
 
       # blaze runs each build script and each test in a sandbox of namespaces that a user makes. Ubuntu keeps a user from making them unless it is told otherwise.
       - name: Allow the sandbox of a build script

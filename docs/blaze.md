@@ -10,13 +10,15 @@ blaze builds every project with its own Rust toolchain, whatever `mise.toml` pin
 
 ## The CI job
 
-`.github/workflows/blaze.yml` installs the pinned release, restores the release, its toolchain, and its store from the Actions cache, and runs the same check. The job sets `continue-on-error: true`: it reports what blaze says and does not block a merge. A pull request keeps one required status, `checks`.
+`.github/workflows/blaze.yml` installs the pinned release, restores the release, its toolchain, and its store from the Actions cache, and runs the same check. The job turns off the AppArmor restriction of Ubuntu on user namespaces, because blaze runs each build script in a sandbox that it makes. The job sets `continue-on-error: true`: it reports what blaze says and does not block a merge. A pull request keeps one required status, `checks`.
 
 The job does not use blaze's remote store, because that needs a cache service and a token that this repository does not have. Each run warms its own store from the Actions cache.
 
+The first run on Linux x86-64 (2026-10-30, run 40978160026) installed the release in 10 s, downloaded its 159 MB toolchain in 6 s, and failed in the load 27 s later. The job sets `save-always`, because a failed job otherwise skips the save of its cache. Its failure is the one below.
+
 ## The blocker, measured 2026-10-30
 
-`blaze check --workspace --all-targets` cannot load this workspace. The output ends with:
+`blaze check --workspace --all-targets` cannot load this workspace, on macOS arm64 and on Linux x86-64. The output ends with:
 
 ```text
 blaze could not compile the build script of `libz-sys v1.1.30` for the load; blaze did not build it (exit status: 1): Error: `build_script_build` reaches 1 function blaze could not compile, and a build with nothing of rustc's has nothing else to compile it, so it is not built:;   <cc::parallel::job_token::inherited_jobserver::HelperThread>::new: unsupported: callee `into_helper_thread`: callee `{closure}`: callee `send`: callee `send`: callee `send`: callee `with`: callee `{closure}::fn_pointer`: callee `{closure}`: unsupported: writable static `__RUST_STD_INTERNAL_VAL` without a rustc symbol
