@@ -45,6 +45,13 @@ jobs:
             ~/.cache/blaze
           key: blaze-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/blaze-version') }}
 
+      # blaze runs each build script and each test in a sandbox of namespaces that a user makes. Ubuntu keeps a user from making them unless it is told otherwise.
+      - name: Allow the sandbox of a build script
+        run: |
+          if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" != 0 ]; then
+            sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
       - name: Run blaze
         run: bash scripts/blaze.sh check --workspace --all-targets
 
