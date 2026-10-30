@@ -14,9 +14,9 @@
 
 use super::BifResult::{Raise, Value};
 use super::{
-    Arc, BeamError, BifContext, BifResult, ExceptionClass, Term, atomics, binary, chksum, erlang,
-    erts_internal, ets, file, float, hash, integer, iolist, lists, maps, math, native, os, packet,
-    persistent_term, re, records, subtract, term, timer, to_i64, unicode, unresolved_mfa,
+    Arc, BeamError, BifContext, BifResult, ExceptionClass, Term, atomics, binary, chksum, dist,
+    erlang, erts_internal, ets, file, float, hash, integer, iolist, lists, maps, math, native, os,
+    packet, persistent_term, re, records, subtract, term, timer, to_i64, unicode, unresolved_mfa,
 };
 use crate::runtime::host::filename_encoding;
 use crate::runtime::scheduler::node::Named;
@@ -263,8 +263,8 @@ bifs! {
     erlang:monotonic_time/1 as ErlangMonotonicTime1 => |cx, [unit]| Ok(erlang::convert_time(cx.scheduler.timers.now(), 1, unit)),
     erlang:nif_error/1 as ErlangNifError1 => |_, [reason]| Ok(Raise { class: ExceptionClass::Error, reason: reason.clone() }),
     erlang:nif_error/2 => unsupported,
-    erlang:node/0 as ErlangNode0 => |_, []| Ok(Value(crate::runtime::local_node())),
-    erlang:node/1 as ErlangNode1 => |_, [term]| Ok(erlang::node(term)),
+    erlang:node/0 as ErlangNode0 => |cx, []| Ok(Value(crate::runtime::local_node(&cx.scheduler.atoms))),
+    erlang:node/1 as ErlangNode1 => |cx, [term]| Ok(erlang::node(term, &cx.scheduler.atoms)),
     erlang:nodes/0 as ErlangNodes0 => |cx, []| Ok(erlang::nodes(&Term::static_atom("visible"), None, cx.scheduler)),
     erlang:nodes/1 as ErlangNodes1 => |cx, [node_types]| Ok(erlang::nodes(node_types, None, cx.scheduler)),
     erlang:nodes/2 as ErlangNodes2 => |cx, [node_types, options]| Ok(erlang::nodes(node_types, Some(options), cx.scheduler)),
@@ -305,7 +305,7 @@ bifs! {
     erlang:seq_trace_print/1 => unsupported,
     erlang:seq_trace_print/2 => unsupported,
     erlang:setelement/3 as ErlangSetelement3 => |_, [index, tuple, value]| Ok(erlang::setelement(index, tuple, value)),
-    erlang:setnode/2 => unsupported,
+    erlang:setnode/2 as ErlangSetnode2 => |cx, [name, creation]| Ok(dist::setnode(cx, name, creation)),
     erlang:size/1 as ErlangSize1 => |_, [term]| Ok(erlang::size(term)),
     erlang:spawn/3 as ErlangSpawn3 => |cx, [module, function, arguments]| erlang::spawn(cx, module, function, arguments),
     erlang:spawn_link/3 as ErlangSpawnLink3 => |cx, [module, function, arguments]| erlang::spawn_link(cx, module, function, arguments),
@@ -344,7 +344,7 @@ bifs! {
     erlang:universaltime_to_localtime/1 as ErlangUniversaltimeToLocaltime1 => |_, [date]| Ok(erlang::universaltime_to_localtime(date)),
     erlang:universaltime_to_posixtime/1 as ErlangUniversaltimeToPosixtime1 => |_, [date]| Ok(erlang::universaltime_to_posixtime(date)),
     // ERTS returns `true` for a pid of another node with no link, and PBeam makes no such link; an old incarnation of the local node needs no signal (`bif.c:1295-1312`, `bif.c:1346-1356`).
-    erlang:unlink/1 as ErlangUnlink1 => |cx, [target]| match target { Term::Pid(target) => { cx.scheduler.unlink(*target); Ok(Value(Term::static_atom("true"))) } Term::Port(port) => { cx.scheduler.unlink_port(*port); Ok(Value(Term::static_atom("true"))) } Term::External(_) if pid_parts(target).is_some() || (erlang::old_incarnation(target) && port_number(target).is_some()) => Ok(Value(Term::static_atom("true"))), _ => Ok(BifResult::badarg()) },
+    erlang:unlink/1 as ErlangUnlink1 => |cx, [target]| match target { Term::Pid(target) => { cx.scheduler.unlink(*target); Ok(Value(Term::static_atom("true"))) } Term::Port(port) => { cx.scheduler.unlink_port(*port); Ok(Value(Term::static_atom("true"))) } Term::External(_) if pid_parts(target).is_some() || (erlang::old_incarnation(target, &cx.scheduler.atoms) && port_number(target).is_some()) => Ok(Value(Term::static_atom("true"))), _ => Ok(BifResult::badarg()) },
     erlang:unregister/1 as ErlangUnregister1 => |cx, [name]| erlang::unregister(cx.scheduler, name),
     erlang:whereis/1 as ErlangWhereis1 => |cx, [name]| Ok(match name { Term::Atom(name) => Value(cx.scheduler.name_owner(cx.scheduler.atoms.name_of(name)).map_or(Term::static_atom("undefined"), Named::term)), _ => BifResult::badarg() }),
     erlang:xor/2 as ErlangXor2 => |_, [left, right]| Ok(match (left, right) { (Term::Atom(left), Term::Atom(right)) if left.is_one_of(&["true", "false"]) && right.is_one_of(&["true", "false"]) => Value(Term::static_atom(if left.is_static("true") == right.is_static("true") { "false" } else { "true" })), _ => BifResult::badarg() }),
@@ -393,7 +393,7 @@ bifs! {
     erts_internal:garbage_collect/1 as ErtsInternalGarbageCollect1 => |_, [kind]| Ok(match kind { Term::Atom(atom) if atom.is_one_of(&["minor", "major"]) => Value(Term::static_atom("true")), _ => BifResult::badarg() }),
     erts_internal:gather_alloc_histograms/1 => unsupported,
     erts_internal:gather_carrier_info/1 => unsupported,
-    erts_internal:get_creation/0 => unsupported,
+    erts_internal:get_creation/0 as ErtsInternalGetCreation0 => |cx, []| Ok(Value(dist::get_creation(cx.scheduler.atoms.this_node().1))),
     erts_internal:get_dflags/0 => unsupported,
     erts_internal:group_leader/2 as ErtsInternalGroupLeader2 => |cx, [leader, target]| erts_internal::group_leader(cx, leader, target),
     erts_internal:group_leader/3 as ErtsInternalGroupLeader3 => |cx, [leader, target, reference]| erts_internal::group_leader_request(cx, leader, target, reference),

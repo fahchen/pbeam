@@ -703,7 +703,9 @@ ambient() ->
         attempt(fun() -> prim_net:get_interface_info(#{}) end),
         attempt(fun() -> prim_net:get_ip_address_table(#{}) end),
         erts_internal:term_type(id(a)),
-        tuple_size(erlang:statistics(runtime))
+        tuple_size(erlang:statistics(runtime)),
+        erts_internal:get_creation(),
+        attempt(fun() -> erlang:setnode(nonode@nohost, 0) end)
     ].
 
 %% Each metadata probe makes a temporary file, so `write_file_info/3`

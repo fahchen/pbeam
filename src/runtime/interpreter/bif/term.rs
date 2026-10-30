@@ -613,16 +613,16 @@ fn encode_parts(
             }
             Term::Pid(ProcessId(data)) => {
                 out.push(88);
-                encode_sysname(atoms, options, &mut out);
+                let creation = encode_sysname(atoms, options, &mut out);
                 out.extend_from_slice(&low_u32(data & u64::from(MAX_PID_NUMBER)).to_be_bytes());
                 out.extend_from_slice(&low_u32(data >> PID_NUMBER_BITS).to_be_bytes());
-                out.extend_from_slice(&0u32.to_be_bytes());
+                out.extend_from_slice(&creation.to_be_bytes());
             }
             Term::Port(port) => {
                 out.push(120);
-                encode_sysname(atoms, options, &mut out);
+                let creation = encode_sysname(atoms, options, &mut out);
                 out.extend_from_slice(&port.0.to_be_bytes());
-                out.extend_from_slice(&0u32.to_be_bytes());
+                out.extend_from_slice(&creation.to_be_bytes());
             }
             // An identifier of another node gives its node name and its
             // creation (`enc_pid`, `external.c:3025-3060`, `enc_term_int`,
@@ -666,8 +666,8 @@ fn encode_parts(
                 }
                 out.push(90);
                 out.extend_from_slice(&3u16.to_be_bytes());
-                encode_sysname(atoms, options, &mut out);
-                out.extend_from_slice(&0u32.to_be_bytes());
+                let creation = encode_sysname(atoms, options, &mut out);
+                out.extend_from_slice(&creation.to_be_bytes());
                 for number in reference.numbers() {
                     out.extend_from_slice(&number.to_be_bytes());
                 }
@@ -699,8 +699,9 @@ fn encode_parts(
                     encode_integer(i64::from(lambda.old_index()), &mut out);
                     encode_integer(i64::from(lambda.old_unique()), &mut out);
                     out.push(88);
-                    encode_sysname(atoms, options, &mut out);
-                    out.extend_from_slice(&[0; 12]);
+                    let creation = encode_sysname(atoms, options, &mut out);
+                    out.extend_from_slice(&[0; 8]);
+                    out.extend_from_slice(&creation.to_be_bytes());
                     pending.extend(fun.free().iter().rev());
                 }
             },
@@ -744,15 +745,26 @@ fn exact_map_key_order(left: &Term, right: &Term, atoms: &AtomTable) -> Ordering
     left.compare_exact(right, atoms).unwrap_or(Ordering::Equal)
 }
 
-/// Write the node atom of a pid, port, or reference: `NIL_EXT` with `local`,
-/// else the local node atom (`enc_internal_pid`, `external.c:2968-2980`).
-fn encode_sysname(atoms: &AtomTable, options: &Options, out: &mut Vec<u8>) {
+/// Write the node atom of a local pid, port, or reference, and return the
+/// creation to write after it: `NIL_EXT` and 0 with `local`, else the name
+/// and the creation of the local node (`enc_internal_pid`,
+/// `external.c:2967-2996`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// // A run where setnode(a@host, 4) ran.
+/// assert_eq!(encode_sysname(&atoms, &options, &mut out), 4);
+/// assert_eq!(out, [119, 6, b'a', b'@', b'h', b'o', b's', b't']);
+/// ```
+fn encode_sysname(atoms: &AtomTable, options: &Options, out: &mut Vec<u8>) -> u32 {
     if options.local {
         out.push(106);
+        0
     } else {
-        let atom =
-            crate::term::Atom::from_static("nonode@nohost").expect("the local node atom is static");
-        encode_atom(atoms.name_of(&atom), options, out);
+        let (name, creation) = atoms.this_node();
+        encode_atom(atoms.name_of(&name), options, out);
+        creation
     }
 }
 
@@ -2053,17 +2065,10 @@ impl Decoder<'_> {
     }
 
     /// Return true when `sysname` and `creation` name the local node, as
-    /// `dec_is_this_node` (`external.c:3124-3131`) does.
+    /// `dec_is_this_node` (`external.c:3123-3129`) does: `NIL_EXT`, or the
+    /// name and the creation of the local node.
     fn is_local(&self, sysname: Option<crate::term::Atom>, creation: u32) -> bool {
-        if creation != 0 {
-            return false;
-        }
-        let atom =
-            crate::term::Atom::from_static("nonode@nohost").expect("the local node atom is static");
-        match sysname {
-            None => true,
-            Some(sysname) => self.atoms.name_of(&sysname) == self.atoms.name_of(&atom),
-        }
+        sysname.is_none_or(|sysname| (sysname, creation) == self.atoms.this_node())
     }
 
     /// Return the node name of `sysname` and `creation` when they do not

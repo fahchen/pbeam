@@ -253,6 +253,15 @@ pub struct AtomTable {
     /// The program that owns the table. A copy keeps the identity, and the
     /// import compares it with the identity of the destination table.
     program: ProgramId,
+    /// The name and the creation of the local node of the run, as
+    /// `erts_this_node` holds them (`erl_node_tables.c:1042-1061`): the
+    /// atom index of the name in the high 32 bits and the creation in the
+    /// low 32 bits. A run starts with `nonode@nohost` and the creation 0;
+    /// `erlang:setnode/2` changes them. The table holds them because each
+    /// term operation that reads the local node (the term order, the text,
+    /// and the external term format) receives the table of the run, and
+    /// each run has its own copy of the table.
+    this_node: AtomicU64,
 }
 
 impl fmt::Debug for AtomTable {
@@ -275,6 +284,8 @@ impl Clone for AtomTable {
     fn clone(&self) -> Self {
         let count = self.read_indices().len();
         let copy = AtomTable::empty(self.program);
+        copy.this_node
+            .store(self.this_node.load(Ordering::Acquire), Ordering::Release);
         for index in 0..count {
             let name = self
                 .name(u32::try_from(index).expect("ATOM_LIMIT fits in u32"))
@@ -294,7 +305,42 @@ impl AtomTable {
                 .map(|_| OnceLock::new())
                 .collect(),
             program,
+            this_node: AtomicU64::new(u64::from(Atom::static_index("nonode@nohost")) << 32),
         }
+    }
+
+    /// Return the name and the creation of the local node of the run
+    /// (`erts_this_node`, `erl_node_tables.c:1042-1061`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let table = AtomTable::new();
+    /// assert_eq!(table.this_node(), (Atom::from_static("nonode@nohost").unwrap(), 0));
+    /// ```
+    pub(crate) fn this_node(&self) -> (Atom, u32) {
+        let node = self.this_node.load(Ordering::Acquire);
+        let index = u32::try_from(node >> 32).expect("the high 32 bits fit in u32");
+        let creation =
+            u32::try_from(node & u64::from(u32::MAX)).expect("the low 32 bits fit in u32");
+        (Atom { index }, creation)
+    }
+
+    /// Give the local node of the run the name `name` and the creation
+    /// `creation`, as `erts_set_this_node` does
+    /// (`erl_node_tables.c:1042-1061`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// table.set_this_node(&name, 4);
+    /// assert_eq!(table.this_node(), (name, 4));
+    /// ```
+    pub(crate) fn set_this_node(&self, name: &Atom, creation: u32) {
+        self.this_node.store(
+            (u64::from(name.index) << 32) | u64::from(creation),
+            Ordering::Release,
+        );
     }
 
     /// Return a table with the 1150 static atoms at indices 0 to 1149, as

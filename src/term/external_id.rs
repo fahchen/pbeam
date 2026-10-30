@@ -5,8 +5,8 @@
 //! (`erl_node_tables.h:213-227`, `erl_term.h:1150-1230`). `binary_to_term/1`
 //! makes one for a pid, a port, or a reference whose node name and creation
 //! are not those of the local node (`dec_pid`, `external.c:3133-3200`,
-//! `4685-4740`, `4786-4890`). PBeam is never alive, so its local node is
-//! `nonode@nohost` with the creation 0.
+//! `4685-4740`, `4786-4890`). The local node is `nonode@nohost` with the
+//! creation 0 until `erlang:setnode/2` gives it a name and a creation.
 
 use super::{Atom, PortId, ProcessId, Reference, Term};
 
@@ -15,9 +15,6 @@ use super::{Atom, PortId, ProcessId, Reference, Term};
 pub(crate) const PID_NUMBER_BITS: u32 = 28;
 /// The mask of the process number in the data of a local pid.
 pub(crate) const PID_NUMBER_MASK: u64 = (1 << PID_NUMBER_BITS) - 1;
-
-/// The name of the local node of a node that is not alive.
-pub(crate) const LOCAL_NODE: &str = "nonode@nohost";
 
 /// A pid, a port, or a reference of another node: the node name, the
 /// creation of the node, and the identifier data.

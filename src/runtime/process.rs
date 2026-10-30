@@ -194,7 +194,7 @@ pub(super) struct OriginMonitor {
     /// for a port name (`other.item` is `undefined`).
     pub(super) target: Option<ProcessId>,
     /// The fourth element of the `DOWN` message: the pid, or
-    /// `{Name, nonode@nohost}` for a monitor by name
+    /// `{Name, Node}` with the local node for a monitor by name
     /// (`erl_proc_sig_queue.c:4942-4955`).
     pub(super) item: Term,
     /// The first element of the `DOWN` message: `'DOWN'`, or the `tag`

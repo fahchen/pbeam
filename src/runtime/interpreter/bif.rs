@@ -23,6 +23,7 @@ use crate::term::ProcessId;
 mod atomics;
 mod binary;
 mod chksum;
+mod dist;
 pub(in crate::runtime) mod erlang;
 mod erts_internal;
 mod ets;

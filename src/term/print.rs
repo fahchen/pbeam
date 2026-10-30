@@ -22,7 +22,7 @@
 //! | pid | `<0.Number.Serial>` |
 //! | reference | `#Ref<0.N2.N1.N0>` |
 
-use super::external_id::{ExternalData, LOCAL_NODE, PID_NUMBER_BITS, PID_NUMBER_MASK};
+use super::external_id::{ExternalData, PID_NUMBER_BITS, PID_NUMBER_MASK};
 use super::{AtomTable, Reference, Target, Term, match_context::MATCH_CONTEXT_ESCAPE};
 
 /// An item of the work stack of `print_term`: a term to print, or a fixed
@@ -242,7 +242,7 @@ fn print_term_counted(term: &Term, atoms: &AtomTable, dcount: &mut i64) -> Vec<u
             Term::External(id) => {
                 // An old incarnation of the local node has the dist entry of
                 // the local node, whose channel number is 0.
-                let channel = if atoms.name_of(&id.node) == LOCAL_NODE {
+                let channel = if id.node == atoms.this_node().0 {
                     0
                 } else {
                     id.node.index()

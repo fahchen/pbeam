@@ -73,7 +73,9 @@ pub(super) fn group_leader(
     }
     let target = match target {
         Term::Pid(target) => target,
-        Term::External(_) if pid_parts(target).is_some() && old_incarnation(target) => {
+        Term::External(_)
+            if pid_parts(target).is_some() && old_incarnation(target, &context.scheduler.atoms) =>
+        {
             return Ok(BifResult::badarg());
         }
         Term::External(_) if pid_parts(target).is_some() => {
@@ -1640,7 +1642,7 @@ pub(super) fn port_info(context: &mut BifContext<'_>, port: &Term) -> Result<Bif
         // (`erl_bif_port.c:517-522`, `erl_bif_port.c:574-579`).
         (_, _)
             if matches!(port, Term::Port(_) | Term::Atom(_))
-                || (old_incarnation(port) && port_number(port).is_some()) =>
+                || (old_incarnation(port, &scheduler.atoms) && port_number(port).is_some()) =>
         {
             Term::static_atom("undefined")
         }
@@ -1813,7 +1815,7 @@ pub(super) fn port_info_item(
         // (`erl_bif_port.c:517-522`, `erl_bif_port.c:574-579`).
         (_, _)
             if matches!(port, Term::Port(_) | Term::Atom(_))
-                || (old_incarnation(port) && port_number(port).is_some()) =>
+                || (old_incarnation(port, &scheduler.atoms) && port_number(port).is_some()) =>
         {
             Term::static_atom("undefined")
         }
