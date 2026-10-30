@@ -1,7 +1,9 @@
 //! Read and change the environment of the run as ERTS keeps its copy of the
 //! environment of the host (`sys/unix/sys_env.c`, `sys/common/erl_osenv.c`).
 
-use std::ffi::{CStr, c_char};
+use std::ffi::{CStr, OsStr, c_char};
+use std::os::unix::ffi::OsStrExt;
+use std::process::Command;
 use std::sync::{LazyLock, RwLock};
 
 /// The environment of the run: the ERTS global environment copy, which
@@ -146,6 +148,29 @@ pub fn add_erlexec_path(bindir: &[u8], rootdir: &[u8]) {
         .map(|(_, value)| value.clone());
     let value = erlexec_path(path.as_deref(), bindir, rootdir);
     set(&mut entries, b"PATH", value);
+}
+
+/// Return a command of `program` with the environment copy of the run, as
+/// `erlexec` runs the start of epmd with its own environment after it sets
+/// `PATH` (`erlexec.c:556-620`, `1327-1372`). The command finds a
+/// `program` without a slash in the `PATH` of the copy.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let status = erlexec_command(OsStr::new("epmd")).arg("-daemon").status()?;
+/// ```
+pub fn erlexec_command(program: &OsStr) -> Command {
+    let mut command = Command::new(program);
+    command
+        .env_clear()
+        .envs(variables().iter().map(|(name, value)| {
+            (
+                OsStr::from_bytes(name).to_owned(),
+                OsStr::from_bytes(value).to_owned(),
+            )
+        }));
+    command
 }
 
 /// Return the `PATH` that `erlexec` sets (`erlexec.c:556-620`). With no

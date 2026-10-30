@@ -14,7 +14,7 @@ pub use error::BeamError;
 pub use runtime::{
     AllowAll, BeamProgram, Binding, Capability, CapabilityKind, Constraint, Delegation, Job,
     Library, LoadFn, NativeFn, NativeResult, NifContext, NifGap, Operation, Policy,
-    RegistrationError, RootAuthority, Schedulers, add_erlexec_path, install_start_dispositions,
-    nif_manifest_gaps, register_library,
+    RegistrationError, RootAuthority, Schedulers, add_erlexec_path, erlexec_command,
+    install_start_dispositions, nif_manifest_gaps, register_library,
 };
 pub use term::{Atom, AtomTable, HostTerm, Map, PortId, ProcessId, Reference, Term, debug_term};
