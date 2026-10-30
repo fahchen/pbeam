@@ -1,6 +1,6 @@
 -module(remote_id_probe).
 -compile({nowarn_deprecated_function, [{erlang, phash, 2}]}).
--export([main/0, link/0, monitor/0, old_monitor/0, old_process_monitor/0, exit/0, exit_alias/0, group_leader/0,
+-export([main/0, external/0, link/0, monitor/0, old_monitor/0, old_process_monitor/0, exit/0, exit_alias/0, group_leader/0,
          group_leader_leader/0, old_send/0, other_scheduler/0]).
 
 %% Decode the pids, ports, and references of another node with
@@ -101,6 +101,52 @@ run(Trap, F) ->
 
 msgs() ->
     receive {T, I, V} -> [{T, norm(I), V} | msgs()] after 0 -> [] end.
+
+%% The external term format of each identifier and of a local pid, a
+%% local reference, and a local port: the round trip of
+%% term_to_binary/1,2 and binary_to_term/1,2, the bytes of the old minor
+%% versions with the node as ATOM_EXT (external.c:2877-2960, 3025-3060,
+%% 3600-3690, 4677-4890), the tag of each local identifier, the sizes,
+%% term_to_iovec/1, and the options safe and used.
+external() ->
+    Ids = ids(),
+    Port = open_port({spawn, "cat"}, []),
+    Local = [self(), make_ref(), Port],
+    Unknown = <<131, 88, 119, 9, "zq9x@host", 5:32, 0:32, 7:32>>,
+    io:format("~p~n", [[
+        [binary_to_term(term_to_binary(I)) =:= I || I <- Ids ++ Local],
+        [binary_to_term(term_to_binary(I), [safe]) =:= I || I <- Ids ++ Local],
+        [term_to_binary(I, [{minor_version, 0}]) || I <- Ids],
+        [term_to_binary(I, [{minor_version, 1}, deterministic]) || I <- Ids],
+        [binary:at(term_to_binary(I), 1) || I <- Local],
+        [erlang:external_size(I) || I <- Ids ++ Local],
+        [iolist_to_binary(term_to_iovec(I)) =:= term_to_binary(I) || I <- Ids],
+        try binary_to_term(Unknown, [safe]) catch error:badarg -> badarg end,
+        element(2, binary_to_term(Unknown, [used])),
+        [element(2, binary_to_term(term_to_binary(I, [local]), [used])) || I <- Ids],
+        [binary_to_term(term_to_binary(I, [local])) =:= I || I <- Ids],
+        zero_numbers()
+    ]]),
+    port_close(Port).
+
+%% A reference of another node with no numbers: dec_term reads a first
+%% number also after the end of the input, and used counts its 4 bytes
+%% (external.c:4795-4796, 6217-6241). A term after it starts 4 bytes later,
+%% and LOCAL_EXT checks its hash only in decoded_size (external.c:5250-5255).
+%% NEW_REFERENCE_EXT rejects a first number of 18 bits (external.c:4780-4783).
+zero_numbers() ->
+    Zero = <<90, 0:16, 119, 6, "b@host", 5:32>>,
+    R = binary_to_term(<<131, Zero/binary>>),
+    [element(2, binary_to_term(<<131, Zero/binary, Tail/binary>>, [used]))
+     || Tail <- [<<>>, <<1, 2>>, <<1, 2, 3, 4, 5>>]]
+    ++ [binary_to_term(term_to_binary(R)) =:= R,
+        binary_to_term(term_to_binary({R})) =:= {R},
+        try binary_to_term(term_to_binary({R, abc, 1})) catch error:badarg -> badarg end,
+        element(2, binary_to_term(<<(term_to_binary({R}, [local]))/binary, 1, 2, 3, 4>>, [used]))]
+    ++ [try binary_to_term(<<131, 114, 1:16, 100, 6:16, "b@host", 0, First:32>>) of
+            Ref -> node(Ref)
+        catch error:badarg -> badarg
+        end || First <- [1 bsl 18 - 1, 1 bsl 18]].
 
 %% The identifiers: pids, ports, and references of b@host and a@host with
 %% each tag, and a pid of an old incarnation of the local node.

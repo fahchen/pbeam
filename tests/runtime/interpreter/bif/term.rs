@@ -148,10 +148,10 @@ fn decode_full(atoms: &AtomTable, bytes: &[u8], policy: AtomPolicy) -> Result<Te
     Decoder {
         input: bytes,
         pos: 0,
+        overrun: 0,
         safe: policy == AtomPolicy::ExistingOnly,
         local: false,
         atoms,
-        seed: SEED,
         code: &CodeTable::default(),
         ets: &crate::runtime::ets::NodeTables::default(),
     }
@@ -774,10 +774,10 @@ fn decodes_local_terms_with_their_block_hash() {
         Decoder {
             input: &local,
             pos: 0,
+            overrun: 0,
             safe: false,
             local: false,
             atoms: &atoms,
-            seed: SEED,
             code: &CodeTable::default(),
             ets: &crate::runtime::ets::NodeTables::default(),
         }
@@ -791,10 +791,10 @@ fn decodes_local_terms_with_their_block_hash() {
         Decoder {
             input: &local,
             pos: 0,
+            overrun: 0,
             safe: false,
             local: false,
             atoms: &atoms,
-            seed: SEED,
             code: &CodeTable::default(),
             ets: &crate::runtime::ets::NodeTables::default(),
         }
@@ -1103,10 +1103,10 @@ fn keeps_the_decoder_guards_behind_the_validation() {
         Decoder {
             input: bytes,
             pos: 0,
+            overrun: 0,
             safe: false,
             local: false,
             atoms: &atoms,
-            seed: SEED,
             code: &CodeTable::default(),
             ets: &crate::runtime::ets::NodeTables::default(),
         }
@@ -1119,7 +1119,7 @@ fn keeps_the_decoder_guards_behind_the_validation() {
         &[116, 0, 0, 0, 2, 97, 1],
         &[77, 0, 0, 0, 0, 8],
         &[255],
-        &[121, 0, 0, 0, 0, 97, 1],
+        &[121, 0, 0],
         &[112],
     ] {
         assert!(matches!(term(invalid), Err(DecodeError::Badarg)));
