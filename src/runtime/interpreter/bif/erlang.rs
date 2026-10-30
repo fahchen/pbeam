@@ -1326,32 +1326,11 @@ pub(super) fn raise(depth: usize, class: &Term, reason: &Term, stacktrace: &Term
 /// A new `capability_denied` atom in a full atom table gives the error of
 /// `AtomTable::put`.
 pub(super) fn link(scheduler: &mut Scheduler, target: &Term) -> Result<BifResult, BeamError> {
-    let target = match *target {
-        Term::Pid(pid) => LinkId::Process(pid),
-        Term::Port(port) => LinkId::Port(port),
-        // A link to an old incarnation of the local node raises `noproc`
-        // without `trap_exit`, else the caller gets the exit signal
-        // `noproc` at once (`bif.c:235-261`, `bif.c:271-289`).
-        Term::External(_) if old_incarnation(target) && !is_reference(target) => {
-            if let Some(denied) = denial(scheduler, CapabilityKind::Process, Operation::Link, None)?
-            {
-                return Ok(denied);
-            }
-            if !scheduler.current_process_mut().trap_exit {
-                return Ok(Raise {
-                    class: ExceptionClass::Error,
-                    reason: Term::static_atom("noproc"),
-                });
-            }
-            let caller = scheduler.current_process_mut().id;
-            let exit = Term::tuple(vec![
-                Term::static_atom("EXIT"),
-                target.clone(),
-                Term::static_atom("noproc"),
-            ]);
-            scheduler.deliver(caller, exit);
-            return Ok(Value(Term::static_atom("true")));
-        }
+    // `None` is a pid or a port of an old incarnation of the local node.
+    let linked_id = match *target {
+        Term::Pid(pid) => Some(LinkId::Process(pid)),
+        Term::Port(port) => Some(LinkId::Port(port)),
+        Term::External(_) if old_incarnation(target) && !is_reference(target) => None,
         _ if matches!(target, Term::External(_)) && pid_parts(target).is_some() => {
             return Err(remote_unsupported("erlang:link/1"));
         }
@@ -1360,7 +1339,26 @@ pub(super) fn link(scheduler: &mut Scheduler, target: &Term) -> Result<BifResult
     if let Some(denied) = denial(scheduler, CapabilityKind::Process, Operation::Link, None)? {
         return Ok(denied);
     }
-    let linked = match target {
+    // A link to an old incarnation of the local node raises `noproc`
+    // without `trap_exit`, else the caller gets the exit signal `noproc` at
+    // once (`bif.c:235-261`, `bif.c:271-289`).
+    let Some(linked_id) = linked_id else {
+        if !scheduler.current_process_mut().trap_exit {
+            return Ok(Raise {
+                class: ExceptionClass::Error,
+                reason: Term::static_atom("noproc"),
+            });
+        }
+        let caller = scheduler.current_process_mut().id;
+        let exit = Term::tuple(vec![
+            Term::static_atom("EXIT"),
+            target.clone(),
+            Term::static_atom("noproc"),
+        ]);
+        scheduler.deliver(caller, exit);
+        return Ok(Value(Term::static_atom("true")));
+    };
+    let linked = match linked_id {
         LinkId::Process(target) => {
             if let Some(denied) = boot_denial(scheduler, target)? {
                 return Ok(denied);
@@ -1670,12 +1668,13 @@ pub(super) fn monitor(
         ("process", Term::Pid(id)) => Some(Ok(MonitorTarget::Process(*id))),
         // ERTS sends a `DOWN` message with `noproc` at once for an old
         // incarnation of the local node (`bif.c:811-825`, `bif.c:925-935`).
-        ("process" | "port", Term::External(_))
-            if old_incarnation(target) && !is_reference(target) =>
+        ("process", Term::External(_))
+            if old_incarnation(target) && pid_parts(target).is_some() =>
         {
-            Some(Err(error(
-                "unsupported erlang:monitor/2,3 of a pid or a port of an old incarnation of the local node: see \"Distribution\" in docs/erts-differences.md",
-            )))
+            Some(Err(old_monitor_unsupported()))
+        }
+        ("port", Term::External(_)) if old_incarnation(target) && port_number(target).is_some() => {
+            Some(Err(old_monitor_unsupported()))
         }
         ("process", Term::External(_)) if pid_parts(target).is_some() => {
             Some(Err(remote_unsupported("erlang:monitor/2,3")))
@@ -1698,6 +1697,21 @@ pub(super) fn monitor(
     }
     let reference = scheduler.monitor(target?, options)?;
     Ok(Value(Term::Reference(reference)))
+}
+
+/// Return the runtime error of `erlang:monitor/2,3` of a pid or a port of an
+/// old incarnation of the local node, where ERTS sends a `DOWN` message
+/// with `noproc` (row "Distribution" of `docs/erts-differences.md`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// return Err(old_monitor_unsupported());
+/// ```
+fn old_monitor_unsupported() -> BeamError {
+    error(
+        "unsupported erlang:monitor/2,3 of a pid or a port of an old incarnation of the local node: see \"Distribution\" in docs/erts-differences.md",
+    )
 }
 
 /// Read the options of `erlang:monitor/3` as ERTS `erts_monitor_opts`

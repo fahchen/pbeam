@@ -1,6 +1,6 @@
 -module(remote_id_probe).
 -compile({nowarn_deprecated_function, [{erlang, phash, 2}]}).
--export([main/0, link/0, monitor/0, old_monitor/0, exit/0, exit_alias/0, group_leader/0,
+-export([main/0, link/0, monitor/0, old_monitor/0, old_process_monitor/0, exit/0, exit_alias/0, group_leader/0,
          group_leader_leader/0, old_send/0]).
 
 %% Decode the pids, ports, and references of another node with
@@ -84,6 +84,8 @@ signals() ->
         fun() -> erlang:port_info(OPort, bad) end, fun() -> is_process_alive(OPid) end,
         fun() -> process_info(OPid, status) end, fun() -> process_info(OPid, [status, links]) end,
         fun() -> process_info(OPid, bad) end, fun() -> process_info(OPid) end,
+        fun() -> monitor(process, OPort) end, fun() -> monitor(port, OPid) end,
+        fun() -> monitor(process, ORef) end,
         fun() -> demonitor(ORef) end, fun() -> erlang:cancel_timer(ORef) end,
         fun() -> unalias(ORef) end],
     [run(Trap, F) || F <- Cases, Trap <- [false, true]].
@@ -145,6 +147,7 @@ remote() -> hd(ids()).
 link() -> erlang:link(remote()).
 monitor() -> erlang:monitor(process, remote()).
 old_monitor() -> erlang:monitor(port, binary_to_term(<<131, 89, 100, 13:16, "nonode@nohost", 8:32, 7:32>>)).
+old_process_monitor() -> erlang:monitor(process, lists:last(ids())).
 exit() -> erlang:exit(remote(), kill).
 exit_alias() -> erlang:exit(lists:nth(7, ids()), x).
 group_leader() -> erlang:group_leader(self(), remote()).

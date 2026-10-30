@@ -1364,6 +1364,10 @@ fn stops_with_a_runtime_error_for_each_signal_to_another_node() {
             "unsupported erlang:monitor/2,3 of a pid or a port of an old incarnation",
         ),
         (
+            "old_process_monitor",
+            "unsupported erlang:monitor/2,3 of a pid or a port of an old incarnation",
+        ),
+        (
             "exit",
             "unsupported erlang:exit/2,3 with a pid or an alias of another node",
         ),
