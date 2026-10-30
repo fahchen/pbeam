@@ -131,7 +131,9 @@ external() ->
 
 %% A reference of another node with no numbers: dec_term reads a first
 %% number also after the end of the input, and used counts its 4 bytes
-%% (external.c:4795-4796, 6217-6241). A term after it starts 4 bytes later.
+%% (external.c:4795-4796, 6217-6241). A term after it starts 4 bytes later,
+%% and LOCAL_EXT checks its hash only in decoded_size (external.c:5250-5255).
+%% NEW_REFERENCE_EXT rejects a first number of 18 bits (external.c:4780-4783).
 zero_numbers() ->
     Zero = <<90, 0:16, 119, 6, "b@host", 5:32>>,
     R = binary_to_term(<<131, Zero/binary>>),
@@ -139,7 +141,12 @@ zero_numbers() ->
      || Tail <- [<<>>, <<1, 2>>, <<1, 2, 3, 4, 5>>]]
     ++ [binary_to_term(term_to_binary(R)) =:= R,
         binary_to_term(term_to_binary({R})) =:= {R},
-        try binary_to_term(term_to_binary({R, abc, 1})) catch error:badarg -> badarg end].
+        try binary_to_term(term_to_binary({R, abc, 1})) catch error:badarg -> badarg end,
+        element(2, binary_to_term(<<(term_to_binary({R}, [local]))/binary, 1, 2, 3, 4>>, [used]))]
+    ++ [try binary_to_term(<<131, 114, 1:16, 100, 6:16, "b@host", 0, First:32>>) of
+            Ref -> node(Ref)
+        catch error:badarg -> badarg
+        end || First <- [1 bsl 18 - 1, 1 bsl 18]].
 
 %% The identifiers: pids, ports, and references of b@host and a@host with
 %% each tag, and a pid of an old incarnation of the local node.

@@ -927,7 +927,6 @@ pub(super) fn binary_to_term(
         safe,
         local: false,
         atoms: &context.scheduler.atoms,
-        seed,
         code: &context.scheduler.code,
         ets: &context.scheduler.ets,
     };
@@ -1002,8 +1001,6 @@ struct Decoder<'a> {
     local: bool,
     /// The atom table of the run.
     atoms: &'a AtomTable,
-    /// The seed of the block hash of `LOCAL_EXT`.
-    seed: u32,
     /// The code table of the run, which holds the fun entries of the loaded
     /// code.
     code: &'a CodeTable,
@@ -1047,13 +1044,10 @@ enum FrameKind {
         header: Vec<crate::term::Atom>,
         def: Option<Arc<RecordDef>>,
     },
-    /// A `LOCAL_EXT` with its hash, the start of the wrapped term, and the
-    /// local flag of the enclosing term.
-    Local {
-        hash: u32,
-        start: usize,
-        prior: bool,
-    },
+    /// A `LOCAL_EXT` with the local flag of the enclosing term. The
+    /// validation walk checks its hash, as ERTS checks it only in
+    /// `decoded_size` (`external.c:5250-5255`).
+    Local { prior: bool },
 }
 
 /// One open container of the decoder walk: its kind, the terms that it still
@@ -1435,7 +1429,6 @@ impl Decoder<'_> {
             safe: self.safe,
             local: false,
             atoms: self.atoms,
-            seed,
             code: self.code,
             ets: self.ets,
         };
@@ -1770,19 +1763,11 @@ impl Decoder<'_> {
                         continue 'parse;
                     }
                     121 => {
-                        let hash = u32::from_be_bytes(
-                            self.take(4)?
-                                .try_into()
-                                .expect("four bytes of the local hash"),
-                        );
+                        self.take(4)?;
                         let prior = self.local;
                         self.local = true;
                         frames.push(Frame {
-                            kind: FrameKind::Local {
-                                hash,
-                                start: self.pos,
-                                prior,
-                            },
+                            kind: FrameKind::Local { prior },
                             remaining: 1,
                             items: Vec::new(),
                         });
@@ -1864,12 +1849,9 @@ impl Decoder<'_> {
                         }
                         break;
                     }
-                    FrameKind::Local { hash, start, prior } => {
+                    FrameKind::Local { prior } => {
                         frames.pop();
                         self.local = prior;
-                        if external::block_hash(&self.input[start..self.pos], self.seed) != hash {
-                            return Err(DecodeError::Badarg);
-                        }
                     }
                 }
             }
@@ -2187,6 +2169,11 @@ impl Decoder<'_> {
         } else {
             self.u32()?
         };
+        // `NEW_REFERENCE_EXT` rejects a first number of 18 bits or more
+        // also for another node (`external.c:4780-4783`).
+        if tag == 1 && first >= MAX_REFERENCE {
+            return Err(DecodeError::Badarg);
+        }
         let mut read = vec![first];
         for _ in 1..count {
             read.push(self.u32()?);
