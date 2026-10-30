@@ -17,6 +17,10 @@
 //! down, as `tests/integration/dispatch_baseline.rs` scales its probes, so the
 //! gate stays short and still proves that the two runtimes return the same
 //! result for each scenario.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::{
     ffi::OsStr,
@@ -181,7 +185,9 @@ fn read_beam(directory: &Path, module: &str) -> Vec<u8> {
 /// assert_eq!(arguments(&program, &SCENARIOS[0]).len(), 1);
 /// ```
 fn arguments(program: &BeamProgram, scenario: &Scenario) -> Vec<HostTerm> {
-    vec![program.host_term(Term::Integer(scenario.count() as i64))]
+    vec![program.host_term(Term::Integer(
+        i64::try_from(scenario.count()).expect("the scenario count fits in i64"),
+    ))]
 }
 
 /// Return a result term as `io:format("~w")` prints it, for the integers and
@@ -361,6 +367,11 @@ fn erts_result(lines: &[String], module: &str) -> String {
 /// Compile the scenarios, run each of them on PBeam and on the pinned ERTS,
 /// check the results, and print the comparison as a Markdown table.
 #[test]
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "the report converts nanosecond and unit counts to f64 for a ratio"
+)]
 fn compares_the_runtime_with_the_pinned_erts() {
     let directory = beam_directory();
     let modules = compile_scenarios(&directory);
