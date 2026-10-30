@@ -113,7 +113,9 @@ inputs() ->
      {process_info,
       [{self, registered_name}, {self, message_queue_len}, {self, reductions},
        {self, current_stacktrace}, {idle, message_queue_len}, {idle, registered_name},
-       {idle, reductions}, {busy, message_queue_len}]}].
+       {idle, reductions}, {busy, message_queue_len},
+       {idle, [registered_name, message_queue_len, reductions]},
+       {idle, [registered_name, registered_name]}]}].
 
 %% The inputs of the BIFs that trap, for longs/1.
 long_inputs() ->

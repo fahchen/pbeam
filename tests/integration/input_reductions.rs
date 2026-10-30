@@ -342,7 +342,8 @@ const COSTS: &[(&str, &[Cost])] = &[
         ],
     ),
     // Each item that PBeam supports costs 1 after the read, also for a
-    // process with 10000 messages (`erl_bif_info.c:1417-1424`, `1601`).
+    // process with 10000 messages (`erl_bif_info.c:1417-1424`, `1601`). A
+    // list costs 1 for each distinct item (`erl_bif_info.c:1134-1145`).
     // `process_info/2` is a heavy BIF, so its call costs nothing.
     (
         "process_info",
@@ -355,6 +356,8 @@ const COSTS: &[(&str, &[Cost])] = &[
             ("{idle,registered_name}", 1),
             ("{idle,reductions}", 1),
             ("{busy,message_queue_len}", 1),
+            ("{idle,[registered_name,message_queue_len,reductions]}", 3),
+            ("{idle,[registered_name,registered_name]}", 1),
         ],
     ),
 ];

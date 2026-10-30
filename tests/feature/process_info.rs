@@ -57,6 +57,25 @@ fn reads_the_links_of_a_process_as_pinned_erts() {
     }
 }
 
+#[test]
+fn reads_a_list_of_items_with_the_stacktrace_as_pinned_erts() {
+    // `process_info(Pid, [current_stacktrace, registered_name])`, as the
+    // crash report of `gen_server` reads the client
+    // (gen_server.erl:2804): another process gives the frame where it
+    // waits first, the caller gives its frames without `process_info/2`
+    // (erl_bif_info.c:2396-2461), a process without a name gives
+    // `{registered_name, []}` in a list, and a dead process gives
+    // `undefined` (erl_bif_info.c:1134-1145, 1616-1625).
+    let erts = run(&mut erts("stacktrace"));
+    assert_eq!((erts.0, erts.2.as_str()), (Some(0), ""), "{}", erts.1);
+    assert!(
+        erts.1.contains("{process_info_probe,deeper,0,"),
+        "{}",
+        erts.1
+    );
+    assert_eq!(run(&mut pbeam("stacktrace")), erts);
+}
+
 /// The exit status code, the stdout, and the stderr of a run.
 type Output = (Option<i32>, String, String);
 
