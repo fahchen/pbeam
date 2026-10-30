@@ -466,8 +466,17 @@ fn rejects_a_bad_distribution_option_as_pinned_erts() {
     // '<Option>'.` and the usage text, erlexec.c:838-846 the error of
     // `-start_epmd`, and erlexec.c:1118-1123 the error of `-no_epmd`
     // without `-proto_dist`, and exit with status 1.
-    let cases: [(&[&str], &str); 7] = [
+    let cases: [(&[&str], &str); 9] = [
         (&["-sname"], "Missing argument(s) for '-sname'."),
+        // `erlexec` reads its options before the emulator reads `+S`.
+        (
+            &["+S", "9999", "-sname"],
+            "Missing argument(s) for '-sname'.",
+        ),
+        (
+            &["+S", "9999", "-no_epmd"],
+            "Missing -proto_dist option, expected when using -no_epmd.",
+        ),
         (&["-name", "--", "a"], "Missing argument(s) for '-name'."),
         (&["-proto_dist"], "Missing argument(s) for '-proto_dist'."),
         (&["-epmd"], "Missing argument(s) for '-epmd'."),

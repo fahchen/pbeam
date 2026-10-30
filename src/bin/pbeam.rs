@@ -559,6 +559,9 @@ fn erlexec_options(arguments: &[OsString]) -> Result<ErlexecOptions<'_>, Exit> {
     let mut rest = Vec::with_capacity(arguments.len());
     let (mut distributed, mut no_epmd, mut proto_dist, mut start) = (false, false, false, true);
     let mut epmd_program = None;
+    // The emulator reads the `+S` flags after `erlexec` has read its
+    // options, so an `erlexec` error comes first.
+    let mut scheduler_values = Vec::new();
     let mut options = arguments.iter().map(|argument| argument.as_bytes());
     while let Some(option) = options.next() {
         if option == b"-extra" {
@@ -612,7 +615,7 @@ fn erlexec_options(arguments: &[OsString]) -> Result<ErlexecOptions<'_>, Exit> {
             _ => None,
         };
         if let Some(value) = value {
-            schedulers.apply_flag(value)?;
+            scheduler_values.push(value);
         } else if option.starts_with(b"+")
             || ERLEXEC_OPTIONS.iter().any(|name| name.as_bytes() == option)
         {
@@ -630,6 +633,9 @@ fn erlexec_options(arguments: &[OsString]) -> Result<ErlexecOptions<'_>, Exit> {
         return Err("Missing -proto_dist option, expected when using -no_epmd."
             .to_owned()
             .into());
+    }
+    for value in scheduler_values {
+        schedulers.apply_flag(value)?;
     }
     Ok(ErlexecOptions {
         schedulers,
