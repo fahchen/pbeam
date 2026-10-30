@@ -21,6 +21,7 @@ use super::{
 use crate::runtime::host::filename_encoding;
 use crate::runtime::scheduler::node::Named;
 use crate::runtime::time;
+use crate::term::external_id::{is_reference, pid_parts, port_number};
 use crate::term::{Direction, Division, ShiftDirection};
 use integer::{Arith, Bitwise};
 
@@ -216,13 +217,13 @@ bifs! {
     erlang:is_map/1 as ErlangIsMap1 => |_, [term]| Ok(Value(Term::static_atom(if matches!(term, Term::Map(_)) { "true" } else { "false" }))),
     erlang:is_map_key/2 as ErlangIsMapKey2 => |_, [key, map]| Ok(maps::is_key(key, map)),
     erlang:is_number/1 as ErlangIsNumber1 => |_, [term]| Ok(Value(Term::static_atom(if term.is_integer() || matches!(term, Term::Float(_)) { "true" } else { "false" }))),
-    erlang:is_pid/1 as ErlangIsPid1 => |_, [term]| Ok(Value(Term::static_atom(if matches!(term, Term::Pid(_)) { "true" } else { "false" }))),
-    erlang:is_port/1 as ErlangIsPort1 => |_, [term]| Ok(Value(Term::static_atom(if matches!(term, Term::Port(_)) { "true" } else { "false" }))),
+    erlang:is_pid/1 as ErlangIsPid1 => |_, [term]| Ok(Value(Term::static_atom(if pid_parts(term).is_some() { "true" } else { "false" }))),
+    erlang:is_port/1 as ErlangIsPort1 => |_, [term]| Ok(Value(Term::static_atom(if port_number(term).is_some() { "true" } else { "false" }))),
     erlang:is_process_alive/1 as ErlangIsProcessAlive1 => |cx, [pid]| erlang::is_process_alive(cx, pid),
     erlang:is_record/1 as ErlangIsRecord1 => |_, [term]| Ok(Value(Term::static_atom(if matches!(term, Term::Record(_)) { "true" } else { "false" }))),
     erlang:is_record/2 as ErlangIsRecord2 => |_, [term, name]| Ok(erlang::is_record(term, name, None)),
     erlang:is_record/3 as ErlangIsRecord3 => |_, [term, name, size]| Ok(erlang::is_record(term, name, Some(size))),
-    erlang:is_reference/1 as ErlangIsReference1 => |_, [term]| Ok(Value(Term::static_atom(if matches!(term, Term::Reference(_) | Term::Resource(_)) { "true" } else { "false" }))),
+    erlang:is_reference/1 as ErlangIsReference1 => |_, [term]| Ok(Value(Term::static_atom(if is_reference(term) { "true" } else { "false" }))),
     erlang:is_tuple/1 as ErlangIsTuple1 => |_, [term]| Ok(Value(Term::static_atom(if matches!(term, Term::Tuple(_)) { "true" } else { "false" }))),
     erlang:length/1 as ErlangLength1 => |cx, [list]| erlang::length(cx.scheduler.current_process_mut(), list, 0),
     erlang:link/1 as ErlangLink1 => |cx, [target]| erlang::link(cx.scheduler, target),
@@ -313,7 +314,7 @@ bifs! {
     erlang:split_binary/2 as ErlangSplitBinary2 => |_, [binary, position]| Ok(erlang::split_binary(binary, position)),
     erlang:start_timer/3 as ErlangStartTimer3 => |cx, [time, receiver, message]| erlang::start_timer(cx, time, receiver, message),
     erlang:start_timer/4 as ErlangStartTimer4 => |cx, [time, receiver, message, options]| timer::start_timer_4(cx, time, receiver, message, options),
-    erlang:statistics/1 => unsupported,
+    erlang:statistics/1 as ErlangStatistics1 => |cx, [item]| erlang::statistics(cx.scheduler, item),
     erlang:subtract/2 as ErlangSubtractFn2 => |cx, [left, right]| { let (process, atoms) = cx.scheduler.current_process_and_atoms(); subtract::subtract(process, atoms, left, right) },
     erlang:system_flag/2 as ErlangSystemFlag2 => |cx, [item, value]| erlang::system_flag(cx, item, value),
     erlang:system_info/1 as ErlangSystemInfo1 => |cx, [item]| erlang::system_info(cx.scheduler, item),
@@ -342,7 +343,8 @@ bifs! {
     erlang:universaltime/0 as ErlangUniversaltime0 => |_, []| Ok(erlang::universaltime()),
     erlang:universaltime_to_localtime/1 as ErlangUniversaltimeToLocaltime1 => |_, [date]| Ok(erlang::universaltime_to_localtime(date)),
     erlang:universaltime_to_posixtime/1 as ErlangUniversaltimeToPosixtime1 => |_, [date]| Ok(erlang::universaltime_to_posixtime(date)),
-    erlang:unlink/1 as ErlangUnlink1 => |cx, [target]| match target { Term::Pid(target) => { cx.scheduler.unlink(*target); Ok(Value(Term::static_atom("true"))) } Term::Port(port) => { cx.scheduler.unlink_port(*port); Ok(Value(Term::static_atom("true"))) } _ => Ok(BifResult::badarg()) },
+    // ERTS returns `true` for a pid of another node with no link, and PBeam makes no such link; an old incarnation of the local node needs no signal (`bif.c:1295-1312`, `bif.c:1346-1356`).
+    erlang:unlink/1 as ErlangUnlink1 => |cx, [target]| match target { Term::Pid(target) => { cx.scheduler.unlink(*target); Ok(Value(Term::static_atom("true"))) } Term::Port(port) => { cx.scheduler.unlink_port(*port); Ok(Value(Term::static_atom("true"))) } Term::External(_) if pid_parts(target).is_some() || (erlang::old_incarnation(target) && port_number(target).is_some()) => Ok(Value(Term::static_atom("true"))), _ => Ok(BifResult::badarg()) },
     erlang:unregister/1 as ErlangUnregister1 => |cx, [name]| erlang::unregister(cx.scheduler, name),
     erlang:whereis/1 as ErlangWhereis1 => |cx, [name]| Ok(match name { Term::Atom(name) => Value(cx.scheduler.name_owner(cx.scheduler.atoms.name_of(name)).map_or(Term::static_atom("undefined"), Named::term)), _ => BifResult::badarg() }),
     erlang:xor/2 as ErlangXor2 => |_, [left, right]| Ok(match (left, right) { (Term::Atom(left), Term::Atom(right)) if left.is_one_of(&["true", "false"]) && right.is_one_of(&["true", "false"]) => Value(Term::static_atom(if left.is_static("true") == right.is_static("true") { "false" } else { "true" })), _ => BifResult::badarg() }),

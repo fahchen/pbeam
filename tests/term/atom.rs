@@ -1,4 +1,6 @@
+use crate::term::ExternalId;
 use crate::term::Lambda;
+use crate::term::external_id::ExternalData;
 use std::sync::Arc;
 
 use super::{
@@ -622,4 +624,36 @@ fn fails_to_import_a_native_record() {
             .contains("unsupported import of a native record into another atom table"),
         "{error}"
     );
+}
+
+#[test]
+fn imports_the_node_atom_of_a_pid_of_another_node() {
+    // A pid of another node holds the atom of its node name, so the import
+    // gives the atom of the destination table and keeps the data.
+    let source = AtomTable::new();
+    let destination = AtomTable::new();
+    destination.put("pbeam_padding_node").unwrap();
+    let node = source.put("b@host").unwrap();
+    let pid = Term::External(Arc::new(ExternalId {
+        node,
+        creation: 5,
+        data: ExternalData::Pid {
+            number: 7,
+            serial: 0,
+        },
+    }));
+    let imported = destination.import_term(&source, &pid).unwrap();
+    let Term::External(id) = &imported else {
+        panic!("the import of a pid of another node gives a pid of another node");
+    };
+    assert_eq!(destination.name(id.node.index()), Some("b@host"));
+    assert_eq!(id.node, destination.get("b@host").unwrap());
+    assert_eq!(id.creation, 5);
+    assert!(matches!(
+        id.data,
+        ExternalData::Pid {
+            number: 7,
+            serial: 0
+        }
+    ));
 }

@@ -4,6 +4,7 @@ use std::cmp::Ordering;
 
 use super::BifResult::Value;
 use super::erlang::{c_int, signals_return};
+use super::erlang::{old_incarnation, remote_unsupported};
 use super::{
     Atom, AtomTable, BeamError, BifContext, BifResult, ExceptionClass, ProcessId, Scheduler,
     SpawnOptions, Target, Term, boot_denial, code, create_process, denial, error, iolist, maps,
@@ -29,6 +30,7 @@ use crate::runtime::{
     unicode::native_filename,
 };
 use crate::term::PortId;
+use crate::term::external_id::{ExternalData, pid_parts, port_number};
 
 /// Run `erts_internal:group_leader(Leader, Target)`, which
 /// `erlang:group_leader/2` in `erlang.beam` calls, as
@@ -62,8 +64,27 @@ pub(super) fn group_leader(
     leader: &Term,
     target: &Term,
 ) -> Result<BifResult, BeamError> {
-    let (Term::Pid(leader), Term::Pid(target)) = (leader, target) else {
+    // `erts_internal_group_leader_2` returns `badarg` for a leader that is
+    // not a pid, raises `badarg` for a target of an old incarnation of the
+    // local node, and sends a signal to a target of another node
+    // (`bif.c:4914-4964`).
+    if pid_parts(leader).is_none() {
         return Ok(Value(Term::static_atom("badarg")));
+    }
+    let target = match target {
+        Term::Pid(target) => target,
+        Term::External(_) if pid_parts(target).is_some() && old_incarnation(target) => {
+            return Ok(BifResult::badarg());
+        }
+        Term::External(_) if pid_parts(target).is_some() => {
+            return Err(remote_unsupported("erlang:group_leader/2"));
+        }
+        _ => return Ok(Value(Term::static_atom("badarg"))),
+    };
+    let Term::Pid(leader) = leader else {
+        return Err(error(
+            "unsupported erlang:group_leader/2 with a leader of another node or of an old incarnation of the local node: see \"Distribution\" in docs/erts-differences.md",
+        ));
     };
     let scheduler = &mut *context.scheduler;
     if let Some(denied) = other_process_denial(scheduler, *target, Operation::GroupLeader)? {
@@ -1615,7 +1636,14 @@ pub(super) fn port_info(context: &mut BifContext<'_>, port: &Term) -> Result<Bif
                 .collect::<Vec<_>>();
             Term::list_from(registered.into_iter().chain(items).collect::<Vec<_>>())
         }
-        (_, _) if matches!(port, Term::Port(_) | Term::Atom(_)) => Term::static_atom("undefined"),
+        // A port of an old incarnation of the local node is closed
+        // (`erl_bif_port.c:517-522`, `erl_bif_port.c:574-579`).
+        (_, _)
+            if matches!(port, Term::Port(_) | Term::Atom(_))
+                || (old_incarnation(port) && port_number(port).is_some()) =>
+        {
+            Term::static_atom("undefined")
+        }
         _ => Term::static_atom("badarg"),
     };
     drop(slot);
@@ -1781,7 +1809,14 @@ pub(super) fn port_info_item(
                 port_item(id, port_state, name)
             }
         }
-        (_, _) if matches!(port, Term::Port(_) | Term::Atom(_)) => Term::static_atom("undefined"),
+        // A port of an old incarnation of the local node is closed
+        // (`erl_bif_port.c:517-522`, `erl_bif_port.c:574-579`).
+        (_, _)
+            if matches!(port, Term::Port(_) | Term::Atom(_))
+                || (old_incarnation(port) && port_number(port).is_some()) =>
+        {
+            Term::static_atom("undefined")
+        }
         _ => Term::static_atom("badtype"),
     };
     drop(slot);
@@ -2574,6 +2609,11 @@ pub(super) fn term_type(atoms: &AtomTable, term: &Term) -> Result<BifResult, Bea
         Term::Port(_) => "port",
         Term::Atom(_) => "atom",
         Term::Nil => "nil",
+        Term::External(id) => match id.data {
+            ExternalData::Pid { .. } => "external_pid",
+            ExternalData::Port(_) => "external_port",
+            ExternalData::Reference(_) => "external_reference",
+        },
         Term::Binary(_) | Term::Record(_) | Term::MatchContext(_) => {
             return Err(error(
                 "erts_internal:term_type/1 cannot name the ERTS form of a binary or a native record"

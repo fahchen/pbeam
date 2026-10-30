@@ -249,17 +249,14 @@ fn raises_badarg_as_pinned_erts() {
         .unwrap();
     assert!(matches!(record.term, Term::Record(_)), "{record:?}");
 
-    // A pid of another node decodes on the pinned ERTS; PBeam stops the
-    // run with a runtime error ("External term format" in
-    // docs/erts-differences.md).
-    let error = program
+    // A pid of another node decodes as on the pinned ERTS (`dec_pid`,
+    // `external.c:3133-3200`); `remote_id_probe` of `tests/feature/
+    // code_server.rs` checks its node, text, and order.
+    let remote = program
         .execute("external_term_probe", "decode_remote_pid", &[])
-        .unwrap_err()
-        .to_string();
-    assert!(
-        error.starts_with("unsupported erlang:binary_to_term/1,2 of a pid of another node"),
-        "{error}"
-    );
+        .unwrap()
+        .term;
+    assert!(matches!(remote, Term::External(_)), "{remote:?}");
 }
 
 const FUN_PROBE: &[u8] = include_bytes!("../../fixtures/external_term/fun_ext_probe.beam");

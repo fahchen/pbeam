@@ -109,7 +109,8 @@ fn owned_once(term: &Term) -> bool {
         | Term::Pid(_)
         | Term::Port(_)
         | Term::Reference(_)
-        | Term::Resource(_) => false,
+        | Term::Resource(_)
+        | Term::External(_) => false,
     }
 }
 
@@ -249,7 +250,8 @@ impl LiveBytes {
                 | Term::Pid(_)
                 | Term::Port(_)
                 | Term::Reference(_)
-                | Term::Resource(_) => {}
+                | Term::Resource(_)
+                | Term::External(_) => {}
             }
         }
     }

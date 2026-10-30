@@ -1708,7 +1708,8 @@ fn map_hash(key: &Term) -> Option<u64> {
         | Term::Pid(_)
         | Term::Port(_)
         | Term::Resource(_)
-        | Term::Reference(_) => {}
+        | Term::Reference(_)
+        | Term::External(_) => {}
         Term::Cons(_) | Term::Tuple(_) | Term::Map(_) | Term::Fun(_) | Term::Record(_) => {
             let mut pending = vec![key];
             while let Some(term) = pending.pop() {
@@ -1720,7 +1721,8 @@ fn map_hash(key: &Term) -> Option<u64> {
                     | Term::Pid(_)
                     | Term::Port(_)
                     | Term::Resource(_)
-                    | Term::Reference(_) => {}
+                    | Term::Reference(_)
+                    | Term::External(_) => {}
                     Term::Cons(cell) => pending.extend([&cell.tail, &cell.head]),
                     Term::Tuple(elements) => pending.extend(elements.iter()),
                     Term::Map(map) => {

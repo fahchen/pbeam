@@ -30,7 +30,7 @@ use static_names::{STATIC_ATOM_COUNT, STATIC_ATOM_NAMES};
 
 use crate::{
     error::{BeamError, error},
-    term::{Fun, Map, Target, Term},
+    term::{ExternalId, Fun, Map, Target, Term},
 };
 
 /// The largest number of atoms in the atom table (`ATOM_LIMIT` in `atom.h`,
@@ -613,6 +613,14 @@ impl AtomTable {
                 return Err(error(
                     "unsupported import of a native record into another atom table",
                 ));
+            }
+            Term::External(id) => {
+                let node = self.import_atom(source, &id.node)?;
+                ready.push(Term::External(Arc::new(ExternalId {
+                    node,
+                    creation: id.creation,
+                    data: id.data.clone(),
+                })));
             }
             Term::Binary(_)
             | Term::Integer(_)

@@ -1,6 +1,7 @@
 mod atom;
 mod binary;
 pub(crate) mod external;
+pub(crate) mod external_id;
 mod flat_size;
 pub(crate) mod float_text;
 mod fun;
@@ -22,6 +23,7 @@ pub(crate) use atom::{MAX_ATOM_CHARACTERS, MAX_ATOM_SZ_LIMIT};
 #[cfg(test)]
 pub(crate) use atom::{test_atom, test_atom_table};
 pub(crate) use binary::Binary;
+pub(crate) use external_id::ExternalId;
 pub(crate) use flat_size::flat_size;
 pub(crate) use fun::Fun;
 pub(crate) use fun::{Lambda, Target, debug_target};
@@ -122,6 +124,9 @@ pub enum Term {
     Port(PortId),
     /// A reference owned by this runtime.
     Reference(Reference),
+    /// A pid, a port, or a reference of another node, which
+    /// `binary_to_term/1` makes (`ExternalThing`, `erl_node_tables.h`).
+    External(Arc<ExternalId>),
     /// A NIF resource term: a magic reference that keeps its resource
     /// object alive, as an ERTS resource term is a magic reference to the
     /// magic binary of the object (`erl_nif.c:3190-3204`). It is a
@@ -771,6 +776,7 @@ impl Clone for Term {
             Term::Fun(fun) => Term::Fun(fun.clone()),
             Term::Record(record) => Term::Record(record.clone()),
             Term::MatchContext(context) => Term::MatchContext(Arc::clone(context)),
+            Term::External(id) => Term::External(Arc::clone(id)),
         }
     }
 }
@@ -971,6 +977,7 @@ impl Term {
                 }
                 (Term::Pid(left), Term::Pid(right)) => left == right,
                 (Term::Port(left), Term::Port(right)) => left == right,
+                (Term::External(left), Term::External(right)) => left == right,
                 // A resource term is its magic reference.
                 (
                     Term::Reference(_) | Term::Resource(_),
@@ -1152,6 +1159,7 @@ fn write_debug(term: &Term, atoms: Option<&AtomTable>, out: &mut impl fmt::Write
             Term::Reference(reference) => write!(out, "Reference({reference:?})")?,
             Term::Resource(resource) => write!(out, "Resource({:?})", resource.reference())?,
             Term::MatchContext(context) => write!(out, "MatchContext({context:?})")?,
+            Term::External(id) => write!(out, "External({id:?})")?,
             Term::Nil | Term::Cons(_) => {
                 let (elements, tail) = term.list_cells().expect("the term is a list");
                 let elements: Vec<_> = elements.collect();
