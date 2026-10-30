@@ -551,10 +551,11 @@ impl Inet {
             }
             None if input_size > filled => Ok((input_size - filled, 0)),
             // ERTS passes a `packet_size` above `INT_MAX` to
-            // `tcp_expand_buffer` as a negative `int`, which expands nothing,
-            // and then reads up to `packet_size` bytes into the smaller
-            // buffer (inet_drv.c:11639-11648, 13009-13016). PBeam ends the
-            // receive with `emsgsize` instead (row "tcp_inet ports").
+            // `tcp_expand_buffer` as a negative `int`, which expands nothing.
+            // Up to `INT_MAX` plus the filled bytes, it then reads into the
+            // smaller buffer (inet_drv.c:11639-11648, 13009-13016), where
+            // PBeam ends the receive with `emsgsize` (row "tcp_inet ports");
+            // above, both end it with `emsgsize` (inet_drv.c:13170-13171).
             None if size > filled && self.packet_size <= INT_MAX => {
                 self.stream.expand(size);
                 Ok((size - filled, 0))
