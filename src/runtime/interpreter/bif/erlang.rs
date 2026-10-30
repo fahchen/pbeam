@@ -5577,9 +5577,33 @@ pub(super) fn process_info(
     }
     // Only `links` charges extra here: the items with a queue charge
     // went as a request above.
-    let extra = super::item_reductions(item, &info, 0, MessageQueue::OffHeap);
-    scheduler.current_process_mut().bump_reductions(1 + extra);
+    scheduler
+        .current_process_mut()
+        .bump_reductions(read_reductions(item, &info));
     Ok(signals_return(scheduler, process, info))
+}
+
+/// Return the reductions of a direct read of `item` of another process
+/// with the result `info`: 1 for each item after its read
+/// (`erl_bif_info.c:1601`) and the extra cost of the item. A list reads a
+/// repeated item once (`part_res`, `erl_bif_info.c:1134-1145`). Only `links`
+/// costs extra here: the items with a queue charge go as a request.
+fn read_reductions(item: &Term, info: &Term) -> i32 {
+    let cost =
+        |item: &Term, info: &Term| 1 + super::item_reductions(item, info, 0, MessageQueue::OffHeap);
+    match (item.proper_list(), info.proper_list()) {
+        (Some(items), Some(results)) => {
+            let items: Vec<&Term> = items.collect();
+            items
+                .iter()
+                .zip(results)
+                .enumerate()
+                .filter(|(index, (item, _))| !items[..*index].contains(item))
+                .map(|(_, (item, result))| cost(item, result))
+                .sum()
+        }
+        _ => cost(item, info),
+    }
 }
 
 /// Return whether a read of `item` of another process always sends the
