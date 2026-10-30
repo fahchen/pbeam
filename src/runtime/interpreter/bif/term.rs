@@ -923,6 +923,7 @@ pub(super) fn binary_to_term(
     let mut decoder = Decoder {
         input: binary,
         pos: 0,
+        overrun: 0,
         safe,
         local: false,
         atoms: &context.scheduler.atoms,
@@ -991,6 +992,10 @@ struct Decoder<'a> {
     input: &'a [u8],
     /// The position of the next byte.
     pos: usize,
+    /// The bytes after the end of `input` that the decode has read: `dec_term`
+    /// reads the first number of a reference with no numbers also after the
+    /// end, and `used` counts them (see [`Decoder::first_reference_number`]).
+    overrun: usize,
     /// The `safe` option: each atom must exist already.
     safe: bool,
     /// True inside `LOCAL_EXT`: `NIL_EXT` stands for the local node.
@@ -1426,6 +1431,7 @@ impl Decoder<'_> {
         let mut decoder = Decoder {
             input: body,
             pos: 0,
+            overrun: 0,
             safe: self.safe,
             local: false,
             atoms: self.atoms,
@@ -1441,7 +1447,7 @@ impl Decoder<'_> {
         let used = if plain.is_some() {
             header
         } else {
-            header + decoder.pos
+            header + decoder.pos + decoder.overrun
         };
         Ok((term, used))
     }
@@ -1474,6 +1480,22 @@ impl Decoder<'_> {
     /// Take a big-endian 32-bit number as a length.
     fn length(&mut self) -> Result<usize, DecodeError> {
         Ok(usize::try_from(self.u32()?).expect("a u32 fits in usize"))
+    }
+
+    /// Take the first number of a reference with no numbers as `dec_term`
+    /// does (`external.c:4780-4781`, `4795-4796`): it reads 4 bytes, which
+    /// the size check of `decoded_size` does not count
+    /// (`external.c:6217-6241`), so at the end of the input it reads after
+    /// the end. Each byte after the end counts as 0 and adds 1 to
+    /// [`Decoder::overrun`]; ERTS reads the memory after the binary there.
+    fn first_reference_number(&mut self) -> u32 {
+        let mut bytes = [0u8; 4];
+        let rest = self.input.get(self.pos..).unwrap_or_default();
+        let taken = rest.len().min(4);
+        bytes[..taken].copy_from_slice(&rest[..taken]);
+        self.pos += taken;
+        self.overrun += 4 - taken;
+        u32::from_be_bytes(bytes)
     }
 
     /// Take a big-endian 32-bit number.
@@ -2159,8 +2181,13 @@ impl Decoder<'_> {
             creation
         };
         // ERTS reads the first reference number even when the count is
-        // zero (`dec_term`, `external.c:4795-4796`).
-        let mut read = vec![self.u32()?];
+        // zero (`dec_term`, `external.c:4780-4781`, `4795-4796`).
+        let first = if count == 0 {
+            self.first_reference_number()
+        } else {
+            self.u32()?
+        };
+        let mut read = vec![first];
         for _ in 1..count {
             read.push(self.u32()?);
         }

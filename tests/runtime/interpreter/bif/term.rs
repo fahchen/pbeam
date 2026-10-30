@@ -148,6 +148,7 @@ fn decode_full(atoms: &AtomTable, bytes: &[u8], policy: AtomPolicy) -> Result<Te
     Decoder {
         input: bytes,
         pos: 0,
+        overrun: 0,
         safe: policy == AtomPolicy::ExistingOnly,
         local: false,
         atoms,
@@ -774,6 +775,7 @@ fn decodes_local_terms_with_their_block_hash() {
         Decoder {
             input: &local,
             pos: 0,
+            overrun: 0,
             safe: false,
             local: false,
             atoms: &atoms,
@@ -791,6 +793,7 @@ fn decodes_local_terms_with_their_block_hash() {
         Decoder {
             input: &local,
             pos: 0,
+            overrun: 0,
             safe: false,
             local: false,
             atoms: &atoms,
@@ -1103,6 +1106,7 @@ fn keeps_the_decoder_guards_behind_the_validation() {
         Decoder {
             input: bytes,
             pos: 0,
+            overrun: 0,
             safe: false,
             local: false,
             atoms: &atoms,
