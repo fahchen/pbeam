@@ -1075,15 +1075,20 @@ pub(super) fn port_command(
         return Ok(signals_return(scheduler, port, Term::static_atom("badarg")));
     };
     // A busy `tcp_inet` port queues each send as a waiter (see
-    // `Inet::send`), so `force` and `nosuspend` on it are not implemented.
-    if (force || nosuspend) && matches!(port_state.driver, Driver::Inet(_)) {
+    // `Inet::send`), so `force` on a busy port and `nosuspend` are not
+    // implemented. `force` on a port that is not busy runs the output as
+    // without it (`erts_port_output`, io.c:1743-1758), as the tick of
+    // `inet_tcp_dist` does (inet_tcp_dist.erl:600).
+    if let Driver::Inet(inet) = &port_state.driver
+        && (nosuspend || (force && inet.stream.busy.is_some()))
+    {
         return Err(error(
             "unsupported erlang:port_command/3 options of a tcp_inet port: see \"tcp_inet ports\" in docs/erts-differences.md",
         ));
     }
-    // The spawn driver has no `ERL_DRV_FLAG_SOFT_BUSY`, so `force` gives
-    // `notsup` (`erl_bif_port.c:195-198`).
-    if force {
+    // The spawn and `udp_inet` drivers have no `ERL_DRV_FLAG_SOFT_BUSY`, so
+    // `force` gives `notsup` (`erl_bif_port.c:195-198`).
+    if force && !port_state.soft_busy() {
         drop(slot);
         return Ok(Value(Term::static_atom("notsup")));
     }

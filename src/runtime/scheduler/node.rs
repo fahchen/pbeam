@@ -480,7 +480,7 @@ impl Node {
         &self,
         id: ProcessId,
         atoms: &crate::term::AtomTable,
-    ) -> Vec<ProcessId> {
+    ) -> Vec<super::dist_table::Controller> {
         // Each exit takes the lock: a `setnode/2` that found the process
         // live before it left the table publishes the owner first, as ERTS
         // sets `F_DISTRIBUTION` in one thread progress block with its check
@@ -497,7 +497,7 @@ impl Node {
             atoms.set_this_node(&nonode, 0);
             return dist.net_kernel_exits();
         }
-        dist.controller_exits(id);
+        dist.controller_exits(super::dist_table::Controller::Process(id));
         Vec::new()
     }
 

@@ -12,10 +12,11 @@
 
 use super::{
     Scheduler,
+    dist_table::Controller,
     tcp_inet::{INFINITY, error_status},
 };
 use crate::{
-    error::BeamError,
+    error::{BeamError, error},
     runtime::{
         port::{
             self, Driver, Port,
@@ -25,6 +26,15 @@ use crate::{
     },
     term::{Atom, PortId, Term},
 };
+
+/// The runtime error of `{deliver, port}` data on a port that is not a
+/// distribution controller, where ERTS sends `{Port, {data, Data}}`
+/// (inet_drv.c:2753-2784).
+const DELIVER_PORT: &str = "unsupported data of a port with the option {deliver, port} that is not a distribution controller: see \"tcp_inet ports\" in docs/erts-differences.md";
+
+/// The runtime error of a distribution message on a port controller
+/// (#1407).
+const DIST_DATA: &str = "unsupported distribution message on a port controller: see \"Distribution\" in docs/erts-differences.md";
 
 impl Scheduler {
     /// Run `TCP_REQ_RECV` of the current process on the connected port
@@ -278,7 +288,13 @@ impl Scheduler {
     ///
     /// # Errors
     ///
-    /// The atom of an error name in a full atom table.
+    /// The atom of an error name in a full atom table, and the errors of
+    /// [`Self::port_data`] and of `{deliver, port}` on an active `udp_inet`
+    /// port.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "event table: one short arm for each `Event` of the `tcp_inet` and `udp_inet` driver"
+    )]
     pub(in crate::runtime) fn send_events(
         &mut self,
         port: PortId,
@@ -323,6 +339,9 @@ impl Scheduler {
                         Self::async_message(port, receiver.id, status),
                     )]
                 }
+                Event::ActiveDatagram { .. } if tcp.delivers_to_port() => {
+                    return Err(error(DELIVER_PORT));
+                }
                 Event::ActiveDatagram { address, data } => {
                     let data = tcp.data_term(data);
                     vec![(owner, self.udp_message(port, &address, data)?)]
@@ -359,6 +378,10 @@ impl Scheduler {
                     ]);
                     vec![(sender.caller, message)]
                 }
+                Event::Data(bytes) if tcp.delivers_to_port() => {
+                    self.port_data(port, &bytes)?;
+                    Vec::new()
+                }
                 Event::Data(bytes) => {
                     vec![(owner, active(port, Atom::TCP, Some(tcp.data_term(bytes))))]
                 }
@@ -387,6 +410,27 @@ impl Scheduler {
             }
         }
         Ok(exit)
+    }
+
+    /// Give the packet `bytes` of the port `port` with `{deliver, port}` to
+    /// the distribution of the node, as `driver_output` does
+    /// (`inet_drv.c:4287-4288`, `2753-2766`; `driver_output2`,
+    /// `io.c:6402-6420`): an empty packet is a tick, which only counts.
+    ///
+    /// # Errors
+    ///
+    /// A port that is not a distribution controller (see [`DELIVER_PORT`])
+    /// and a packet with data (see [`DIST_DATA`]).
+    fn port_data(&self, port: PortId, bytes: &[u8]) -> Result<(), BeamError> {
+        let mut dist = self.node.dist();
+        let Some(name) = dist.controlled_by(Controller::Port(port)) else {
+            return Err(error(DELIVER_PORT));
+        };
+        if !bytes.is_empty() {
+            return Err(error(DIST_DATA));
+        }
+        dist.count_input(&name);
+        Ok(())
     }
 
     /// The status term of a result with no value: `ok`, or the error status

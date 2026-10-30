@@ -121,9 +121,24 @@ fn runs_the_bifs_of_a_process_controller_as_pinned_erts() {
     let erts = stdout(&erts_erl(&epmd, &main));
     assert!(erts.contains("controller: [false,false,true,"), "{erts}");
     assert_eq!(stdout(&pbeam_erl(&epmd, &main)), erts);
+    // A tcp_inet port controls a connection, and the exit of the port ends
+    // it (dist.c:5269-5336, io.c:3910-3916).
+    let port = probe(
+        &["-sname", &name],
+        "dist_channel_probe:port_channel(), halt().",
+    );
+    let erts = stdout(&erts_erl(&epmd, &port));
+    assert!(
+        erts.contains("port_errors: [badarg,badarg,badarg,badarg,"),
+        "{erts}"
+    );
+    assert_eq!(stdout(&pbeam_erl(&epmd, &port)), erts);
     let exit = probe(&[], "dist_channel_probe:net_kernel_exit(), halt().");
     let erts = stdout(&erts_erl(&epmd, &exit));
-    assert!(erts.contains("stopped: [killed,nonode@nohost,"), "{erts}");
+    assert!(
+        erts.contains("stopped: [killed,net_kernel_terminated,nonode@nohost,"),
+        "{erts}"
+    );
     assert_eq!(stdout(&pbeam_erl(&epmd, &exit)), erts);
 }
 
@@ -148,16 +163,14 @@ fn offers_the_mandatory_distribution_flags() {
 
 #[test]
 fn stops_at_a_part_of_a_channel_that_pbeam_does_not_have() {
-    // A port controller (#1406), flags without a mandatory flag, where ERTS
-    // sends an error report (dist.c:5176-5187), and a distribution message
-    // (#1407) stop the run with a runtime error.
+    // Flags without a mandatory flag, where ERTS sends an error report
+    // (dist.c:5176-5187), a distribution message on a process or a port
+    // controller (#1407), and `{deliver, port}` data of a port that is not
+    // a controller, where ERTS sends `{Port, {data, Data}}`
+    // (inet_drv.c:2753-2784), stop the run with a runtime error.
     let epmd = Epmd::start();
     let name = format!("dstop{}", std::process::id());
     for (function, error) in [
-        (
-            "port_controller",
-            "unsupported erts_internal:create_dist_channel/3 with a port controller",
-        ),
         (
             "no_mandatory",
             "unsupported erts_internal:create_dist_channel/3 with flags that miss a mandatory flag",
@@ -165,6 +178,18 @@ fn stops_at_a_part_of_a_channel_that_pbeam_does_not_have() {
         (
             "message",
             "unsupported erlang:dist_ctrl_put_data/2 of a distribution message",
+        ),
+        (
+            "port_message",
+            "unsupported distribution message on a port controller",
+        ),
+        (
+            "deliver_port",
+            "unsupported data of a port with the option {deliver, port}",
+        ),
+        (
+            "deliver_udp",
+            "unsupported data of a port with the option {deliver, port}",
         ),
     ] {
         let expression = format!("dist_channel_probe:{function}(), halt().");
@@ -240,4 +265,85 @@ fn connects_to_an_erts_node_as_a_hidden_node_as_pinned_erts() {
     let refused = "false\n[]\n[]\n";
     assert_eq!(stdout(&erts_erl(&epmd, &client(&erts, "bad"))), refused);
     assert_eq!(stdout(&pbeam_erl(&epmd, &client(&pbeam, "bad"))), refused);
+}
+
+#[test]
+fn connects_over_a_tcp_inet_port_as_pinned_erts() {
+    // inet_tcp_dist, the default carrier, makes the tcp_inet port the
+    // controller of the connection (dist.c:5269-5336) and sets
+    // `{deliver, port}` and `{packet, 4}` on it (inet_tcp_dist.erl
+    // f_setopts_post_nodeup). The connection stays up for more than two
+    // net_ticktime of 2 s, so each side gets the ticks of the other
+    // (dist_util.erl:628-670). The custom `-epmd_module` dist_epmd gives
+    // the fixed listen port of the ERTS node from address_please/3 as
+    // `{ok, Ip, Port, Version}` (net_kernel.erl, inet_tcp_dist.erl).
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let listen = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+        .to_string();
+    let server = format!("dtsrv{id}");
+    let node = ErtsNode::start(
+        &epmd,
+        &[
+            "-sname",
+            &server,
+            "-setcookie",
+            "ck",
+            "-kernel",
+            "net_ticktime",
+            "2",
+            "-kernel",
+            "logger_level",
+            "none",
+            "-kernel",
+            "inet_dist_listen_min",
+            &listen,
+            "-kernel",
+            "inet_dist_listen_max",
+            &listen,
+        ],
+        "io:format(\"~s~n\", [node()]), \
+         L = fun L(Old) -> case nodes(hidden) of Old -> timer:sleep(20), L(Old); \
+         New -> io:format(\"~p~n\", [New]), L(New) end end, L([]).",
+    );
+    let server = node.line();
+    let host = server.split_once('@').unwrap().1.to_owned();
+    let client = |name: &str, custom: bool| {
+        let expression = format!(
+            "io:format(\"~p~n~p~n\", [net_kernel:connect_node('{server}'), nodes(hidden)]), \
+             timer:sleep(5000), io:format(\"~p~n\", [nodes(hidden)]), halt()."
+        );
+        let mut arguments = vec!["-sname", name, "-setcookie", "ck", "-hidden"];
+        if custom {
+            arguments.extend(["-pa", "fixtures/dist", "-epmd_module", "dist_epmd"]);
+            arguments.extend(["-dist_epmd_port", &listen]);
+        }
+        arguments.extend(["-kernel", "net_ticktime", "2", "-noshell", "-eval"]);
+        let mut arguments: Vec<String> = arguments.into_iter().map(str::to_owned).collect();
+        arguments.push(expression);
+        arguments
+    };
+    let connected = format!("true\n[{0}]\n[{0}]\n", atom_text(&server));
+    for custom in [false, true] {
+        let (pbeam, erts) = (format!("dtpb{custom}{id}"), format!("dterts{custom}{id}"));
+        assert_eq!(stdout(&erts_erl(&epmd, &client(&erts, custom))), connected);
+        assert_eq!(
+            node.line(),
+            format!("[{}]", atom_text(&format!("{erts}@{host}")))
+        );
+        assert_eq!(node.line(), "[]");
+        assert_eq!(
+            stdout(&pbeam_erl(&epmd, &client(&pbeam, custom))),
+            connected
+        );
+        assert_eq!(
+            node.line(),
+            format!("[{}]", atom_text(&format!("{pbeam}@{host}")))
+        );
+        assert_eq!(node.line(), "[]");
+    }
 }

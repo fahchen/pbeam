@@ -4027,9 +4027,18 @@ impl Scheduler {
             .expect("the exiting process is alive");
         debug_assert!(!process.in_run_queue, "only the current process exits");
         self.node.remove_process(id);
-        // ERTS kills each controller from the init process `<0.0.0>`
-        // (`kill_dist_ctrl_proc`, `dist.c:896-903`).
+        // ERTS kills each process controller from the init process
+        // `<0.0.0>` (`kill_dist_ctrl_proc`, `dist.c:896-903`), and each port
+        // controller exits with `net_kernel_terminated` (`dist.c:930-932`,
+        // `979-988`).
         for controller in self.node.net_exits(id, &self.atoms) {
+            let controller = match controller {
+                dist_table::Controller::Process(controller) => controller,
+                dist_table::Controller::Port(port) => {
+                    self.fail_port(port, Term::static_atom("net_kernel_terminated"));
+                    continue;
+                }
+            };
             let kill = Signal::Exit {
                 from: LinkId::Process(ProcessId(0)),
                 reason: Term::static_atom("kill"),

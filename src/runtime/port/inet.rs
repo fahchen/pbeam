@@ -214,6 +214,11 @@ pub(in crate::runtime) struct Inet {
     state: State,
     /// The option `mode`: 0 for `list` (the start value), 1 for `binary`.
     mode: i32,
+    /// The option `deliver` (`INET_LOPT_DELIVER`, `inet_drv.c:781-783`):
+    /// 1 for `term` (the start value, `inet_drv.c:10931`), 0 for `port`. A
+    /// port controller with `port` gives its data to the distribution of
+    /// the node (`inet_drv.c:4287-4288`).
+    deliver: i32,
     /// The option `packet` (`htype`): 0 for `raw` (the start value), 1, 2,
     /// or 3 for the header of 1, 2, or 4 bytes (`TCP_PB_RAW`, `TCP_PB_1`,
     /// `TCP_PB_2`, `TCP_PB_4`, `packet_parser.h:35-38`).
@@ -330,6 +335,18 @@ impl Inet {
         self.send_timeout
     }
 
+    /// Return whether the driver of the port has `ERL_DRV_FLAG_SOFT_BUSY`:
+    /// `tcp_inet` has it and `udp_inet` does not (`inet_drv.c:1374`). Only
+    /// such a port can be a distribution controller (`dist.c:5287-5288`).
+    pub(in crate::runtime) fn soft_busy(&self) -> bool {
+        self.socket_type == SocketType::Stream
+    }
+
+    /// Return whether the option `deliver` is `port`.
+    pub(in crate::runtime) fn delivers_to_port(&self) -> bool {
+        self.deliver == 0
+    }
+
     /// Return the descriptor of a new port of `socket_type`: no socket,
     /// `list` mode, passive, and an infinite send timeout.
     ///
@@ -348,6 +365,7 @@ impl Inet {
             socket: None,
             state: State::Closed,
             mode: 0,
+            deliver: 1,
             packet: 0,
             packet_size: 0,
             active: 0,
@@ -382,6 +400,7 @@ impl Inet {
             family: self.family,
             state: State::Connected,
             mode: self.mode,
+            deliver: self.deliver,
             packet: self.packet,
             packet_size: self.packet_size,
             send_timeout: self.send_timeout,
@@ -860,6 +879,10 @@ impl Inet {
                     self.mode = value;
                     true
                 }
+                25 => {
+                    self.deliver = value;
+                    true
+                }
                 22 if value == 3 && self.socket_type == SocketType::Stream => {
                     return Err(error(ACTIVE_N));
                 }
@@ -1191,6 +1214,7 @@ impl Inet {
             };
             let value = match option {
                 24 => Some(self.mode),
+                25 => Some(self.deliver),
                 23 => Some(self.packet),
                 32 => Some(self.packet_size.cast_signed()),
                 22 if self.active == 3 => {
