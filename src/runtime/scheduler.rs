@@ -4273,6 +4273,7 @@ fn named_item(name: &Atom, atoms: &AtomTable) -> Term {
 }
 
 mod code;
+mod dist_input;
 pub(super) mod dist_table;
 mod known_nodes;
 pub(super) mod node;

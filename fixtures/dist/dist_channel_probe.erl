@@ -3,7 +3,8 @@
 -module(dist_channel_probe).
 -compile(nowarn_deprecated_catch).
 -export([main/0, net_kernel_exit/0, port_channel/0, no_mandatory/0, message/0,
-         port_message/0, deliver_port/0, deliver_udp/0]).
+         port_message/0, deliver_port/0, deliver_udp/0, input/0, reject/1,
+         trace_token/0, link_op/0, atom_cache/0]).
 
 main() ->
     %% net_kernel reports the dist_ctrlr message of a connection that it
@@ -232,6 +233,100 @@ deliver_udp() ->
     {ok, Port} = inet:port(U),
     ok = gen_udp:send(U, {127, 0, 0, 1}, Port, <<"hi">>),
     receive Message -> io:format("~p~n", [Message]) end.
+
+%% Packets with data to a process controller and to a port controller
+%% go to a pid and a name, or are dropped (dist.c:2463-2553).
+input() ->
+    logger:set_primary_config(level, none),
+    M = mandatory(),
+    register(dinput, self()),
+    Dead = spawn(fun() -> ok end),
+    DeadRef = monitor(process, Dead),
+    receive {'DOWN', DeadRef, _, _, _} -> ok end,
+    erts_internal:new_connection(zz@nohost),
+    {ok, DH} = erts_internal:create_dist_channel(zz@nohost, self(), {M, 1}),
+    From = remote_pid(zz@nohost),
+    Packets = fun(Tag) ->
+                      [packet({2, '', self()}, {Tag, send}),
+                       packet({22, From, self()}, {Tag, send_sender}),
+                       packet({6, From, '', dinput}, {Tag, reg_send}),
+                       packet({6, From, '', nobody}, {Tag, nobody}),
+                       packet({2, '', Dead}, {Tag, dead}),
+                       packet({22, From, From}, {Tag, remote}),
+                       packet({2, '', Dead}, <<>>)]
+              end,
+    Put = [erlang:dist_ctrl_put_data(DH, P) || P <- Packets(process)],
+    show(process, [Put, flush(), erlang:dist_get_stat(DH)]),
+    {ok, L} = gen_tcp:listen(0, [binary]),
+    {ok, Port} = inet:port(L),
+    {ok, C} = gen_tcp:connect({127, 0, 0, 1}, Port, [binary, {packet, 4}]),
+    {ok, A} = gen_tcp:accept(L),
+    erts_internal:new_connection(yy@nohost),
+    {ok, PH} = erts_internal:create_dist_channel(yy@nohost, A, {M, 1}),
+    ok = inet:setopts(A, [{active, true}, {deliver, port}, {packet, 4}]),
+    [ok = gen_tcp:send(C, P) || P <- Packets(port)],
+    timer:sleep(200),
+    show(port, [flush(), erlang:dist_get_stat(PH)]).
+
+%% Packets that ERTS rejects and ends the connection.
+reject(N) ->
+    erts_internal:new_connection(zz@nohost),
+    {ok, DH} = erts_internal:create_dist_channel(zz@nohost, self(), {mandatory(), 1}),
+    From = remote_pid(zz@nohost),
+    Packet = case N of
+                 1 -> <<112, 130, 97, 1>>;
+                 2 -> <<112, 131, 68, 0>>;
+                 3 -> <<112, 131, 97>>;
+                 4 -> packet_only(foo);
+                 5 -> packet_only({2, '', foo});
+                 6 -> packet_only({2, '', self(), extra});
+                 7 -> <<(packet_only({22, From, self()}))/binary, 131, 97>>;
+                 8 -> packet_only({});
+                 9 -> pid_reference_packet();
+                 10 -> packet_only({-1, '', self()})
+             end,
+    erlang:dist_ctrl_put_data(DH, Packet).
+
+%% A message with a reference of the local node that has the pid marker
+%% bit (erl_bif_unique.h:106-109), which PBeam cannot hold.
+pid_reference_packet() ->
+    <<131, 90, Rest/binary>> = term_to_binary(make_ref()),
+    Size = byte_size(Rest) - 12,
+    <<Head:Size/binary, N0:32, N1:32, N2:32>> = Rest,
+    <<(packet_only({2, '', self()}))/binary,
+      131, 90, Head/binary, N0:32, (N1 bor (1 bsl 30)):32, N2:32>>.
+
+%% A packet on a connection with DFLAG_DIST_HDR_ATOM_CACHE.
+atom_cache() ->
+    erts_internal:new_connection(zz@nohost),
+    {ok, DH} = erts_internal:create_dist_channel(zz@nohost, self(), {mandatory() bor 16#2000, 1}),
+    erlang:dist_ctrl_put_data(DH, packet_only({2, '', self()})).
+
+%% A control message with a trace token.
+trace_token() ->
+    erts_internal:new_connection(zz@nohost),
+    {ok, DH} = erts_internal:create_dist_channel(zz@nohost, self(), {mandatory(), 1}),
+    erlang:dist_ctrl_put_data(DH, packet({12, '', self(), []}, m)).
+
+%% An operation of another task (LINK).
+link_op() ->
+    erts_internal:new_connection(zz@nohost),
+    {ok, DH} = erts_internal:create_dist_channel(zz@nohost, self(), {mandatory(), 1}),
+    erlang:dist_ctrl_put_data(DH, packet_only({1, remote_pid(zz@nohost), self()})).
+
+%% A pid of the node Node.
+remote_pid(Node) ->
+    Name = atom_to_binary(Node),
+    binary_to_term(<<131, 88, 118, (byte_size(Name)):16, Name/binary, 1:32, 0:32, 1:32>>).
+
+packet(Control, Message) ->
+    <<(packet_only(Control))/binary, (term_to_binary(Message))/binary>>.
+
+packet_only(Control) ->
+    <<112, (term_to_binary(Control))/binary>>.
+
+flush() ->
+    receive M -> [M | flush()] after 0 -> [] end.
 
 mandatory() ->
     element(3, erts_internal:get_dflags()).

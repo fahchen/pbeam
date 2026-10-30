@@ -133,6 +133,12 @@ fn runs_the_bifs_of_a_process_controller_as_pinned_erts() {
         "{erts}"
     );
     assert_eq!(stdout(&pbeam_erl(&epmd, &port)), erts);
+    // Packets with data on a process and a port controller go to a pid
+    // and a name, or are dropped (dist.c:2463-2553).
+    let input = probe(&["-sname", &name], "dist_channel_probe:input(), halt().");
+    let erts = stdout(&erts_erl(&epmd, &input));
+    assert!(erts.contains("{process,send_sender},"), "{erts}");
+    assert_eq!(stdout(&pbeam_erl(&epmd, &input)), erts);
     let exit = probe(&[], "dist_channel_probe:net_kernel_exit(), halt().");
     let erts = stdout(&erts_erl(&epmd, &exit));
     assert!(
@@ -164,40 +170,50 @@ fn offers_the_mandatory_distribution_flags() {
 #[test]
 fn stops_at_a_part_of_a_channel_that_pbeam_does_not_have() {
     // Flags without a mandatory flag, where ERTS sends an error report
-    // (dist.c:5176-5187), a distribution message on a process or a port
-    // controller (#1407), and `{deliver, port}` data of a port that is not
-    // a controller, where ERTS sends `{Port, {data, Data}}`
+    // (dist.c:5176-5187), a packet that ERTS rejects on a process or a port
+    // controller, where ERTS ends the connection (dist.c:3144-3165,
+    // external.c:922-977), a control message with a trace token, another
+    // operation, and `{deliver, port}` data of a port that is not a
+    // controller, where ERTS sends `{Port, {data, Data}}`
     // (inet_drv.c:2753-2784), stop the run with a runtime error.
     let epmd = Epmd::start();
     let name = format!("dstop{}", std::process::id());
-    for (function, error) in [
+    let rejected = "unsupported distribution message that ERTS rejects";
+    let deliver = "unsupported data of a port with the option {deliver, port}";
+    let mut cases = vec![
         (
-            "no_mandatory",
+            "no_mandatory()".to_owned(),
             "unsupported erts_internal:create_dist_channel/3 with flags that miss a mandatory flag",
         ),
+        ("message()".to_owned(), rejected),
+        ("port_message()".to_owned(), rejected),
         (
-            "message",
-            "unsupported erlang:dist_ctrl_put_data/2 of a distribution message",
+            "trace_token()".to_owned(),
+            "unsupported distribution message with a trace token",
         ),
         (
-            "port_message",
-            "unsupported distribution message on a port controller",
+            "link_op()".to_owned(),
+            "unsupported distribution operation 1",
         ),
-        (
-            "deliver_port",
-            "unsupported data of a port with the option {deliver, port}",
-        ),
-        (
-            "deliver_udp",
-            "unsupported data of a port with the option {deliver, port}",
-        ),
-    ] {
-        let expression = format!("dist_channel_probe:{function}(), halt().");
+        ("deliver_port()".to_owned(), deliver),
+        ("deliver_udp()".to_owned(), deliver),
+    ];
+    cases.extend([1, 2, 3, 4, 5, 6, 7, 8, 10].map(|n| (format!("reject({n})"), rejected)));
+    cases.push((
+        "atom_cache()".to_owned(),
+        "unsupported distribution message on a connection with the atom cache or fragments",
+    ));
+    cases.push((
+        "reject(9)".to_owned(),
+        "unsupported distribution message of a pid reference",
+    ));
+    for (call, error) in cases {
+        let expression = format!("dist_channel_probe:{call}, halt().");
         let output = pbeam_erl(&epmd, &probe(&["-sname", &name], &expression));
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
             !output.status.success() && stderr.contains(error),
-            "{function}: {output:?}\nstderr: {stderr}"
+            "{call}: {output:?}\nstderr: {stderr}"
         );
     }
 }
@@ -345,5 +361,54 @@ fn connects_over_a_tcp_inet_port_as_pinned_erts() {
             format!("[{}]", atom_text(&format!("{pbeam}@{host}")))
         );
         assert_eq!(node.line(), "[]");
+    }
+}
+
+#[test]
+fn receives_a_message_from_an_erts_node_as_pinned_erts() {
+    // The ERTS node sends REG_SEND to the name dreg of each new hidden node
+    // (dist.c:1668-1675), over the prim_socket carrier, where the
+    // controller gives the packet to erlang:dist_ctrl_put_data/2, and over
+    // the tcp_inet port controller (dist.c:2468-2507).
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let server = format!("drsrv{id}");
+    let node = ErtsNode::start(
+        &epmd,
+        &[
+            "-sname",
+            &server,
+            "-setcookie",
+            "ck",
+            "-kernel",
+            "logger_level",
+            "none",
+        ],
+        "io:format(\"~s~n\", [node()]), \
+         L = fun L(Old) -> New = nodes(hidden), \
+         [{dreg, N} ! {hello, node()} || N <- New -- Old], timer:sleep(20), L(New) end, L([]).",
+    );
+    let server = node.line();
+    let client = |name: &str, socket: bool| {
+        let expression = format!(
+            "register(dreg, self()), true = net_kernel:connect_node('{server}'), \
+             receive M -> io:format(\"~p~n\", [M]) after 5000 -> io:format(\"timeout~n\") end, \
+             halt()."
+        );
+        let mut arguments = vec!["-sname", name, "-setcookie", "ck", "-hidden"];
+        if socket {
+            arguments.extend(SOCKET_CARRIER);
+        }
+        arguments.extend(["-noshell", "-eval"]);
+        let mut arguments: Vec<String> = arguments.into_iter().map(str::to_owned).collect();
+        arguments.push(expression);
+        arguments
+    };
+    let hello = format!("{{hello,{}}}\n", atom_text(&server));
+    for socket in [true, false] {
+        let erts = format!("drerts{socket}{id}");
+        assert_eq!(stdout(&erts_erl(&epmd, &client(&erts, socket))), hello);
+        let pbeam = format!("drpb{socket}{id}");
+        assert_eq!(stdout(&pbeam_erl(&epmd, &client(&pbeam, socket))), hello);
     }
 }

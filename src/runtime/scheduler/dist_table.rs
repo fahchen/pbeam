@@ -347,6 +347,11 @@ impl DistTable {
         )
     }
 
+    /// Return the distribution flags of the entry of `name` (`dep->dflags`).
+    pub(in crate::runtime) fn flags(&self, name: &Atom) -> u64 {
+        self.entries[&name.index()].flags
+    }
+
     /// Return the input handler of the entry of `name`.
     pub(in crate::runtime) fn input_handler(&self, name: &Atom) -> Option<ProcessId> {
         self.entries[&name.index()].input_handler
