@@ -245,7 +245,8 @@ fn frames_packets_with_a_header_of_1_2_and_4_bytes_as_pinned_erts() {
     // of the option with bytes in the buffer, also in active mode
     // (inet_drv.c:7968-7982), the length byte of a send of
     // 300 bytes with `{packet, 1}`, `packet_size`, a buffer smaller than
-    // the header (inet_drv.c:13007-13019), and `emsgsize` in passive and
+    // the header (inet_drv.c:13007-13019), a `packet_size` above `INT_MAX`
+    // (packet_parser.c:486-494), and `emsgsize` in passive and
     // active mode (inet_drv.c:12849-12890, 13118-13119).
     assert_connect_runs(
         "packet",
@@ -268,8 +269,11 @@ fn frames_packets_with_a_header_of_1_2_and_4_bytes_as_pinned_erts() {
          [[{ok,[{packet_size,4},{buffer,9216}]},{ok,<<111,107>>},{error,emsgsize},{error,enotconn},\
          {error,closed}],[{ok,[{packet_size,0},{buffer,2}]},{error,emsgsize},{error,enotconn},\
          {error,enotconn},{error,closed}],[{ok,[{packet_size,8},{buffer,2}]},{ok,<<111,107>>},\
-         {ok,<<104,101,108,108,111>>},ok,{ok,<<0,0,0,1,122>>}]],[{tcp,<<97>>},missing,{tcp_error,\
-         emsgsize},tcp_closed,missing],[]]\n",
+         {ok,<<104,101,108,108,111>>},ok,{ok,<<0,0,0,1,122>>}],[{ok,[{packet_size,2147483648},\
+         {buffer,9216}]},{error,emsgsize},{error,enotconn},{error,enotconn},{error,closed}],\
+         [{ok,[{packet_size,4294967295},{buffer,9216}]},{error,timeout},{error,timeout},ok,\
+         {ok,<<0,0,0,1,122>>}]],[{tcp,<<97>>},missing,{tcp_error,emsgsize},tcp_closed,missing],\
+         []]\n",
     );
 }
 

@@ -482,7 +482,9 @@ impl Inet {
     /// is not known yet, which is an empty buffer for `raw` and a buffer
     /// shorter than the header else. A length after the header above
     /// `packet_size`, or above `INT_MAX` minus the header length when
-    /// `packet_size` is 0, gives `Err(())`.
+    /// `packet_size` is 0, gives `Err(())`, and so does a sum of the header
+    /// length and the length that is negative as a C `int`; a sum of 0
+    /// gives `Ok(None)`.
     ///
     /// # Examples
     ///
@@ -510,9 +512,16 @@ impl Inet {
         if length > limit {
             return Err(());
         }
-        Ok(Some(
-            usize::try_from(header + length).expect("a packet length fits usize"),
-        ))
+        // `packet_get_length` returns the sum as a C `int`, and `tcp_remain`
+        // takes a negative sum as an error and 0 as an unknown length
+        // (packet_parser.c:494, inet_drv.c:12973-12997, 13033-13035).
+        match header.wrapping_add(length).cast_signed() {
+            0 => Ok(None),
+            ..0 => Err(()),
+            total => Ok(Some(
+                usize::try_from(total).expect("a positive int fits usize"),
+            )),
+        }
     }
 
     /// Return how many bytes to read before the first packet of the buffer
@@ -541,7 +550,12 @@ impl Inet {
                 Ok((stream.remain, length))
             }
             None if input_size > filled => Ok((input_size - filled, 0)),
-            None if size > filled => {
+            // ERTS passes a `packet_size` above `INT_MAX` to
+            // `tcp_expand_buffer` as a negative `int`, which expands nothing,
+            // and then reads up to `packet_size` bytes into the smaller
+            // buffer (inet_drv.c:11639-11648, 13009-13016). PBeam ends the
+            // receive with `emsgsize` instead (row "tcp_inet ports").
+            None if size > filled && self.packet_size <= INT_MAX => {
                 self.stream.expand(size);
                 Ok((size - filled, 0))
             }

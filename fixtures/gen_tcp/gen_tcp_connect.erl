@@ -111,8 +111,12 @@ packet() ->
     {ok, L} = gen_tcp:listen(0, [binary, {active, false}]),
     {ok, P} = inet:port(L),
     Sizes = [packet(L, P, H) || H <- [1, 2, 4]],
-    Limits = [limit(L, P, Options) || Options <- [[{packet_size, 4}], [{buffer, 2}],
-                                                  [{buffer, 2}, {packet_size, 8}]]],
+    Two = <<2:32, "ok", 5:32, "hello">>,
+    Limits = [limit(L, P, Options, Data)
+              || {Options, Data} <- [{[{packet_size, 4}], Two}, {[{buffer, 2}], Two},
+                                     {[{buffer, 2}, {packet_size, 8}], Two},
+                                     {[{packet_size, 16#80000000}], <<16#7fffffff:32, "ab">>},
+                                     {[{packet_size, 16#ffffffff}], <<16#fffffffc:32, "ab">>}]],
     Active = active_limit(L, P),
     ok = gen_tcp:close(L),
     io:format("~w~n", [[Sizes, Limits, Active, flush()]]).
@@ -160,13 +164,14 @@ packet(L, P, H) ->
 %% A packet that packet_size does not allow, here the second packet, and a
 %% buffer smaller than the header give emsgsize to a passive receive, and
 %% the socket can then not read (inet_drv.c:12849-12890, 13007-13019,
-%% 13167-13171, 13227-13228).
-limit(L, P, Options) ->
+%% 13167-13171, 13227-13228). A packet_size above INT_MAX gives lengths
+%% that are negative or 0 as a C int (packet_parser.c:486-494).
+limit(L, P, Options, Data) ->
     {ok, S} = gen_tcp:connect({127, 0, 0, 1}, P, [binary, {active, false}, {packet, 4} | Options]),
     {ok, A} = gen_tcp:accept(L, 5000),
-    ok = gen_tcp:send(A, <<2:32, "ok", 5:32, "hello">>),
+    ok = gen_tcp:send(A, Data),
     timer:sleep(50),
-    Result = [inet:getopts(S, [packet_size, buffer]), gen_tcp:recv(S, 0, 1000),
+    Result = [inet:getopts(S, [packet_size, buffer]), gen_tcp:recv(S, 0, 300),
               gen_tcp:recv(S, 0, 100), gen_tcp:send(S, <<"z">>), gen_tcp:recv(A, 0, 1000)],
     [ok = gen_tcp:close(X) || X <- [S, A]],
     Result.
