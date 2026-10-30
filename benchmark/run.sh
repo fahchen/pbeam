@@ -12,15 +12,17 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-# The pinned toolchain, as mise sets it: a plain PATH can hold another OTP or
-# Rust release, and the record must name the tools that the numbers use.
+# A plain PATH can hold another OTP or Rust release, so each tool runs through
+# `mise exec` with the pins of mise.toml, also when this script runs without
+# `mise run`. The record names the tools that the numbers use.
+pinned() { mise exec -- "$@"; }
 export LANG=en_US.UTF-8
 export LC_ALL=en_US.UTF-8
 
 {
   printf '== PBeam and ERTS benchmark ==\n'
   printf 'revision %s\n' "$(git rev-parse HEAD)"
-  # A change in the working tree makes the record exact, because the measured
+  # A change in the working tree makes the record inexact, because the measured
   # code is then not the commit.
   git diff --quiet HEAD 2>/dev/null || printf 'the working tree differs from HEAD\n'
   printf 'host %s, %s\n' \
@@ -29,10 +31,10 @@ export LC_ALL=en_US.UTF-8
   printf 'cpus %s\n' "$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo unknown)"
   printf 'load %s\n' \
     "$(sysctl -n vm.loadavg 2>/dev/null || cut -d' ' -f1-3 /proc/loadavg 2>/dev/null || echo unknown)"
-  printf 'rustc %s\n' "$(rustc --version)"
-  printf 'cargo %s\n' "$(cargo --version)"
-  erl -noshell -eval 'io:format("erlc OTP ~s, ERTS ~s, ~s~n", [erlang:system_info(otp_release), erlang:system_info(version), erlang:system_info(emu_flavor)]), halt().'
+  printf 'rustc %s\n' "$(pinned rustc --version)"
+  printf 'cargo %s\n' "$(pinned cargo --version)"
+  pinned erl -noshell -eval 'io:format("erlc OTP ~s, ERTS ~s, ~s~n", [erlang:system_info(otp_release), erlang:system_info(version), erlang:system_info(emu_flavor)]), halt().'
   printf '\n'
 }
 
-cargo test --locked --release --test benchmark -- --nocapture
+pinned cargo test --locked --release --test benchmark -- --nocapture

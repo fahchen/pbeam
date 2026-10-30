@@ -2,7 +2,7 @@
 
 This directory holds five scenarios that run the same compiled BEAM modules on the PBeam runtime and on the pinned ERTS. It reports the speed of each scenario as the ratio of the PBeam time to the ERTS time.
 
-The scenarios measure the runtime, not the build and not the boot. The beam files are the same files for the two runs, and the boot time is part of neither number.
+The scenarios measure the runtime, not the build and not the boot. The beam files are the same files for the two runs, and the start of the runtime and of the process is part of neither number.
 
 ## Scenarios
 
@@ -14,15 +14,14 @@ The scenarios measure the runtime, not the build and not the boot. The beam file
 | Map build and lookup | `bench_map.erl` | One key: one insert into the map and one lookup | 100000 |
 | Table insert and lookup | `bench_ets.erl` | One object: one insert into an ETS set table and one lookup | 100000 |
 
-Each module exports one function that takes the count as an integer, for example `bench_arith:loop/1`. The count is an argument, so the number of units is in `benchmark.rs` only.
+Each module exports one function that takes the count as an integer, for example `bench_arith:loop/1`. The count is an argument, so the number of units is in `benchmark.rs` only. `bench_run.erl` is the timing driver of the two runtimes, not a scenario.
 
 ## Method
 
 `tests/integration/benchmark.rs` is an integration test. It compiles `benchmark/*.erl` with the pinned `erlc` into `target/benchmark/beams/`, runs each scenario through the library API of the runtime, and runs the ERTS reference through `erl +S 1 -noshell` with the same beam files on the code path. One scheduler matches the single scheduler thread of the PBeam binary.
 
-- The ERTS run times the call in the guest with `erlang:monotonic_time(nanosecond)`.
-- The PBeam run times the call of the runtime from the host with `std::time::Instant`.
-- Each number is the minimum of 9 runs.
+- On each runtime, `bench_run:measure/4` runs the scenario 9 times in one process and times each run in the guest with `erlang:monotonic_time(nanosecond)`. The two runtimes measure the same work in the same way, and the start of the runtime and of the process is part of neither number.
+- Each number is the minimum of the 9 runs.
 - The test asserts that the result of each scenario is equal on PBeam and ERTS, so the two runs do the same work.
 - The check gate (`mise run check`) runs the same test with 2 runs and one twentieth of the units, so it checks the scenarios on every change and stays short.
 
@@ -32,9 +31,9 @@ Each module exports one function that takes the count as an integer, for example
 mise run bench-compare
 ```
 
-The task runs `bash benchmark/run.sh`. The script prints the revision, the host, the toolchain, the one-minute load, and the table, then runs `cargo test --release --test benchmark -- --nocapture`. The test compiles the Erlang sources with the pinned `erlc` into `target/benchmark/beams/` first.
+The task runs `bash benchmark/run.sh`. The script runs each tool through `mise exec`, so a direct `bash benchmark/run.sh` also uses the pinned OTP and Rust. It prints the revision, the host, the toolchain, the one-minute load, and the table, then runs `cargo test --release --test benchmark -- --nocapture`. The test compiles the Erlang sources with the pinned `erlc` into `target/benchmark/beams/` first.
 
-`mise run bench-compare` needs the Rust release build of the example and the pinned ERTS, and it needs no other setup.
+`mise run bench-compare` needs the pinned toolchain of `mise.toml` and no other setup.
 
 ## Results
 

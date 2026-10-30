@@ -178,7 +178,7 @@ description = "Measure the term drop cost on a release build and write target/dr
 run = "bash scripts/drop_costs.sh"
 
 [tasks.bench-compare]
-description = "Compare the PBeam runtime with the pinned ERTS on the three scenarios of benchmark/"
+description = "Compare the PBeam runtime with the pinned ERTS on the five scenarios of benchmark/"
 run = "bash benchmark/run.sh"
 
 [tasks.bench-release]

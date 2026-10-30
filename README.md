@@ -68,7 +68,7 @@ line coverage. The constant-return BEAM fixture is checked in at
 World entry instructions and imports.
 See the [evidence table](docs/hello-world-target.md).
 
-Run `mise run bench-compare` to compare the runtime with the pinned ERTS on the three scenarios of [benchmark](benchmark/README.md). That directory records the method, the scenarios, and the measured results.
+Run `mise run bench-compare` to compare the runtime with the pinned ERTS on the five scenarios of [benchmark](benchmark/README.md). That directory records the method, the scenarios, and the measured results.
 
 In CI, a pull request that changes only Markdown files runs `mise run lint` instead of `mise run check`. A Markdown file that a test or build step reads counts as code: `scripts/ci_task.sh` lists these files. A push to `main` always runs `mise run check`.
 
