@@ -1343,6 +1343,32 @@ fn gives_the_pids_ports_and_references_of_another_node_as_pinned_erts() {
 }
 
 #[test]
+fn encodes_and_decodes_the_pids_ports_and_references_as_pinned_erts() {
+    // term_to_binary/1,2 gives NEW_PID_EXT, V4_PORT_EXT, and
+    // NEWER_REFERENCE_EXT with the node and the creation of the
+    // identifier, and binary_to_term/1,2 gives the same identifier back: a
+    // local one for the local node with the local creation, else one of
+    // another node (external.c:2877-2960, 3025-3060, 3600-3690, 4677-4890).
+    let erts = run(&mut erts_probe(
+        REMOTE_ID_PROBE,
+        "remote_id_probe",
+        "external",
+        &[],
+    ));
+    // `~p` writes the tags 88, 90, and 120 as a string.
+    assert!(erts.contains("\"XZx\""), "{erts}");
+    assert_eq!(
+        run(&mut pbeam_probe(
+            REMOTE_ID_PROBE,
+            "remote_id_probe",
+            "external",
+            &[]
+        )),
+        erts
+    );
+}
+
+#[test]
 fn stops_with_a_runtime_error_for_each_signal_to_another_node() {
     // A link, a monitor, an exit signal, and a group leader of a pid of
     // another node, and an exit signal to an alias of another node, need a

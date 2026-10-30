@@ -923,10 +923,10 @@ pub(super) fn binary_to_term(
     let mut decoder = Decoder {
         input: binary,
         pos: 0,
+        overrun: 0,
         safe,
         local: false,
         atoms: &context.scheduler.atoms,
-        seed,
         code: &context.scheduler.code,
         ets: &context.scheduler.ets,
     };
@@ -991,14 +991,16 @@ struct Decoder<'a> {
     input: &'a [u8],
     /// The position of the next byte.
     pos: usize,
+    /// The bytes after the end of `input` that the decode has read: `dec_term`
+    /// reads the first number of a reference with no numbers also after the
+    /// end, and `used` counts them (see [`Decoder::first_reference_number`]).
+    overrun: usize,
     /// The `safe` option: each atom must exist already.
     safe: bool,
     /// True inside `LOCAL_EXT`: `NIL_EXT` stands for the local node.
     local: bool,
     /// The atom table of the run.
     atoms: &'a AtomTable,
-    /// The seed of the block hash of `LOCAL_EXT`.
-    seed: u32,
     /// The code table of the run, which holds the fun entries of the loaded
     /// code.
     code: &'a CodeTable,
@@ -1042,13 +1044,10 @@ enum FrameKind {
         header: Vec<crate::term::Atom>,
         def: Option<Arc<RecordDef>>,
     },
-    /// A `LOCAL_EXT` with its hash, the start of the wrapped term, and the
-    /// local flag of the enclosing term.
-    Local {
-        hash: u32,
-        start: usize,
-        prior: bool,
-    },
+    /// A `LOCAL_EXT` with the local flag of the enclosing term. The
+    /// validation walk checks its hash, as ERTS checks it only in
+    /// `decoded_size` (`external.c:5250-5255`).
+    Local { prior: bool },
 }
 
 /// One open container of the decoder walk: its kind, the terms that it still
@@ -1426,10 +1425,10 @@ impl Decoder<'_> {
         let mut decoder = Decoder {
             input: body,
             pos: 0,
+            overrun: 0,
             safe: self.safe,
             local: false,
             atoms: self.atoms,
-            seed,
             code: self.code,
             ets: self.ets,
         };
@@ -1441,7 +1440,7 @@ impl Decoder<'_> {
         let used = if plain.is_some() {
             header
         } else {
-            header + decoder.pos
+            header + decoder.pos + decoder.overrun
         };
         Ok((term, used))
     }
@@ -1474,6 +1473,22 @@ impl Decoder<'_> {
     /// Take a big-endian 32-bit number as a length.
     fn length(&mut self) -> Result<usize, DecodeError> {
         Ok(usize::try_from(self.u32()?).expect("a u32 fits in usize"))
+    }
+
+    /// Take the first number of a reference with no numbers as `dec_term`
+    /// does (`external.c:4780-4781`, `4795-4796`): it reads 4 bytes, which
+    /// the size check of `decoded_size` does not count
+    /// (`external.c:6217-6241`), so at the end of the input it reads after
+    /// the end. Each byte after the end counts as 0 and adds 1 to
+    /// [`Decoder::overrun`]; ERTS reads the memory after the binary there.
+    fn first_reference_number(&mut self) -> u32 {
+        let mut bytes = [0u8; 4];
+        let rest = self.input.get(self.pos..).unwrap_or_default();
+        let taken = rest.len().min(4);
+        bytes[..taken].copy_from_slice(&rest[..taken]);
+        self.pos += taken;
+        self.overrun += 4 - taken;
+        u32::from_be_bytes(bytes)
     }
 
     /// Take a big-endian 32-bit number.
@@ -1748,19 +1763,11 @@ impl Decoder<'_> {
                         continue 'parse;
                     }
                     121 => {
-                        let hash = u32::from_be_bytes(
-                            self.take(4)?
-                                .try_into()
-                                .expect("four bytes of the local hash"),
-                        );
+                        self.take(4)?;
                         let prior = self.local;
                         self.local = true;
                         frames.push(Frame {
-                            kind: FrameKind::Local {
-                                hash,
-                                start: self.pos,
-                                prior,
-                            },
+                            kind: FrameKind::Local { prior },
                             remaining: 1,
                             items: Vec::new(),
                         });
@@ -1842,12 +1849,9 @@ impl Decoder<'_> {
                         }
                         break;
                     }
-                    FrameKind::Local { hash, start, prior } => {
+                    FrameKind::Local { prior } => {
                         frames.pop();
                         self.local = prior;
-                        if external::block_hash(&self.input[start..self.pos], self.seed) != hash {
-                            return Err(DecodeError::Badarg);
-                        }
                     }
                 }
             }
@@ -2159,8 +2163,18 @@ impl Decoder<'_> {
             creation
         };
         // ERTS reads the first reference number even when the count is
-        // zero (`dec_term`, `external.c:4795-4796`).
-        let mut read = vec![self.u32()?];
+        // zero (`dec_term`, `external.c:4780-4781`, `4795-4796`).
+        let first = if count == 0 {
+            self.first_reference_number()
+        } else {
+            self.u32()?
+        };
+        // `NEW_REFERENCE_EXT` rejects a first number of 18 bits or more
+        // also for another node (`external.c:4780-4783`).
+        if tag == 1 && first >= MAX_REFERENCE {
+            return Err(DecodeError::Badarg);
+        }
+        let mut read = vec![first];
         for _ in 1..count {
             read.push(self.u32()?);
         }
