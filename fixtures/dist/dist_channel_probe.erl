@@ -85,7 +85,9 @@ main() ->
     CtrlRef = monitor(process, Ctrl),
     Ctrl ! stop,
     receive {'DOWN', CtrlRef, _, _, _} -> ok end,
-    show(down, [nodes(hidden), nodes(known), erlang:dist_get_stat(DH),
+    show(down, [nodes(hidden), nodes(known),
+                catch erlang:dist_ctrl_put_data(DH, <<>>),
+                erlang:dist_get_stat(DH),
                 erts_internal:abort_pending_connection(zz@nohost, DH)]),
     %% The caller itself is the controller.
     show(self, self_controller(M)).
@@ -150,6 +152,7 @@ net_kernel_exit() ->
 port_controller() ->
     erts_internal:new_connection(zz@nohost),
     Port = open_port({spawn, "cat"}, []),
+    badarg = erts_internal:create_dist_channel(zz@nohost, Port, foo),
     erts_internal:create_dist_channel(zz@nohost, Port, {mandatory(), 1}).
 
 %% Flags without each mandatory flag.

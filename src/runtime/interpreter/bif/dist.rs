@@ -310,12 +310,8 @@ pub(super) fn create_dist_channel(
     };
     let scheduler = &mut *context.scheduler;
     let controller = match controller {
-        Term::Pid(pid) => *pid,
-        Term::Port(_) => {
-            return Err(error(
-                "unsupported erts_internal:create_dist_channel/3 with a port controller: see \"Distribution\" in docs/erts-differences.md",
-            ));
-        }
+        Term::Pid(pid) => Some(*pid),
+        Term::Port(_) => None,
         _ => return Ok(BifResult::Value(Term::static_atom("badarg"))),
     };
     let Term::Tuple(options) = options else {
@@ -341,6 +337,13 @@ pub(super) fn create_dist_channel(
     if *name == scheduler.atoms.this_node().0 {
         return Ok(BifResult::Value(Term::static_atom("badarg")));
     }
+    // ERTS takes the port branch after the checks of the options and of
+    // the node (`dist.c:5163-5201`, `5269`).
+    let Some(controller) = controller else {
+        return Err(error(
+            "unsupported erts_internal:create_dist_channel/3 with a port controller: see \"Distribution\" in docs/erts-differences.md",
+        ));
+    };
     let caller = scheduler.current_process().id;
     let start = connection_start(scheduler);
     let node = Arc::clone(scheduler.node());

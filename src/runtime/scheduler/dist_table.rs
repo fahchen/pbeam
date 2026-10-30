@@ -55,8 +55,9 @@ struct Entry {
     /// The distribution controller of a connected entry (`dep->cid`).
     controller: Option<ProcessId>,
     /// The process that gives the data of the connection to
-    /// `erlang:dist_ctrl_put_data/2` (`dep->input_handler`). ERTS does not
-    /// clear it when the entry becomes idle (`erl_node_tables.c:672-676`).
+    /// `erlang:dist_ctrl_put_data/2` (`dep->input_handler`). The exit of the
+    /// controller clears it (`dist.c:1074`), and an aborted connection had
+    /// none.
     input_handler: Option<ProcessId>,
     /// The count of `erlang:dist_ctrl_put_data/2` calls (`dep->in`).
     input: u64,
@@ -353,8 +354,8 @@ impl DistTable {
     }
 
     /// Make the entry that `process` controls idle at the exit of
-    /// `process` with the input count 0, as `erts_do_net_exits` does for a
-    /// controller (`dist.c:1021-1117`).
+    /// `process` with the input count 0 and no input handler, as
+    /// `erts_do_net_exits` does for a controller (`dist.c:1021-1117`).
     pub(in crate::runtime) fn controller_exits(&mut self, process: ProcessId) {
         if let Some(entry) = self
             .entries
@@ -363,6 +364,7 @@ impl DistTable {
         {
             entry.set_idle(self.next_order);
             entry.input = 0;
+            entry.input_handler = None;
             self.next_order += 1;
         }
     }
