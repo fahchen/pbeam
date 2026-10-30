@@ -84,6 +84,22 @@ fn stdout(output: &Output) -> String {
     String::from_utf8(output.stdout.clone()).unwrap()
 }
 
+/// Return the text of the node name `name` as `~p` writes the atom
+/// (`io_lib:write_atom/1`): plain when it starts with a lowercase letter
+/// and has only letters, digits, `_`, and `@`, else quoted. A host name
+/// with a `-` gives a quoted name, and a host name without one does not.
+fn atom_text(name: &str) -> String {
+    let plain = name.starts_with(|c: char| c.is_ascii_lowercase())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '@');
+    if plain {
+        name.to_owned()
+    } else {
+        format!("'{name}'")
+    }
+}
+
 /// Return the arguments that run `dist_channel_probe:Function()` and halt,
 /// after the arguments `before`.
 fn probe<'a>(before: &[&'a str], expression: &'a str) -> Vec<&'a str> {
@@ -232,12 +248,18 @@ fn connects_to_an_erts_node_as_a_hidden_node_as_pinned_erts() {
     };
     let (pbeam, erts) = (format!("dpb{id}"), format!("derts{id}"));
     let pbeam_output = stdout(&pbeam_erl(&epmd, &client(&pbeam, "ck")));
-    assert_eq!(node.line(), format!("['{pbeam}@{host}']"));
+    assert_eq!(
+        node.line(),
+        format!("[{}]", atom_text(&format!("{pbeam}@{host}")))
+    );
     assert_eq!(node.line(), "[]");
     let erts_output = stdout(&erts_erl(&epmd, &client(&erts, "ck")));
-    assert_eq!(node.line(), format!("['{erts}@{host}']"));
+    assert_eq!(
+        node.line(),
+        format!("[{}]", atom_text(&format!("{erts}@{host}")))
+    );
     assert_eq!(node.line(), "[]");
-    let connected = format!("true\n['{server}']\n['{server}']\n");
+    let connected = format!("true\n[{0}]\n[{0}]\n", atom_text(&server));
     assert_eq!(erts_output, connected);
     assert_eq!(pbeam_output, connected);
     let refused = "false\n[]\n[]\n";
@@ -305,17 +327,23 @@ fn connects_over_a_tcp_inet_port_as_pinned_erts() {
         arguments.push(expression);
         arguments
     };
-    let connected = format!("true\n['{server}']\n['{server}']\n");
+    let connected = format!("true\n[{0}]\n[{0}]\n", atom_text(&server));
     for custom in [false, true] {
         let (pbeam, erts) = (format!("dtpb{custom}{id}"), format!("dterts{custom}{id}"));
         assert_eq!(stdout(&erts_erl(&epmd, &client(&erts, custom))), connected);
-        assert_eq!(node.line(), format!("['{erts}@{host}']"));
+        assert_eq!(
+            node.line(),
+            format!("[{}]", atom_text(&format!("{erts}@{host}")))
+        );
         assert_eq!(node.line(), "[]");
         assert_eq!(
             stdout(&pbeam_erl(&epmd, &client(&pbeam, custom))),
             connected
         );
-        assert_eq!(node.line(), format!("['{pbeam}@{host}']"));
+        assert_eq!(
+            node.line(),
+            format!("[{}]", atom_text(&format!("{pbeam}@{host}")))
+        );
         assert_eq!(node.line(), "[]");
     }
 }
