@@ -11,7 +11,7 @@ use super::{
     Arc, BeamError, BifContext, BifResult, Binary, CapabilityKind, ExceptionClass, Operation,
     Scheduler, SpawnOptions, Target, Term, boot_denial, create_process, current_frame,
     current_function, denial, error, erts_internal, io_service, is_bif, mfa_stacktrace,
-    other_process_denial,
+    other_process_denial, process_stacktrace,
 };
 use super::{to_i64, to_u64, to_usize};
 use crate::beam::code::Instruction;
@@ -5531,6 +5531,7 @@ pub(super) fn process_info(
                     messages,
                     reader: InfoReader::Caller,
                     registered_name: registered,
+                    backtrace_depth: 0,
                 };
                 let info = match stacktrace {
                     Some(stacktrace) => stacktrace,
@@ -5567,15 +5568,14 @@ pub(super) fn process_info(
         }
         return Ok(Value(Term::static_atom("undefined")));
     };
-    let messages = target.mailbox.message_count();
-    let registered = scheduler.registered_name_of(*id);
     let request = ProcessInfoRequest {
         code: &scheduler.code,
         atoms: &scheduler.atoms,
         current: 0,
-        messages,
+        messages: target.mailbox.message_count(),
         reader: InfoReader::Other,
-        registered_name: registered,
+        registered_name: scheduler.registered_name_of(*id),
+        backtrace_depth: scheduler.node().backtrace_depth(),
     };
     let info = request
         .item(target, item)?
@@ -5587,8 +5587,7 @@ pub(super) fn process_info(
     // ERTS always sends a request for `memory` and `total_heap_size` of
     // another process (`ERTS_PI_FLAG_FORCE_SIG_SEND`,
     // `erl_bif_info.c:828,839,1381`) and discards the cost of the request.
-    let forced = matches!(item, Term::Atom(name)
-        if matches!(scheduler.atoms.name_of(name), "memory" | "total_heap_size"));
+    let forced = forces_request(&scheduler.atoms, item);
     if forced || target.exiting.is_some() || target.mailbox.has_incoming() {
         let (caller, reference, request) = process_info_request(scheduler, item)?;
         scheduler
@@ -5598,9 +5597,51 @@ pub(super) fn process_info(
     }
     // Only `links` charges extra here: the items with a queue charge
     // went as a request above.
-    let extra = super::item_reductions(item, &info, 0, MessageQueue::OffHeap);
-    scheduler.current_process_mut().bump_reductions(1 + extra);
+    scheduler
+        .current_process_mut()
+        .bump_reductions(read_reductions(item, &info));
     Ok(signals_return(scheduler, process, info))
+}
+
+/// Return the reductions of a direct read of `item` of another process
+/// with the result `info`: 1 for each item after its read
+/// (`erl_bif_info.c:1601`) and the extra cost of the item. A list reads a
+/// repeated item once (`part_res`, `erl_bif_info.c:1134-1145`). Only `links`
+/// costs extra here: the items with a queue charge go as a request.
+fn read_reductions(item: &Term, info: &Term) -> i32 {
+    let cost =
+        |item: &Term, info: &Term| 1 + super::item_reductions(item, info, 0, MessageQueue::OffHeap);
+    match (item.proper_list(), info.proper_list()) {
+        (Some(items), Some(results)) => {
+            let items: Vec<&Term> = items.collect();
+            items
+                .iter()
+                .zip(results)
+                .enumerate()
+                .filter(|(index, (item, _))| !items[..*index].contains(item))
+                .map(|(_, (item, result))| cost(item, result))
+                .sum()
+        }
+        _ => cost(item, info),
+    }
+}
+
+/// Return whether a read of `item` of another process always sends the
+/// process-info request. ERTS forces it for many items
+/// (`ERTS_PI_FLAG_FORCE_SIG_SEND`, `erl_bif_info.c:810-855`, `1381-1382`);
+/// PBeam forces it for `memory` and `total_heap_size`, whose cost ERTS
+/// discards, and for `current_stacktrace`, a frame of the target when it
+/// handles the request. An item of a list forces the request for the list
+/// (`erl_bif_info.c:1335-1336`).
+fn forces_request(atoms: &AtomTable, item: &Term) -> bool {
+    let force = |item: &Term| {
+        matches!(item, Term::Atom(name)
+            if matches!(atoms.name_of(name), "memory" | "total_heap_size" | "current_stacktrace"))
+    };
+    match item.proper_list() {
+        Some(mut items) => items.any(force),
+        None => force(item),
+    }
 }
 
 /// The `current_stacktrace` item of the calling process: the frames of the
@@ -5626,9 +5667,13 @@ fn remote_process_info(
     id: ProcessId,
     item: &Term,
 ) -> Result<Option<BifResult>, BeamError> {
-    if let Term::Atom(name) = item
-        && OTHER_PROCESS_INFO_ITEMS.contains(&scheduler.atoms.name_of(name))
-    {
+    let atoms = &scheduler.atoms;
+    let carried = |item: &Term| matches!(item, Term::Atom(name) if OTHER_PROCESS_INFO_ITEMS.contains(&atoms.name_of(name)));
+    let all_carried = match item.proper_list() {
+        Some(mut items) => items.all(carried),
+        None => carried(item),
+    };
+    if all_carried {
         let (caller, reference, request) = process_info_request(scheduler, item)?;
         // The pending monitor of the caller goes before the
         // request, and a target that exits before the owner drains
@@ -5696,7 +5741,9 @@ fn caller_info_list(
 ) -> Result<Option<Term>, BeamError> {
     let atoms = &scheduler.atoms;
     let supported = items.iter().all(|item| {
-        matches!(item, Term::Atom(name) if PROCESS_INFO_1_KEYS.contains(&atoms.name_of(name)))
+        matches!(item, Term::Atom(name)
+            if PROCESS_INFO_1_KEYS.contains(&atoms.name_of(name))
+                || atoms.name_of(name) == "current_stacktrace")
     });
     if !supported {
         return Ok(None);
@@ -5715,9 +5762,10 @@ fn caller_info_list(
         let found = all
             .iter()
             .find(|pair| matches!(pair, Term::Tuple(elements) if elements[0] == *item));
-        let pair = match found {
-            Some(pair) => pair.clone(),
-            None => Term::tuple(vec![item.clone(), Term::nil()]),
+        let pair = match (found, caller_stacktrace(scheduler, item)?) {
+            (_, Some(stacktrace)) => stacktrace,
+            (Some(pair), None) => pair.clone(),
+            (None, None) => Term::tuple(vec![item.clone(), Term::nil()]),
         };
         // ERTS reads a repeated item once and copies its result
         // (`part_res`, `erl_bif_info.c:1134-1145`), so only its first read costs.
@@ -6373,6 +6421,10 @@ pub(in crate::runtime) struct ProcessInfoRequest<'a> {
     pub(in crate::runtime) reader: InfoReader,
     /// The registered name of the process.
     pub(in crate::runtime) registered_name: Option<Atom>,
+    /// The `backtrace_depth` system flag, the most frames of
+    /// `current_stacktrace` of another process. The caller reads its own
+    /// frames with `caller_stacktrace`, so its request gives 0.
+    pub(in crate::runtime) backtrace_depth: usize,
 }
 
 impl ProcessInfoRequest<'_> {
@@ -6384,6 +6436,34 @@ impl ProcessInfoRequest<'_> {
         process: &ProcessState,
         item: &Term,
     ) -> Result<Option<Term>, BeamError> {
+        // A list of items gives the list of the results in the same order
+        // (`erl_bif_info.c:1134-1145`, `1450-1468`). A process without a
+        // name gives `{registered_name, []}` in the list
+        // (`erl_bif_info.c:1616-1625`).
+        if let Some(items) = item.proper_list() {
+            let mut info = Vec::new();
+            for entry in items {
+                let Some(value) = self.item(process, entry)? else {
+                    return Ok(None);
+                };
+                info.push(if value.is_nil() {
+                    Term::tuple(vec![entry.clone(), value])
+                } else {
+                    value
+                });
+            }
+            return Ok(Some(Term::list_from(info)));
+        }
+        // Another process gives the frame where it continues first
+        // (`current_stacktrace`, `erl_bif_info.c:2396-2405`).
+        if self.reader == InfoReader::Other && item == &Term::static_atom("current_stacktrace") {
+            let mut frames = process_stacktrace(self.code, self.atoms, process, 0, 0)?;
+            frames.truncate(self.backtrace_depth);
+            return Ok(Some(Term::tuple(vec![
+                item.clone(),
+                Term::list_from(frames),
+            ])));
+        }
         let values = process_info_values(
             self.code,
             process,

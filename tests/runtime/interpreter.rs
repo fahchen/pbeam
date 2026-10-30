@@ -4493,29 +4493,6 @@ fn reads_process_info_of_a_process_that_is_not_alive_and_of_the_caller_items() {
 }
 
 #[test]
-fn rejects_the_current_stacktrace_of_another_process() {
-    // ERTS 29.1.1 returns the frames of another live process. PBeam
-    // records no stack frames, so it returns a runtime error.
-    let error = run_with_child(vec![
-        Instruction::Move(atom("fixture"), Operand::X(0)),
-        Instruction::Move(atom("child"), Operand::X(1)),
-        Instruction::Move(
-            Operand::Value(Term::list_from(vec![test_atom("normal")])),
-            Operand::X(2),
-        ),
-        erlang_call("spawn", 3, CallKind::Body),
-        Instruction::Move(atom("current_stacktrace"), Operand::X(1)),
-        erlang_call("process_info", 2, CallKind::Tail),
-        Instruction::Return,
-    ])
-    .unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        "unsupported erlang:process_info/2 arguments Pid(ProcessId(1)), Atom(\"current_stacktrace\")"
-    );
-}
-
-#[test]
 fn registers_a_name_or_raises_badarg_as_pinned_erts() {
     let register = |name: Term, id: Term| call_ext_with("erlang", "register", vec![name, id]);
     let root = Term::Pid(crate::ProcessId(0));

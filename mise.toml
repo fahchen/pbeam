@@ -53,6 +53,10 @@ run = '''mix run --no-start -e 'for module <- [Hello, HelloVariant] do path = :c
 description = "Disassemble the constant-return BEAM fixture"
 run = '''erl -noshell -eval 'io:format("~p~n", [beam_disasm:file("fixtures/beam/constant.beam")]), halt().' '''
 
+[tasks.blaze-check]
+description = "Check the workspace with blaze of .github/blaze-version, installed when missing; not a gate yet (docs/blaze.md)"
+run = "bash scripts/blaze.sh"
+
 [tasks.check-brief]
 description = "Run all required checks and print only the result; the full log goes to target/check.log"
 quiet = true
@@ -176,6 +180,10 @@ run = 'bash scripts/dispatch_attribution.sh "${usage_label:-base}" "${usage_outp
 [tasks.bench-drop]
 description = "Measure the term drop cost on a release build and write target/drop-costs.txt"
 run = "bash scripts/drop_costs.sh"
+
+[tasks.bench-compare]
+description = "Compare the PBeam runtime with the pinned ERTS on the five scenarios of benchmark/"
+run = "bash benchmark/run.sh"
 
 [tasks.bench-release]
 description = "Measure the scheduler release of a large shared graph on a release build and write target/release-costs.txt"

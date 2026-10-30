@@ -7362,14 +7362,34 @@ fn frame_function<'a>(
 /// `func_info` before it, is a runtime invariant error. A full atom table
 /// gives the error of `AtomTable::put`.
 fn mfa_stacktrace(scheduler: &mut Scheduler, skip: usize) -> Result<Vec<Term>, BeamError> {
-    let mut frames: Vec<Frame> = scheduler
-        .current_process()
-        .frames
-        .iter()
-        .rev()
-        .skip(skip)
-        .cloned()
-        .collect();
+    let (process, code, atoms) = scheduler.current_process_code_and_atoms();
+    process_stacktrace(code, atoms, process, skip, 1)
+}
+
+/// Return the stack trace frames of `process` as [`mfa_stacktrace`] does,
+/// with the location of the newest frame `newest_back` instructions before
+/// its next instruction. A newest frame that is the instruction where the
+/// process continues gives 0, as ERTS looks up `p->i` itself
+/// (`erts_build_stacktrace` with `include_i`, `erl_bif_info.c:2407-2430`);
+/// a return address gives 1.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let frames = process_stacktrace(&code, &atoms, &process, 0, 0)?;
+/// ```
+///
+/// # Errors
+///
+/// The errors of [`mfa_stacktrace`].
+pub(super) fn process_stacktrace(
+    code: &CodeTable,
+    atoms: &AtomTable,
+    process: &ProcessState,
+    skip: usize,
+    newest_back: usize,
+) -> Result<Vec<Term>, BeamError> {
+    let mut frames: Vec<Frame> = process.frames.iter().rev().skip(skip).cloned().collect();
     // ERTS records one frame for each run of equal continuation pointers,
     // so a recursion gives one frame (`gather_stacktrace`,
     // `beam_common.c:817-834`).
@@ -7379,21 +7399,21 @@ fn mfa_stacktrace(scheduler: &mut Scheduler, skip: usize) -> Result<Vec<Term>, B
     let count = frames.len();
     let mut stacktrace = Vec::with_capacity(count);
     for (index, frame) in frames.into_iter().enumerate() {
-        let module = Arc::clone(scheduler.code.module_by_id(frame.module_id)?);
+        let module = Arc::clone(code.module_by_id(frame.module_id)?);
         let (_, function, arity) = frame_function(&module, &frame)?;
         // The first apply of a start at `erlang:apply/3` is a body apply
         // with no frame in ERTS, so `apply_bif_error_adjustment` does not
         // keep the `erlang.beam` frame (`beam_common.c:1355-1366`).
-        if index + 1 == count && scheduler.current_process().start_apply {
+        if index + 1 == count && process.start_apply {
             continue;
         }
+        let back = if index == 0 { newest_back } else { 1 };
+        let position = frame.next_instruction - back;
         stacktrace.push(Term::tuple(vec![
-            Term::Atom(scheduler.atoms.put(&module.name)?),
-            Term::Atom(scheduler.atoms.put(function)?),
+            Term::Atom(atoms.put(&module.name)?),
+            Term::Atom(atoms.put(function)?),
             Term::Integer(arity.into()),
-            module
-                .lines
-                .location(frame.next_instruction - 1, Term::nil()),
+            module.lines.location(position, Term::nil()),
         ]));
     }
     Ok(stacktrace)

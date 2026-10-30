@@ -864,6 +864,10 @@ path = "tests/integration/net.rs"
 name = "erts_debug_size"
 path = "tests/integration/erts_debug_size.rs"
 
+[[test]]
+name = "benchmark"
+path = "tests/integration/benchmark.rs"
+
 # BeautifulRust lints (https://github.com/morganlinton/BeautifulRust, lints/lints.toml).
 # Silence a lint locally with #[expect(clippy::<lint>, reason = "...")].
 [lints.rust]
