@@ -235,6 +235,48 @@ fn connects_ipv6_sockets_and_binds_the_address_tags_as_pinned_erts() {
     assert_connect_runs("ipv6", &expected);
 }
 
+#[test]
+fn frames_packets_with_a_header_of_1_2_and_4_bytes_as_pinned_erts() {
+    // `{packet, 1 | 2 | 4}` between a socket with the option and a raw
+    // socket: the header of each send (inet_drv.c:13736-13885), one whole
+    // packet without its header for each receive (inet_drv.c:4279-4304,
+    // 12967-13235; packet_parser.c:248-284, 483-494), a split packet, two
+    // packets in one read, `{active, once}` and `{active, true}`, a change
+    // of the option with bytes in the buffer, also in active mode
+    // (inet_drv.c:7968-7982), the length byte of a send of
+    // 300 bytes with `{packet, 1}`, `packet_size`, a buffer smaller than
+    // the header (inet_drv.c:13007-13019), a `packet_size` above `INT_MAX`
+    // (packet_parser.c:486-494), and `emsgsize` in passive and
+    // active mode (inet_drv.c:12849-12890, 13118-13119).
+    assert_connect_runs(
+        "packet",
+        "[[[[{ok,[{packet,1},{packet_size,0}]},ok,{ok,<<3,97,98,99>>},ok,{ok,<<3,100,101,102>>},\
+         ok,{ok,<<0>>}],[{ok,<<120,121,122>>},{error,timeout},{error,einval}],[{ok,<<115,112,\
+         108,105,116>>},{ok,<<111,110,101>>},{ok,<<>>}],[{tcp,[116,119,111]},missing,{ok,[{active,\
+         false}]}],[{tcp,<<116,104,114,101,101>>},{tcp,<<102,111,117,114>>}],[ok,{ok,<<6,116>>},\
+         ok,{error,timeout},ok,{ok,[{packet,0}]}],[ok,{ok,<<44>>}],[]],[[{ok,[{packet,2},{packet_size,\
+         0}]},ok,{ok,<<0,3,97,98,99>>},ok,{ok,<<0,3,100,101,102>>},ok,{ok,<<0,0>>}],[{ok,<<120,\
+         121,122>>},{error,timeout},{error,einval}],[{ok,<<115,112,108,105,116>>},{ok,<<111,\
+         110,101>>},{ok,<<>>}],[{tcp,[116,119,111]},missing,{ok,[{active,false}]}],[{tcp,<<116,\
+         104,114,101,101>>},{tcp,<<102,111,117,114>>}],[ok,{ok,<<0,6,116>>},ok,{error,timeout},\
+         ok,{ok,[{packet,0}]}],[],[ok,ok,ok,missing,ok,{tcp,<<111,32,114,97,119,0,4,98,97,\
+         99,107,0>>}]],[[{ok,[{packet,4},{packet_size,0}]},ok,{ok,<<0,0,0,3,97,98,99>>},ok,\
+         {ok,<<0,0,0,3,100,101,102>>},ok,{ok,<<0,0,0,0>>}],[{ok,<<120,121,122>>},{error,timeout},\
+         {error,einval}],[{ok,<<115,112,108,105,116>>},{ok,<<111,110,101>>},{ok,<<>>}],[{tcp,\
+         [116,119,111]},missing,{ok,[{active,false}]}],[{tcp,<<116,104,114,101,101>>},{tcp,\
+         <<102,111,117,114>>}],[ok,{ok,<<0,0,0,6,116>>},ok,{error,timeout},ok,{ok,[{packet,\
+         0}]}],[],[ok,ok,ok,missing,ok,{tcp,<<111,32,114,97,119,0,0,0,4,98,97,99,107,0>>}]]],\
+         [[{ok,[{packet_size,4},{buffer,9216}]},{ok,<<111,107>>},{error,emsgsize},{error,enotconn},\
+         {error,closed}],[{ok,[{packet_size,0},{buffer,2}]},{error,emsgsize},{error,enotconn},\
+         {error,enotconn},{error,closed}],[{ok,[{packet_size,8},{buffer,2}]},{ok,<<111,107>>},\
+         {ok,<<104,101,108,108,111>>},ok,{ok,<<0,0,0,1,122>>}],[{ok,[{packet_size,2147483648},\
+         {buffer,9216}]},{error,emsgsize},{error,enotconn},{error,enotconn},{error,closed}],\
+         [{ok,[{packet_size,4294967295},{buffer,9216}]},{error,timeout},{error,timeout},ok,\
+         {ok,<<0,0,0,1,122>>}]],[{tcp,<<97>>},missing,{tcp_error,emsgsize},tcp_closed,missing],\
+         []]\n",
+    );
+}
+
 /// Run `gen_tcp_connect:Function()` on the pinned ERTS and on PBeam, as
 /// [`runs_the_gen_tcp_calls_of_thousand_island_as_pinned_erts`] runs its
 /// probe, and check that each run writes `expected`.

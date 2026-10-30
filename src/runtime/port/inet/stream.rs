@@ -1,5 +1,6 @@
 //! The receive and send state of a connected socket of a `tcp_inet` port
-//! in passive and active mode with `{packet, raw}`, as `tcp_descriptor` keeps it
+//! in passive and active mode with `{packet, raw}`, `{packet, 1}`,
+//! `{packet, 2}`, and `{packet, 4}`, as `tcp_descriptor` keeps it
 //! (`inet_drv.c:1308`, 1050-1064, 12268-12325, 12657-12731, 12783-12890,
 //! 12967-13240, 13613-13852, 14234-14370).
 //!
@@ -26,6 +27,15 @@
 //! after one message. The end of the connection gives `{tcp_error, S,
 //! Reason}` for a failed read, then `{tcp_closed, S}`, and the port ends
 //! (inet_drv.c:3987-4095, 12783-12890, 13042-13128, 13613-13662).
+//!
+//! With `{packet, 1}`, `{packet, 2}`, or `{packet, 4}` (the `packet`
+//! values 1, 2, and 3), each send starts with a big-endian header of 1, 2,
+//! or 4 bytes that holds the low bytes of the length: `<<"abc">>` with
+//! `{packet, 2}` writes `[0, 3, $a, $b, $c]`. A receive takes the length 0
+//! and gives one whole packet without its header, and an active socket
+//! gives one message for each whole packet. A length above `packet_size`
+//! gives `emsgsize` (inet_drv.c:4279-4304, 12967-13235, 13736-13885;
+//! packet_parser.c:248-284, 483-494).
 
 use std::{
     collections::VecDeque,
@@ -49,6 +59,10 @@ pub(super) const BUFFER: usize = 9216;
 
 /// The largest receive length (`TCP_MAX_PACKET_SIZE`, `inet_drv.c:1308`).
 const MAX_PACKET: i32 = 0x400_0000;
+
+/// The largest `int` of C (`INT_MAX`), the largest packet length with its
+/// header when `packet_size` is 0 (packet_parser.c:487-489).
+const INT_MAX: u32 = 0x7fff_ffff;
 
 /// The queue size that makes a send wait (`INET_HIGH_WATERMARK`,
 /// `inet_drv.c:1062`).
@@ -259,7 +273,7 @@ pub(in crate::runtime) struct Stream {
     /// The size of the input buffer, 0 without a buffer (`i_bufsz`).
     input_size: usize,
     /// The bytes that the receive of a length still needs (`i_remain`).
-    remain: usize,
+    pub(super) remain: usize,
     /// The receive that waits for data.
     pub(in crate::runtime) receiver: Option<Receiver>,
     /// The connect that waits for the write select of the socket.
@@ -368,6 +382,9 @@ impl Inet {
         };
         let length = i32::from_be_bytes([n3, n2, n1, n0]);
         let reply = match length {
+            // A packet type other than `raw` takes only the length 0
+            // (inet_drv.c:12302-12303).
+            _ if self.packet != 0 && length != 0 => error_reply("einval"),
             ..0 => return Err(self.unsupported("receive length", length)),
             _ if length > MAX_PACKET => error_reply("enomem"),
             _ if self.stream.receiver.is_some() => error_reply("ealready"),
@@ -381,17 +398,20 @@ impl Inet {
         Ok(Control::Reply(reply))
     }
 
-    /// Read for the receive of `length` bytes, 0 for the bytes of one read,
-    /// as `tcp_recv` does (inet_drv.c:13130-13240), and return the messages
-    /// of the step: the data when the receive has its bytes, or the end of
-    /// the receive when the peer closed or the read failed. No message
-    /// means that the receive waits.
+    /// Read for the receive of `length` bytes, 0 for one packet, as
+    /// `tcp_recv` does (inet_drv.c:13130-13235), and return the messages of
+    /// the step: the data when the receive has its packet, or the end of
+    /// the receive when the peer closed, the read failed, or the packet is
+    /// not valid (`emsgsize`, see [`Self::remain`]). No message means that
+    /// the receive waits. With `{packet, raw}`, a packet is the bytes of
+    /// one read. A read that leaves the length of the packet unknown reads
+    /// again at once (inet_drv.c:13224-13233).
     pub(in crate::runtime) fn receive(&mut self, length: usize) -> Vec<Event> {
         if self.socket_type == SocketType::Datagram {
             return self.receive_datagram();
         }
         let stream = &mut self.stream;
-        let read = if stream.input_size == 0 {
+        let mut read = if stream.input_size == 0 {
             let size = if length > 0 { length } else { stream.buffer };
             stream.input = vec![0; size];
             stream.input_size = size;
@@ -405,30 +425,150 @@ impl Inet {
             stream.remain = length - stream.filled;
             stream.remain
         } else if stream.remain == 0 {
-            if stream.filled > 0 {
-                let length = stream.filled;
-                return self.deliver(length);
+            match self.remain() {
+                Err(()) => return self.packet_error(),
+                Ok((0, length)) => return self.deliver(length),
+                Ok((read, _)) => read,
             }
-            stream.input_size - stream.filled
         } else {
             stream.remain
         };
-        let mut socket = self.socket.as_ref().expect("a connected port has a socket");
-        let start = stream.filled;
-        let count = match socket.read(&mut stream.input[start..start + read]) {
-            Ok(count) if count > 0 => count,
-            Err(failure) if failure.kind() == io::ErrorKind::WouldBlock => return Vec::new(),
-            result => return self.receive_ended(result.err()),
-        };
-        let stream = &mut self.stream;
-        stream.filled += count;
-        if stream.remain > 0 {
-            stream.remain -= count;
+        loop {
+            let mut socket = self.socket.as_ref().expect("a connected port has a socket");
+            let stream = &mut self.stream;
+            let start = stream.filled;
+            let count = match socket.read(&mut stream.input[start..start + read]) {
+                Ok(count) if count > 0 => count,
+                Err(failure) if failure.kind() == io::ErrorKind::WouldBlock => return Vec::new(),
+                result => return self.receive_ended(result.err()),
+            };
+            stream.filled += count;
             if stream.remain > 0 {
-                return Vec::new();
+                stream.remain -= count;
+                if stream.remain > 0 {
+                    return Vec::new();
+                }
+                return self.deliver(self.stream.filled);
             }
+            read = match self.remain() {
+                Err(()) => return self.packet_error(),
+                Ok((0, length)) => return self.deliver(length),
+                Ok((read, _)) => read,
+            };
         }
-        self.deliver(self.stream.filled)
+    }
+
+    /// Return the header length of the packet type: 0 for `raw`, else 1,
+    /// 2, or 4 bytes.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// port.packet = 3;
+    /// assert_eq!(port.header_length(), 4);
+    /// ```
+    fn header_length(&self) -> usize {
+        match self.packet {
+            1 => 1,
+            2 => 2,
+            3 => 4,
+            _ => 0,
+        }
+    }
+
+    /// Return the length of the first packet of the buffer with its header,
+    /// as `packet_get_length` does for `raw` and the headers of 1, 2, and 4
+    /// bytes (packet_parser.c:248-284, 483-494): `Ok(None)` when the length
+    /// is not known yet, which is an empty buffer for `raw` and a buffer
+    /// shorter than the header else. A length after the header above
+    /// `packet_size`, or above `INT_MAX` minus the header length when
+    /// `packet_size` is 0, gives `Err(())`, and so does a sum of the header
+    /// length and the length that is negative as a C `int`; a sum of 0
+    /// gives `Ok(None)`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// // {packet, 2} with the bytes [0, 3, $a]
+    /// assert_eq!(port.packet_length(), Ok(Some(5)));
+    /// ```
+    fn packet_length(&self) -> Result<Option<usize>, ()> {
+        let bytes = &self.stream.input[..self.stream.filled];
+        let header = self.header_length();
+        if header == 0 {
+            return Ok((!bytes.is_empty()).then_some(bytes.len()));
+        }
+        let Some(header_bytes) = bytes.get(..header) else {
+            return Ok(None);
+        };
+        let length = header_bytes
+            .iter()
+            .fold(0_u32, |length, byte| length << 8 | u32::from(*byte));
+        let header = u32::try_from(header).expect("a header has at most 4 bytes");
+        let limit = match self.packet_size {
+            0 => INT_MAX - header,
+            size => size,
+        };
+        if length > limit {
+            return Err(());
+        }
+        // `packet_get_length` returns the sum as a C `int`, and `tcp_remain`
+        // takes a negative sum as an error and 0 as an unknown length
+        // (packet_parser.c:494, inet_drv.c:12973-12997, 13033-13035).
+        match header.wrapping_add(length).cast_signed() {
+            0 => Ok(None),
+            ..0 => Err(()),
+            total => Ok(Some(
+                usize::try_from(total).expect("a positive int fits usize"),
+            )),
+        }
+    }
+
+    /// Return how many bytes to read before the first packet of the buffer
+    /// is whole, and the length of the packet (0 when it is not known), as
+    /// `tcp_remain` does (inet_drv.c:12967-13036): `(0, length)` for a
+    /// whole packet. A known length expands the buffer to it and sets the
+    /// bytes that the receive still needs. An unknown length reads into the
+    /// free space of the buffer; a full buffer expands to `packet_size` when
+    /// `packet_size` is larger, else the packet is not valid. The bytes of
+    /// the buffer always start at its start, so the buffer has no used
+    /// space before them (`tcp_restart_input`).
+    ///
+    /// # Errors
+    ///
+    /// `Err(())` for a packet that is not valid, which `tcp_recv` ends with
+    /// `emsgsize`.
+    fn remain(&mut self) -> Result<(usize, usize), ()> {
+        let (filled, input_size) = (self.stream.filled, self.stream.input_size);
+        let size = usize::try_from(self.packet_size).expect("a u32 fits usize");
+        match self.packet_length()? {
+            Some(length) if length <= filled => Ok((0, length)),
+            Some(length) => {
+                let stream = &mut self.stream;
+                stream.expand(length);
+                stream.remain = length - filled;
+                Ok((stream.remain, length))
+            }
+            None if input_size > filled => Ok((input_size - filled, 0)),
+            // ERTS passes a `packet_size` above `INT_MAX` to
+            // `tcp_expand_buffer` as a negative `int`, which expands nothing.
+            // Up to `INT_MAX` plus the filled bytes, it then reads into the
+            // smaller buffer (inet_drv.c:11639-11648, 13009-13016), where
+            // PBeam ends the receive with `emsgsize` (row "tcp_inet ports");
+            // above, both end it with `emsgsize` (inet_drv.c:13170-13171).
+            None if size > filled && self.packet_size <= INT_MAX => {
+                self.stream.expand(size);
+                Ok((size - filled, 0))
+            }
+            None => Err(()),
+        }
+    }
+
+    /// End the receive with `emsgsize` for a packet that is not valid, as
+    /// `tcp_recv_error` does (inet_drv.c:12849-12890, 13170-13171,
+    /// 13227-13228).
+    fn packet_error(&mut self) -> Vec<Event> {
+        self.receive_ended(Some(io::Error::from_raw_os_error(libc::EMSGSIZE)))
     }
 
     /// End the receive that waits with `timeout`, as
@@ -467,46 +607,64 @@ impl Inet {
             return self.active_end(Vec::new(), None, "normal".to_owned());
         }
         if activation == Activation::Read {
-            self.receive(0)
-        } else if stream.input_size == 0 || stream.remain > 0 || stream.filled == 0 {
-            Vec::new()
-        } else {
-            self.deliver(stream.filled)
+            return self.receive(0);
+        }
+        if stream.input_size == 0 || stream.remain > 0 {
+            return Vec::new();
+        }
+        // A packet that is not valid gives no message here
+        // (inet_drv.c:13047-13058).
+        match self.remain() {
+            Ok((0, length)) => self.deliver(length),
+            _ => Vec::new(),
         }
     }
 
-    /// Give the first `length` bytes of the buffer to the receive, as
-    /// `tcp_deliver` does (inet_drv.c:13042-13128), or to the owner as
-    /// `{tcp, S, Data}` in active mode, which then becomes passive for
-    /// `once` (`tcp_reply_data`, inet_drv.c:4278-4303). When
-    /// the receive takes all the filled bytes, the buffer itself becomes
-    /// the data, shrunk to `length`, and the port has no buffer
-    /// (`tcp_clear_input`). Else the receive gets a copy of the `length`
-    /// bytes, and the bytes after them move to the start of the buffer.
-    fn deliver(&mut self, length: usize) -> Vec<Event> {
-        let stream = &mut self.stream;
-        stream.statistics.input(to_u64(length));
-        let data = if length == stream.filled {
-            let mut data = std::mem::take(&mut stream.input);
-            data.truncate(length);
-            data.shrink_to_fit();
-            stream.filled = 0;
-            stream.input_size = 0;
-            data
-        } else {
-            let data = stream.input[..length].to_vec();
-            stream.input.copy_within(length..stream.filled, 0);
-            stream.filled -= length;
-            data
-        };
-        stream.remain = 0;
-        match self.active {
-            0 => self.end_receive(Ok(data)),
-            active => {
-                if active == 2 {
-                    self.active = 0;
-                }
-                vec![Event::Data(data)]
+    /// Give the packet of the first `length` bytes of the buffer without
+    /// its header to the receive, as `tcp_deliver` and `tcp_reply_data` do
+    /// (inet_drv.c:4279-4304, 13042-13128), or to the owner as `{tcp, S,
+    /// Data}` in active mode, which then becomes passive for `once`. An
+    /// active socket then gives each other whole packet of the buffer; a
+    /// packet that is not valid stops the delivery with no message
+    /// (inet_drv.c:13118-13119). When the packet takes all the filled
+    /// bytes, the buffer itself becomes the data and the port has no buffer
+    /// (`tcp_clear_input`). Else the bytes after the packet move to the
+    /// start of the buffer.
+    fn deliver(&mut self, mut length: usize) -> Vec<Event> {
+        let mut events = Vec::new();
+        loop {
+            let header = self.header_length();
+            let stream = &mut self.stream;
+            stream.statistics.input(to_u64(length));
+            let data = if length == stream.filled {
+                let mut data = std::mem::take(&mut stream.input);
+                data.truncate(length);
+                data.drain(..header);
+                data.shrink_to_fit();
+                stream.filled = 0;
+                stream.input_size = 0;
+                data
+            } else {
+                let data = stream.input[header..length].to_vec();
+                stream.input.copy_within(length..stream.filled, 0);
+                stream.filled -= length;
+                data
+            };
+            stream.remain = 0;
+            if self.active == 0 {
+                events.extend(self.end_receive(Ok(data)));
+                return events;
+            }
+            if self.active == 2 {
+                self.active = 0;
+            }
+            events.push(Event::Data(data));
+            if self.active == 0 || self.stream.input_size == 0 {
+                return events;
+            }
+            match self.remain() {
+                Ok((0, next)) => length = next,
+                _ => return events,
             }
         }
     }
@@ -758,6 +916,17 @@ impl Inet {
             }
             return reply(Err("enotconn".to_owned()));
         }
+        // The header holds the low bytes of the length, as `put_int8`,
+        // `put_int16`, and `put_int32` write them (inet_drv.c:13745-13763).
+        let header = self.header_length();
+        let framed: Vec<u8>;
+        let data = if header == 0 {
+            data
+        } else {
+            let length = to_u64(data.len()).to_be_bytes();
+            framed = [&length[8 - header..], data].concat();
+            &framed
+        };
         self.stream.statistics.output(to_u64(data.len()));
         if !self.stream.output.is_empty() {
             self.stream.output.extend(data);

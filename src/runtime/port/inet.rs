@@ -214,6 +214,13 @@ pub(in crate::runtime) struct Inet {
     state: State,
     /// The option `mode`: 0 for `list` (the start value), 1 for `binary`.
     mode: i32,
+    /// The option `packet` (`htype`): 0 for `raw` (the start value), 1, 2,
+    /// or 3 for the header of 1, 2, or 4 bytes (`TCP_PB_RAW`, `TCP_PB_1`,
+    /// `TCP_PB_2`, `TCP_PB_4`, `packet_parser.h:35-38`).
+    packet: i32,
+    /// The option `packet_size` (`psize`): the largest packet length after
+    /// the header, 0 (the start value) for no limit (inet_drv.c:7026-7032).
+    packet_size: u32,
     /// The option `active`: 0 for `false` (the start value), 1 for `true`,
     /// 2 for `once`, and 3 for `{active, N}` (`INET_MULTI`, only on a
     /// `udp_inet` port). A delivery in `once` mode sets it to 0, and the
@@ -341,6 +348,8 @@ impl Inet {
             socket: None,
             state: State::Closed,
             mode: 0,
+            packet: 0,
+            packet_size: 0,
             active: 0,
             active_count: 0,
             read_packets: 5,
@@ -373,6 +382,8 @@ impl Inet {
             family: self.family,
             state: State::Connected,
             mode: self.mode,
+            packet: self.packet,
+            packet_size: self.packet_size,
             send_timeout: self.send_timeout,
             send_timeout_close: self.send_timeout_close,
             stream: Box::new(Stream::new(self.stream.buffer)),
@@ -475,7 +486,7 @@ impl Inet {
             5 => self.name(),
             6 => self.bind(request),
             7 => {
-                let old = self.active;
+                let (old, old_packet) = (self.active, self.packet);
                 let mut count = 0;
                 let reply = self.set_options(request, &mut count)?;
                 if reply == [OK] {
@@ -484,7 +495,17 @@ impl Inet {
                 if count > 0 {
                     return Ok(Control::Passive { reply, count });
                 }
-                return Ok(self.set_active_result(old, reply));
+                // A change of the packet type in active mode drops the
+                // remaining length of the packet (inet_drv.c:7975-7981).
+                if self.packet != old_packet
+                    && old != 0
+                    && self.active != 0
+                    && self.state == State::Connected
+                    && self.socket_type == SocketType::Stream
+                {
+                    self.stream.remain = 0;
+                }
+                return Ok(self.set_active_result(old, old_packet, reply));
             }
             8 => self.get_options(request)?,
             11 => return Ok(self.statistics(request)),
@@ -823,12 +844,18 @@ impl Inet {
             let value = i32::from_be_bytes([*v3, *v2, *v1, *v0]);
             request = rest;
             let set = match option {
-                // PBeam reads a `tcp_inet` socket with `{packet, raw}` only,
-                // so a `SETOPTS` that keeps `raw` changes nothing. The port
-                // stores the packet type for each other value
-                // (inet_drv.c:7018-7024), and PBeam cannot frame that type.
-                23 if value == 0 => true,
+                // The port stores the packet type (inet_drv.c:7018-7024).
+                // PBeam frames `raw` and the headers of 1, 2, and 4 bytes
+                // only.
+                23 if (0..=3).contains(&value) => {
+                    self.packet = value;
+                    true
+                }
                 23 => return Err(self.unsupported("option packet", value)),
+                32 => {
+                    self.packet_size = value.cast_unsigned();
+                    true
+                }
                 24 => {
                     self.mode = value;
                     true
@@ -1078,17 +1105,23 @@ impl Inet {
     }
 
     /// Return the result of a `SETOPTS` with the reply `reply` that changed
-    /// the option `active` from `old`: [`Control::Active`] when a connected
-    /// socket became active or a socket whose connection ended is active,
+    /// the option `active` from `old` and the option `packet` from
+    /// `old_packet`: [`Control::Active`] when a connected socket became
+    /// active, an active socket changed its packet type, or a socket whose
+    /// connection ended is active,
     /// else the reply (inet_drv.c:7001-7011, 7949-7981). A connected
     /// `udp_inet` socket gives the reply, so a receive that waits does not
     /// read for the owner (inet_drv.c:4335-4357). PBeam runs no
     /// `{active, N}`, so only `once` reads.
-    fn set_active_result(&self, old: i32, reply: Vec<u8>) -> Control {
+    fn set_active_result(&self, old: i32, old_packet: i32, reply: Vec<u8>) -> Control {
         let ended = self.stream.ended && self.active != 0;
+        // A change of the packet type in active mode delivers the packets
+        // of the buffer, and a change to `once` with the same packet type
+        // reads (inet_drv.c:7949-7981).
+        let same_packet = self.packet == old_packet;
         if reply != [OK]
             || !ended
-                && (old != 0
+                && (old != 0 && same_packet
                     || self.active == 0
                     || self.state != State::Connected
                     || self.socket_type != SocketType::Stream)
@@ -1096,7 +1129,7 @@ impl Inet {
             return Control::Reply(reply);
         }
         Control::Active {
-            activation: if self.active == 2 {
+            activation: if old == 0 && self.active == 2 && same_packet {
                 Activation::Read
             } else {
                 Activation::Deliver
@@ -1158,6 +1191,8 @@ impl Inet {
             };
             let value = match option {
                 24 => Some(self.mode),
+                23 => Some(self.packet),
+                32 => Some(self.packet_size.cast_signed()),
                 22 if self.active == 3 => {
                     // The count needs 2 more bytes (inet_drv.c:9179-9183).
                     if reply.len() + 7 > MAX_OPT_BUFFER {
