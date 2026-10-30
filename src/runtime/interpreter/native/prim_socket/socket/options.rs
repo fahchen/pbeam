@@ -12,9 +12,13 @@
 use nix::errno::Errno;
 use nix::sys::socket::{getsockopt, setsockopt, sockopt};
 
+#[cfg(target_os = "linux")]
+use std::net::Ipv6Addr;
 use std::os::fd::AsRawFd;
 use std::ptr;
 
+#[cfg(target_os = "linux")]
+use super::in6_addr;
 use super::{
     Arc, BeamError, BifResult, CLOSED, CLOSING, ExceptionClass, Ipv4Addr, Mutex, OtpOptions,
     Reference, Scheduler, Signal, Socket, SocketState, Sockets, Term, atom, atom_name, closed,

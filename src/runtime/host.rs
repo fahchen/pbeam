@@ -140,7 +140,10 @@ pub(crate) enum FilenameEncoding {
     /// ERTS checks and writes a name as `ERL_FILENAME_UTF8` does
     /// (`erl_unicode.c:2222-2555`), but it composes the code points of a
     /// native name that it reads (`erl_unicode.c:2177-2190`).
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(dead_code, reason = "only macOS uses it")
+    )]
     Utf8Mac,
 }
 

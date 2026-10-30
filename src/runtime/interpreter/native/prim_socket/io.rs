@@ -748,7 +748,14 @@ fn send_messages(
             }
             Err(failure) if written.is_empty() => {
                 let request = (key, caller, reference);
-                return send_result(scheduler, state, Err(failure), 0, false, request);
+                return send_result(
+                    scheduler,
+                    state,
+                    Err(failure),
+                    0,
+                    IovTail::from(false),
+                    request,
+                );
             }
             Err(_) => break,
         }
@@ -932,7 +939,7 @@ fn receive_messages(
                     scheduler,
                     state,
                     &failure.into(),
-                    zero,
+                    RecvRef::from(zero),
                     key,
                     caller,
                     reference,

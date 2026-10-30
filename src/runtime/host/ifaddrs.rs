@@ -8,7 +8,13 @@ use std::ffi::c_int;
 
 /// An entry of the list of `getifaddrs`: `ifa_name`, `ifa_flags`, and
 /// `ifa_addr`, `ifa_netmask`, and `ifa_dstaddr` (see [`copy`]).
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(
+    all(not(target_os = "macos"), not(test)),
+    expect(
+        dead_code,
+        reason = "only the macOS reader of prim_net uses it; the unit tests run each reader"
+    )
+)]
 pub(crate) struct Entry {
     pub(crate) name: Vec<u8>,
     pub(crate) flags: u32,
@@ -19,7 +25,13 @@ pub(crate) struct Entry {
 
 /// A socket address of an entry: its family, and the bytes of the address
 /// that ERTS reads (see [`copy`]).
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(
+    all(not(target_os = "macos"), not(test)),
+    expect(
+        dead_code,
+        reason = "only the macOS reader of prim_net uses it; the unit tests run each reader"
+    )
+)]
 pub(crate) struct Address {
     pub(crate) family: c_int,
     pub(crate) bytes: Vec<u8>,

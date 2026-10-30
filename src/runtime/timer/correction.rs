@@ -130,8 +130,8 @@ pub(super) enum Check {
     /// the time offset and corrects the Erlang monotonic time for the drift
     /// of the OS monotonic clock and the error to the OS system time.
     #[cfg_attr(
-        target_os = "linux",
-        allow(dead_code, reason = "the host check of macOS; the unit tests use it")
+        all(target_os = "linux", not(test)),
+        expect(dead_code, reason = "the host check of macOS; the unit tests use it")
     )]
     Correction,
 }
