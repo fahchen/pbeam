@@ -68,7 +68,7 @@ static ONE_FILE_RUN: Mutex<()> = Mutex::new(());
 
 /// The variables of `erlexec`: the flag variables, whose flags `pbeam erl`
 /// adds to the arguments as `erlexec` does, and `ERL_EPMD_PORT`, which it
-/// rejects. Each run removes them, so that a shell setting does not change
+/// gives as `-epmd_port`. Each run removes them, so that a shell setting does not change
 /// the runs.
 const ERL_FLAG_VARIABLES: [&str; 5] = [
     "ERL_OTP29_FLAGS",
