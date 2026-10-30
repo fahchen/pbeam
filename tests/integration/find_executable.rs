@@ -1,3 +1,10 @@
+//! Runs the executable search and the file info functions on PBeam and compares them with the
+//! pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::{
     env,
     fs::{self, File, FileTimes, Permissions},
@@ -224,7 +231,7 @@ fn isolated_find_executable() {
             &[program.host_term(Term::Integer(1 << 60))],
         )
         .unwrap();
-    let results = [main, bifs, names].map(|term| text(&term.term, term.atoms()) + "\n");
+    let results = [main, bifs, names].map(|term| format!("{}\n", text(&term.term, term.atoms())));
     fs::write(env::var_os(RESULT).unwrap(), results.concat()).unwrap();
 }
 
@@ -270,7 +277,7 @@ fn make_files(directory: &Path) {
     // Times outside 1902-01-01 to 9999-12-31, which `build_file_info`
     // limits (`prim_file_nif.h:97-105`). A file system can limit them first.
     for (name, time) in [
-        ("old", UNIX_EPOCH - Duration::from_secs(3_000_000_000)),
+        ("old", UNIX_EPOCH - Duration::from_mins(50_000_000)),
         ("future", UNIX_EPOCH + Duration::from_secs(260_000_000_000)),
     ] {
         let times = FileTimes::new().set_accessed(time).set_modified(time);

@@ -1,3 +1,10 @@
+//! Runs the ETS table functions (lookup, insert, delete, owner exit) on PBeam and compares them
+//! with the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::process::Command;
 use std::sync::Arc;
 
@@ -32,7 +39,7 @@ fn reference_with(arguments: &[&str], function: &str) -> Vec<u8> {
         .output()
         .unwrap();
     assert!(output.status.success());
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, <[u8; 0]>::default());
     output.stdout
 }
 
@@ -64,6 +71,7 @@ fn inserts_objects_in_a_loop_as_pinned_erts() {
 
 /// Run `ets_probe:Function()` 9 times on PBeam, print the least of the timed
 /// runs, and return the result of the last run.
+#[expect(clippy::print_stdout, reason = "the probe prints its measurement")]
 fn timed(program: &BeamProgram, function: &str) -> Term {
     let mut best = std::time::Duration::MAX;
     let mut result = None;
@@ -333,7 +341,7 @@ fn reads_the_application_environment_from_ac_tab_as_pinned_erts() {
         .output()
         .unwrap();
     assert!(output.status.success());
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, <[u8; 0]>::default());
     assert_eq!(
         output.stdout,
         b"[[set,public,true,1,true],[default,true,value]]\n"
@@ -1077,7 +1085,7 @@ fn helps_a_fixed_clear_from_another_process_as_pinned_erts() {
             .execute("ets_probe", "fixtable_clear_help", &[])
             .unwrap()
             .term,
-        Term::list_from(vec![Term::Integer(100000), Term::Integer(0)])
+        Term::list_from(vec![Term::Integer(100_000), Term::Integer(0)])
     );
     assert_eq!(reference("fixtable_clear_help"), b"[100000,0]\n");
 }

@@ -1,3 +1,9 @@
+//! Checks the stack trace of `erlang:throw/1` and `erlang:exit/1` on PBeam against the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::process::Command;
 
 use pbeam_runtime::BeamProgram;

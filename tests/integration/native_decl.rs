@@ -1,3 +1,10 @@
+//! Reads the persisted native declarations of a compiled module and checks that each call path
+//! reaches the registered native.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use pbeam_runtime::{
     BeamModule, BeamProgram, Binding, Job, Library, NativeResult, NifContext, Term,
     register_library,
@@ -14,6 +21,10 @@ const MARKER: i64 = 90210;
 
 /// Return the marker for a binary argument, and `badarg` for any other
 /// argument, as a NIF of the fixture would.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "NIF function pointer; every NIF returns `Result<NativeResult, BeamError>`"
+)]
 fn sha256(
     context: &mut NifContext<'_>,
     arguments: &[Term],
@@ -59,7 +70,7 @@ fn reads_the_persisted_declarations_of_a_compiled_module() {
     assert_eq!(declarations[0], ("sha256".to_owned(), 1));
 
     let caller = BeamModule::load(NATIVE_DECL_CALLER).unwrap();
-    assert!(caller.native_declarations().is_empty());
+    assert_eq!(caller.native_declarations(), []);
 }
 
 /// A registered native runs at the `nif_start` entry of the declared stub

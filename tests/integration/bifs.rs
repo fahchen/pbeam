@@ -3,6 +3,7 @@
 //! `fixtures/bifs/is_builtin.txt`. This test checks the snapshot on the
 //! pinned ERTS.
 
+use std::fmt::Write as _;
 use std::{fs, process::Command};
 
 /// `fixtures/bifs/is_builtin.txt` lists each exported function of the pinned
@@ -46,10 +47,13 @@ fn is_builtin_snapshot_equals_the_pinned_erts() {
         .collect();
     builtin.sort_unstable();
     builtin.dedup();
-    let snapshot: String = builtin
-        .iter()
-        .map(|(module, function, arity)| format!("{module}\t{function}\t{arity}\n"))
-        .collect();
+    let snapshot: String =
+        builtin
+            .iter()
+            .fold(String::new(), |mut text, (module, function, arity)| {
+                let _ = writeln!(text, "{module}\t{function}\t{arity}");
+                text
+            });
     assert_eq!(
         snapshot,
         fs::read_to_string("fixtures/bifs/is_builtin.txt").unwrap()

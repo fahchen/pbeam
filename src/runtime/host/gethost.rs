@@ -24,6 +24,13 @@ use std::{
     thread,
 };
 
+/// The size of the name buffer of `getnameinfo` (`NI_MAXHOST`).
+#[expect(
+    clippy::as_conversions,
+    reason = "NI_MAXHOST is a small libc constant, and TryFrom is not const"
+)]
+const HOST_NAME_LEN: usize = libc::NI_MAXHOST as usize;
+
 /// `OP_GETHOSTBYNAME` (`inet_gethost.c:154`).
 const OP_GETHOSTBYNAME: u8 = 1;
 /// `OP_GETHOSTBYADDR` (`inet_gethost.c:155`).
@@ -237,7 +244,8 @@ fn atoi(text: &[u8]) -> i32 {
     let value = if negative { -magnitude } else { magnitude };
     // `strtol` clamps to `long`; the cast to `int` keeps the low 32 bits.
     let long = i64::try_from(value).unwrap_or(i64::MAX);
-    long as i32
+    let [b0, b1, b2, b3, ..] = long.to_le_bytes();
+    i32::from_le_bytes([b0, b1, b2, b3])
 }
 
 /// An event of the main loop.
@@ -260,7 +268,8 @@ fn read_request(input: &mut impl Read) -> Event {
         Some(4) => {}
         _ => return Event::Fatal,
     }
-    let mut request = vec![0; u32::from_be_bytes(size) as usize];
+    let mut request =
+        vec![0; usize::try_from(u32::from_be_bytes(size)).expect("a u32 fits in usize")];
     if read_exact(input, &mut request) != Some(request.len()) || request.len() < 5 {
         return Event::Fatal;
     }
@@ -306,7 +315,7 @@ impl Pool {
     /// Start a worker thread with the given queue, as `create_worker` does.
     fn create(&mut self, domain: Option<Vec<u8>>, queue: VecDeque<Job>) -> Worker {
         let (jobs, receiver) = mpsc::channel::<Job>();
-        let (id, events, answer) = (self.next_id, self.events.clone(), self.answer.clone());
+        let (id, events, answer) = (self.next_id, self.events.clone(), Arc::clone(&self.answer));
         self.next_id += 1;
         thread::spawn(move || {
             while let Ok(job) = receiver.recv() {
@@ -382,12 +391,11 @@ impl Pool {
     /// Handle the reply of the busy worker at `index`, as `handle_io_busy`
     /// does (`inet_gethost.c:552-585`).
     fn replied(&mut self, index: usize) {
-        match self.busy[index].queue.pop_front() {
-            Some(job) => self.send(index, job),
-            None => {
-                let worker = self.busy.swap_remove(index);
-                self.free.push(worker);
-            }
+        if let Some(job) = self.busy[index].queue.pop_front() {
+            self.send(index, job);
+        } else {
+            let worker = self.busy.swap_remove(index);
+            self.free.push(worker);
         }
     }
 
@@ -556,9 +564,9 @@ fn address_info_code(value: c_int) -> Code {
 fn hosts_reply(unit: u8, addresses: &[Vec<u8>], names: &[Vec<u8>]) -> Vec<u8> {
     let mut reply = vec![unit];
     reply.extend_from_slice(&u32::try_from(addresses.len()).unwrap_or(0).to_be_bytes());
-    addresses
-        .iter()
-        .for_each(|address| reply.extend_from_slice(address));
+    for address in addresses {
+        reply.extend_from_slice(address);
+    }
     reply.extend_from_slice(&u32::try_from(names.len()).unwrap_or(0).to_be_bytes());
     for name in names {
         reply.extend_from_slice(name);
@@ -569,13 +577,16 @@ fn hosts_reply(unit: u8, addresses: &[Vec<u8>], names: &[Vec<u8>]) -> Vec<u8> {
 
 /// Read the current `h_errno`.
 fn h_errno_value() -> c_int {
-    // SAFETY: glibc and musl return the address of the `h_errno` of the
-    // thread; macOS has one global `int`. The caller holds `NETDB`.
     #[cfg(target_os = "linux")]
+    // SAFETY: glibc and musl return the address of the `h_errno` of the
+    // thread, which is valid to read for the life of the thread.
     unsafe {
         *__h_errno_location()
     }
     #[cfg(not(target_os = "linux"))]
+    // SAFETY: macOS has one global `int` `h_errno`, which is always
+    // initialized. The caller holds `NETDB`, so no call of the network
+    // database functions writes it during this read.
     unsafe {
         h_errno
     }
@@ -584,7 +595,9 @@ fn h_errno_value() -> c_int {
 /// Run `gethostbyname(name)`, as the worker does for `PROTO_IPV4`
 /// (`inet_gethost.c:1837-1847`).
 fn host_by_name(name: &CStr) -> Result<Vec<u8>, Code> {
-    let _lock = NETDB.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = NETDB
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // SAFETY: `name` is a NUL-terminated string. The caller holds `NETDB`.
     let host = unsafe { gethostbyname(name.as_ptr()) };
     hostent_reply(host)
@@ -593,7 +606,9 @@ fn host_by_name(name: &CStr) -> Result<Vec<u8>, Code> {
 /// Run `gethostbyaddr(address, 4, AF_INET)`, as the worker does for
 /// `PROTO_IPV4` (`inet_gethost.c:1929-1941`).
 fn host_by_address(address: [u8; 4]) -> Result<Vec<u8>, Code> {
-    let _lock = NETDB.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = NETDB
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // SAFETY: `address` holds the 4 bytes that the call reads. The caller
     // holds `NETDB`.
     let host = unsafe { gethostbyaddr(address.as_ptr().cast(), 4, libc::AF_INET) };
@@ -695,7 +710,7 @@ fn name_info(address: [u8; 16]) -> Result<Vec<u8>, Code> {
     }
     socket.sin6_family = libc::sa_family_t::try_from(libc::AF_INET6).unwrap_or(0);
     socket.sin6_addr.s6_addr = address;
-    let mut name = [0 as c_char; libc::NI_MAXHOST as usize];
+    let mut name = [0; HOST_NAME_LEN];
     // SAFETY: `socket` is a `sockaddr_in6` of the given size, and the call
     // writes at most `name.len()` bytes to `name`.
     let result = unsafe {

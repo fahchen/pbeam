@@ -16,7 +16,7 @@
 //! directory.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env, fs,
     io::Write,
     path::{Path, PathBuf},
@@ -44,6 +44,10 @@ const USAGE: &str =
        pbeam_bundle executable <runtime-binary> <bundle> <output>
        pbeam_bundle check-nifs <directory>";
 
+#[expect(
+    clippy::print_stderr,
+    reason = "the command-line binary reports to the terminal"
+)]
 fn main() -> ExitCode {
     let arguments: Vec<_> = env::args_os().skip(1).collect();
     let Some((command, rest)) = arguments.split_first() else {
@@ -51,49 +55,51 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
     let result = match command.to_str() {
-        Some("bundle") => match rest {
-            [directory, output, module, function, start] => build_bundle(
-                Path::new(directory),
-                Path::new(output),
-                &module.to_string_lossy(),
-                &function.to_string_lossy(),
-                Path::new(start),
-            ),
-            _ => {
+        Some("bundle") => {
+            if let [directory, output, module, function, start] = rest {
+                build_bundle(
+                    Path::new(directory),
+                    Path::new(output),
+                    &module.to_string_lossy(),
+                    &function.to_string_lossy(),
+                    Path::new(start),
+                )
+            } else {
                 eprintln!("{USAGE}");
                 return ExitCode::FAILURE;
             }
-        },
-        Some("fixture") => match rest {
-            [output, module, function, start, beams, consolidated] => build_fixture(
-                Path::new(output),
-                &module.to_string_lossy(),
-                &function.to_string_lossy(),
-                Path::new(start),
-                Path::new(beams),
-                Path::new(consolidated),
-            ),
-            _ => {
+        }
+        Some("fixture") => {
+            if let [output, module, function, start, beams, consolidated] = rest {
+                build_fixture(
+                    Path::new(output),
+                    &module.to_string_lossy(),
+                    &function.to_string_lossy(),
+                    Path::new(start),
+                    Path::new(beams),
+                    Path::new(consolidated),
+                )
+            } else {
                 eprintln!("{USAGE}");
                 return ExitCode::FAILURE;
             }
-        },
-        Some("executable") => match rest {
-            [runtime, bundle, output] => {
+        }
+        Some("executable") => {
+            if let [runtime, bundle, output] = rest {
                 build_executable(Path::new(runtime), Path::new(bundle), Path::new(output))
-            }
-            _ => {
+            } else {
                 eprintln!("{USAGE}");
                 return ExitCode::FAILURE;
             }
-        },
-        Some("check-nifs") => match rest {
-            [directory] => check_nifs(Path::new(directory)),
-            _ => {
+        }
+        Some("check-nifs") => {
+            if let [directory] = rest {
+                check_nifs(Path::new(directory))
+            } else {
                 eprintln!("{USAGE}");
                 return ExitCode::FAILURE;
             }
-        },
+        }
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::FAILURE;
@@ -243,32 +249,29 @@ fn add_fixture_beam(
 ) -> Result<(), String> {
     let canonical = fs::canonicalize(path)
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-    let name = match resource_name(&canonical) {
-        Ok(name) => {
-            let ebin = canonical
-                .parent()
-                .expect("a BEAM file of a lib directory has a parent");
-            let prefix = name.rsplit_once('/').map_or("", |(prefix, _)| prefix);
-            ebins.insert(ebin.to_path_buf(), prefix.to_owned());
-            return Ok(());
-        }
-        Err(_) => {
-            let file = canonical
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            if canonical.parent() == Some(example) {
-                format!("pbeam/{file}")
-            } else if canonical.parent() == Some(consolidated) {
-                format!("releases/{FIXTURE_VERSION}/consolidated/{file}")
-            } else {
-                return Err(format!(
-                    "{} is not in an OTP lib directory, the example directory {}, or the consolidated directory {}",
-                    path.display(),
-                    example.display(),
-                    consolidated.display()
-                ));
-            }
+    let name = if let Ok(name) = resource_name(&canonical) {
+        let ebin = canonical
+            .parent()
+            .expect("a BEAM file of a lib directory has a parent");
+        let prefix = name.rsplit_once('/').map_or("", |(prefix, _)| prefix);
+        ebins.insert(ebin.to_path_buf(), prefix.to_owned());
+        return Ok(());
+    } else {
+        let file = canonical
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if canonical.parent() == Some(example) {
+            format!("pbeam/{file}")
+        } else if canonical.parent() == Some(consolidated) {
+            format!("releases/{FIXTURE_VERSION}/consolidated/{file}")
+        } else {
+            return Err(format!(
+                "{} is not in an OTP lib directory, the example directory {}, or the consolidated directory {}",
+                path.display(),
+                example.display(),
+                consolidated.display()
+            ));
         }
     };
     let bytes =
@@ -345,6 +348,14 @@ fn check_nifs(directory: &Path) -> Result<(), String> {
 /// // NIF function has no PBeam binding; a call runs the BEAM stub body".
 /// assert!(nif_gate(root, &missing_binding_files).is_ok());
 /// ```
+#[expect(
+    clippy::print_stdout,
+    reason = "the command-line binary reports to the terminal"
+)]
+#[expect(
+    clippy::case_sensitive_file_extension_comparisons,
+    reason = "the OTP build writes the suffix `.beam` in lower case, and the match must stay exact"
+)]
 fn nif_gate(root: &Path, files: &BTreeMap<String, Vec<u8>>) -> Result<(), String> {
     let mut failures = Vec::new();
     for (name, bytes) in files.iter().filter(|(name, _)| name.ends_with(".beam")) {
@@ -382,6 +393,10 @@ fn nif_gate(root: &Path, files: &BTreeMap<String, Vec<u8>>) -> Result<(), String
 ///     [PathBuf::from("/r/lib/a-1/priv/a_nif.so")]
 /// );
 /// ```
+#[expect(
+    clippy::case_sensitive_file_extension_comparisons,
+    reason = "the OTP build writes the suffix `.so` in lower case, and the match must stay exact"
+)]
 fn shipped_libraries(root: &Path, beam: &str, files: &BTreeMap<String, Vec<u8>>) -> Vec<PathBuf> {
     let ebin = Path::new(beam).parent().unwrap_or(Path::new(""));
     if ebin.file_name() != Some(std::ffi::OsStr::new("ebin")) {
@@ -403,7 +418,11 @@ fn build_executable(runtime: &Path, bundle: &Path, output: &Path) -> Result<(), 
         .map_err(|error| format!("cannot read the bundle {}: {error}", bundle.display()))?;
     file.extend_from_slice(&bundle);
     file.extend_from_slice(MAGIC);
-    file.extend_from_slice(&u64::try_from(bundle.len()).unwrap().to_le_bytes());
+    file.extend_from_slice(
+        &u64::try_from(bundle.len())
+            .expect("a bundle length fits in u64")
+            .to_le_bytes(),
+    );
     write_output(output, &file, 0o755)
 }
 
@@ -465,7 +484,7 @@ fn start_modules(
     let list = fs::read_to_string(start_list)
         .map_err(|error| format!("cannot read {}: {error}", start_list.display()))?;
     let mut modules = Vec::new();
-    let mut erts_directories = BTreeMap::new();
+    let mut erts_directories = BTreeSet::new();
     for line in list.lines().filter(|line| !line.is_empty()) {
         let path = Path::new(line);
         let name = resource_name(path)?;
@@ -475,14 +494,14 @@ fn start_modules(
         if name.starts_with("lib/erts-")
             && let Some(parent) = path.parent()
         {
-            erts_directories.insert(parent.to_owned(), ());
+            erts_directories.insert(parent.to_owned());
         }
         resources.insert(name, bytes);
     }
     // The release carries each application of OTP. The erts application is
     // the exception: copy all of it, because the boot loads modules that the
     // start set does not name.
-    for directory in erts_directories.keys() {
+    for directory in &erts_directories {
         for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
             let path = entry.map_err(|error| error.to_string())?.path();
             let name = resource_name(&path)?;

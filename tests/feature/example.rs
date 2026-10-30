@@ -22,7 +22,12 @@
 //! Each other module loads on demand through the pinned `error_handler` and
 //! `code_server`, so the output order of two processes that race is the
 //! order of an interactive-mode ERTS run (#428).
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
+use std::fmt::Write as _;
 use std::{
     path::Path,
     process::{Command, Output, Stdio},
@@ -210,8 +215,10 @@ fn runs_fairness_as_pinned_erts_with_one_scheduler() {
         "b 18670..20000",
     ]
     .iter()
-    .map(|line| format!("{line}\\n"))
-    .collect();
+    .fold(String::new(), |mut text, line| {
+        let _ = write!(text, "{line}\\n");
+        text
+    });
 
     let erts = run_example(&["fairness", "--erts"], None);
     let pbeam = run_example(&["fairness", "--no-build"], None);
@@ -397,6 +404,12 @@ fn runs_the_called_modules_of_an_example_on_demand_as_pinned_erts() {
         files.len()
     );
 
+    checks_the_unloaded_modules(&output);
+}
+
+/// Check the `pbeam.unloaded` list that the build of `called_modules` wrote
+/// into `output`, and the load error of each BEAM file in it.
+fn checks_the_unloaded_modules(output: &Path) {
     // The build writes each called module that the `pbeam` run does not get
     // into `pbeam.unloaded`: the code path has no BEAM file for it, or the
     // PBeam loader does not load its BEAM file.
@@ -494,6 +507,51 @@ fn runs_restricted_guest_with_its_strict_policy_as_pinned_erts_and_denies_other_
     );
     assert_eq!(parts(&pbeam), parts(&erts), "PBeam");
 
+    checks_the_denied_operations();
+
+    // Without `terminal` `write`, `IO.puts/1` raises
+    // `error:capability_denied`: the IO service entry of `user` denies the
+    // request.
+    let no_terminal = run_restricted_guest(
+        "restricted_guest_probe_policy",
+        &[
+            "pbeam_boot",
+            "start",
+            "restricted_guest_probe",
+            "no_terminal",
+        ],
+    );
+    assert_eq!(
+        parts(&no_terminal),
+        (
+            String::new(),
+            "pbeam: root process exited with {result,[{puts,denied}]}\\n".to_owned(),
+            Some(1)
+        ),
+        "no terminal capability"
+    );
+
+    // The strict policy gives capabilities only to `RestrictedGuest.main/0`.
+    // For another entry, `initial/1` returns `deny`, so the run stops when
+    // the root process enters the runtime.
+    let other_entry = run_restricted_guest(
+        "Elixir.RestrictedGuest.Policy",
+        &["pbeam_boot", "start", "restricted_guest_probe", "denied"],
+    );
+    assert_eq!(
+        parts(&other_entry),
+        (
+            String::new(),
+            "pbeam: the policy denied the root process: initial/1 returned deny\\n".to_owned(),
+            Some(1)
+        ),
+        "another entry"
+    );
+}
+
+/// Check the operations that the strict policy of `restricted_guest_probe`
+/// permits and denies.
+fn checks_the_denied_operations() {
     // `restricted_guest_probe:denied/0` runs in the root process of
     // `pbeam_boot` after it enters the runtime, with the capabilities of
     // the strict policy (`restricted_guest_probe_policy`). Its spawn of
@@ -567,45 +625,6 @@ fn runs_restricted_guest_with_its_strict_policy_as_pinned_erts_and_denies_other_
             Some(1)
         ),
         "denied operations"
-    );
-
-    // Without `terminal` `write`, `IO.puts/1` raises
-    // `error:capability_denied`: the IO service entry of `user` denies the
-    // request.
-    let no_terminal = run_restricted_guest(
-        "restricted_guest_probe_policy",
-        &[
-            "pbeam_boot",
-            "start",
-            "restricted_guest_probe",
-            "no_terminal",
-        ],
-    );
-    assert_eq!(
-        parts(&no_terminal),
-        (
-            String::new(),
-            "pbeam: root process exited with {result,[{puts,denied}]}\\n".to_owned(),
-            Some(1)
-        ),
-        "no terminal capability"
-    );
-
-    // The strict policy gives capabilities only to `RestrictedGuest.main/0`.
-    // For another entry, `initial/1` returns `deny`, so the run stops when
-    // the root process enters the runtime.
-    let other_entry = run_restricted_guest(
-        "Elixir.RestrictedGuest.Policy",
-        &["pbeam_boot", "start", "restricted_guest_probe", "denied"],
-    );
-    assert_eq!(
-        parts(&other_entry),
-        (
-            String::new(),
-            "pbeam: the policy denied the root process: initial/1 returned deny\\n".to_owned(),
-            Some(1)
-        ),
-        "another entry"
     );
 }
 
@@ -745,7 +764,7 @@ fn run_in_terminal(mut command: Command, keys: &[u8]) -> (Vec<u8>, String) {
         // SAFETY: `tcgetpgrp` reads the foreground process group of the
         // terminal of `master` and changes no state.
         let group = unsafe { libc::tcgetpgrp(master.as_raw_fd()) };
-        if group == child.id() as libc::pid_t {
+        if group == libc::pid_t::try_from(child.id()).unwrap() {
             break;
         }
         assert!(
@@ -768,31 +787,7 @@ fn run_in_terminal(mut command: Command, keys: &[u8]) -> (Vec<u8>, String) {
             }
         })
     };
-    let start = Instant::now();
-    loop {
-        if visible(&output.lock().unwrap())
-            .windows(4)
-            .any(|window| window == b"to q")
-        {
-            break;
-        }
-        // A run that ends before the screen reports the condition at once,
-        // instead of the full build limit.
-        if let Some(status) = child.try_wait().unwrap() {
-            thread::sleep(Duration::from_millis(100));
-            panic!(
-                "the run ended before the screen of terra_counter appeared: {status}: {:?}",
-                String::from_utf8_lossy(&output.lock().unwrap())
-            );
-        }
-        assert!(
-            start.elapsed() < TERRA_TIME_LIMIT,
-            "the screen of terra_counter did not appear within {TERRA_TIME_LIMIT:?}, and the child \
-             holds the pseudo-terminal as its controlling terminal: {:?}",
-            String::from_utf8_lossy(&output.lock().unwrap())
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
+    wait_for_the_screen(&mut child, &output);
     // The counter waits for a key. Send `keys`, so that the runtime restores
     // the terminal and `main/0` writes its result.
     std::fs::File::from(master.try_clone().unwrap())
@@ -833,6 +828,38 @@ fn run_in_terminal(mut command: Command, keys: &[u8]) -> (Vec<u8>, String) {
         );
     }
     (bytes, format!("{status} {ret}"))
+}
+
+/// Wait until the screen of `terra_counter` shows the text "to q" in `output`.
+/// A run that ends before the screen, or a screen that does not appear within
+/// the limit, fails the test.
+#[cfg(target_os = "macos")]
+fn wait_for_the_screen(child: &mut std::process::Child, output: &std::sync::Mutex<Vec<u8>>) {
+    let start = Instant::now();
+    loop {
+        if visible(&output.lock().unwrap())
+            .windows(4)
+            .any(|window| window == b"to q")
+        {
+            break;
+        }
+        // A run that ends before the screen reports the condition at once,
+        // instead of the full build limit.
+        if let Some(status) = child.try_wait().unwrap() {
+            thread::sleep(Duration::from_millis(100));
+            panic!(
+                "the run ended before the screen of terra_counter appeared: {status}: {:?}",
+                String::from_utf8_lossy(&output.lock().unwrap())
+            );
+        }
+        assert!(
+            start.elapsed() < TERRA_TIME_LIMIT,
+            "the screen of terra_counter did not appear within {TERRA_TIME_LIMIT:?}, and the child \
+             holds the pseudo-terminal as its controlling terminal: {:?}",
+            String::from_utf8_lossy(&output.lock().unwrap())
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 /// Return `source` without the control sequences, so that the test can find
@@ -963,16 +990,21 @@ fn child_setup_failure(bytes: &[u8]) -> Option<String> {
 #[cfg(target_os = "macos")]
 fn open_terminal() -> Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd), std::io::Error> {
     let (mut master, mut slave) = (-1, -1);
-    // SAFETY: `openpty` writes two new fds to `master` and `slave`, and
-    // accepts a null name. `fcntl` changes only the fd flags. Each `OwnedFd`
-    // takes one new fd.
     let mut win = libc::winsize {
         ws_row: 24,
         ws_col: 80,
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
+    // SAFETY: `openpty` writes two new fds through the pointers to `master`
+    // and `slave`, and `win` is a live `winsize` that it only reads. It
+    // accepts a null name and a null `termios`. `fcntl` changes only the
+    // flags of an fd that `openpty` just opened. If `openpty` fails, the
+    // block returns before it uses the fds. Each `OwnedFd` takes one new fd
+    // that nothing else owns.
     let (master, slave) = unsafe {
+        use std::os::fd::FromRawFd;
+
         let result = libc::openpty(
             &raw mut master,
             &raw mut slave,
@@ -984,9 +1016,10 @@ fn open_terminal() -> Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd), std::
             return Err(std::io::Error::last_os_error());
         }
         for fd in [master, slave] {
-            assert_eq!(libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC), 0);
+            if libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
         }
-        use std::os::fd::FromRawFd;
 
         (
             std::os::fd::OwnedFd::from_raw_fd(master),
@@ -1075,14 +1108,21 @@ fn restores_the_terminal_before_the_result_of_terra_counter_as_interactive_erts(
         String::from_utf8_lossy(pbeam_before)
     );
 
+    checks_the_terra_counter_executable();
+}
+
+/// Build one executable of the build of `terra_counter`, run it with the keys
+/// of the Terra reference, and compare its result with the pinned ERTS.
+#[cfg(target_os = "macos")]
+fn checks_the_terra_counter_executable() {
+    use std::fs;
+    use std::path::PathBuf;
+
     // One executable of the same build, with the keys of the Terra
     // reference: `Terra.run/1` returns `{:ok, 1}` (docs/terra-reference.md).
     // The run uses no installed OTP: `PATH` holds no `erl` or `elixir`,
     // `HOME` is an empty directory, and the variable `PBEAM_OTP_ROOT` is
     // unset.
-    use std::fs;
-    use std::path::PathBuf;
-
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let directory = std::env::temp_dir().join(format!(
         "pbeam-one-file-{}-terra_counter",

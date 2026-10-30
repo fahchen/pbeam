@@ -9,7 +9,7 @@
 //! the pipes of the ports only when no process can run (see
 //! [`Scheduler::wait_input`]).
 
-use super::{LinkId, Scheduler};
+use super::{LinkId, Scheduler, tcp_inet::StopNotice};
 use crate::{
     error::{BeamError, error},
     runtime::{
@@ -19,6 +19,25 @@ use crate::{
     },
     term::{PortId, ProcessId, Reference, Term},
 };
+
+/// What a port does at the end of file of its program.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::runtime) enum EndOfFile {
+    /// The port has `eof`: it sends `{Port, eof}` and stays open.
+    Soft,
+    /// The port closes with the reason `normal`.
+    Close,
+}
+
+/// Whether an exit of a port keeps a port that has queued output in the
+/// `CLOSING` state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExitMode {
+    /// Flush the queued output first (`flush_port`).
+    Flush,
+    /// Close at once.
+    Immediate,
+}
 
 impl Scheduler {
     /// Open a port with the name `name` and the driver `driver`, owned by
@@ -170,16 +189,23 @@ impl Scheduler {
             self.port_send(owner, port_message(id, "data", data));
         }
         drop(slot);
-        self.port_end_of_file(id, soft);
+        self.port_end_of_file(
+            id,
+            if soft {
+                EndOfFile::Soft
+            } else {
+                EndOfFile::Close
+            },
+        );
         Ok(())
     }
 
     /// Handle the end of file of the spawn port `id`, after its exit status
     /// and the line that is not complete, as `driver_failure_eof` does
-    /// (`io.c:7191-7219`): a port with `eof` (`soft`) sends `{Port, eof}`
+    /// (`io.c:7191-7219`): a port with `eof` ([`EndOfFile::Soft`]) sends `{Port, eof}`
     /// to the owner and stays open, and it reads nothing more. Each other
     /// port closes with the reason `normal`.
-    pub(super) fn port_end_of_file(&mut self, id: PortId, soft: bool) {
+    pub(super) fn port_end_of_file(&mut self, id: PortId, mode: EndOfFile) {
         // `{Port, eof}` goes out under the port lock, as in
         // `driver_failure_eof` (io.c:7191-7209).
         let cell = self.node.port(id);
@@ -190,7 +216,7 @@ impl Scheduler {
             .and_then(|slot| slot.as_ref())
             .map(|port| port.owner);
         if let Some(owner) = owner {
-            if soft {
+            if mode == EndOfFile::Soft {
                 let eof = Term::tuple(vec![Term::Port(id), Term::static_atom("eof")]);
                 self.port_send(owner, eof);
             } else {
@@ -289,7 +315,7 @@ impl Scheduler {
     /// scheduler.close_port(port, Term::static_atom("normal"));
     /// ```
     pub(in crate::runtime) fn close_port(&mut self, id: PortId, reason: Term) -> bool {
-        self.exit_port(id, reason, true, None)
+        self.exit_port(id, reason, ExitMode::Flush, None)
     }
 
     /// Close the open port `id` for a `{Pid, close}` message, as
@@ -310,7 +336,12 @@ impl Scheduler {
         id: PortId,
         sender: ProcessId,
     ) -> bool {
-        self.exit_port(id, Term::static_atom("normal"), true, Some(sender))
+        self.exit_port(
+            id,
+            Term::static_atom("normal"),
+            ExitMode::Flush,
+            Some(sender),
+        )
     }
 
     /// Close the open port `id` with the reason `reason` from its driver,
@@ -325,12 +356,12 @@ impl Scheduler {
     /// scheduler.fail_port(port, Term::static_atom("einval"));
     /// ```
     pub(in crate::runtime) fn fail_port(&mut self, id: PortId, reason: Term) {
-        let _ = self.exit_port(id, reason, false, None);
+        let _ = self.exit_port(id, reason, ExitMode::Immediate, None);
     }
 
     /// Close the open port `id` with the reason `reason` (see
     /// [`Self::close_port`]), and keep a port that flushes in the `CLOSING`
-    /// state only with `flush`.
+    /// state only with [`ExitMode::Flush`].
     /// Return true when this exit closed an open port, false for a port
     /// that closed before or is in the `CLOSING` state, so that one of two
     /// concurrent `erlang:port_close/1` calls gives `badarg`
@@ -341,7 +372,7 @@ impl Scheduler {
         &mut self,
         id: PortId,
         reason: Term,
-        flush: bool,
+        mode: ExitMode,
         closer: Option<ProcessId>,
     ) -> bool {
         // The port lock comes first. The table lock is taken only after the
@@ -355,7 +386,7 @@ impl Scheduler {
         };
         // A close of a port in the `CLOSING` state changes nothing
         // (io.c:3870-3874).
-        if flush && port.closing {
+        if mode == ExitMode::Flush && port.closing {
             return false;
         }
         // A close message from a process that no longer owns the port sends
@@ -390,7 +421,7 @@ impl Scheduler {
         // `CLOSING` set, so its stop sends no message (io.c:3659-3721).
         // A spawn port with a queue also waits for its queue
         // (`fd_flush`, sys_drivers.c:1468-1469).
-        let queued = flush
+        let queued = mode == ExitMode::Flush
             && reason != Term::static_atom("kill")
             && match &port.driver {
                 Driver::Inet(tcp) => tcp.has_output(),
@@ -643,7 +674,12 @@ impl Scheduler {
     pub(super) fn stop_port(&mut self, id: PortId, port: Port) {
         let (owner, send_closed) = (port.owner, port.send_closed);
         if let Driver::Inet(tcp) = port.driver {
-            self.tcp_stop(id, tcp, !port.closing);
+            let notice = if port.closing {
+                StopNotice::Silent
+            } else {
+                StopNotice::Notify
+            };
+            self.tcp_stop(id, tcp, notice);
         }
         // `terminate_port` sends `{Port, closed}` after the driver stop
         // (io.c:3746-3758).
@@ -702,7 +738,7 @@ impl Scheduler {
     /// that does not exist drops the message.
     pub(in crate::runtime) fn port_send(&mut self, target: ProcessId, term: Term) {
         match self.remote_owner(target) {
-            Some(index) if !self.processes.contains_key(&target) => {
+            Some(index) if !self.processes.contains_key(target) => {
                 self.node.send_message(index, None, term, target, None);
             }
             _ => self.deliver(target, term),

@@ -1,3 +1,10 @@
+//! Runs `module_info` of preloaded and loaded modules on PBeam and compares the results with the
+//! pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::process::Command;
 
 use pbeam_runtime::{AtomTable, BeamProgram, Term};
@@ -152,7 +159,10 @@ fn without_chunks(beam: &[u8], drop: &[&[u8; 4]]) -> Vec<u8> {
     let mut body = b"BEAM".to_vec();
     let mut pos = 12;
     while pos < beam.len() {
-        let size = u32::from_be_bytes(beam[pos + 4..pos + 8].try_into().unwrap()) as usize;
+        let size = usize::try_from(u32::from_be_bytes(
+            beam[pos + 4..pos + 8].try_into().unwrap(),
+        ))
+        .unwrap();
         let end = pos + 8 + size.next_multiple_of(4);
         if !drop.iter().any(|name| beam[pos..pos + 4] == name[..]) {
             body.extend_from_slice(&beam[pos..end]);
@@ -160,18 +170,18 @@ fn without_chunks(beam: &[u8], drop: &[&[u8; 4]]) -> Vec<u8> {
         pos = end;
     }
     let mut out = b"FOR1".to_vec();
-    out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    out.extend_from_slice(&u32::try_from(body.len()).unwrap().to_be_bytes());
     out.extend(body);
     out
 }
 
 /// Return `beam` with the chunk `CInf` replaced by `data`, which is 4 bytes
 /// long.
-fn with_compile_info(beam: &[u8], data: &[u8; 4]) -> Vec<u8> {
+fn with_compile_info(beam: &[u8], data: [u8; 4]) -> Vec<u8> {
     let mut out = without_chunks(beam, &[b"CInf"]);
     out.extend_from_slice(b"CInf\0\0\0\x04");
-    out.extend_from_slice(data);
-    let size = (out.len() - 8) as u32;
+    out.extend_from_slice(&data);
+    let size = u32::try_from(out.len() - 8).unwrap();
     out[4..8].copy_from_slice(&size.to_be_bytes());
     out
 }
@@ -241,7 +251,7 @@ fn refuses_a_compile_chunk_that_is_not_an_external_term() {
     // The ERTS loader refuses the module with `badfile` when the `CInf`
     // chunk is not one valid external term (jit/asm_load.c:1096-1111): a
     // first byte that is not 131, or a term that ends early.
-    let failure = BeamProgram::load(&[&with_compile_info(MODULE_INFO_CHUNKS, b"\0\0\0\0")])
+    let failure = BeamProgram::load(&[&with_compile_info(MODULE_INFO_CHUNKS, *b"\0\0\0\0")])
         .unwrap_err()
         .to_string();
     assert!(
@@ -249,7 +259,7 @@ fn refuses_a_compile_chunk_that_is_not_an_external_term() {
         "{failure}"
     );
     assert!(
-        BeamProgram::load(&[&with_compile_info(MODULE_INFO_CHUNKS, b"\x83\x68\x02\x6a")]).is_err()
+        BeamProgram::load(&[&with_compile_info(MODULE_INFO_CHUNKS, *b"\x83\x68\x02\x6a")]).is_err()
     );
 }
 

@@ -1,3 +1,5 @@
+//! Runs `integer_to_binary` on PBeam and compares the results with the pinned ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};

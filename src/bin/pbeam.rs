@@ -1,3 +1,6 @@
+//! The `pbeam` command-line binary. It loads BEAM files, runs a function as the root process, and
+//! boots a node as `erl` does.
+
 use std::{
     ffi::{OsStr, OsString},
     fs,
@@ -8,7 +11,7 @@ use std::{
 
 use clap::Parser;
 use pbeam_runtime::{
-    BeamError, BeamProgram, HostTerm, Schedulers, Term, add_erlexec_path,
+    BeamError, BeamProgram, HostTerm, RootAuthority, Schedulers, Term, add_erlexec_path,
     install_start_dispositions,
 };
 
@@ -219,7 +222,7 @@ fn main() -> ExitCode {
     {
         let arguments = ErlCli::parse_from(words.into_iter().skip(1));
         let extracted = arguments.extracted_root.clone();
-        let status = exit_status(boot_erl(arguments));
+        let status = exit_status(boot_erl(&arguments));
         pbeam_runtime::embedded::remove_extraction(extracted);
         return status;
     }
@@ -237,6 +240,10 @@ fn main() -> ExitCode {
 
 /// Return the exit status of the end of a command line, and write the
 /// message of an error to stderr.
+#[expect(
+    clippy::print_stderr,
+    reason = "the command-line binary reports to the terminal"
+)]
 fn exit_status(end: Result<(), Exit>) -> ExitCode {
     match end {
         Ok(()) => ExitCode::SUCCESS,
@@ -281,7 +288,7 @@ impl From<BeamError> for Exit {
     fn from(run_error: BeamError) -> Self {
         match run_error {
             BeamError::Halt(status) => Self::Halt(status),
-            run_error => Self::Error(run_error.to_string()),
+            run_error @ BeamError::Runtime(_) => Self::Error(run_error.to_string()),
         }
     }
 }
@@ -342,7 +349,12 @@ fn run(arguments: Cli) -> Result<(), Exit> {
     let (module, function) = (&arguments.module, &arguments.function);
     let result = match &arguments.policy {
         Some(policy) => {
-            program.execute_with_policy_module(module, function, &atoms, policy, arguments.boot)
+            let authority = if arguments.boot {
+                RootAuthority::Boot
+            } else {
+                RootAuthority::Policy
+            };
+            program.execute_with_policy_module(module, function, &atoms, policy, authority)
         }
         None => program.execute(module, function, &atoms),
     };
@@ -369,7 +381,7 @@ fn run_end(result: Result<HostTerm, BeamError>) -> Result<(), Exit> {
 ///
 /// ```rust,ignore
 /// let arguments = ErlCli::parse_from(["pbeam erl", "--root", root, "--bindir", bindir, "--preloaded", ebin, "--", "-boot", "start_clean"]);
-/// boot_erl(arguments)?;
+/// boot_erl(&arguments)?;
 /// ```
 ///
 /// # Errors
@@ -380,7 +392,7 @@ fn run_end(result: Result<HostTerm, BeamError>) -> Result<(), Exit> {
 /// `ERL_EPMD_PORT`, the errors of
 /// [`BeamProgram::load_preloaded`], and the errors of
 /// [`BeamProgram::boot`]. A halt of the run gives [`Exit::Halt`].
-fn boot_erl(arguments: ErlCli) -> Result<(), Exit> {
+fn boot_erl(arguments: &ErlCli) -> Result<(), Exit> {
     // `erlexec` gives `-epmd_port` for each value of `ERL_EPMD_PORT`, also
     // an empty one (`erlexec.c:633`, `1754-1760`), which only the
     // distribution reads.

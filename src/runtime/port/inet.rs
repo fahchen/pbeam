@@ -38,8 +38,8 @@
 //! `prim_inet:accept_opts/3` copies to an accepted socket: `keepalive` (1),
 //! `linger` (3), `priority` (8), `tos` (9), `delay_send` (31), `recvtos`
 //! (43), `ttl` (46), and `recvttl` (47) (prim_inet.erl:502-518;
-//! inet_tcp.erl:249). Each other request, option, family, and protocol
-//! returns a runtime error (row "tcp_inet ports" of
+//! `inet_tcp.erl:249`). Each other request, option, family, and protocol
+//! returns a runtime error (row "`tcp_inet` ports" of
 //! `docs/erts-differences.md`).
 //!
 //! A `udp_inet` port runs the requests of `packet_inet_ctl`, which runs
@@ -73,26 +73,46 @@ use crate::{
     term::{ProcessId, Reference},
 };
 use stream::Stream;
-pub(in crate::runtime) use stream::{Event, Output, Receiver};
+pub(in crate::runtime) use stream::{Activation, Event, Output, Receiver};
 
 /// The number that `prim_inet` adds to each request code
-/// (`ERTS_INET_DRV_CONTROL_MAGIC_NUMBER`, prim_inet.erl:2969).
+/// (`ERTS_INET_DRV_CONTROL_MAGIC_NUMBER`, `prim_inet.erl:2969`).
 const MAGIC: u32 = 0x03f1_a300;
 
+/// A byte count or position as `u64`, which holds every `usize`.
+fn to_u64(count: usize) -> u64 {
+    u64::try_from(count).expect("a usize fits in u64")
+}
+
+/// The low 32 bits of `value`, as the C conversion of a 64-bit counter to
+/// `Uint32` keeps them.
+fn low_u32(value: u64) -> u32 {
+    let [b0, b1, b2, b3, ..] = value.to_le_bytes();
+    u32::from_le_bytes([b0, b1, b2, b3])
+}
+
+/// The `size_t` of a C `int`, which keeps the sign bits as the C conversion
+/// does.
+fn sign_extended(value: i32) -> usize {
+    isize::try_from(value)
+        .expect("an isize holds an i32 on every supported target")
+        .cast_unsigned()
+}
+
 /// The largest reply of `GETOPTS` and `SUBSCRIBE` (`INET_MAX_OPT_BUFFER`,
-/// inet_drv.c:1046).
+/// `inet_drv.c:1046`).
 const MAX_OPT_BUFFER: usize = 64 * 1024;
 
 /// The `how` of `TCP_REQ_SHUTDOWN` for the read side (`TCP_SHUT_RD`,
-/// inet_drv.c:684).
+/// `inet_drv.c:684`).
 const SHUT_READ: u8 = 0;
 
 /// The `how` of `TCP_REQ_SHUTDOWN` for the write side (`TCP_SHUT_WR`,
-/// inet_drv.c:683).
+/// `inet_drv.c:683`).
 const SHUT_WRITE: u8 = 1;
 
 /// The `how` of `TCP_REQ_SHUTDOWN` for both sides (`TCP_SHUT_RDWR`,
-/// inet_drv.c:685).
+/// `inet_drv.c:685`).
 const SHUT_READ_WRITE: u8 = 2;
 
 /// The reply code of a request that succeeded (`INET_REP_OK`).
@@ -101,13 +121,13 @@ pub(in crate::runtime) const OK: u8 = 1;
 /// The reply code of a request that failed (`INET_REP_ERROR`).
 const ERROR: u8 = 0;
 
-/// The family code of IPv4 (`INET_AF_INET`, inet_int.hrl:31).
+/// The family code of IPv4 (`INET_AF_INET`, `inet_int.hrl:31`).
 const AF_INET: u8 = 1;
 
-/// The family code of IPv6 (`INET_AF_INET6`, inet_int.hrl:32).
+/// The family code of IPv6 (`INET_AF_INET6`, `inet_int.hrl:32`).
 const AF_INET6: u8 = 2;
 
-/// The family code of the `local` family (`INET_AF_LOCAL`, inet_int.hrl:35).
+/// The family code of the `local` family (`INET_AF_LOCAL`, `inet_int.hrl:35`).
 const AF_LOCAL: u8 = 5;
 
 /// The size of `sun_path` of `struct sockaddr_un` on the host.
@@ -116,7 +136,7 @@ const SUN_PATH: usize = 108;
 #[cfg(not(target_os = "linux"))]
 const SUN_PATH: usize = 104;
 
-/// The state of the socket of a port (`INET_STATE_*`, inet_drv.c).
+/// The state of the socket of a port (`INET_STATE_*`, `inet_drv.c`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
     /// No socket: the port opened, and `OPEN` did not run.
@@ -204,7 +224,7 @@ pub(in crate::runtime) struct Inet {
     active_count: i16,
     /// The option `read_packets` of a `udp_inet` port: the most datagrams
     /// that one poll event reads (`INET_PACKET_POLL`, 5, at the start,
-    /// inet_drv.c:1072, 14508).
+    /// `inet_drv.c:1072`, 14508).
     read_packets: i32,
     /// A `udp_inet` socket whose read select is off: it reads no datagram,
     /// also in active mode, until a receive request or a change of the
@@ -222,9 +242,9 @@ pub(in crate::runtime) struct Inet {
     delay_send: bool,
     /// Whether a `SETOPTS` set the option `buffer` (`INET_FLG_BUFFER_SET`),
     /// after which `recbuf` does not change `buffer`. An accepted socket
-    /// starts without it (inet_drv.c:14457).
+    /// starts without it (`inet_drv.c:14457`).
     buffer_set: bool,
-    /// The next async reference (`op_ref`, inet_drv.c:1549, 10937).
+    /// The next async reference (`op_ref`, `inet_drv.c:1549`, 10937).
     op_ref: u16,
     /// The callers that wait for a connection, in arrival order.
     pub(in crate::runtime) acceptors: VecDeque<Acceptor>,
@@ -250,13 +270,13 @@ pub(in crate::runtime) enum Control {
     Connect(u32),
     /// A valid `SETOPTS` that made a connected socket active, as
     /// `inet_set_opts` returns 1 or 2 (inet_drv.c:7949-7981): the reply is
-    /// `[1]` after the scheduler delivers the data. With `read`, the change
-    /// to `once` reads the socket (`tcp_recv`), else the change to `true`
+    /// `[1]` after the scheduler delivers the data. With
+    /// [`Activation::Read`], the change to `once` reads the socket (`tcp_recv`), else the change to `true`
     /// delivers the bytes of the input buffer (`tcp_deliver`)
     /// (inet_drv.c:11131-11148).
     Active {
-        /// The port reads the socket.
-        read: bool,
+        /// What the port does first.
+        activation: Activation,
     },
     /// A `SETOPTS` that ended `{active, N}` this many times
     /// (inet_drv.c:6993-6998): the port sends `{udp_passive, S}` to the
@@ -276,6 +296,24 @@ pub(in crate::runtime) enum Control {
         /// The length, 0 for the bytes of one read.
         length: usize,
     },
+}
+
+/// Whether a failed set of a socket option fails the request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SetErrors {
+    /// A failed set does not fail the request.
+    Ignore,
+    /// A failed set fails the request (`propagate` of `inet_set_opts`).
+    Propagate,
+}
+
+/// Whether a membership option joins or leaves a multicast group.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GroupAction {
+    /// `ip_add_membership` and `ipv6_add_membership`.
+    Join,
+    /// `ip_drop_membership` and `ipv6_drop_membership`.
+    Leave,
 }
 
 impl Inet {
@@ -343,7 +381,7 @@ impl Inet {
     }
 
     /// Return the next async reference, as `NEW_ASYNC_ID` does
-    /// (inet_drv.c:1549): 0 first, then 1 more each time, modulo 2^16.
+    /// (`inet_drv.c:1549)`: 0 first, then 1 more each time, modulo 2^16.
     ///
     /// # Examples
     ///
@@ -587,7 +625,7 @@ impl Inet {
     }
 
     /// Make the non-blocking socket of `domain`, `socket_type`, and
-    /// `protocol`. `SET_NONBLOCKING` ignores its result (inet_drv.c:5212).
+    /// `protocol`. `SET_NONBLOCKING` ignores its result (`inet_drv.c:5212`).
     fn open_socket(
         &mut self,
         domain: Domain,
@@ -737,7 +775,7 @@ impl Inet {
         Ok(address)
     }
 
-    /// Run `INET_REQ_SETOPTS` (inet_set_opts, inet_drv.c:6871-7530): set
+    /// Run `INET_REQ_SETOPTS` (`inet_set_opts`, inet_drv.c:6871-7530): set
     /// each option of 5 bytes in order, and ignore a rest of fewer bytes.
     /// `linger` takes 4 more bytes, the time in seconds, and a missing time
     /// gives `einval`. A failed `setsockopt` of `reuseaddr`, `keepalive`,
@@ -772,6 +810,10 @@ impl Inet {
     /// 20 more bytes on IPv6, and fewer bytes give a runtime error. A failed
     /// `setsockopt` of these options does not fail the request
     /// (inet_drv.c:7589-7802).
+    #[expect(
+        clippy::too_many_lines,
+        reason = "option table: one arm for each `INET_REQ_SETOPTS` option code, as `inet_set_opts` in `inet_drv.c` (7018-7802); each arm is short"
+    )]
     fn set_options(
         &mut self,
         mut request: &[u8],
@@ -831,50 +873,63 @@ impl Inet {
                     true
                 }
                 20 => {
-                    self.stream.buffer = value.max(1) as usize;
+                    self.stream.buffer =
+                        usize::try_from(value.max(1)).expect("the buffer is at least 1");
                     self.buffer_set = true;
                     true
                 }
-                2 => self.set_socket(libc::SO_DONTROUTE, false, |socket| {
+                2 => self.set_socket(libc::SO_DONTROUTE, SetErrors::Ignore, |socket| {
                     setsockopt(socket, sockopt::DontRoute, &(value != 0)).map_err(io::Error::from)
                 }),
-                4 => self.set_socket(libc::SO_BROADCAST, false, |socket| {
+                4 => self.set_socket(libc::SO_BROADCAST, SetErrors::Ignore, |socket| {
                     socket.set_broadcast(value != 0)
                 }),
-                6 => self.set_socket(libc::SO_SNDBUF, false, |socket| {
-                    socket.set_send_buffer_size(value as usize)
+                6 => self.set_socket(libc::SO_SNDBUF, SetErrors::Ignore, |socket| {
+                    socket.set_send_buffer_size(sign_extended(value))
                 }),
                 7 => {
                     if !self.buffer_set {
                         if value > MAX_UDP_BUFFER && self.socket_type == SocketType::Datagram {
-                            self.stream.buffer = MAX_UDP_BUFFER as usize;
-                        } else if i64::from(value) > self.stream.buffer as i64 {
-                            self.stream.buffer = value as usize;
+                            self.stream.buffer = usize::try_from(MAX_UDP_BUFFER)
+                                .expect("the UDP buffer limit is positive");
+                        } else if i64::from(value)
+                            > i64::try_from(self.stream.buffer).expect("a buffer size fits in i64")
+                        {
+                            self.stream.buffer = usize::try_from(value)
+                                .expect("a value above the buffer is positive");
                         }
                     }
-                    self.set_socket(libc::SO_RCVBUF, false, |socket| {
-                        socket.set_recv_buffer_size(value as usize)
+                    self.set_socket(libc::SO_RCVBUF, SetErrors::Ignore, |socket| {
+                        socket.set_recv_buffer_size(sign_extended(value))
                     })
                 }
-                12 => self.set_socket(libc::IP_MULTICAST_TTL, false, |socket| {
-                    socket.set_multicast_ttl_v4(value as u32)
+                12 => self.set_socket(libc::IP_MULTICAST_TTL, SetErrors::Ignore, |socket| {
+                    socket.set_multicast_ttl_v4(value.cast_unsigned())
                 }),
-                13 => self.set_socket(libc::IP_MULTICAST_LOOP, false, |socket| {
+                13 => self.set_socket(libc::IP_MULTICAST_LOOP, SetErrors::Ignore, |socket| {
                     socket.set_multicast_loop_v4(value != 0)
                 }),
                 11 => match self.family {
-                    AF_INET => self.set_socket(libc::IP_MULTICAST_IF, false, |socket| {
-                        socket.set_multicast_if_v4(&Ipv4Addr::from(value as u32))
-                    }),
+                    AF_INET => {
+                        self.set_socket(libc::IP_MULTICAST_IF, SetErrors::Ignore, |socket| {
+                            socket.set_multicast_if_v4(&Ipv4Addr::from(value.cast_unsigned()))
+                        })
+                    }
                     // ERTS gives the index in network byte order
                     // (`sock_htonl`, inet_drv.c:7608).
-                    AF_INET6 => self.set_socket(libc::IPV6_MULTICAST_IF, false, |socket| {
-                        socket.set_multicast_if_v6((value as u32).to_be())
-                    }),
+                    AF_INET6 => {
+                        self.set_socket(libc::IPV6_MULTICAST_IF, SetErrors::Ignore, |socket| {
+                            socket.set_multicast_if_v6(value.cast_unsigned().to_be())
+                        })
+                    }
                     _ => false,
                 },
                 14 | 15 => {
-                    let add = *option == 14;
+                    let action = if *option == 14 {
+                        GroupAction::Join
+                    } else {
+                        GroupAction::Leave
+                    };
                     match (value, self.family) {
                         (1, AF_INET) => {
                             let Some((head, rest)) = request.split_first_chunk::<12>() else {
@@ -886,13 +941,13 @@ impl Inet {
                             let index = u32::from_be_bytes([i3, i2, i1, i0]);
                             let group = Ipv4Addr::new(g3, g2, g1, g0);
                             let interface = Ipv4Addr::new(a3, a2, a1, a0);
-                            let kind = if add {
+                            let kind = if action == GroupAction::Join {
                                 libc::IP_ADD_MEMBERSHIP
                             } else {
                                 libc::IP_DROP_MEMBERSHIP
                             };
-                            self.set_socket(kind, false, |socket| {
-                                membership_v4(socket, add, group, index, interface)
+                            self.set_socket(kind, SetErrors::Ignore, |socket| {
+                                membership_v4(socket, action, group, index, interface)
                             })
                         }
                         (2, AF_INET6) => {
@@ -906,24 +961,28 @@ impl Inet {
                             let [i3, i2, i1, i0, ref group @ ..] = *head;
                             let index = u32::from_be_bytes([i3, i2, i1, i0]);
                             let group = Ipv6Addr::from(*group);
-                            self.set_socket(IPV6_MEMBERSHIP[usize::from(add)], false, |socket| {
-                                if add {
-                                    socket.join_multicast_v6(&group, index)
-                                } else {
-                                    socket.leave_multicast_v6(&group, index)
-                                }
-                            })
+                            self.set_socket(
+                                IPV6_MEMBERSHIP[usize::from(action == GroupAction::Join)],
+                                SetErrors::Ignore,
+                                |socket| {
+                                    if action == GroupAction::Join {
+                                        socket.join_multicast_v6(&group, index)
+                                    } else {
+                                        socket.leave_multicast_v6(&group, index)
+                                    }
+                                },
+                            )
                         }
                         _ => false,
                     }
                 }
-                0 => self.set_socket(libc::SO_REUSEADDR, false, |socket| {
+                0 => self.set_socket(libc::SO_REUSEADDR, SetErrors::Ignore, |socket| {
                     socket.set_reuse_address(value != 0)
                 }),
-                1 => self.set_socket(libc::SO_KEEPALIVE, false, |socket| {
+                1 => self.set_socket(libc::SO_KEEPALIVE, SetErrors::Ignore, |socket| {
                     socket.set_keepalive(value != 0)
                 }),
-                10 => self.set_socket(libc::TCP_NODELAY, false, |socket| {
+                10 => self.set_socket(libc::TCP_NODELAY, SetErrors::Ignore, |socket| {
                     socket.set_tcp_nodelay(value != 0)
                 }),
                 3 => {
@@ -932,26 +991,32 @@ impl Inet {
                     };
                     request = rest;
                     let linger = linger_time(value, u32::from_be_bytes([*s3, *s2, *s1, *s0]))?;
-                    self.set_socket(libc::SO_LINGER, false, |socket| socket.set_linger(linger))
+                    self.set_socket(libc::SO_LINGER, SetErrors::Ignore, |socket| {
+                        socket.set_linger(linger)
+                    })
                 }
                 8 => self.set_priority(value),
-                9 => self.set_socket(libc::IP_TOS, true, |socket| socket.set_tos_v4(value as u32)),
-                46 => self.set_socket(libc::IP_TTL, true, |socket| socket.set_ttl_v4(value as u32)),
+                9 => self.set_socket(libc::IP_TOS, SetErrors::Propagate, |socket| {
+                    socket.set_tos_v4(value.cast_unsigned())
+                }),
+                46 => self.set_socket(libc::IP_TTL, SetErrors::Propagate, |socket| {
+                    socket.set_ttl_v4(value.cast_unsigned())
+                }),
                 // A datagram receive reads no ancillary data, so it cannot
                 // give `{tos, TOS}` (inet_drv.c:15452-15466).
                 43 if value != 0 && self.socket_type == SocketType::Datagram => {
                     return Err(error(UDP_RECVTOS_ON));
                 }
-                43 => self.set_socket(libc::IP_RECVTOS, true, |socket| {
+                43 => self.set_socket(libc::IP_RECVTOS, SetErrors::Propagate, |socket| {
                     socket.set_recv_tos_v4(value != 0)
                 }),
-                16 => self.set_socket(libc::IPV6_V6ONLY, true, |socket| {
+                16 => self.set_socket(libc::IPV6_V6ONLY, SetErrors::Propagate, |socket| {
                     socket.set_only_v6(value != 0)
                 }),
-                41 => self.set_socket(libc::IPV6_TCLASS, true, |socket| {
-                    socket.set_tclass_v6(value as u32)
+                41 => self.set_socket(libc::IPV6_TCLASS, SetErrors::Propagate, |socket| {
+                    socket.set_tclass_v6(value.cast_unsigned())
                 }),
-                44 => self.set_socket(libc::IPV6_RECVTCLASS, true, |socket| {
+                44 => self.set_socket(libc::IPV6_RECVTCLASS, SetErrors::Propagate, |socket| {
                     socket.set_recv_tclass_v6(value != 0)
                 }),
                 47 if value != 0 => return Err(error(RECVTTL_ON)),
@@ -961,7 +1026,7 @@ impl Inet {
                 // option on macOS, which has no `TCP_NOPUSH` for ERTS
                 // (inet_drv.c:1101-1105, 7506-7521).
                 #[cfg(target_os = "linux")]
-                48 => self.set_socket(libc::TCP_CORK, false, |socket| {
+                48 => self.set_socket(libc::TCP_CORK, SetErrors::Ignore, |socket| {
                     socket.set_tcp_cork(value != 0)
                 }),
                 #[cfg(not(target_os = "linux"))]
@@ -1031,7 +1096,11 @@ impl Inet {
             return Control::Reply(reply);
         }
         Control::Active {
-            read: self.active == 2,
+            activation: if self.active == 2 {
+                Activation::Read
+            } else {
+                Activation::Deliver
+            },
         }
     }
 
@@ -1043,22 +1112,22 @@ impl Inet {
     }
 
     /// Run `set` on the socket of the option with the socket constant
-    /// `kind`, such as `IP_TOS` (see [`set_option`]). Return `false` when `propagate` is true and the
+    /// `kind`, such as `IP_TOS` (see [`set_option`]). Return `false` when `errors` is [`SetErrors::Propagate`] and the
     /// socket is missing or `set` fails, else `true`.
     fn set_socket(
         &self,
         kind: c_int,
-        propagate: bool,
+        errors: SetErrors,
         set: impl FnOnce(&Socket) -> io::Result<()>,
     ) -> bool {
         let result = self
             .socket
             .as_ref()
-            .map(|socket| set_option(socket, kind, propagate, set));
-        !propagate || matches!(result, Some(Ok(())))
+            .map(|socket| set_option(socket, kind, errors, set));
+        errors == SetErrors::Ignore || matches!(result, Some(Ok(())))
     }
 
-    /// Run `INET_REQ_GETOPTS` (inet_fill_opts, inet_drv.c:9071-9754): give
+    /// Run `INET_REQ_GETOPTS` (`inet_fill_opts`, inet_drv.c:9071-9754): give
     /// each option code with its value in order. A socket option whose
     /// `getsockopt` fails, also without a socket, is not in the reply, and
     /// `send_timeout`, `send_timeout_close`, and `delay_send` are not in it
@@ -1075,17 +1144,17 @@ impl Inet {
             let flag = |get: fn(&Socket) -> io::Result<bool>, bit: i32| {
                 socket
                     .and_then(|socket| get(socket).ok())
-                    .map(|on| getsockopt_value(on, bit))
+                    .map(|on| i32::from(on) * getsockopt_scale(bit))
             };
             let integer = |get: fn(&Socket) -> io::Result<u32>| {
                 socket
                     .and_then(|socket| get(socket).ok())
-                    .map(|value| value as i32)
+                    .map(u32::cast_signed)
             };
             let size = |get: fn(&Socket) -> io::Result<usize>| {
                 socket
                     .and_then(|socket| get(socket).ok())
-                    .map(|value| value as i32)
+                    .map(|value| low_u32(to_u64(value)).cast_signed())
             };
             let value = match option {
                 24 => Some(self.mode),
@@ -1101,10 +1170,10 @@ impl Inet {
                 }
                 22 => Some(self.active),
                 33 if self.socket_type == SocketType::Datagram => Some(self.read_packets),
-                20 => Some(self.stream.buffer as i32),
+                20 => Some(low_u32(to_u64(self.stream.buffer)).cast_signed()),
                 2 => socket
                     .and_then(|socket| getsockopt(socket, sockopt::DontRoute).ok())
-                    .map(|on| getsockopt_value(on, libc::SO_DONTROUTE)),
+                    .map(|on| i32::from(on) * getsockopt_scale(libc::SO_DONTROUTE)),
                 4 => flag(Socket::broadcast, libc::SO_BROADCAST),
                 6 => size(Socket::send_buffer_size),
                 7 => size(Socket::recv_buffer_size),
@@ -1156,7 +1225,7 @@ impl Inet {
                         let (on, seconds) = linger.map_or((0, 0), |time| (1, time.as_secs()));
                         reply.push(option);
                         reply.extend(i32::to_be_bytes(on));
-                        reply.extend((seconds as u32).to_be_bytes());
+                        reply.extend(low_u32(seconds).to_be_bytes());
                     }
                     continue;
                 }
@@ -1189,7 +1258,7 @@ impl Inet {
 
 /// The runtime error of `{active, N}`.
 /// The `buffer` that `recbuf` sets on a `udp_inet` port at most
-/// (`INET_UDP_THEORETICAL_MAX_MTU`, inet_drv.c:1059).
+/// (`INET_UDP_THEORETICAL_MAX_MTU`, `inet_drv.c:1059`).
 const MAX_UDP_BUFFER: i32 = 1 << 16;
 
 const ACTIVE_N: &str = "unsupported tcp_inet option active with a count: see \"tcp_inet ports\" in docs/erts-differences.md";
@@ -1261,14 +1330,14 @@ const IPV6_MEMBERSHIP: [c_int; 2] = [libc::IPV6_DROP_MEMBERSHIP, libc::IPV6_ADD_
 #[cfg(not(target_os = "linux"))]
 const IPV6_MEMBERSHIP: [c_int; 2] = [libc::IPV6_LEAVE_GROUP, libc::IPV6_JOIN_GROUP];
 
-/// Join (`add`) or leave the IPv4 group `group` with `ip_mreqn`, as
+/// Join or leave the IPv4 group `group` with `ip_mreqn`, as
 /// `inet_set_opts` does on Linux (inet_drv.c:7696-7711). The kernel finds
 /// the device by the index `index` when it is not 0, else by the address
 /// `interface` (`ip_mc_find_dev`), so the call gives only one of them.
 #[cfg(target_os = "linux")]
 fn membership_v4(
     socket: &Socket,
-    add: bool,
+    action: GroupAction,
     group: Ipv4Addr,
     index: u32,
     interface: Ipv4Addr,
@@ -1279,25 +1348,25 @@ fn membership_v4(
     } else {
         InterfaceIndexOrAddress::Index(index)
     };
-    if add {
+    if action == GroupAction::Join {
         socket.join_multicast_v4_n(&group, &interface)
     } else {
         socket.leave_multicast_v4_n(&group, &interface)
     }
 }
 
-/// Join (`add`) or leave the IPv4 group `group` with `ip_mreq`, which has
+/// Join or leave the IPv4 group `group` with `ip_mreq`, which has
 /// no index, as `inet_set_opts` does without `ip_mreqn`
 /// (inet_drv.c:7728-7742).
 #[cfg(not(target_os = "linux"))]
 fn membership_v4(
     socket: &Socket,
-    add: bool,
+    action: GroupAction,
     group: Ipv4Addr,
     _index: u32,
     interface: Ipv4Addr,
 ) -> io::Result<()> {
-    if add {
+    if action == GroupAction::Join {
         socket.join_multicast_v4(&group, &interface)
     } else {
         socket.leave_multicast_v4(&group, &interface)
@@ -1310,7 +1379,7 @@ fn membership_v4(
 /// # Examples
 ///
 /// ```rust,ignore
-/// set_option(&socket, libc::SO_KEEPALIVE, false, |socket| socket.set_keepalive(true))?;
+/// set_option(&socket, libc::SO_KEEPALIVE, SetErrors::Ignore, |socket| socket.set_keepalive(true))?;
 /// ```
 ///
 /// # Errors
@@ -1320,7 +1389,7 @@ fn membership_v4(
 fn set_option(
     socket: &Socket,
     _kind: c_int,
-    _propagate: bool,
+    _errors: SetErrors,
     set: impl FnOnce(&Socket) -> io::Result<()>,
 ) -> io::Result<()> {
     set(socket)
@@ -1332,22 +1401,23 @@ fn set_option(
 /// # Examples
 ///
 /// ```rust,ignore
-/// set_option(&socket, libc::IP_TOS, true, |socket| socket.set_tos_v4(16))?;
+/// set_option(&socket, libc::IP_TOS, SetErrors::Propagate, |socket| socket.set_tos_v4(16))?;
 /// ```
 ///
 /// # Errors
 ///
-/// The error of `set`, and with `propagate` the error of a set again.
+/// The error of `set`, and with [`SetErrors::Propagate`] the error of a set
+/// again.
 #[cfg(target_os = "linux")]
 fn set_option(
     socket: &Socket,
     kind: c_int,
-    propagate: bool,
+    errors: SetErrors,
     set: impl FnOnce(&Socket) -> io::Result<()>,
 ) -> io::Result<()> {
     prio_tos_trick(
         kind,
-        propagate,
+        errors,
         (socket.priority(), socket.tos_v4()),
         || set(socket),
         |tos| socket.set_tos_v4(tos),
@@ -1363,23 +1433,24 @@ fn set_option(
 /// (inet_drv.c:6798-6799): an option with the constant of `IP_TOS`, such
 /// as `TCP_NODELAY`, does not set `tos` again, and an option with the
 /// constant of `SO_PRIORITY` sets nothing again. A saved value whose
-/// `getsockopt` failed is not set again. With `propagate`, a failed set of
+/// `getsockopt` failed is not set again. With [`SetErrors::Propagate`], a failed set of
 /// `tos` again is the result and stops the set of `priority`, and a failed
 /// set of `priority` again is the result unless it fails with `EPERM`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// prio_tos_trick(libc::IP_TTL, true, (Ok(0), Ok(16)), set, set_tos, set_priority)?;
+/// prio_tos_trick(libc::IP_TTL, SetErrors::Propagate, (Ok(0), Ok(16)), set, set_tos, set_priority)?;
 /// ```
 ///
 /// # Errors
 ///
-/// The error of `set`, and with `propagate` the error of a set again.
+/// The error of `set`, and with [`SetErrors::Propagate`] the error of a set
+/// again.
 #[cfg(target_os = "linux")]
 fn prio_tos_trick(
     kind: c_int,
-    propagate: bool,
+    errors: SetErrors,
     saved: (io::Result<u32>, io::Result<u32>),
     set: impl FnOnce() -> io::Result<()>,
     set_tos: impl FnOnce(u32) -> io::Result<()>,
@@ -1392,7 +1463,7 @@ fn prio_tos_trick(
     }
     if let (true, Ok(tos)) = (kind != libc::IP_TOS, tos) {
         let restored = set_tos(tos);
-        if propagate {
+        if errors == SetErrors::Propagate {
             restored?;
         }
     }
@@ -1400,7 +1471,11 @@ fn prio_tos_trick(
         return Ok(());
     };
     match set_priority(priority) {
-        Err(failure) if propagate && failure.raw_os_error() != Some(libc::EPERM) => Err(failure),
+        Err(failure)
+            if errors == SetErrors::Propagate && failure.raw_os_error() != Some(libc::EPERM) =>
+        {
+            Err(failure)
+        }
         _ => Ok(()),
     }
 }
@@ -1414,6 +1489,10 @@ fn prio_tos_trick(
 /// assert_eq!(priority(None), Some(0));
 /// ```
 #[cfg(not(target_os = "linux"))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "same signature as the Linux variant, which reads the socket option and can fail"
+)]
 fn priority(_socket: Option<&Socket>) -> Option<i32> {
     Some(0)
 }
@@ -1430,11 +1509,11 @@ fn priority(_socket: Option<&Socket>) -> Option<i32> {
 fn priority(socket: Option<&Socket>) -> Option<i32> {
     socket
         .and_then(|socket| socket.priority().ok())
-        .map(|value| value as i32)
+        .map(u32::cast_signed)
 }
 
 impl Inet {
-    /// Run `INET_REQ_SUBSCRIBE` of `caller` (inet_subscribe,
+    /// Run `INET_REQ_SUBSCRIBE` of `caller` (`inet_subscribe`,
     /// inet_drv.c:10819-10848; the size check, inet_drv.c:11025-11044):
     /// give each `subs_empty_out_q` (1) with the size of the queue, 32
     /// bits. With a size above 0, each code adds `caller` to the
@@ -1462,7 +1541,7 @@ impl Inet {
                 self.stream.subscribers.push(caller);
             }
             reply.push(code);
-            reply.extend((size as u32).to_be_bytes());
+            reply.extend(low_u32(to_u64(size)).to_be_bytes());
         }
         Control::Reply(reply)
     }
@@ -1471,6 +1550,10 @@ impl Inet {
     /// `SO_PRIORITY`, as on macOS, it changes nothing
     /// (inet_drv.c:7389-7398).
     #[cfg(not(target_os = "linux"))]
+    #[expect(
+        clippy::unused_self,
+        reason = "same signature as the Linux variant, which sets `SO_PRIORITY` on the socket"
+    )]
     fn set_priority(&self, _value: i32) -> bool {
         true
     }
@@ -1479,8 +1562,8 @@ impl Inet {
     /// 1, inet_drv.c:7389-7398).
     #[cfg(target_os = "linux")]
     fn set_priority(&self, value: i32) -> bool {
-        self.set_socket(libc::SO_PRIORITY, true, |socket| {
-            socket.set_priority(value as u32)
+        self.set_socket(libc::SO_PRIORITY, SetErrors::Propagate, |socket| {
+            socket.set_priority(value.cast_unsigned())
         })
     }
 }
@@ -1506,7 +1589,7 @@ fn local_address(n: u8, name: &[u8]) -> Result<SockAddr, Vec<u8>> {
 /// which starts with a zero byte, and an unnamed address gives the empty
 /// name. `nix` keeps each byte of the length that the host gives, which
 /// on macOS has no terminating zero byte for a name that ERTS binds
-/// (inet_drv.c:4772).
+/// (`inet_drv.c:4772`).
 fn local_name(
     socket: &Socket,
     get: fn(std::os::fd::RawFd) -> nix::Result<nix::sys::socket::UnixAddr>,
@@ -1610,23 +1693,22 @@ fn get_host_name(request: &[u8]) -> Vec<u8> {
     [&[OK][..], &host_name()].concat()
 }
 
-/// Give the value that `getsockopt` returns for a flag option, which
-/// `GETOPTS` puts in its reply as is (inet_drv.c:9727-9750). macOS gives
+/// Give the value that `getsockopt` returns for a flag option that is on,
+/// which `GETOPTS` puts in its reply as is (inet_drv.c:9727-9750). macOS gives
 /// the flag bit `bit` of an option that is on: `so_options & SO_REUSEADDR`
 /// (4), `so_options & SO_KEEPALIVE` (8), and `t_flags & TF_NODELAY` (4) in
 /// xnu `sogetoptlock` and `tcp_ctloutput`, and 1 for `IP_RECVTOS`
 /// (`OPTBIT`). Linux gives 1 (`sk_reuse`, `sock_flag(sk, SOCK_KEEPOPEN)`,
 /// and `!!(nonagle & TCP_NAGLE_OFF)`). `socket2` gives only a boolean, so
-/// this function maps it back.
+/// the caller multiplies this value by it.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(getsockopt_value(false, 8), 0);
-/// assert_eq!(getsockopt_value(true, 8), if cfg!(target_vendor = "apple") { 8 } else { 1 });
+/// assert_eq!(getsockopt_scale(8), if cfg!(target_vendor = "apple") { 8 } else { 1 });
 /// ```
-fn getsockopt_value(on: bool, bit: i32) -> i32 {
-    i32::from(on) * if APPLE { bit } else { 1 }
+fn getsockopt_scale(bit: i32) -> i32 {
+    if APPLE { bit } else { 1 }
 }
 
 /// True on macOS and the other Apple hosts.

@@ -46,6 +46,16 @@ pub(in crate::runtime) enum Accept {
 /// The timeout of an accept without end (`INET_INFINITY`).
 pub(super) const INFINITY: u32 = u32::MAX;
 
+/// Whether the stop of a port tells the receive that waits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum StopNotice {
+    /// The receive that waits gets an error message.
+    Notify,
+    /// The receive gets no message: the port terminates in the `CLOSING`
+    /// state.
+    Silent,
+}
+
 impl Scheduler {
     /// Run `INET_REQ_ACCEPT` of the current process on the listen port
     /// `listen` with its descriptor `tcp` and the timeout `timeout` in
@@ -128,7 +138,7 @@ impl Scheduler {
         let caller = self.current_process_mut().id;
         try_reply(accepted, |(id, accepted)| {
             let port = self.open_accepted(caller, accepted)?;
-            self.port_send(caller, self.async_message(listen, id, ok_port(port)));
+            self.port_send(caller, Self::async_message(listen, id, ok_port(port)));
             Ok(async_reply(id))
         })
     }
@@ -187,7 +197,7 @@ impl Scheduler {
         let status = port.map(ok_port).or(error).expect("an accept or an error");
         self.port_send(
             acceptor.caller,
-            self.async_message(listen, acceptor.id, status),
+            Self::async_message(listen, acceptor.id, status),
         );
         Ok(port.is_some())
     }
@@ -215,7 +225,7 @@ impl Scheduler {
         if let Some(acceptor) = self.remove_acceptor(listen, caller, Some(timer)) {
             self.demonitor_acceptor(listen, acceptor);
             let status = error_status(Term::static_atom("timeout"));
-            self.port_send(caller, self.async_message(listen, acceptor.id, status));
+            self.port_send(caller, Self::async_message(listen, acceptor.id, status));
         }
     }
 
@@ -242,24 +252,24 @@ impl Scheduler {
     /// descriptor `tcp`, as `tcp_close_check` does (inet_drv.c:11859-11890):
     /// each caller in the queue, in order, loses its timer and its monitor
     /// and gets `{inet_async, L, Ref, {error, closed}}`, and so does the
-    /// receive or the connect that waits (inet_drv.c:11883-11885). Without `notify`, for a port that terminates in
+    /// receive or the connect that waits (inet_drv.c:11883-11885). With [`StopNotice::Silent`], for a port that terminates in
     /// the `CLOSING` state, the receive gets no message (io.c:6212-6227); a
     /// connected port has no accept.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.tcp_stop(listen, tcp, true);
+    /// scheduler.tcp_stop(listen, tcp, StopNotice::Notify);
     /// ```
-    pub(super) fn tcp_stop(&mut self, listen: PortId, tcp: Inet, notify: bool) {
+    pub(super) fn tcp_stop(&mut self, listen: PortId, tcp: Inet, notice: StopNotice) {
         let waiting = tcp.stream.receiver.or(tcp.stream.connector);
         if let Some(receiver) = waiting {
             if let Some(timer) = receiver.timer {
                 self.cancel_port_timer(timer);
             }
             let status = error_status(Term::static_atom("closed"));
-            let message = self.async_message(listen, receiver.id, status);
-            if notify {
+            let message = Self::async_message(listen, receiver.id, status);
+            if notice == StopNotice::Notify {
                 self.port_send(receiver.caller, message);
             }
         }
@@ -268,7 +278,7 @@ impl Scheduler {
             let status = error_status(Term::static_atom("closed"));
             self.port_send(
                 acceptor.caller,
-                self.async_message(listen, acceptor.id, status),
+                Self::async_message(listen, acceptor.id, status),
             );
         }
     }
@@ -326,7 +336,7 @@ impl Scheduler {
 impl Scheduler {
     /// Return the message `{inet_async, L, Ref, Status}` of the listen port
     /// `listen`.
-    pub(super) fn async_message(&self, listen: PortId, id: u16, status: Term) -> Term {
+    pub(super) fn async_message(listen: PortId, id: u16, status: Term) -> Term {
         Term::tuple(vec![
             Term::Atom(Atom::INET_ASYNC),
             Term::Port(listen),

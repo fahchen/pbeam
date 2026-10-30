@@ -1,3 +1,10 @@
+//! Checks the preemption of busy processes, the reduction charge of `receive`, and `erlang:yield`
+//! on PBeam against the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 #[path = "../common/mod.rs"]
 mod common;
 

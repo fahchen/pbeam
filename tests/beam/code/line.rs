@@ -80,7 +80,8 @@ fn gives_no_location_without_a_line_table() {
     let mut table = LineTable::parse(&chunk(1, 1, 1, 0, &[0x51], &[]), "probe").unwrap();
     table.line(0, 9).unwrap();
     table.function(1, None).unwrap();
-    assert!(table.entries.is_empty());
+    let no_entries: [(usize, usize); 0] = [];
+    assert_eq!(table.entries, no_entries);
     assert_eq!(table.location(0, Term::nil()), Term::nil());
 }
 
@@ -119,7 +120,7 @@ fn locations(table: &mut LineTable) -> Vec<Term> {
     let items = table.items.len();
     (1..items)
         .map(|item| {
-            table.line(item, item as u64).unwrap();
+            table.line(item, u64::try_from(item).unwrap()).unwrap();
             table.location(item, Term::nil())
         })
         .collect()

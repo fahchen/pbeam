@@ -25,7 +25,7 @@ use std::{
 /// );
 /// assert_eq!(output.status.code(), Some(0));
 /// ```
-pub fn run_with_time_limit(command: &mut Command, stdout: Stdio, limit: Duration) -> Output {
+pub(crate) fn run_with_time_limit(command: &mut Command, stdout: Stdio, limit: Duration) -> Output {
     let mut child = command
         .stdin(Stdio::null())
         .stdout(stdout)
@@ -62,7 +62,7 @@ pub fn run_with_time_limit(command: &mut Command, stdout: Stdio, limit: Duration
 /// );
 /// assert_eq!(output.status.code(), Some(0));
 /// ```
-pub fn run_dumb_utf8(command: &mut Command, stdout: Stdio, limit: Duration) -> Output {
+pub(crate) fn run_dumb_utf8(command: &mut Command, stdout: Stdio, limit: Duration) -> Output {
     run_with_time_limit(
         command.env("TERM", "dumb").env("LC_ALL", "C.UTF-8"),
         stdout,
@@ -79,7 +79,7 @@ pub fn run_dumb_utf8(command: &mut Command, stdout: Stdio, limit: Duration) -> O
 /// ```rust,ignore
 /// let output = run_dumb_utf8(&mut command, broken_pipe(), RUN_TIME_LIMIT);
 /// ```
-pub fn broken_pipe() -> Stdio {
+pub(crate) fn broken_pipe() -> Stdio {
     let (reader, writer) = io::pipe().unwrap();
     drop(reader);
     writer.into()

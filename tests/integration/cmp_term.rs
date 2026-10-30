@@ -2,6 +2,10 @@
 //! PBeam. `CMP_TERM` of the BIF table calls `erts_cmp` with `exact = 1`
 //! (`bif.c:5417-5427`, `erl_utils.h:122`), and `maps` reads the BIF to order
 //! two keys.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::process::Command;
 
@@ -22,7 +26,7 @@ fn reference() -> Vec<u8> {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     reference.stdout
 }
 

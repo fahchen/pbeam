@@ -1,3 +1,10 @@
+//! Runs the binary match instructions and the BIFs that use them on PBeam and compares them with
+//! the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 #[path = "../common/mod.rs"]
 mod common;
 
@@ -30,7 +37,7 @@ fn reference(expression: &str) -> Vec<u8> {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     reference.stdout
 }
 
@@ -596,6 +603,10 @@ fn bs_get_atom(name: &str) -> Term {
 }
 
 /// The tuple `{Head, Tail}` of two binaries.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "builds one expected `Result` of a case table whose other cases are `Err`"
+)]
 fn halves(head: &[u8], tail: &[u8]) -> Result<Term, String> {
     Ok(Term::tuple(vec![
         Term::binary(head.to_vec()),
@@ -815,6 +826,10 @@ fn float_calls(cases: &[(&[u8], Term)]) -> Vec<Vec<Term>> {
 }
 
 /// The result `{F, Rest}` of a float segment.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "builds one expected `Result` of a case table whose other cases are `Err`"
+)]
 fn float_rest(value: f64, rest: &[u8]) -> Result<Term, String> {
     Ok(Term::tuple(vec![
         Term::Float(value),
@@ -882,7 +897,7 @@ fn runs_bs_get_float2_of_each_size_and_endianness_as_pinned_erts() {
             short.clone(),
             short.clone(),
             short.clone(),
-            float_rest(5.960464477539063e-8, &[]),
+            float_rest(5.960_464_477_539_063e-8, &[]),
             float_rest(65504.0, &[]),
             float_rest(-0.0, &[]),
             short.clone(),
@@ -914,7 +929,7 @@ short,short,short,short,short,short,short,short,{5.960464477539063e-8,<<>>},{655
         float_rest(1.5, &[]),
         float_rest(1.0, &[]),
         float_rest(std::f64::consts::PI, &[]),
-        short.clone(),
+        short,
     ];
     assert_eq!(bs_float_each("little", &float_calls(&little)), expected);
     assert_eq!(bs_float_each("native", &float_calls(&little)), expected);
@@ -1076,7 +1091,6 @@ fn runs_the_utf16_and_utf32_match_instructions_as_pinned_erts() {
     // values are the results of the pinned ERTS.
     let program = BeamProgram::load(&[BS_UTF_PROBE]).unwrap();
     let short = Term::Atom(program.atom("short").unwrap());
-    let int = Term::Atom(program.atom("int").unwrap());
     let pair = |code_point: i64, rest: &[u8]| {
         Term::tuple(vec![Term::Integer(code_point), Term::binary(rest.to_vec())])
     };
@@ -1099,7 +1113,7 @@ fn runs_the_utf16_and_utf32_match_instructions_as_pinned_erts() {
     .map(<[u8]>::to_vec)
     .to_vec();
     let little16 = little_units(&big16, 2);
-    let values16 = [65, 0x1F600, 0x10000, 0x10FFFF, 0xD7FF, 0xE000, 0xFFFF];
+    let values16 = [65, 0x1F600, 0x10000, 0x0010_FFFF, 0xD7FF, 0xE000, 0xFFFF];
     let mut big_results: Vec<_> = values16
         .iter()
         .zip([&[1][..], &[7], &[], &[], &[], &[], &[]])
@@ -1120,9 +1134,27 @@ fn runs_the_utf16_and_utf32_match_instructions_as_pinned_erts() {
     skipped.extend(vec![short.clone(); 6]);
     assert_eq!(bs_utf_each("skip16", &big16), skipped);
     let mut skipped_little = vec![rest(&[]); 7];
-    skipped_little.extend(vec![short.clone(); 6]);
+    skipped_little.extend(vec![short; 6]);
     assert_eq!(bs_utf_each("skip16_little", &little16), skipped_little);
+}
 
+#[test]
+fn runs_the_utf32_match_instructions_as_pinned_erts() {
+    // `bs_get_utf16` and `bs_skip_utf16` call `erts_bs_get_utf16`
+    // (erl_bits.c:2223-2285; jit/arm/instr_bs.cpp:905-934). A unit that is
+    // not a surrogate is one character, and a high and a low surrogate are
+    // one character. A lone surrogate and fewer than 16 bits fail.
+    // `bs_get_utf32` and `bs_skip_utf32` read a 32-bit integer and fail for
+    // a surrogate or a value above 16#10FFFF, with the position moved back
+    // (jit/arm/ops.tab:1086-1095, instr_bs.cpp:936-983). The expected
+    // values are the results of the pinned ERTS.
+    let program = BeamProgram::load(&[BS_UTF_PROBE]).unwrap();
+    let short = Term::Atom(program.atom("short").unwrap());
+    let int = Term::Atom(program.atom("int").unwrap());
+    let pair = |code_point: i64, rest: &[u8]| {
+        Term::tuple(vec![Term::Integer(code_point), Term::binary(rest.to_vec())])
+    };
+    let rest = |bytes: &[u8]| Term::binary(bytes.to_vec());
     let big32: Vec<Vec<u8>> = [
         &[0, 0, 0, 65, 1][..],
         &[0, 1, 246, 0],
@@ -1139,7 +1171,7 @@ fn runs_the_utf16_and_utf32_match_instructions_as_pinned_erts() {
     .map(<[u8]>::to_vec)
     .to_vec();
     let little32 = little_units(&big32, 4);
-    let values32 = [65, 0x1F600, 0x10FFFF, 0xD7FF, 0xE000];
+    let values32 = [65, 0x1F600, 0x0010_FFFF, 0xD7FF, 0xE000];
     let mut big_results = vec![pair(65, &[1])];
     big_results.extend(
         values32[1..]
@@ -1166,7 +1198,7 @@ fn runs_the_utf16_and_utf32_match_instructions_as_pinned_erts() {
     // integer after `bs_get_utf32` fails.
     let mut retracted = big_results[..5].to_vec();
     retracted.extend(
-        [0x110000, 0xD800, 0xDFFF, 0xFFFF_FFFF]
+        [0x0011_0000, 0xD800, 0xDFFF, 0xFFFF_FFFF]
             .map(|value: i64| Term::tuple(vec![int.clone(), Term::Integer(value), rest(&[])])),
     );
     retracted.extend([short.clone(), short.clone()]);
@@ -1181,7 +1213,7 @@ fn runs_the_utf16_and_utf32_match_instructions_as_pinned_erts() {
         vec![
             Term::tuple(vec![int.clone(), Term::Integer(56320), rest(&[])]),
             Term::tuple(vec![int.clone(), Term::Integer(55357), rest(&[0, 65])]),
-            Term::tuple(vec![int.clone(), Term::Integer(55357), rest(&[])]),
+            Term::tuple(vec![int, Term::Integer(55357), rest(&[])]),
         ]
     );
 
@@ -1319,7 +1351,7 @@ fn runs_bs_match_string_at_a_bit_offset_as_pinned_erts() {
         22, 150, 55, 38, 247, 54, 246, 103, 66, 230, 150, 54, 246, 228,
     ]);
     let calls = [
-        vec![shifted.clone()],
+        vec![shifted],
         vec![binary(&[
             22, 150, 55, 38, 247, 54, 246, 103, 66, 230, 150, 54, 22, 228,
         ])],
@@ -1452,7 +1484,7 @@ fn runs_bs_get_integer2_as_pinned_erts() {
                 Term::binary(vec![0x34, 0x56])
             ])),
             Ok(Term::tuple(vec![
-                Term::Integer(0x123456),
+                Term::Integer(0x0012_3456),
                 Term::binary(Vec::new())
             ])),
             false_(),
@@ -1566,7 +1598,7 @@ fn runs_bs_skip_utf8_as_pinned_erts() {
 }
 
 /// `bs_get_binary2` with the size `all` runs `{ensure_at_least,0,Unit}`
-/// and `get_tail` (`emit_i_bs_get_binary_all2`, jit/arm/instr_bs.cpp:
+/// and `get_tail` (`emit_i_bs_get_binary_all2`, `jit/arm/instr_bs.cpp`:
 /// 386-405): a rest that is not a multiple of the unit fails.
 #[test]
 fn runs_bs_get_binary2_with_the_size_all_as_pinned_erts() {

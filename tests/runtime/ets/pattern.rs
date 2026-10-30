@@ -56,7 +56,7 @@ fn matches_lists_maps_and_ground_tuples() {
     let pattern = Pattern::compile(&atoms, &map).unwrap();
     assert!(pattern.matches_nothing(1));
     assert_eq!(pattern.run(std::slice::from_ref(&one)), None);
-    let twice = Term::tuple(vec![variable.clone(), variable.clone()]);
+    let twice = Term::tuple(vec![variable.clone(), variable]);
     let pattern = Pattern::compile(&atoms, &twice).unwrap();
     assert_eq!(pattern.run(&[one.clone(), Term::Integer(2)]), None);
     assert_eq!(
@@ -71,16 +71,14 @@ fn run(
     head: Term,
     guards: Vec<Term>,
     body: Vec<Term>,
-    object: Vec<Term>,
+    object: &[Term],
 ) -> Option<Term> {
     let spec = Term::list_from(vec![Term::tuple(vec![
         head,
         Term::list_from(guards),
         Term::list_from(body),
     ])]);
-    MatchSpec::compile(atoms, &spec)
-        .unwrap()
-        .run(atoms, &object)
+    MatchSpec::compile(atoms, &spec).unwrap().run(atoms, object)
 }
 
 /// Return the guard call `{Name, Arguments...}`.
@@ -91,6 +89,10 @@ fn call(atoms: &AtomTable, name: &str, arguments: Vec<Term>) -> Term {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "case table: one entry for each guard function of the match specification"
+)]
 fn runs_each_guard_function_of_the_match_specification() {
     let atoms = test_atom_table();
     let var1 = atom(&atoms, "$1");
@@ -164,7 +166,7 @@ fn runs_each_guard_function_of_the_match_specification() {
         (call(&atoms, "is_function", vec![var1.clone()]), fun.clone()),
         (
             call(&atoms, "is_function", vec![var1.clone(), Term::Integer(1)]),
-            fun.clone(),
+            fun,
         ),
         (
             call(&atoms, "is_map_key", vec![key_a.clone(), var1.clone()]),
@@ -179,7 +181,7 @@ fn runs_each_guard_function_of_the_match_specification() {
                 head.clone(),
                 vec![guard.clone()],
                 vec![ok.clone()],
-                object
+                &object
             ),
             Some(ok.clone()),
             "{guard:?} {value:?}"
@@ -217,8 +219,8 @@ fn runs_each_guard_function_of_the_match_specification() {
             Term::Integer(1),
         ),
         (
-            call(&atoms, "map_get", vec![key_a.clone(), var1.clone()]),
-            map.clone(),
+            call(&atoms, "map_get", vec![key_a, var1.clone()]),
+            map,
             Term::Integer(1),
         ),
         (
@@ -238,7 +240,7 @@ fn runs_each_guard_function_of_the_match_specification() {
         ),
         (
             call(&atoms, "byte_size", vec![var1.clone()]),
-            binary.clone(),
+            binary,
             Term::Integer(2),
         ),
         (
@@ -250,7 +252,7 @@ fn runs_each_guard_function_of_the_match_specification() {
         (
             call(&atoms, "node", vec![var1.clone()]),
             Term::Pid(ProcessId(0)),
-            node.clone(),
+            node,
         ),
         (
             call(&atoms, "+", vec![var1.clone()]),
@@ -328,7 +330,7 @@ fn runs_each_guard_function_of_the_match_specification() {
         let guard = equal(&atoms, guard, expected.clone());
         let object = vec![value.clone(), Term::Integer(2)];
         assert_eq!(
-            run(&atoms, head.clone(), vec![guard], vec![ok.clone()], object),
+            run(&atoms, head.clone(), vec![guard], vec![ok.clone()], &object),
             Some(ok.clone()),
             "{shown:?} {value:?} {expected:?}"
         );
@@ -349,7 +351,7 @@ fn runs_each_guard_function_of_the_match_specification() {
                 head.clone(),
                 vec![guard],
                 vec![ok.clone()],
-                vec![value, Term::Integer(1)],
+                &[value, Term::Integer(1)],
             ),
             Some(ok.clone())
         );
@@ -363,7 +365,7 @@ fn runs_each_guard_function_of_the_match_specification() {
                 head.clone(),
                 vec![guard],
                 vec![ok.clone()],
-                vec![Term::Integer(2), Term::Integer(1)]
+                &[Term::Integer(2), Term::Integer(1)]
             ),
             Some(ok.clone())
         );
@@ -375,7 +377,7 @@ fn runs_each_guard_function_of_the_match_specification() {
             head.clone(),
             vec![guard],
             vec![ok.clone()],
-            vec![Term::Integer(2), Term::Integer(1)]
+            &[Term::Integer(2), Term::Integer(1)]
         ),
         Some(ok.clone())
     );
@@ -401,7 +403,7 @@ fn runs_each_guard_function_of_the_match_specification() {
                 head.clone(),
                 vec![guard],
                 vec![ok.clone()],
-                vec![first, second]
+                &[first, second]
             ),
             Some(ok.clone())
         );
@@ -413,7 +415,7 @@ fn runs_each_guard_function_of_the_match_specification() {
     ]);
     let orelse = Term::tuple(vec![
         atom(&atoms, "orelse"),
-        call(&atoms, "is_atom", vec![var1.clone()]),
+        call(&atoms, "is_atom", vec![var1]),
         Term::static_atom("true"),
     ]);
     assert_eq!(
@@ -422,7 +424,7 @@ fn runs_each_guard_function_of_the_match_specification() {
             head.clone(),
             vec![andalso, orelse],
             vec![ok.clone()],
-            vec![Term::Integer(1), Term::Integer(2)]
+            &[Term::Integer(1), Term::Integer(2)]
         ),
         Some(ok.clone())
     );
@@ -448,7 +450,7 @@ fn runs_each_guard_function_of_the_match_specification() {
                 head.clone(),
                 vec![guard],
                 vec![ok.clone()],
-                vec![Term::Integer(1), Term::Integer(2)]
+                &[Term::Integer(1), Term::Integer(2)]
             ),
             Some(ok.clone()),
             "{expected:?}"
@@ -472,7 +474,7 @@ fn runs_each_guard_function_of_the_match_specification() {
                 head.clone(),
                 vec![guard],
                 vec![ok.clone()],
-                vec![Term::Integer(1), Term::Integer(2)]
+                &[Term::Integer(1), Term::Integer(2)]
             ),
             None
         );
@@ -484,8 +486,6 @@ fn builds_match_specification_terms_and_rejects_bad_ones() {
     let atoms = test_atom_table();
     let at = |atoms: &AtomTable, name| atom(atoms, name);
     let head = Term::tuple(vec![at(&atoms, "$1"), at(&atoms, "$2")]);
-    let ok = Term::static_atom("true");
-    let key_k = atom(&atoms, "k");
     let spec = Term::list_from(vec![Term::tuple(vec![
         head.clone(),
         Term::nil(),
@@ -530,16 +530,23 @@ fn builds_match_specification_terms_and_rejects_bad_ones() {
         "element",
         vec![Term::Integer(3), Term::static_atom("$_")],
     )]);
-    let spec = Term::list_from(vec![Term::tuple(vec![head.clone(), Term::nil(), body])]);
+    let spec = Term::list_from(vec![Term::tuple(vec![head, Term::nil(), body])]);
     assert_eq!(
         MatchSpec::compile(&atoms, &spec)
             .unwrap()
             .run(&atoms, &[Term::Integer(1), Term::Integer(2)]),
         Some(Term::static_atom("EXIT"))
     );
+}
+
+#[test]
+fn builds_match_specification_bodies_with_bignums_and_failing_division() {
+    let atoms = test_atom_table();
+    let at = |atoms: &AtomTable, name| atom(atoms, name);
+    let head = Term::tuple(vec![at(&atoms, "$1"), at(&atoms, "$2")]);
     // A large arithmetic result becomes a bignum, and division by zero fails.
     let big = Term::Integer(1 << 40);
-    let body = Term::list_from(vec![call(&atoms, "*", vec![big.clone(), big.clone()])]);
+    let body = Term::list_from(vec![call(&atoms, "*", vec![big.clone(), big])]);
     let spec = Term::list_from(vec![Term::tuple(vec![head.clone(), Term::nil(), body])]);
     assert!(matches!(
         MatchSpec::compile(&atoms, &spec)
@@ -552,23 +559,35 @@ fn builds_match_specification_terms_and_rejects_bad_ones() {
         "/",
         vec![Term::Float(1.0), Term::Float(0.0)],
     )]);
-    let spec = Term::list_from(vec![Term::tuple(vec![head.clone(), Term::nil(), body])]);
+    let spec = Term::list_from(vec![Term::tuple(vec![head, Term::nil(), body])]);
     assert_eq!(
         MatchSpec::compile(&atoms, &spec)
             .unwrap()
             .run(&atoms, &[Term::Integer(1), Term::Integer(2)]),
         Some(Term::static_atom("EXIT"))
     );
+}
+
+#[test]
+fn rejects_bad_match_specifications() {
+    let atoms = test_atom_table();
+    let at = |atoms: &AtomTable, name| atom(atoms, name);
+    let head = Term::tuple(vec![at(&atoms, "$1"), at(&atoms, "$2")]);
+    let ok = Term::static_atom("true");
     // An unsupported guard, a map expression, and a bad specification.
-    let unsupported = Term::list_from(vec![Term::tuple(vec![
-        head.clone(),
-        Term::list_from([call(&atoms, "round", vec![Term::Float(1.0)])]),
-        Term::nil(),
-    ])]);
-    assert!(matches!(
-        MatchSpec::compile(&atoms, &unsupported),
-        Err(SpecError::Unsupported(_))
-    ));
+    // ERTS knows each of these guards, so each gives `Unsupported`, not
+    // `badarg`: one of each arity of the known list.
+    for (name, arity) in [("round", 1), ("binary_part", 2), ("is_record", 3)] {
+        let unsupported = Term::list_from(vec![Term::tuple(vec![
+            head.clone(),
+            Term::list_from([call(&atoms, name, vec![Term::Float(1.0); arity])]),
+            Term::nil(),
+        ])]);
+        assert!(matches!(
+            MatchSpec::compile(&atoms, &unsupported),
+            Err(SpecError::Unsupported(_))
+        ));
+    }
     let map =
         Term::Map(Map::from_pairs(vec![(at(&atoms, "a"), Term::Integer(1))], &atoms).unwrap());
     let spec = Term::list_from(vec![Term::tuple(vec![
@@ -635,7 +654,7 @@ fn builds_match_specification_terms_and_rejects_bad_ones() {
     let compiled = MatchSpec::compile(
         &atoms,
         &Term::list_from(vec![Term::tuple(vec![
-            head.clone(),
+            head,
             Term::nil(),
             Term::list_from([ok.clone()]),
         ])]),
@@ -643,8 +662,17 @@ fn builds_match_specification_terms_and_rejects_bad_ones() {
     .unwrap();
     assert_eq!(
         compiled.run(&atoms, &[Term::Integer(1), Term::Integer(2)]),
-        Some(ok.clone())
+        Some(ok)
     );
+}
+
+#[test]
+fn gives_the_key_and_the_match_nothing_test_of_a_match_specification() {
+    let atoms = test_atom_table();
+    let at = |atoms: &AtomTable, name| atom(atoms, name);
+    let head = Term::tuple(vec![at(&atoms, "$1"), at(&atoms, "$2")]);
+    let ok = Term::static_atom("true");
+    let key_k = atom(&atoms, "k");
     // A single clause gives its key and its match-nothing test, and a
     // specification with two clauses gives neither.
     let one = Term::list_from(vec![Term::tuple(vec![
@@ -666,7 +694,7 @@ fn builds_match_specification_terms_and_rejects_bad_ones() {
     ]);
     assert_eq!(
         MatchSpec::compile(&atoms, &one).unwrap().bound_key(1),
-        Some(&key_k.clone())
+        Some(&key_k)
     );
     assert!(!MatchSpec::compile(&atoms, &one).unwrap().matches_nothing(1));
     assert_eq!(MatchSpec::compile(&atoms, &two).unwrap().bound_key(1), None);
@@ -709,11 +737,15 @@ fn builds_match_specification_terms_and_rejects_bad_ones() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "case table: one `fails` call for each guard and expression that fails"
+)]
 fn fails_each_guard_and_expression_like_the_match_program() {
     let atoms = test_atom_table();
     let var1 = atom(&atoms, "$1");
     let var2 = atom(&atoms, "$2");
-    let head = Term::tuple(vec![var1.clone(), var2.clone()]);
+    let head = Term::tuple(vec![var1.clone(), var2]);
     let ok = Term::static_atom("true");
     let key_a = atom(&atoms, "a");
     let object = |value: Term| vec![value, Term::Integer(2)];
@@ -724,7 +756,7 @@ fn fails_each_guard_and_expression_like_the_match_program() {
                 head.clone(),
                 vec![guard.clone()],
                 vec![ok.clone()],
-                vec![value, Term::Integer(2)],
+                &[value, Term::Integer(2)],
             ),
             None,
             "{guard:?}"
@@ -745,7 +777,7 @@ fn fails_each_guard_and_expression_like_the_match_program() {
         call(&atoms, "bit_size", vec![var1.clone()]),
         call(&atoms, "byte_size", vec![var1.clone()]),
         call(&atoms, "tuple_size", vec![var1.clone()]),
-        call(&atoms, "node", vec![var1.clone()]),
+        call(&atoms, "node", vec![var1]),
         call(&atoms, "not", vec![Term::Integer(1)]),
         call(
             &atoms,
@@ -793,7 +825,7 @@ fn fails_each_guard_and_expression_like_the_match_program() {
             head.clone(),
             vec![guard],
             vec![ok.clone()],
-            object(Term::Integer(1))
+            &object(Term::Integer(1))
         ),
         Some(ok.clone())
     );
@@ -812,7 +844,7 @@ fn fails_each_guard_and_expression_like_the_match_program() {
             head.clone(),
             vec![guard],
             vec![ok.clone()],
-            object(Term::Integer(1))
+            &object(Term::Integer(1))
         ),
         Some(ok.clone())
     );
@@ -832,7 +864,7 @@ fn fails_each_guard_and_expression_like_the_match_program() {
             head.clone(),
             vec![guard],
             vec![ok.clone()],
-            object(Term::Integer(1))
+            &object(Term::Integer(1))
         ),
         Some(ok.clone())
     );
@@ -841,7 +873,7 @@ fn fails_each_guard_and_expression_like_the_match_program() {
         call(&atoms, "+", vec![big, Term::Float(1.0)]),
         Term::tuple(vec![
             atom(&atoms, "const"),
-            Term::Float(1.2676506002282294e30),
+            Term::Float(1.267_650_600_228_229_4e30),
         ]),
     ]);
     assert_eq!(
@@ -850,17 +882,20 @@ fn fails_each_guard_and_expression_like_the_match_program() {
             head.clone(),
             vec![guard],
             vec![ok.clone()],
-            object(Term::Integer(1))
+            &object(Term::Integer(1))
         ),
         Some(ok.clone())
     );
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "case table: one entry for each expression that shifts a list or a number"
+)]
 fn shifts_lists_and_boolean_forms_like_the_match_program() {
     let atoms = test_atom_table();
     let head = Term::static_atom("_");
-    let ok = Term::static_atom("true");
     let run_expression = |atoms: &AtomTable, expression: Term| {
         let spec = Term::list_from([Term::tuple(vec![
             head.clone(),
@@ -985,6 +1020,23 @@ fn shifts_lists_and_boolean_forms_like_the_match_program() {
             Term::static_atom("EXIT")
         ))
     );
+}
+
+#[test]
+fn takes_the_boolean_forms_like_the_match_program() {
+    let atoms = test_atom_table();
+    let head = Term::static_atom("_");
+    let ok = Term::static_atom("true");
+    let run_expression = |atoms: &AtomTable, expression: Term| {
+        let spec = Term::list_from([Term::tuple(vec![
+            head.clone(),
+            Term::nil(),
+            Term::list_from([expression]),
+        ])]);
+        MatchSpec::compile(atoms, &spec)
+            .unwrap()
+            .run(atoms, &[Term::Integer(1)])
+    };
     // The boolean forms take two or more operands.
     for (form, operands, expected) in [
         ("and", vec![ok.clone(), ok.clone(), ok.clone()], ok.clone()),
@@ -1023,7 +1075,7 @@ fn shifts_lists_and_boolean_forms_like_the_match_program() {
                 Term::static_atom("false"),
                 Term::static_atom("false"),
             ],
-            ok.clone(),
+            ok,
         ),
     ] {
         let mut elements = vec![atom(&atoms, form)];
@@ -1034,6 +1086,23 @@ fn shifts_lists_and_boolean_forms_like_the_match_program() {
             "{form}"
         );
     }
+}
+
+#[test]
+fn takes_one_operand_of_the_boolean_forms_like_the_match_program() {
+    let atoms = test_atom_table();
+    let head = Term::static_atom("_");
+    let ok = Term::static_atom("true");
+    let run_expression = |atoms: &AtomTable, expression: Term| {
+        let spec = Term::list_from([Term::tuple(vec![
+            head.clone(),
+            Term::nil(),
+            Term::list_from([expression]),
+        ])]);
+        MatchSpec::compile(atoms, &spec)
+            .unwrap()
+            .run(atoms, &[Term::Integer(1)])
+    };
     // One operand is allowed. `and` and `or` check the boolean; `andalso`
     // and `orelse` give the operand (`erl_db_util.c:4701-4855`).
     for (form, operand, expected) in [
@@ -1103,7 +1172,7 @@ fn tests_and_sizes_a_bitstring_with_tail_bits_like_the_match_program() {
     ] {
         let body = call(&atoms, name, vec![var1.clone()]);
         assert_eq!(
-            run(&atoms, head.clone(), vec![], vec![body], vec![value]),
+            run(&atoms, head.clone(), vec![], vec![body], &[value]),
             Some(Term::Integer(expected)),
             "{name}"
         );
@@ -1121,7 +1190,7 @@ fn tests_and_sizes_a_bitstring_with_tail_bits_like_the_match_program() {
                 head.clone(),
                 vec![guard.clone()],
                 vec![var1.clone()],
-                vec![value.clone()]
+                std::slice::from_ref(&value)
             ),
             passes.then_some(value)
         );

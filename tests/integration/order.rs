@@ -1,3 +1,5 @@
+//! Runs term order in `is_ge` and `erlang:'>='` on PBeam and compares it with the pinned ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};
@@ -55,7 +57,7 @@ fn compares_terms_in_is_ge_and_erlang_ge_as_pinned_erts() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     assert_eq!(
         String::from_utf8(reference.stdout).unwrap(),
         format!(

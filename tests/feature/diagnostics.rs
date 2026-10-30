@@ -1,3 +1,9 @@
+//! Checks that the display bytes of the `pbeam` binary match the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::{
     process::{Command, Stdio},
     time::Duration,

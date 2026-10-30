@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use super::BifResult::Value;
-use super::*;
+use super::{Atom, BifContext, BifResult, ExceptionClass, Map, Term};
 use crate::runtime::interpreter::code_table::CodeTable;
 use crate::runtime::interpreter::record::{badrecord, field_reason};
 use crate::term::{AtomTable, Record, RecordDef, flatmap_order};
@@ -23,22 +23,32 @@ fn record_or_badarg(value: &Term) -> Result<&Record, BifResult> {
     value.record().ok_or_else(BifResult::badarg)
 }
 
-/// Run `records:get_module/1` and `records:get_name/1`: return the module or
-/// the name of a record (`erl_record.c:964-984`).
+/// Run `records:get_module/1`: return the module of a record
+/// (`erl_record.c:964-984`).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(matches!(identity(&record, true), BifResult::Value(_)));
+/// assert!(matches!(get_module(&record), BifResult::Value(_)));
 /// ```
-pub(super) fn identity(value: &Term, module: bool) -> BifResult {
+pub(super) fn get_module(value: &Term) -> BifResult {
     match record_or_badarg(value) {
-        Ok(record) => {
-            let def = record.def();
-            Value(Term::Atom(
-                if module { &def.module } else { &def.name }.clone(),
-            ))
-        }
+        Ok(record) => Value(Term::Atom(record.def().module.clone())),
+        Err(error) => error,
+    }
+}
+
+/// Run `records:get_name/1`: return the name of a record
+/// (`erl_record.c:964-984`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(get_name(&record), BifResult::Value(_)));
+/// ```
+pub(super) fn get_name(value: &Term) -> BifResult {
+    match record_or_badarg(value) {
+        Ok(record) => Value(Term::Atom(record.def().name.clone())),
         Err(error) => error,
     }
 }
@@ -138,14 +148,13 @@ pub(super) fn get_definition(cx: &mut BifContext<'_>, module: &Term, name: &Term
             None => key,
         }
     });
-    let options = exported_map(def.is_exported, &scheduler.atoms);
+    let options = exported_map(Term::from(def.is_exported), &scheduler.atoms);
     Value(Term::tuple(vec![options, Term::list_from(fields)]))
 }
 
 /// Return the map `#{is_exported => Exported}`.
-fn exported_map(exported: bool, atoms: &AtomTable) -> Term {
-    let value = Term::static_atom(if exported { "true" } else { "false" });
-    Map::from_pairs(vec![(Term::static_atom("is_exported"), value)], atoms)
+fn exported_map(exported: Term, atoms: &AtomTable) -> Term {
+    Map::from_pairs(vec![(Term::static_atom("is_exported"), exported)], atoms)
         .map(Term::Map)
         .expect("an atom key fits a map")
 }

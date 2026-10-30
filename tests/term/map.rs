@@ -34,18 +34,21 @@ fn match_context() -> Term {
 
 #[test]
 fn hashes_small_integers_as_erts() {
-    assert_eq!(map_hash(&Term::Integer(1)), Some(7938660269479274665));
-    assert_eq!(map_hash(&Term::Integer(-1)), Some(7256831767414464289));
+    assert_eq!(map_hash(&Term::Integer(1)), Some(7_938_660_269_479_274_665));
+    assert_eq!(
+        map_hash(&Term::Integer(-1)),
+        Some(7_256_831_767_414_464_289)
+    );
     assert!(map_hash(&Term::Integer((1 << 59) - 1)).is_some());
     assert!(map_hash(&Term::Integer(-(1 << 59))).is_some());
     // A bignum key hashes with the bignum path of the internal hash.
     assert_eq!(
         map_hash(&Term::Integer(1 << 59)),
-        Some(10054563828903259082)
+        Some(10_054_563_828_903_259_082)
     );
     assert_eq!(
         map_hash(&Term::Integer(-(1 << 59) - 1)),
-        Some(12317164193119007090)
+        Some(12_317_164_193_119_007_090)
     );
 }
 
@@ -54,12 +57,12 @@ fn hashes_atoms_by_their_index_as_erts() {
     // true has index 1: its ERTS word is (1 << 6) | 0xB = 0x4B.
     assert_eq!(
         map_hash(&Term::static_atom("true")),
-        Some(14558535449716669319)
+        Some(14_558_535_449_716_669_319)
     );
     // abs_path has index 26. ERTS 29.1.1: its internal hash.
     assert_eq!(
         map_hash(&Term::static_atom("abs_path")),
-        Some(17379220480677090226)
+        Some(17_379_220_480_677_090_226)
     );
 }
 
@@ -169,7 +172,10 @@ fn hashes_tuple_keys_with_the_internal_hash() {
     for key in keys {
         assert_eq!(map_hash(&key), Some(internal_hash(&key)));
     }
-    assert_eq!(map_hash(&Term::tuple(vec![])), Some(4510301282025278020));
+    assert_eq!(
+        map_hash(&Term::tuple(vec![])),
+        Some(4_510_301_282_025_278_020)
+    );
 }
 
 #[test]
@@ -363,11 +369,11 @@ fn becomes_a_hashmap_with_the_erts_order_above_32_keys() {
     // The first three keys have hashes with the same low 60 bits, and so do the next two.
     // Each group splits only at level 15. ERTS 29.1.1: maps:keys of this map.
     let deep = [
-        413866500823436792,
-        -101714049538469044,
-        -74925715755171563,
-        329898321527737274,
-        446694106686689078,
+        413_866_500_823_436_792,
+        -101_714_049_538_469_044,
+        -74_925_715_755_171_563,
+        329_898_321_527_737_274,
+        446_694_106_686_689_078,
     ];
     assert_eq!(
         map_hash(&Term::Integer(deep[0])),
@@ -501,15 +507,15 @@ fn copies_a_shared_form_before_a_change() {
             vec![(Insert::Set, Term::Integer(1), atom("w"))],
             &test_atom_table(),
         )
-        .unwrap()
+        .unwrap();
     });
     change(|map| {
         map.insert(Term::Integer(2), atom("w"), &test_atom_table())
-            .unwrap()
+            .unwrap();
     });
     change(|map| {
         map.insert(Term::Integer(-1), atom("w"), &test_atom_table())
-            .unwrap()
+            .unwrap();
     });
 
     // A copy of a flatmap of 32 keys that gets the 33rd key is a hashmap. The other copy stays
@@ -566,14 +572,14 @@ fn copies_only_the_hashmap_nodes_on_the_path_of_a_change() {
         assert_eq!(copy.get(&Term::Integer(key)), Some(&atom("w")));
     };
     change(500, 28, |map, key| {
-        map.insert(key, atom("w"), &test_atom_table()).unwrap()
+        map.insert(key, atom("w"), &test_atom_table()).unwrap();
     });
     change(2000, 29, |map, key| {
-        map.insert(key, atom("w"), &test_atom_table()).unwrap()
+        map.insert(key, atom("w"), &test_atom_table()).unwrap();
     });
     change(500, 28, |map, key| {
         map.update(vec![(Insert::Set, key, atom("w"))], &test_atom_table())
-            .unwrap()
+            .unwrap();
     });
 }
 
@@ -584,12 +590,13 @@ fn drains_the_pairs_of_a_map_only_from_the_last_copy() {
         let mut map = integers(1..=size);
         let mut copy = map.clone();
         map.drain_into(&mut pending);
-        assert!(pending.is_empty());
-        assert_eq!(copy.len(), size as usize);
+        let no_terms: [crate::term::Term; 0] = [];
+        assert_eq!(pending, no_terms);
+        assert_eq!(copy.len(), usize::try_from(size).unwrap());
         // `Term::drop` drops the map after `drain_into`.
         drop(map);
         copy.drain_into(&mut pending);
-        assert_eq!(pending.len(), 2 * size as usize);
+        assert_eq!(pending.len(), 2 * usize::try_from(size).unwrap());
         // The last holder takes the form, so the map has no form after the
         // drain, as a tuple has no array after `Tuple::take_last`.
         assert!(copy.repr.is_none());
@@ -690,7 +697,7 @@ fn builds_the_same_map_from_pairs_in_any_order() {
 
 #[test]
 fn splits_a_leaf_into_nodes_until_the_hashes_differ() {
-    let leaf = |key: i64| (key as u64, Term::Integer(key), Term::Integer(key));
+    let leaf = |key: i64| (key.cast_unsigned(), Term::Integer(key), Term::Integer(key));
     // 0x101 and 0x201 select the same slot at levels 0 and 1, and slots 1 and 2 at level 2.
     let child = Node::split(0, leaf(0x201), leaf(0x101), &test_atom_table());
     let (bitmap, children) = node_of(&child);
@@ -810,8 +817,8 @@ fn identity(keys: Vec<Term>) -> Map {
 }
 
 /// Return the keys of the pairs of a chunk.
-fn chunk_keys(map: &Map, path: Term, direction: Direction) -> (Vec<Term>, Option<i64>) {
-    let chunk = map.chunk(&path, 1000, direction).unwrap().unwrap();
+fn chunk_keys(map: &Map, path: &Term, direction: Direction) -> (Vec<Term>, Option<i64>) {
+    let chunk = map.chunk(path, 1000, direction).unwrap().unwrap();
     let keys = chunk.pairs.iter().map(|(key, _)| (*key).clone()).collect();
     (keys, chunk.next)
 }
@@ -834,20 +841,20 @@ fn takes_a_whole_collision_node_in_a_chunk() {
     // ERTS 29.1.1 in a new process: map_next(0, Map, iterator) gives 33
     // pairs, because the 32nd pair starts the collision node, and the path 369.
     assert_eq!(
-        chunk_keys(&map, Term::Integer(0), Direction::Forward),
+        chunk_keys(&map, &Term::Integer(0), Direction::Forward),
         (keys[..33].to_vec(), Some(369))
     );
     // map_next(113, Map, iterator) selects the collision node at depth
     // 16, after the 16 elements of the path digit.
     assert_eq!(
-        chunk_keys(&map, Term::Integer(113), Direction::Forward),
+        chunk_keys(&map, &Term::Integer(113), Direction::Forward),
         (keys[31..].to_vec(), None)
     );
     // A path other than 0 has no limit of 32 pairs: -(2^59) reads as
     // 2^59, and 2^59 is a bignum. A leaf above the last element ends the path.
     for path in [-(1 << 59), 1 << 59] {
         assert_eq!(
-            chunk_keys(&map, Term::Integer(path), Direction::Forward),
+            chunk_keys(&map, &Term::Integer(path), Direction::Forward),
             (keys.clone(), None)
         );
     }
@@ -867,7 +874,7 @@ fn takes_a_whole_collision_node_in_a_chunk() {
     keys.extend(list(&after));
     let map = identity(keys.clone());
     assert_eq!(
-        chunk_keys(&map, Term::Integer(0), Direction::Backward),
+        chunk_keys(&map, &Term::Integer(0), Direction::Backward),
         (keys[3..].to_vec(), Some(97))
     );
     // A flatmap needs a small integer path.
@@ -888,11 +895,11 @@ fn fails_for_a_path_that_erts_returns_as_a_bignum_not_in_normal_form() {
     // groups (see becomes_a_hashmap_with_the_erts_order_above_32_keys),
     // so each group is in a node at level 15.
     let deep = [
-        329898321527737274,
-        446694106686689078,
-        413866500823436792,
-        -101714049538469044,
-        -74925715755171563,
+        329_898_321_527_737_274,
+        446_694_106_686_689_078,
+        413_866_500_823_436_792,
+        -101_714_049_538_469_044,
+        -74_925_715_755_171_563,
     ];
     let before = [
         319, 169, 371, 359, 160, 388, 136, 324, 348, 287, 296, 357, 239, 179, 289, 263, 313, 235,
@@ -911,7 +918,7 @@ fn fails_for_a_path_that_erts_returns_as_a_bignum_not_in_normal_form() {
     );
     // ERTS 29.1.1: map_next(1152921504606846994, Map, iterator) gives the last two pairs.
     assert_eq!(
-        chunk_keys(&map, Term::Integer((1 << 60) + 18), Direction::Forward),
+        chunk_keys(&map, &Term::Integer((1 << 60) + 18), Direction::Forward),
         (keys[32..].to_vec(), None)
     );
     let after = [
@@ -926,18 +933,18 @@ fn fails_for_a_path_that_erts_returns_as_a_bignum_not_in_normal_form() {
     );
     // ERTS 29.1.1: map_next(1152921504606847762, Map, []) gives the first four pairs.
     assert_eq!(
-        chunk_keys(&map, Term::Integer((1 << 60) + 786), Direction::Backward),
+        chunk_keys(&map, &Term::Integer((1 << 60) + 786), Direction::Backward),
         (keys[..4].to_vec(), None)
     );
     // A path of 15 elements is a bignum of one digit, in normal form only above 2^59 - 1.
     let mut elements = vec![0; 14];
-    assert_eq!(encode_path(elements.clone()), Ok(0));
+    assert_eq!(encode_path(&elements), Ok(0));
     elements.push(8);
-    assert_eq!(encode_path(elements.clone()), Ok(1 << 59));
+    assert_eq!(encode_path(&elements), Ok(1 << 59));
     *elements.last_mut().unwrap() = 7;
-    assert!(encode_path(elements.clone()).is_err());
+    assert!(encode_path(&elements).is_err());
     elements.extend([1, 1]);
-    assert!(encode_path(elements).is_err());
+    assert!(encode_path(&elements).is_err());
 }
 
 #[test]
@@ -1055,6 +1062,11 @@ const MAP_COST_KEY_SUM: i64 = MAP_COST_KEYS * (MAP_COST_KEYS + 1) / 2;
 /// ```rust,ignore
 /// cost("nothing", 1.0, 0, || 0);
 /// ```
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "a benchmark converts small counts to i64 and counts and nanosecond times to f64"
+)]
 fn cost(name: &str, calls: f64, expected: i64, body: impl Fn() -> i64) {
     let mut best = f64::MAX;
     for _ in 0..MAP_COST_RUNS {
@@ -1075,6 +1087,16 @@ fn cost(name: &str, calls: f64, expected: i64, body: impl Fn() -> i64) {
 /// over it, and a walk of `erts_internal:map_next/3`. Each number is the
 /// minimum of [`MAP_COST_RUNS`] runs, in nanosecond for each call.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "table of measurements: one `cost` call for each map operation, and the calls share the map"
+)]
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    reason = "a benchmark converts small counts to i64 and counts and nanosecond times to f64"
+)]
 fn records_the_map_operation_cost() {
     // Each key is its own value, so a read and a walk consume an integer and
     // the sum of a round is known.
@@ -1286,6 +1308,11 @@ fn put_maps(pairs: &[(Term, Term)]) -> Vec<Map> {
 /// Both paths replace the value of a key that every map already holds, so
 /// the timer compares one operation with the same operation. The maps are
 /// built before the timer, and the allocation of the maps stays out of it.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "a benchmark converts small counts to i64 and counts and nanosecond times to f64"
+)]
 fn put_cost(name: &str, pairs: &[(Term, Term)], body: impl Fn(&mut Map) -> i64) -> f64 {
     let mut maps = put_maps(pairs);
     let mut best = f64::MAX;
@@ -1313,6 +1340,11 @@ fn put_cost(name: &str, pairs: &[(Term, Term)], body: impl Fn(&mut Map) -> i64) 
 /// Each number is the minimum of [`MAP_COST_RUNS`] runs, in nanosecond for
 /// each call.
 #[test]
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_wrap,
+    reason = "a benchmark converts small counts to i64 and counts and nanosecond times to f64"
+)]
 fn prints_the_cost_of_a_map_put() {
     println!(
         "map put cost: minimum of {MAP_COST_RUNS} runs of {PUT_COST_ROUNDS} rounds, in nanosecond for each call"
@@ -1498,15 +1530,15 @@ fn counts_the_terms_of_the_values_of_a_drain() {
     // The walk of a drain queues the keys and the values of its leaves, and
     // it flushes that queue before a caller reads the number. A value that
     // holds a long list therefore gives the bytes of that list.
-    let width = 1024;
+    let width: i64 = 1024;
     let mut direct = crate::term::LiveBytes::new();
-    direct.term(&Term::list_from((0..width as i64).map(Term::Integer)));
+    direct.term(&Term::list_from((0..width).map(Term::Integer)));
     let expected = direct.bytes();
     assert!(expected > 0, "a list of cells holds live bytes");
     let mut map = Map::from_pairs(
         vec![(
             Term::Integer(0),
-            Term::list_from((0..width as i64).map(Term::Integer)),
+            Term::list_from((0..width).map(Term::Integer)),
         )],
         &test_atom_table(),
     )

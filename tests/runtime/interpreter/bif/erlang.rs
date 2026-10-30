@@ -5,6 +5,7 @@
 //! term, because a port needs `erlang:open_port/2` of `erlang.beam`.
 
 use super::*;
+use crate::runtime::interpreter::bif::item_reductions;
 use crate::term::Binary;
 use crate::{PortId, ProcessId};
 
@@ -116,19 +117,19 @@ fn reports_the_exiting_status_of_another_process() {
     let frame = code.mfa_frame("fixture", "main", 0).unwrap();
     let mut process = ProcessState::new(ProcessId(1), Start::Entry(frame), vec![]);
     process.exiting = Some(Term::static_atom("normal"));
-    let values = process_info_values(&code, &process, 0, 0, false, None).unwrap();
+    let values = process_info_values(&code, &process, 0, 0, InfoReader::Other, None).unwrap();
     assert_eq!(values.status, "exiting");
     process.exiting = None;
     process.waiting = true;
     assert_eq!(
-        process_info_values(&code, &process, 0, 0, false, None)
+        process_info_values(&code, &process, 0, 0, InfoReader::Other, None)
             .unwrap()
             .status,
         "waiting"
     );
     process.waiting = false;
     assert_eq!(
-        process_info_values(&code, &process, 0, 0, false, None)
+        process_info_values(&code, &process, 0, 0, InfoReader::Other, None)
             .unwrap()
             .status,
         "runnable"
@@ -146,13 +147,13 @@ fn reads_the_current_function_of_a_process_that_did_not_run() {
         function: Atom::from_static("apply").unwrap(),
     };
     let mut process = ProcessState::new(ProcessId(1), start, vec![Term::Integer(1)]);
-    let values = process_info_values(&code, &process, 0, 0, false, None).unwrap();
+    let values = process_info_values(&code, &process, 0, 0, InfoReader::Other, None).unwrap();
     assert!(matches!(
         values.current_function,
         Some(MfaNames::Atoms(_, _, 1))
     ));
     process.undefined_start = None;
-    let values = process_info_values(&code, &process, 0, 0, false, None).unwrap();
+    let values = process_info_values(&code, &process, 0, 0, InfoReader::Other, None).unwrap();
     assert!(values.current_function.is_none());
 }
 
@@ -166,14 +167,23 @@ fn returns_the_erlang_unique_integer_sequences() {
     assert_eq!(scheduler.unique_integer_positive().unwrap(), 2);
     assert_eq!(scheduler.unique_integer_positive().unwrap(), 4);
     assert_eq!(
-        scheduler.unique_monotonic_integer(false).unwrap(),
+        scheduler
+            .unique_monotonic_integer(UniqueRange::Signed)
+            .unwrap(),
         SMALL_INTEGER_MIN
     );
     assert_eq!(
-        scheduler.unique_monotonic_integer(false).unwrap(),
+        scheduler
+            .unique_monotonic_integer(UniqueRange::Signed)
+            .unwrap(),
         SMALL_INTEGER_MIN + 1
     );
-    assert_eq!(scheduler.unique_monotonic_integer(true).unwrap(), 3);
+    assert_eq!(
+        scheduler
+            .unique_monotonic_integer(UniqueRange::Positive)
+            .unwrap(),
+        3
+    );
 }
 
 #[test]
@@ -219,7 +229,7 @@ fn returns_the_on_load_flag_of_prepared_code() {
     let mut scheduler = Scheduler::new(AtomTable::new());
     scheduler.code = fixture_code();
     let frame = scheduler.code.mfa_frame("fixture", "main", 0).unwrap();
-    scheduler.start(frame, vec![], AllowAll.initial()).unwrap();
+    scheduler.start(frame, vec![], AllowAll.initial());
     scheduler.schedule_next().unwrap();
     let plain = BeamModule::new(
         "fixture".into(),
@@ -275,7 +285,7 @@ fn loads_over_old_code_and_returns_not_purged_for_current_and_old_code() {
     .unwrap();
     scheduler.code = CodeTable::new(HashMap::from([("fixture".into(), Arc::new(first))]));
     let frame = scheduler.code.mfa_frame("fixture", "main", 0).unwrap();
-    scheduler.start(frame, vec![], AllowAll.initial()).unwrap();
+    scheduler.start(frame, vec![], AllowAll.initial());
     scheduler.schedule_next().unwrap();
     assert_eq!(scheduler.code.delete("fixture"), Some(true));
     assert_eq!(scheduler.code.delete("fixture"), Some(false));
@@ -327,9 +337,7 @@ fn denies_a_code_delete_without_its_capability() {
     let mut scheduler = Scheduler::new(AtomTable::new());
     scheduler.code = fixture_code();
     let frame = scheduler.code.mfa_frame("fixture", "main", 0).unwrap();
-    scheduler
-        .start(frame, vec![], Vec::new())
-        .expect("the root starts");
+    scheduler.start(frame, vec![], Vec::new());
     scheduler.schedule_next().unwrap();
     let fixture = Term::Atom(scheduler.atoms.put("fixture").unwrap());
     let denied = delete_module(&mut scheduler, &fixture).unwrap();
@@ -445,7 +453,7 @@ fn keeps_the_on_load_flag_after_finish_loading() {
     let mut scheduler = Scheduler::new(AtomTable::new());
     scheduler.code = fixture_code();
     let frame = scheduler.code.mfa_frame("fixture", "main", 0).unwrap();
-    scheduler.start(frame, vec![], AllowAll.initial()).unwrap();
+    scheduler.start(frame, vec![], AllowAll.initial());
     scheduler.schedule_next().unwrap();
     let plain = BeamModule::new(
         "plain".into(),
@@ -499,7 +507,11 @@ fn charges_a_quarter_reduction_for_each_group_of_four_links() {
     let links = |count: usize| {
         Term::list_from(
             (0..count)
-                .map(|index| Term::Pid(ProcessId(index as u64)))
+                .map(|index| {
+                    Term::Pid(ProcessId(
+                        u64::try_from(index).expect("a count fits in u64"),
+                    ))
+                })
                 .collect::<Vec<_>>(),
         )
     };
@@ -510,7 +522,7 @@ fn charges_a_quarter_reduction_for_each_group_of_four_links() {
                 &item,
                 &Term::tuple(vec![item.clone(), links(count)]),
                 0,
-                false
+                MessageQueue::OnHeap
             ),
             reductions,
             "{count}"
@@ -522,7 +534,7 @@ fn charges_a_quarter_reduction_for_each_group_of_four_links() {
             &status,
             &Term::tuple(vec![status.clone(), Term::static_atom("running")]),
             8,
-            false
+            MessageQueue::OnHeap
         ),
         0
     );

@@ -140,10 +140,12 @@ impl NameTable {
     /// assert_eq!(names.name(names.intern("main")), "main");
     /// ```
     fn name(&self, id: NameId) -> &str {
-        &self.names[id.0 as usize]
+        &self.names[usize::try_from(id.0).expect("a name identity fits in usize")]
     }
 }
 
+/// A parsed BEAM module: its name, its exports, its instructions, and the
+/// tables that the instructions refer to.
 #[derive(Debug)]
 pub struct BeamModule {
     pub(crate) name: String,
@@ -429,8 +431,10 @@ fn resolve(
             let label = *target;
             match function_starts.get(&label) {
                 Some(Some(entry)) => {
-                    *function = entry.function as u32;
-                    *target = entry.start as u32;
+                    *function = u32::try_from(entry.function)
+                        .expect("a BEAM Code chunk holds fewer than 2^32 functions");
+                    *target = u32::try_from(entry.start)
+                        .expect("a BEAM Code chunk holds fewer than 2^32 instructions");
                 }
                 Some(None) => {
                     return Err(error(format!("entry label {label} has no function info")));
@@ -444,7 +448,7 @@ fn resolve(
         | Instruction::LoopReceiveEnd(target)
         | Instruction::Wait(target) => resolve_branch(target, jump_targets)?,
         Instruction::Catch { label, .. } | Instruction::WaitTimeout { label, .. } => {
-            resolve_branch(label, jump_targets)?
+            resolve_branch(label, jump_targets)?;
         }
         Instruction::Bif { fail_label, .. }
         | Instruction::Test { fail_label, .. }
@@ -532,8 +536,8 @@ fn resolve_branch(target: &mut u32, jump_targets: &LabelMap<usize>) -> Result<()
         .copied()
         .ok_or_else(|| error(format!("missing BEAM label {label}")))?;
     // A BEAM `Code` chunk is at most 2^32 - 1 bytes, so its instruction
-    // index is below 2^32 and the cast keeps every value.
-    *target = index as u32;
+    // index is below 2^32 and the conversion keeps every value.
+    *target = u32::try_from(index).expect("an instruction index is below 2^32");
     Ok(())
 }
 
@@ -603,6 +607,10 @@ impl BeamModule {
     /// let module = BeamModule::load(CONSTANT)?;
     /// assert!(BeamModule::load(b"not beam").is_err());
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`BeamError`] when `bytes` is not a valid BEAM file.
     pub fn load(bytes: &[u8]) -> Result<Self, BeamError> {
         code::parse(bytes, &AtomTable::new())
     }
@@ -616,6 +624,13 @@ impl BeamModule {
     /// let module = BeamModule::load(CONSTANT)?;
     /// assert_eq!(module.execute("number", &[])?, Term::Integer(7));
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`BeamError`] when `arguments` has more elements than a
+    /// BEAM arity allows, when the module has no export `function` of that
+    /// arity, when the entry runs an instruction other than a move of a
+    /// constant to `x0` and a return, or when the entry never sets `x0`.
     pub fn execute(&self, function: &str, arguments: &[Term]) -> Result<Term, BeamError> {
         let arity = checked_arity(arguments.len())?;
         let entry = self

@@ -55,6 +55,10 @@ use super::Term;
 struct BinaryView {
     /// The array of the bytes of the source binary, from its first byte.
     /// The array is empty when the view keeps its bytes in `chunks`.
+    #[expect(
+        clippy::rc_buffer,
+        reason = "`Binary` shares byte arrays as `Arc<Vec<u8>>` because `append_in_place` grows the vector through `Arc::get_mut`; an `Arc<[u8]>` cannot grow"
+    )]
     bytes: Arc<Vec<u8>>,
     /// The chunks of a view that an append built, or `None` for each other
     /// view. Each chunk is an immutable array, and an append shares the
@@ -64,6 +68,10 @@ struct BinaryView {
     chunks: Option<Arc<Chunks>>,
     /// The bytes of `chunks` joined in one array, built at the first read
     /// that needs the contiguous bytes. `None` until such a read.
+    #[expect(
+        clippy::rc_buffer,
+        reason = "`Binary` shares byte arrays as `Arc<Vec<u8>>` because `append_in_place` grows the vector through `Arc::get_mut`; an `Arc<[u8]>` cannot grow"
+    )]
     flat: OnceLock<Arc<Vec<u8>>>,
     /// The offset in bits of the first bit of this binary in the array.
     offset: usize,
@@ -74,6 +82,10 @@ struct BinaryView {
     /// offset is on a byte boundary, because the view is then a slice of the
     /// array with no copy. The `Arc` keeps a copy of such a binary O(1), as
     /// a copy of a byte-aligned binary is.
+    #[expect(
+        clippy::rc_buffer,
+        reason = "`Binary` shares byte arrays as `Arc<Vec<u8>>` because `append_in_place` grows the vector through `Arc::get_mut`; an `Arc<[u8]>` cannot grow"
+    )]
     packed: Option<Arc<Vec<u8>>>,
     /// Whether the view is a sub-binary of an off-heap binary even when it
     /// holds at most 512 bits, as each element of ERTS `term_to_iovec/1,2`
@@ -86,6 +98,10 @@ struct BinaryView {
 /// append built keeps its descriptor size.
 struct Chunks {
     /// The chunks, each one an immutable array.
+    #[expect(
+        clippy::rc_buffer,
+        reason = "`Binary` shares byte arrays as `Arc<Vec<u8>>` because `append_in_place` grows the vector through `Arc::get_mut`; an `Arc<[u8]>` cannot grow"
+    )]
     arrays: Vec<Arc<Vec<u8>>>,
     /// The byte offset of the end of each chunk, in order. The view builds
     /// the index with the chunk list, in the same walk of the chunks that
@@ -128,6 +144,10 @@ impl Binary {
     /// assert_eq!(bytes.array().len(), 2);
     /// ```
     #[cfg(test)]
+    #[expect(
+        clippy::rc_buffer,
+        reason = "`Binary` shares byte arrays as `Arc<Vec<u8>>` because `append_in_place` grows the vector through `Arc::get_mut`; an `Arc<[u8]>` cannot grow"
+    )]
     pub(crate) fn array(&self) -> &Arc<Vec<u8>> {
         &self.0.bytes
     }
@@ -180,6 +200,10 @@ impl Binary {
     /// let bytes = Binary::from(b"ab".to_vec());
     /// assert_eq!(bytes.backing().len(), 2);
     /// ```
+    #[expect(
+        clippy::rc_buffer,
+        reason = "`Binary` shares byte arrays as `Arc<Vec<u8>>` because `append_in_place` grows the vector through `Arc::get_mut`; an `Arc<[u8]>` cannot grow"
+    )]
     pub(super) fn backing(&self) -> &Arc<Vec<u8>> {
         &self.0.bytes
     }
@@ -208,6 +232,10 @@ impl Binary {
     /// assert!(Binary::from(b"ab".to_vec()).flat_backing().is_empty());
     /// ```
     #[cfg(test)]
+    #[expect(
+        clippy::rc_buffer,
+        reason = "`Binary` shares byte arrays as `Arc<Vec<u8>>` because `append_in_place` grows the vector through `Arc::get_mut`; an `Arc<[u8]>` cannot grow"
+    )]
     pub(super) fn flat_backing(&self) -> &Arc<Vec<u8>> {
         self.0.flat_backing()
     }
@@ -236,9 +264,9 @@ impl Binary {
     ///
     /// ```rust,ignore
     /// let bytes = Binary::from(b"abc".to_vec());
-    /// assert_eq!(bytes.view_bytes(), std::mem::size_of::<usize>() * 4);
+    /// assert_eq!(Binary::view_bytes(), std::mem::size_of::<usize>() * 4);
     /// ```
-    pub(super) fn view_bytes(&self) -> usize {
+    pub(super) fn view_bytes() -> usize {
         std::mem::size_of::<BinaryView>()
     }
 
@@ -358,6 +386,10 @@ impl Binary {
     /// assert!(view.packed().is_some());
     /// ```
     #[cfg(test)]
+    #[expect(
+        clippy::rc_buffer,
+        reason = "`Binary` shares byte arrays as `Arc<Vec<u8>>` because `append_in_place` grows the vector through `Arc::get_mut`; an `Arc<[u8]>` cannot grow"
+    )]
     pub(crate) fn packed(&self) -> Option<&Arc<Vec<u8>>> {
         self.0.packed.as_ref()
     }
@@ -370,6 +402,10 @@ impl Binary {
     /// ```rust,ignore
     /// assert!(Binary::from(&[0xC3]).bits(4, 8).packed_backing().is_some());
     /// ```
+    #[expect(
+        clippy::rc_buffer,
+        reason = "`Binary` shares byte arrays as `Arc<Vec<u8>>` because `append_in_place` grows the vector through `Arc::get_mut`; an `Arc<[u8]>` cannot grow"
+    )]
     pub(super) fn packed_backing(&self) -> Option<&Arc<Vec<u8>>> {
         self.0.packed.as_ref()
     }
@@ -527,6 +563,10 @@ impl Binary {
     /// let suffix = vec![Arc::new(b"cd".to_vec())];
     /// assert_eq!(Binary::concat_arrays(&prefix, suffix), Binary::from(b"abcd".to_vec()));
     /// ```
+    #[expect(
+        clippy::rc_buffer,
+        reason = "`Binary` shares byte arrays as `Arc<Vec<u8>>` because `append_in_place` grows the vector through `Arc::get_mut`; an `Arc<[u8]>` cannot grow"
+    )]
     pub(crate) fn concat_arrays(prefix: &Binary, suffix: Vec<Arc<Vec<u8>>>) -> Binary {
         let mut chunks = prefix.chunks();
         let appended: usize = suffix.iter().map(|chunk| chunk.len()).sum();
@@ -607,6 +647,10 @@ impl Binary {
     /// let binary = Binary::from(b"ab".to_vec());
     /// assert_eq!(binary.chunks().len(), 1);
     /// ```
+    #[expect(
+        clippy::rc_buffer,
+        reason = "`Binary` shares byte arrays as `Arc<Vec<u8>>` because `append_in_place` grows the vector through `Arc::get_mut`; an `Arc<[u8]>` cannot grow"
+    )]
     pub(crate) fn chunks(&self) -> Vec<Arc<Vec<u8>>> {
         let view = &self.0;
         match &view.chunks {
@@ -694,6 +738,10 @@ impl Binary {
     /// let chunk = Arc::new(b"ab".to_vec());
     /// assert_eq!(Binary::from_chunks(vec![chunk]), Binary::from(b"ab".to_vec()));
     /// ```
+    #[expect(
+        clippy::rc_buffer,
+        reason = "`Binary` shares byte arrays as `Arc<Vec<u8>>` because `append_in_place` grows the vector through `Arc::get_mut`; an `Arc<[u8]>` cannot grow"
+    )]
     pub(crate) fn from_chunks(chunks: Vec<Arc<Vec<u8>>>) -> Binary {
         if let [chunk] = chunks.as_slice() {
             let size = chunk.len() * BITS_PER_BYTE;
@@ -756,6 +804,10 @@ impl BinaryView {
     /// Return the one array that holds the bytes of this view. A view that
     /// an append built joins its chunks in one array at the first call, so
     /// the reader of the contiguous bytes pays one copy of the chunks.
+    #[expect(
+        clippy::rc_buffer,
+        reason = "`Binary` shares byte arrays as `Arc<Vec<u8>>` because `append_in_place` grows the vector through `Arc::get_mut`; an `Arc<[u8]>` cannot grow"
+    )]
     fn flat_backing(&self) -> &Arc<Vec<u8>> {
         match &self.chunks {
             None => &self.bytes,

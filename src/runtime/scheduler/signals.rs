@@ -135,10 +135,10 @@ impl Scheduler {
     pub(in crate::runtime) fn demonitor_file(&mut self, owner: ProcessId, file: Reference) {
         let current = self.current_process_mut();
         let monitor = TargetMonitor::File(file);
-        let owned = current.id == owner;
+        let is_owner = current.id == owner;
         current
             .monitored_by
-            .retain(|&entry| !owned || entry != monitor);
+            .retain(|&entry| !is_owner || entry != monitor);
     }
 
     /// Send the signal `signal` to the process `target`, as
@@ -168,7 +168,7 @@ impl Scheduler {
         target: ProcessId,
         signal: Signal,
     ) -> Result<(), Box<Signal>> {
-        if !self.processes.contains_key(&target)
+        if !self.processes.contains_key(target)
             && let Some(index) = self.remote_owner(target)
         {
             self.deliver_remote(index, target, Held::Signal { sender, signal });
@@ -206,14 +206,14 @@ impl Scheduler {
         signal: Signal,
     ) -> Result<(), Box<Signal>> {
         if let Some(pending) = self.take_pending_monitor(target) {
-            if self.processes.contains_key(&target) {
+            if self.processes.contains_key(target) {
                 self.queue_signal(sender, target, monitor_signal(pending));
             } else {
                 self.pending_monitor_failed(sender, pending);
             }
             self.release_held();
         }
-        if !self.processes.contains_key(&target) {
+        if !self.processes.contains_key(target) {
             return Err(Box::new(signal));
         }
         self.queue_signal(sender, target, signal);
@@ -230,10 +230,7 @@ impl Scheduler {
     /// scheduler.queue_signal(Some(caller), child, Signal::Flush);
     /// ```
     fn queue_signal(&mut self, sender: Option<ProcessId>, target: ProcessId, signal: Signal) {
-        let process = self
-            .processes
-            .get_mut(&target)
-            .expect("the target is alive");
+        let process = self.processes.get_mut(target).expect("the target is alive");
         process.self_signals |= sender == Some(target);
         process.mailbox.push_signal(signal);
         self.enqueue(target);
@@ -288,7 +285,7 @@ impl Scheduler {
         to: ProcessId,
         pending: Monitor,
     ) {
-        if self.processes.contains_key(&to) {
+        if self.processes.contains_key(to) {
             self.queue_signal(Some(pending.watcher), to, monitor_signal(pending));
         } else if let Some(index) = self.remote_owner(to) {
             let signal = monitor_signal(pending);
@@ -301,8 +298,8 @@ impl Scheduler {
 
     /// Give the ERTS response of the dead target `target` for a signal that
     /// a scheduler of another thread sent before the target exited.
-    pub(in crate::runtime) fn dead_target_signal(&mut self, target: ProcessId, signal: Signal) {
-        match signal {
+    pub(in crate::runtime) fn dead_target_signal(&mut self, target: ProcessId, signal: &Signal) {
+        match *signal {
             Signal::Monitor { watcher, reference } => {
                 self.send_monitor_down(None, watcher, reference, Term::static_atom("noproc"));
             }
@@ -393,7 +390,7 @@ impl Scheduler {
         match held {
             Held::Message { from, term } => {
                 self.node
-                    .send_message(index, Some(from), term, target, pending)
+                    .send_message(index, Some(from), term, target, pending);
             }
             Held::Signal { sender, signal } => self
                 .node
@@ -507,7 +504,7 @@ impl Scheduler {
         point: HandlingPoint,
     ) -> Result<i32, BeamError> {
         self.drain_inbox();
-        let process = self.processes.get_mut(&id).expect("the process is alive");
+        let process = self.processes.get_mut(id).expect("the process is alive");
         if point == HandlingPoint::ScheduleIn {
             process.mailbox.fetch();
         }
@@ -520,7 +517,7 @@ impl Scheduler {
         let mut count = 0;
         let mut walk = process.mailbox.walk();
         loop {
-            let process = self.processes.get_mut(&id).expect("the process is alive");
+            let process = self.processes.get_mut(id).expect("the process is alive");
             let Some(step) = process.mailbox.next_signal(&mut walk) else {
                 break;
             };
@@ -538,7 +535,7 @@ impl Scheduler {
                 break;
             }
         }
-        let process = self.processes.get_mut(&id).expect("the process is alive");
+        let process = self.processes.get_mut(id).expect("the process is alive");
         process.mailbox.end_walk(walk);
         if !process.mailbox.has_incoming() {
             process.self_signals = false;
@@ -578,6 +575,10 @@ impl Scheduler {
     /// ```rust,ignore
     /// let handled = scheduler.handle_signal(id, &mut walk, node, Signal::Flush, HandlingPoint::Running)?;
     /// ```
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm for each signal type, as `erts_proc_sig_handle_incoming` in `erl_proc_sig_queue.c` has one case for each signal"
+    )]
     fn handle_signal(
         &mut self,
         id: ProcessId,
@@ -776,7 +777,11 @@ impl Scheduler {
             } => {
                 self.handled(id, node);
                 let refers = self.check_process_code(id, &module);
-                self.send_message(id, requester, check_process_code_reply(tag, refers));
+                self.send_message(
+                    id,
+                    requester,
+                    check_process_code_reply(tag, Term::from(refers)),
+                );
                 0
             }
             Signal::ProcessInfo {
@@ -791,7 +796,7 @@ impl Scheduler {
                     HandlingPoint::ScheduleIn => 0,
                 };
                 let registered = self.registered_name_of(id);
-                let process = self.processes.get_mut(&id).expect("the process is alive");
+                let process = self.processes.get_mut(id).expect("the process is alive");
                 let messages = process.mailbox.messages_before(node);
                 // The item name comes from the atom table, so remove the
                 // node here and keep the two field borrows separate.
@@ -801,7 +806,7 @@ impl Scheduler {
                     atoms: &self.atoms,
                     current,
                     messages,
-                    caller: false,
+                    reader: bif::erlang::InfoReader::Other,
                     registered_name: registered,
                 };
                 let info = request
@@ -823,7 +828,7 @@ impl Scheduler {
     /// scheduler.handled(id, node).links.insert(from, 0);
     /// ```
     fn handled(&mut self, id: ProcessId, node: NodeId) -> &mut ProcessState {
-        let process = self.processes.get_mut(&id).expect("the process is alive");
+        let process = self.processes.get_mut(id).expect("the process is alive");
         process.mailbox.remove(node);
         process
     }
@@ -867,7 +872,7 @@ impl Scheduler {
             normal_kills,
             alias,
         } = exit;
-        let process = self.processes.get_mut(&id).expect("the process is alive");
+        let process = self.processes.get_mut(id).expect("the process is alive");
         let active = match alias {
             Some(alias) => process
                 .monitors
@@ -919,7 +924,7 @@ impl Scheduler {
         reason: Term,
     ) -> i32 {
         let Some(monitor) = self.remove_origin_monitor(id, reference) else {
-            let process = self.processes.get_mut(&id).expect("the process is alive");
+            let process = self.processes.get_mut(id).expect("the process is alive");
             process.mailbox.remove(node);
             return 0;
         };
@@ -931,7 +936,7 @@ impl Scheduler {
             monitor.item,
             reason,
         ]);
-        let process = self.processes.get_mut(&id).expect("the process is alive");
+        let process = self.processes.get_mut(id).expect("the process is alive");
         process.mailbox.convert(walk, node, down);
         self.activate(id);
         extra
@@ -959,7 +964,7 @@ impl Scheduler {
         alias: Reference,
         message: Term,
     ) -> i32 {
-        let process = self.processes.get_mut(&id).expect("the process is alive");
+        let process = self.processes.get_mut(id).expect("the process is alive");
         let Some(mode) = process.monitors.get(&alias).and_then(|origin| origin.alias) else {
             process.mailbox.remove(node);
             return 2;
@@ -972,7 +977,7 @@ impl Scheduler {
             // (`erl_proc_sig_queue.c:6064-6107`).
             self.end_monitor(id, alias, &monitor);
         }
-        let process = self.processes.get_mut(&id).expect("the process is alive");
+        let process = self.processes.get_mut(id).expect("the process is alive");
         process.mailbox.convert(walk, node, message);
         self.activate(id);
         1
@@ -1001,17 +1006,13 @@ impl Scheduler {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert!(scheduler.handle_exit_signals(&mut process, 3850)?);
+    /// assert!(scheduler.handle_exit_signals(&mut process, 3850));
     /// ```
-    ///
-    /// # Errors
-    ///
-    /// The error of [`Self::port_link_exit`].
     pub(in crate::runtime) fn handle_exit_signals(
         &mut self,
         process: &mut ProcessState,
         reds: i32,
-    ) -> Result<bool, BeamError> {
+    ) -> bool {
         let id = process.id;
         let limit = SIGNAL_COUNT_FACTOR * reds;
         let mut count = 0;
@@ -1087,14 +1088,18 @@ impl Scheduler {
                     reference,
                     ..
                 } => {
-                    self.send_message(id, requester, reply(reference, Term::static_atom("badarg")))
+                    self.send_message(id, requester, reply(reference, Term::static_atom("badarg")));
                 }
                 Signal::IsAlive {
                     requester,
                     reference,
                 } => self.send_message(id, requester, reply(reference, Term::static_atom("false"))),
                 Signal::CheckProcessCode { requester, tag, .. } => {
-                    self.send_message(id, requester, check_process_code_reply(tag, false))
+                    self.send_message(
+                        id,
+                        requester,
+                        check_process_code_reply(tag, Term::from(false)),
+                    );
                 }
                 Signal::ProcessInfo {
                     requester,
@@ -1112,7 +1117,7 @@ impl Scheduler {
             }
         }
         process.mailbox.end_walk(walk);
-        Ok(!process.mailbox.has_middle())
+        !process.mailbox.has_middle()
     }
 
     /// Make messages ready for `loop_rec` of the current process at the end

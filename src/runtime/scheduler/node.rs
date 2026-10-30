@@ -157,6 +157,15 @@ struct BifTimers {
     trees: HashMap<ProcessId, MonitorLinkTree<TimerReference, ()>>,
 }
 
+/// Where the receiver of a BIF timer lives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::runtime) enum ReceiverSite {
+    /// The scheduler that registers the timer.
+    Local,
+    /// Another scheduler.
+    Remote,
+}
+
 /// The owner of a registered name: a process or a port.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::runtime) enum Named {
@@ -358,8 +367,8 @@ impl Node {
                 local_node_hash: OnceLock::new(),
                 ets: Arc::default(),
                 code: super::code::NodeCode::default(),
-                atomics: Default::default(),
-                counters: Default::default(),
+                atomics: crate::runtime::atomics::AtomicArrays::default(),
+                counters: crate::runtime::atomics::AtomicArrays::default(),
                 resources: NodeResources::default(),
                 poll: super::poll::NodePoll::new(count),
                 system_logger: Mutex::new(Term::static_atom("logger")),
@@ -447,8 +456,8 @@ impl Node {
             local_node_hash: OnceLock::new(),
             ets: Arc::default(),
             code: super::code::NodeCode::default(),
-            atomics: Default::default(),
-            counters: Default::default(),
+            atomics: crate::runtime::atomics::AtomicArrays::default(),
+            counters: crate::runtime::atomics::AtomicArrays::default(),
             resources: NodeResources::default(),
             poll: super::poll::NodePoll::new(1),
             system_logger: Mutex::new(Term::static_atom("logger")),
@@ -669,21 +678,35 @@ impl Node {
     }
 
     /// Mark the scheduler `index` as a scheduler that has no runnable
-    /// process (`hungry` true) or that has work again (`hungry` false). The
-    /// mark changes under the lock of the idle count, as each steal reads it
-    /// ([`Self::give_work`]). Thus after a call with `false`, each process
-    /// that a steal gave the scheduler is in its inbox, and the scheduler
-    /// takes it at its next step, before it runs a process.
+    /// process. The mark changes under the lock of the idle count, as each
+    /// steal reads it ([`Self::give_work`]). Thus after
+    /// [`Self::clear_hungry`], each process that a steal gave the scheduler is
+    /// in its inbox, and the scheduler takes it at its next step, before it
+    /// runs a process.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// node.set_hungry(1, true);
+    /// node.set_hungry(1);
     /// assert!(node.has_hungry(0));
     /// ```
-    pub(in crate::runtime) fn set_hungry(&self, index: usize, hungry: bool) {
+    pub(in crate::runtime) fn set_hungry(&self, index: usize) {
         let _idle = self.idle.lock().expect("the idle count is not poisoned");
-        self.hungry[index].store(hungry, Ordering::Relaxed);
+        self.hungry[index].store(true, Ordering::Relaxed);
+    }
+
+    /// Mark the scheduler `index` as one that has work again, as
+    /// [`Self::set_hungry`] marks it hungry.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// node.clear_hungry(1);
+    /// assert!(!node.has_hungry(0));
+    /// ```
+    pub(in crate::runtime) fn clear_hungry(&self, index: usize) {
+        let _idle = self.idle.lock().expect("the idle count is not poisoned");
+        self.hungry[index].store(false, Ordering::Relaxed);
     }
 
     /// Return whether a scheduler other than `index` has no runnable
@@ -716,7 +739,7 @@ impl Node {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// node.set_hungry(1, true);
+    /// node.set_hungry(1);
     /// assert_eq!(node.give_work(0, || vec![(process, None)]), 1);
     /// assert!(!node.has_hungry(0));
     /// ```
@@ -949,7 +972,7 @@ impl Node {
 
     /// Record the BIF timer `reference` of the scheduler `index` with the
     /// end tick `end` for `receiver`, and put it into the timer tree of a
-    /// receiver process. For a receiver of another scheduler (`remote`),
+    /// receiver process. For a receiver of another scheduler ([`ReceiverSite::Remote`]),
     /// return false and record nothing when it is not a live process. The
     /// check holds the timer table lock, and the exit of the receiver marks
     /// it as exiting before it takes its tree
@@ -961,11 +984,11 @@ impl Node {
         index: usize,
         end: i64,
         receiver: Option<ProcessId>,
-        remote: bool,
+        site: ReceiverSite,
     ) -> bool {
         let mut timers = self.timers.lock().expect("the timer table is not poisoned");
         if let Some(receiver) = receiver {
-            if remote && self.live_owner(receiver).is_none() {
+            if site == ReceiverSite::Remote && self.live_owner(receiver).is_none() {
                 return false;
             }
             timers

@@ -6,7 +6,7 @@
 //! error.
 
 use super::BifResult::Value;
-use super::*;
+use super::{BeamError, BifContext, BifResult, Term, error, to_i64, to_u64};
 use crate::term::{AtomTable, Binary};
 
 /// The HTTP methods that `packet_parse_http` returns as atoms, in the order
@@ -75,6 +75,16 @@ const HEADERS: [&str; 52] = [
 /// names (`HTTP_MAX_NAME_LEN`, `packet_parser.c:64`).
 const MAX_NAME_LEN: usize = 50;
 
+/// The kind of line that an HTTP packet holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HttpLine {
+    /// A request or response line (`http_bin`).
+    Start,
+    /// A header line (`httph_bin`), which a line that starts with a space
+    /// continues.
+    Header,
+}
+
 /// A packet type of `decode_packet_3` (`TCP_PB_*`, `packet_parser.h`).
 enum Kind {
     /// `http_bin`: a request or response line, with binary strings.
@@ -123,7 +133,7 @@ pub(super) fn decode_packet(
         if !(0..=i64::from(u32::MAX)).contains(value) {
             return Ok(BifResult::badarg());
         }
-        let value = *value as u64;
+        let value = u64::try_from(*value).expect("the range check keeps the value in 0..=u32::MAX");
         match context.scheduler.atoms.name_of(name) {
             "packet_size" => packet_size = value,
             "line_length" => line_length = value,
@@ -134,9 +144,9 @@ pub(super) fn decode_packet(
             _ => return Ok(BifResult::badarg()),
         }
     }
-    let header = match kind {
-        Kind::HttpBin => false,
-        Kind::HttpHBin => true,
+    let line = match kind {
+        Kind::HttpBin => HttpLine::Start,
+        Kind::HttpHBin => HttpLine::Header,
         Kind::Unsupported(name) => {
             if !binary.bit_size().is_multiple_of(8) {
                 return Ok(BifResult::badarg());
@@ -149,7 +159,7 @@ pub(super) fn decode_packet(
     let Some(bytes) = binary.bytes() else {
         return Ok(BifResult::badarg());
     };
-    let length = packet_length(bytes, packet_size, line_length, header);
+    let length = packet_length(bytes, packet_size, line_length, line);
     if length < 0 {
         return Ok(Value(Term::tuple(vec![
             atom(context, "error")?,
@@ -165,7 +175,7 @@ pub(super) fn decode_packet(
     // An HTTP packet length is at most the size of the subject, so the
     // `packet_sz > bin_sz` case of `decode_packet_3` cannot occur.
     let packet_size = usize::try_from(length).expect("an HTTP packet length fits a usize");
-    let packet = parse_http(&context.scheduler.atoms, &bytes[..packet_size], header)?;
+    let packet = parse_http(&context.scheduler.atoms, &bytes[..packet_size], line)?;
     // The rest is a sub-binary of the subject, as
     // `erts_make_sub_binary` gives it (`erl_bif_port.c:1602-1604`).
     let rest = Term::Binary(binary.bits(packet_size * 8, binary.bit_size()));
@@ -196,7 +206,7 @@ fn kind(context: &BifContext<'_>, term: &Term) -> Option<Kind> {
 /// packet or line (`packet_get_length`, `packet_parser.c:390-450`). A
 /// `header` packet continues a line that starts with a space after a
 /// newline (`packet_parser.c:431-436`).
-fn packet_length(bytes: &[u8], packet_size: u64, line_length: u64, header: bool) -> i64 {
+fn packet_length(bytes: &[u8], packet_size: u64, line_length: u64, form: HttpLine) -> i64 {
     let n = bytes.len();
     let max_length = if packet_size == 0 {
         line_length
@@ -209,14 +219,14 @@ fn packet_length(bytes: &[u8], packet_size: u64, line_length: u64, header: bool)
     let mut start = 0;
     loop {
         let Some(offset) = bytes[start..].iter().position(|byte| *byte == b'\n') else {
-            if max_length != 0 && n as u64 >= max_length {
+            if max_length != 0 && to_u64(n) >= max_length {
                 return -1;
             }
             return 0;
         };
         let end = start + offset + 1;
-        if !header {
-            if max_length != 0 && end as u64 > max_length {
+        if form == HttpLine::Start {
+            if max_length != 0 && to_u64(end) > max_length {
                 return -1;
             }
             return i64::try_from(end).expect("a packet length fits an i64");
@@ -227,12 +237,12 @@ fn packet_length(bytes: &[u8], packet_size: u64, line_length: u64, header: bool)
                 start = end;
                 continue;
             }
-            if max_length != 0 && end as u64 > max_length {
+            if max_length != 0 && to_u64(end) > max_length {
                 return -1;
             }
             return i64::try_from(end).expect("a packet length fits an i64");
         }
-        if max_length != 0 && end as u64 > max_length {
+        if max_length != 0 && to_u64(end) > max_length {
             return -1;
         }
         return 0;
@@ -242,8 +252,8 @@ fn packet_length(bytes: &[u8], packet_size: u64, line_length: u64, header: bool)
 /// Return the packet of an HTTP line, as `packet_parse_http`
 /// (`packet_parser.c:662-862`) gives it, or the `{http_error, Line}` packet
 /// of a line that it cannot parse (`packet_parse`, `packet_parser.h:155-159`).
-fn parse_http(atoms: &AtomTable, bytes: &[u8], header: bool) -> Result<Term, BeamError> {
-    match line(atoms, bytes, header)? {
+fn parse_http(atoms: &AtomTable, bytes: &[u8], form: HttpLine) -> Result<Term, BeamError> {
+    match line(atoms, bytes, form)? {
         Some(packet) => Ok(packet),
         None => Ok(Term::tuple(vec![
             Term::Atom(atoms.put("http_error")?),
@@ -255,7 +265,7 @@ fn parse_http(atoms: &AtomTable, bytes: &[u8], header: bool) -> Result<Term, Bea
 /// Return the packet of one HTTP line, or `None` for a line that
 /// `packet_parse_http` refuses (`packet_parser.c:662-862`). The line is
 /// `bytes` without the trailing CRLF (`packet_parser.c:669-673`).
-fn line(atoms: &AtomTable, bytes: &[u8], header: bool) -> Result<Option<Term>, BeamError> {
+fn line(atoms: &AtomTable, bytes: &[u8], form: HttpLine) -> Result<Option<Term>, BeamError> {
     // `packet_length` gives a packet only after a newline, so the last byte
     // is always `\n`.
     let n = if bytes.len() >= 2 && bytes[bytes.len() - 2] == b'\r' {
@@ -263,7 +273,7 @@ fn line(atoms: &AtomTable, bytes: &[u8], header: bool) -> Result<Option<Term>, B
     } else {
         bytes.len() - 1
     };
-    if header {
+    if form == HttpLine::Header {
         return header_line(atoms, bytes, n);
     }
     if n >= 5 && &bytes[..5] == b"HTTP/" {
@@ -480,7 +490,7 @@ fn header_line(atoms: &AtomTable, bytes: &[u8], n: usize) -> Result<Option<Term>
     };
     Ok(Some(Term::tuple(vec![
         Term::Atom(atoms.put("http_header")?),
-        Term::Integer(bit as i64),
+        Term::Integer(to_i64(bit)),
         header,
         binary(&bytes[..name_len]),
         binary(&bytes[ptr..ptr + left]),

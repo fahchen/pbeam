@@ -65,15 +65,14 @@ impl KnownNodes {
     /// ```
     pub(super) fn send(&mut self, name: &Atom, now: i64) {
         self.expire(now);
-        match self.used.get_mut(&name.index()) {
-            Some(used) => *used = true,
-            None => {
-                let order = self.next;
-                self.next += 1;
-                self.used.insert(name.index(), false);
-                self.order.insert(order, name.clone());
-                self.timers.push(Reverse((now + DELETE_DELAY, order)));
-            }
+        if let Some(used) = self.used.get_mut(&name.index()) {
+            *used = true;
+        } else {
+            let order = self.next;
+            self.next += 1;
+            self.used.insert(name.index(), false);
+            self.order.insert(order, name.clone());
+            self.timers.push(Reverse((now + DELETE_DELAY, order)));
         }
     }
 

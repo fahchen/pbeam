@@ -13,7 +13,7 @@ use order::KeyOrder;
 
 use crate::error::BeamError;
 use crate::term::atom_hash;
-use crate::term::{AtomTable, LiveBytes, ProcessId, Reference, Term, internal_hash};
+use crate::term::{AtomTable, Direction, LiveBytes, ProcessId, Reference, Term, internal_hash};
 
 /// The number of slots of the first segment of a hash table, which a new
 /// table has (`FIRST_SEGSZ`, `erl_db_hash.c:164-165`).
@@ -23,7 +23,7 @@ const FIRST_SEGMENT_SLOTS: usize = 256;
 const SEGMENT_SLOTS: usize = 2048;
 /// The reductions of a segment that the exit of the owner frees, without its
 /// objects (`EXT_SEGSZ/64`, `erl_db_hash.c:3141`).
-const SEGMENT_REDUCTIONS: i32 = (SEGMENT_SLOTS / 64) as i32;
+const SEGMENT_REDUCTIONS: usize = SEGMENT_SLOTS / 64;
 /// The fewest slots with which a table can shrink: one more segment than two
 /// segments (`FIRST_SEGSZ + 2*EXT_SEGSZ`, `erl_db_hash.c:3382`).
 const SHRINK_SLOTS: usize = FIRST_SEGMENT_SLOTS + 2 * SEGMENT_SLOTS;
@@ -185,7 +185,7 @@ pub(super) struct Table {
     owner: ProcessId,
     /// The table type, as `tb->common.status & (DB_SET | DB_BAG |
     /// DB_DUPLICATE_BAG)`.
-    table_type: TableType,
+    kind: TableType,
     /// Which other processes can read and write the table.
     access: Access,
     /// The 1-based key position, as the C `int` `tb->common.keypos`
@@ -391,14 +391,14 @@ impl Busy {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let busy = Busy::new(ProcessId(0), vec![vec![test_atom("k")]], false);
+    /// let busy = Busy::new(ProcessId(0), vec![vec![test_atom("k")]], InsertKind::Insert);
     /// assert_eq!(busy.walked, 0);
     /// ```
-    pub(super) fn new(owner: ProcessId, objects: Vec<Vec<Term>>, walk: bool) -> Busy {
+    pub(super) fn new(owner: ProcessId, objects: Vec<Vec<Term>>, kind: InsertKind) -> Busy {
         Busy {
             owner,
             objects,
-            walk,
+            walk: kind == InsertKind::InsertNew,
             walked: 0,
             found: false,
             inserted: 0,
@@ -425,17 +425,42 @@ impl Busy {
     }
 }
 
+/// Return a key hash as a `usize`: `HashValue` is a `UWord`, so the hash fits.
+fn hash_word(hash: u64) -> usize {
+    usize::try_from(hash).expect("a u64 fits in usize on a 64-bit host")
+}
+
 /// Return the bucket of the stored key hash `hash` for a table of `buckets`
 /// buckets, as `hash_to_ix` gives it (`erl_db_hash.c:199-209`).
 fn stored_bucket(hash: u64, buckets: usize) -> usize {
     let mask = buckets.next_power_of_two() - 1;
-    // `HashValue` is a `UWord`, so the key hash fits.
-    let bucket = hash as usize & mask;
+    let bucket = hash_word(hash) & mask;
     if bucket >= buckets {
         bucket & (mask >> 1)
     } else {
         bucket
     }
+}
+
+/// The options that `ets:info/2` gives for a table.
+pub(super) struct TableOptions {
+    /// The `write_concurrency` option (`table_info`, `erl_db.c:5487-5501`).
+    pub(super) write_concurrency: Term,
+    /// The `read_concurrency` option (`erl_db.c:5502-5503`).
+    pub(super) read_concurrency: bool,
+    /// The `decentralized_counters` option (`erl_db.c:5516-5517`).
+    pub(super) decentralized_counters: bool,
+    /// The `compressed` option (`erl_db.c:5512-5513`).
+    pub(super) compressed: bool,
+}
+
+/// The BIF that an ETS insert serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum InsertKind {
+    /// `ets:insert/2`.
+    Insert,
+    /// `ets:insert_new/2`.
+    InsertNew,
 }
 
 /// The type of a hash table: the part of `tb->common.status` that
@@ -1336,7 +1361,7 @@ impl Freeing {
     /// assert_eq!(freeing.segments, 1);
     /// ```
     fn new(mut table: Table) -> Freeing {
-        let segments = if table.table_type == TableType::OrderedSet {
+        let segments = if table.kind == TableType::OrderedSet {
             1
         } else {
             segment(table.segment_slots() - 1) + 1
@@ -1376,7 +1401,7 @@ impl Freeing {
             self.fixdels -= 1;
             return Some(1);
         }
-        if self.table.table_type == TableType::OrderedSet {
+        if self.table.kind == TableType::OrderedSet {
             return self.free_objects(budget);
         }
         self.segments = self.segments.checked_sub(1)?;
@@ -1386,7 +1411,8 @@ impl Freeing {
         };
         let last = (FIRST_SEGMENT_SLOTS + self.segments * SEGMENT_SLOTS).min(self.table.buckets);
         let table = &mut self.table;
-        let mut reds = SEGMENT_REDUCTIONS;
+        let mut reds =
+            i32::try_from(SEGMENT_REDUCTIONS).expect("a segment reduction count fits in i32");
         for bucket in first..last {
             let mut key = std::mem::replace(&mut table.heads[bucket], EMPTY);
             while key != EMPTY {
@@ -1490,7 +1516,7 @@ impl Table {
     ) -> Table {
         Table {
             owner,
-            table_type,
+            kind: table_type,
             access,
             keypos,
             objects: Vec::new(),
@@ -1566,7 +1592,7 @@ impl Table {
     /// assert_eq!(table.table_type(), TableType::Set);
     /// ```
     pub(super) fn table_type(&self) -> TableType {
-        self.table_type
+        self.kind
     }
 
     /// Return the atom that `ets:new/2` gave the table, as
@@ -1585,7 +1611,7 @@ impl Table {
 
     /// Set the atom that `ets:new/2` gave the table.
     pub(super) fn set_name(&mut self, name: &str) {
-        self.name = name.to_owned();
+        name.clone_into(&mut self.name);
     }
 
     /// Return the owner.
@@ -1639,20 +1665,20 @@ impl Table {
     /// Set the options that `ets:info/2` gives. `ets:new/2` keeps no other
     /// effect of them, as it does not compress objects, except that a hash
     /// table with decentralized counters gets its lock counters.
-    pub(super) fn set_options(
-        &mut self,
-        write_concurrency: Term,
-        read_concurrency: bool,
-        decentralized_counters: bool,
-        compressed: bool,
-    ) {
+    pub(super) fn set_options(&mut self, options: TableOptions) {
+        let TableOptions {
+            write_concurrency,
+            read_concurrency,
+            decentralized_counters,
+            compressed,
+        } = options;
         self.write_concurrency = write_concurrency;
         self.read_concurrency = read_concurrency;
         self.decentralized_counters = decentralized_counters;
         self.compressed = compressed;
         // A decentralized `ordered_set` is a `catree`, which has no lock
         // counters (`erl_db.c:2717-2721`).
-        if decentralized_counters && self.table_type != TableType::OrderedSet {
+        if decentralized_counters && self.kind != TableType::OrderedSet {
             self.lock_items = vec![0; LOCK_COUNTERS];
         }
     }
@@ -1693,13 +1719,13 @@ impl Table {
     pub(super) fn size(&self) -> u64 {
         let structural = i128::try_from(self.object_count()).unwrap_or(i128::MAX);
         let size = structural + i128::from(self.size_adjust);
-        (size as u128 & u128::from(u64::MAX)) as u64
+        u64::try_from(size.cast_unsigned() & u128::from(u64::MAX)).expect("the mask keeps 64 bits")
     }
 
     /// Return the item counter as the signed `Sint` that growth and shrink
     /// compare (`NITEMS_ESTIMATE`, `erl_db_hash.c:1352`, `759`).
     fn item_count(&self) -> i64 {
-        self.size() as i64
+        self.size().cast_signed()
     }
 
     /// Return the item estimate of a key with the hash `hash`: 64 times the
@@ -1707,10 +1733,14 @@ impl Table {
     /// counter (`NITEMS_ESTIMATE`, `erl_db_hash.c:106-117`).
     fn estimate(&self, hash: u64) -> i64 {
         self.lock_items
-            .get(hash as usize % LOCK_COUNTERS)
+            .get(hash_word(hash) % LOCK_COUNTERS)
             .map_or_else(
                 || self.item_count(),
-                |items| items.wrapping_mul(LOCK_COUNTERS as i64),
+                |items| {
+                    items.wrapping_mul(
+                        i64::try_from(LOCK_COUNTERS).expect("the lock counter count fits in i64"),
+                    )
+                },
             )
     }
 
@@ -1718,8 +1748,8 @@ impl Table {
     /// counter of the lock of the key with the hash `hash` (`ADD_NITEMS`,
     /// `erl_db_hash.c:119-129`).
     fn count_lock(&mut self, hash: u64, before: u64) {
-        let change = self.size().wrapping_sub(before) as i64;
-        if let Some(items) = self.lock_items.get_mut(hash as usize % LOCK_COUNTERS) {
+        let change = self.size().wrapping_sub(before).cast_signed();
+        if let Some(items) = self.lock_items.get_mut(hash_word(hash) % LOCK_COUNTERS) {
             *items = items.wrapping_add(change);
         }
     }
@@ -1731,7 +1761,7 @@ impl Table {
     /// the shrink.
     fn try_shrink(&mut self, nitems: i64) {
         for _ in 0..RESIZE_STEPS {
-            if nitems as u64 >= u64::try_from(self.shrink_limit()).unwrap_or(u64::MAX) {
+            if nitems.cast_unsigned() >= u64::try_from(self.shrink_limit()).unwrap_or(u64::MAX) {
                 break;
             }
             self.join();
@@ -1748,7 +1778,7 @@ impl Table {
     /// assert_eq!(table.delete_all_reductions(), 32);
     /// ```
     pub(super) fn delete_all_reductions(&self) -> usize {
-        if self.table_type == TableType::OrderedSet {
+        if self.kind == TableType::OrderedSet {
             // The ERTS tree frees one node for each reduction
             // (`do_free_tree_continue`, `erl_db_tree.c:2877-2904`).
             return self.object_count();
@@ -1759,8 +1789,7 @@ impl Table {
             // (`db_mark_all_deleted_hash`, `erl_db_hash.c:3034-3051`).
             return (self.buckets - 1).div_ceil(8);
         }
-        self.segment_slots().div_ceil(SEGMENT_SLOTS) * SEGMENT_REDUCTIONS as usize
-            + self.object_count()
+        self.segment_slots().div_ceil(SEGMENT_SLOTS) * SEGMENT_REDUCTIONS + self.object_count()
     }
 
     /// Return the memory of the table in 64-bit words, as
@@ -1863,6 +1892,10 @@ impl Table {
     /// let atoms = AtomTable::new();
     /// assert_eq!(table.next_key(&atoms, &Term::static_atom("k")), None);
     /// ```
+    #[expect(
+        clippy::option_option,
+        reason = "three results: no such key (badarg), the last key, and the next key of `db_next_hash`"
+    )]
     pub(super) fn next_key(&self, atoms: &AtomTable, key: &Term) -> Option<Option<Term>> {
         let hash = stored_hash(atoms, key);
         if self.position(hash, key).is_some() {
@@ -1899,7 +1932,7 @@ impl Table {
     }
 
     /// Return the key of an `ordered_set` table next to the key `key` in the
-    /// term order: the least key above it when `forward` is true, as
+    /// term order: the least key above it for [`Direction::Forward`], as
     /// `db_next_tree` does with `find_next` (`erl_db_tree.c:665-711`,
     /// `erl_db_tree.c:3167-3224`), else the greatest key below it, as
     /// `db_prev_tree` does with `find_prev` (`erl_db_tree.c:740-757`,
@@ -1912,8 +1945,8 @@ impl Table {
     /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::OrderedSet);
     /// table.insert(&atoms, vec![Term::Integer(1)]);
     /// table.insert(&atoms, vec![Term::Integer(3)]);
-    /// assert_eq!(table.ordered_step(&atoms, &Term::Float(2.0), true), Some(Term::Integer(3)));
-    /// assert_eq!(table.ordered_step(&atoms, &Term::Integer(1), false), None);
+    /// assert_eq!(table.ordered_step(&atoms, &Term::Float(2.0), Direction::Forward), Some(Term::Integer(3)));
+    /// assert_eq!(table.ordered_step(&atoms, &Term::Integer(1), Direction::Backward), None);
     /// ```
     ///
     /// # Errors
@@ -1923,16 +1956,16 @@ impl Table {
         &self,
         atoms: &AtomTable,
         key: &Term,
-        forward: bool,
+        direction: Direction,
     ) -> Result<Option<Term>, BeamError> {
         Ok(self
             .key_order()
-            .beyond(atoms, key, forward)?
+            .beyond(atoms, key, direction)?
             .next()
             .cloned())
     }
 
-    /// Return the least key of an `ordered_set` table when `first` is true,
+    /// Return the least key of an `ordered_set` table for [`Direction::Forward`],
     /// as `db_first_tree` does (`erl_db_tree.c:635-663`), else the
     /// greatest key, as `db_last_tree` does (`erl_db_tree.c:712-738`).
     /// Return `None` for an empty table.
@@ -1941,16 +1974,16 @@ impl Table {
     ///
     /// ```rust,ignore
     /// let table = Table::ordered(ProcessId(0), Access::Public, 1, atoms);
-    /// assert_eq!(table.ordered_end(true), None);
+    /// assert_eq!(table.ordered_end(Direction::Forward), None);
     /// ```
-    ///
-    /// # Errors
-    ///
-    /// Return a runtime error when the order of a key is not supported.
-    pub(super) fn ordered_end(&self, first: bool) -> Result<Option<Term>, BeamError> {
+    pub(super) fn ordered_end(&self, direction: Direction) -> Option<Term> {
         let order = self.key_order();
         let mut keys = order.iter();
-        Ok(if first { keys.next() } else { keys.next_back() }.cloned())
+        match direction {
+            Direction::Forward => keys.next(),
+            Direction::Backward => keys.next_back(),
+        }
+        .cloned()
     }
 
     /// Return the object of an `ordered_set` table whose key is equal to
@@ -1978,7 +2011,7 @@ impl Table {
     }
 
     /// Return the objects of an `ordered_set` table in key order, up when
-    /// `forward` is true and else down, from the key next to `after`, or
+    /// [`Direction::Forward`] and else down, from the key next to `after`, or
     /// from the first or the last key when `after` is `None`, as
     /// `traverse_forward` and `traverse_backwards` step with `find_next` and
     /// `find_prev` (`erl_db_tree.c:3659-3762`). The key `after` does not have
@@ -1987,7 +2020,7 @@ impl Table {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let objects: Vec<_> = table.ordered_walk(&atoms, None, true)?.collect();
+    /// let objects: Vec<_> = table.ordered_walk(&atoms, None, Direction::Forward)?.collect();
     /// ```
     ///
     /// # Errors
@@ -1997,13 +2030,13 @@ impl Table {
         &'a self,
         atoms: &'a AtomTable,
         after: Option<&Term>,
-        forward: bool,
+        direction: Direction,
     ) -> Result<impl Iterator<Item = &'a [Term]> + 'a, BeamError> {
         let order = self.key_order();
         let keys: Box<dyn Iterator<Item = &'a Term> + 'a> = match after {
-            None if forward => Box::new(order.iter()),
+            None if direction == Direction::Forward => Box::new(order.iter()),
             None => Box::new(order.iter().rev()),
-            Some(key) => order.beyond(atoms, key, forward)?,
+            Some(key) => order.beyond(atoms, key, direction)?,
         };
         Ok(keys.map(move |key| self.ordered_object(atoms, key)))
     }
@@ -2518,7 +2551,7 @@ impl Table {
                 }
             }
         }
-        SEGMENT_REDUCTIONS as usize + objects
+        SEGMENT_REDUCTIONS + objects
     }
 
     /// Remove all objects of the table, as `db_delete_all_objects_hash`
@@ -2536,7 +2569,7 @@ impl Table {
     /// ```
     pub(super) fn clear(&mut self, atoms: &AtomTable) -> usize {
         let count = self.object_count();
-        if self.is_fixed() && self.table_type != TableType::OrderedSet {
+        if self.is_fixed() && self.kind != TableType::OrderedSet {
             // A fixed table marks each object of each bucket as a
             // pseudo-deleted object and keeps its chains, with one delete
             // record (`db_mark_all_deleted_hash`, `erl_db_hash.c:3007-3051`).
@@ -2580,7 +2613,7 @@ impl Table {
     /// does.
     pub(super) fn take_key(&mut self, atoms: &AtomTable, key: &Term) {
         // An ordered_set finds the key with `==` (`erl_db_tree.c:758-761`).
-        if self.table_type == TableType::OrderedSet {
+        if self.kind == TableType::OrderedSet {
             self.delete(atoms, key);
             return;
         }
@@ -2588,7 +2621,7 @@ impl Table {
         let Some(index_slot) = self.position(hash, key) else {
             return;
         };
-        if !self.is_fixed() || self.table_type == TableType::OrderedSet {
+        if !self.is_fixed() || self.kind == TableType::OrderedSet {
             self.delete(atoms, key);
             return;
         }
@@ -2665,7 +2698,7 @@ impl Table {
         let mut slot = index_slot;
         while slot != EMPTY {
             if !self.is_deleted(slot) && self.object_of(slot).as_slice() == object {
-                if self.is_fixed() && self.table_type != TableType::OrderedSet {
+                if self.is_fixed() && self.kind != TableType::OrderedSet {
                     // The select delete adds one delete record for each
                     // bucket that it changes (`erl_db_hash.c:2636-2640`).
                     let bucket = self.bucket(hash);
@@ -2744,7 +2777,7 @@ impl Table {
     /// ```
     pub(super) fn erase_object(&mut self, atoms: &AtomTable, object: &[Term]) {
         let key = self.key(object).clone();
-        if matches!(self.table_type, TableType::Set | TableType::OrderedSet) {
+        if matches!(self.kind, TableType::Set | TableType::OrderedSet) {
             if self.object(atoms, &key) == Some(object) {
                 self.delete(atoms, &key);
             }
@@ -2788,7 +2821,7 @@ impl Table {
                     }
                     self.delete_live_object(hash, slot, previous);
                 }
-                if self.table_type != TableType::DuplicateBag {
+                if self.kind != TableType::DuplicateBag {
                     break;
                 }
             } else {
@@ -2881,7 +2914,7 @@ impl Table {
             let hash = stored_hash(atoms, key);
             (self.key_slot(atoms, key), hash)
         };
-        if found.is_none() && self.table_type == TableType::OrderedSet {
+        if found.is_none() && self.kind == TableType::OrderedSet {
             let key = self.key(&object).clone();
             self.key_order_mut().put(key);
         }
@@ -2890,7 +2923,7 @@ impl Table {
             if let Some(records) = self.retained.get(&hash)
                 && let Some(index) = records.iter().rposition(|retained| retained.key == *key)
             {
-                match self.table_type {
+                match self.kind {
                     TableType::Set | TableType::OrderedSet => self.revive(object, index, hash),
                     _ => {
                         // A bag or a duplicate_bag adds the object at the
@@ -2903,11 +2936,11 @@ impl Table {
                 return;
             }
         }
-        let node = match (found, self.table_type) {
+        let node = match (found, self.kind) {
             (Some(slot), TableType::Set | TableType::OrderedSet) => {
                 let old = stored_hash(atoms, self.key(self.object_of(slot)));
                 self.rekey(slot, old, hash);
-                if self.table_type == TableType::OrderedSet {
+                if self.kind == TableType::OrderedSet {
                     let key = self.key(&object).clone();
                     self.key_order_mut().put(key);
                 }
@@ -2980,7 +3013,7 @@ impl Table {
     /// ```rust,ignore
     /// let mut table = Table::new(ProcessId(0), Access::Public, 1, TableType::Set);
     /// let atoms = AtomTable::new();
-    /// table.busy = Some(Busy::new(ProcessId(0), vec![vec![test_atom("k")]], false));
+    /// table.busy = Some(Busy::new(ProcessId(0), vec![vec![test_atom("k")]], InsertKind::Insert));
     /// let (units, result) = table.step_busy(&atoms, 8);
     /// assert_eq!((units, result), (2, Some(Term::static_atom("true"))));
     /// ```
@@ -3007,7 +3040,8 @@ impl Table {
                         break;
                     }
                 }
-                let key = &busy.objects[busy.walked][self.keypos as usize - 1];
+                let key = &busy.objects[busy.walked]
+                    [usize::try_from(self.keypos).expect("a stored object has a key position") - 1];
                 busy.looped = false;
                 if self.object(atoms, key).is_some() {
                     busy.found = true;
@@ -3068,15 +3102,15 @@ impl Table {
                 // keeps the walk of each key for its other objects, so its
                 // work stays that of one list insert.
                 let object = std::mem::take(&mut busy.objects[busy.inserted]);
-                let compared = if self.table_type == TableType::Bag {
-                    self.insert_bag(atoms, object, &mut busy.walks, false)
+                let compared = if self.kind == TableType::Bag {
+                    self.insert_bag(atoms, object, &mut busy.walks, InsertKind::Insert)
                 } else {
                     self.insert(atoms, object);
                     0
                 };
                 busy.looped = false;
                 busy.inserted += 1;
-                left -= 1 + compared as i64;
+                left -= 1 + i64::try_from(compared).expect("a compared count fits in i64");
             }
             // A turn that uses the last of the budget ends the insert in
             // its next turn, as the trapped YCF call uninstalls the state
@@ -3118,7 +3152,7 @@ impl Table {
     /// assert_eq!(table.insert_all(&atoms, vec![object(2), object(1), object(3)]), vec![1, 1, 2]);
     /// ```
     pub(super) fn insert_all(&mut self, atoms: &AtomTable, objects: Vec<Vec<Term>>) -> Vec<usize> {
-        self.insert_all_with(atoms, objects, false)
+        self.insert_all_with(atoms, objects, InsertKind::Insert)
     }
 
     /// Insert the objects of `ets:insert_new/2`: for a bag key that the
@@ -3130,16 +3164,16 @@ impl Table {
         atoms: &AtomTable,
         objects: Vec<Vec<Term>>,
     ) -> Vec<usize> {
-        self.insert_all_with(atoms, objects, true)
+        self.insert_all_with(atoms, objects, InsertKind::InsertNew)
     }
 
     fn insert_all_with(
         &mut self,
         atoms: &AtomTable,
         objects: Vec<Vec<Term>>,
-        new: bool,
+        kind: InsertKind,
     ) -> Vec<usize> {
-        if self.table_type != TableType::Bag {
+        if self.kind != TableType::Bag {
             let count = objects.len();
             for object in objects {
                 self.insert(atoms, object);
@@ -3149,7 +3183,7 @@ impl Table {
         let mut walks: HashMap<u64, Vec<BagWalk>> = HashMap::new();
         objects
             .into_iter()
-            .map(|object| self.insert_bag(atoms, object, &mut walks, new))
+            .map(|object| self.insert_bag(atoms, object, &mut walks, kind))
             .collect()
     }
 
@@ -3174,7 +3208,7 @@ impl Table {
         atoms: &AtomTable,
         object: Vec<Term>,
         walks: &mut HashMap<u64, Vec<BagWalk>>,
-        new: bool,
+        kind: InsertKind,
     ) -> usize {
         let hash = stored_hash(atoms, self.key(&object));
         if self.is_fixed() && self.position(hash, self.key(&object)).is_none() {
@@ -3182,7 +3216,7 @@ impl Table {
             if let Some(records) = self.retained.get(&hash)
                 && let Some(index) = records.iter().rposition(|retained| retained.key == key)
             {
-                if new {
+                if kind == InsertKind::InsertNew {
                     // The key-clash walk of `ets:insert_new/2` adds a new
                     // object at the head of the key's list
                     // (`erl_db_hash.c:1412-1422`, `1447-1452`).
@@ -3212,9 +3246,10 @@ impl Table {
             }
         }
         let walks = walks.entry(hash).or_default();
-        let index = match (walks.iter()).position(|walk| walk.key == *self.key(&object)) {
-            Some(index) => index,
-            None => {
+        let index =
+            if let Some(index) = (walks.iter()).position(|walk| walk.key == *self.key(&object)) {
+                index
+            } else {
                 let key = self.key(&object).clone();
                 // ERTS compares the new object with the first object of
                 // the key's list first, and that object stays the chain
@@ -3222,42 +3257,38 @@ impl Table {
                 let cursor = self.chain_node(hash, &key).unwrap_or(EMPTY);
                 walks.push(BagWalk::new(key, cursor));
                 walks.len() - 1
-            }
-        };
+            };
         let walk = &mut walks[index];
         let object_hash = object_hash(&object);
-        match walk.find(self, object_hash, &object) {
-            Some(count) => {
-                if let Some(slot) = walk.seen.get(&object_hash).and_then(|pairs| {
-                    pairs
-                        .iter()
-                        .find(|(_, slot)| self.object_of(*slot).as_slice() == object)
-                        .map(|(_, slot)| *slot)
-                }) && !new
-                    && self.is_deleted(slot)
-                {
-                    self.restore_object(slot, hash, &walk.key);
-                    // The restored object is the first object of the key,
-                    // so the next object of the run compares from it
-                    // (`erl_db_hash.c:1431-1435`).
-                    walk.cursor = slot;
-                    walk.walked = 0;
-                    walk.added = 0;
-                    walk.seen.clear();
-                }
-                count
+        if let Some(count) = walk.find(self, object_hash, &object) {
+            if let Some(slot) = walk.seen.get(&object_hash).and_then(|pairs| {
+                pairs
+                    .iter()
+                    .find(|(_, slot)| self.object_of(*slot).as_slice() == object)
+                    .map(|(_, slot)| *slot)
+            }) && kind != InsertKind::InsertNew
+                && self.is_deleted(slot)
+            {
+                self.restore_object(slot, hash, &walk.key);
+                // The restored object is the first object of the key,
+                // so the next object of the run compares from it
+                // (`erl_db_hash.c:1431-1435`).
+                walk.cursor = slot;
+                walk.walked = 0;
+                walk.added = 0;
+                walk.seen.clear();
             }
-            None => {
-                let count = walk.added + walk.walked;
-                let node = self.chain_node(hash, &walk.key).unwrap_or(EMPTY);
-                let slot = self.add(atoms, hash, object, node);
-                walk.seen
-                    .entry(object_hash)
-                    .or_default()
-                    .push((Place::Added(walk.added), slot));
-                walk.added += 1;
-                count
-            }
+            count
+        } else {
+            let count = walk.added + walk.walked;
+            let node = self.chain_node(hash, &walk.key).unwrap_or(EMPTY);
+            let slot = self.add(atoms, hash, object, node);
+            walk.seen
+                .entry(object_hash)
+                .or_default()
+                .push((Place::Added(walk.added), slot));
+            walk.added += 1;
+            count
         }
     }
 
@@ -3306,7 +3337,10 @@ impl Table {
         self.count_lock(hash, size);
         // ERTS compares the signed estimate with the unsigned bucket count,
         // so an estimate below 0 is a huge value (`erl_db_hash.c:1456-1460`).
-        while self.estimate(hash) as u64 > self.buckets as u64 && splits < RESIZE_STEPS {
+        while self.estimate(hash).cast_unsigned()
+            > u64::try_from(self.buckets).expect("a usize fits in u64")
+            && splits < RESIZE_STEPS
+        {
             self.split(atoms);
             splits += 1;
         }
@@ -3453,7 +3487,7 @@ impl Table {
         for slot in keys {
             self.next[slot] = EMPTY;
             let hash = stored_hash(atoms, self.key(self.object_of(slot)));
-            if hash as usize & mask == to {
+            if hash_word(hash) & mask == to {
                 self.link(to, high, slot);
                 high = slot;
             } else {
@@ -3724,7 +3758,7 @@ impl Table {
         if let Some(slot) = self.position(stored_hash(atoms, key), key) {
             return Some(slot);
         }
-        if self.table_type != TableType::OrderedSet {
+        if self.kind != TableType::OrderedSet {
             return None;
         }
         match self.key_order().find(atoms, key) {
@@ -3780,21 +3814,18 @@ impl Table {
     /// assert_eq!(table.allocate(), 1);
     /// ```
     fn allocate(&mut self) -> usize {
-        match self.free.pop() {
-            Some(slot) => {
-                // A freed slot can hold the flag of a pseudo-deleted object
-                // that a take freed (`db_take_hash`, `erl_db_hash.c:2949-2995`).
-                if let Some(deleted) = self.deleted.get_mut(slot) {
-                    *deleted = false;
-                }
-                slot
+        if let Some(slot) = self.free.pop() {
+            // A freed slot can hold the flag of a pseudo-deleted object
+            // that a take freed (`db_take_hash`, `erl_db_hash.c:2949-2995`).
+            if let Some(deleted) = self.deleted.get_mut(slot) {
+                *deleted = false;
             }
-            None => {
-                self.objects.push(None);
-                self.older.push(EMPTY);
-                self.next.push(EMPTY);
-                self.objects.len() - 1
-            }
+            slot
+        } else {
+            self.objects.push(None);
+            self.older.push(EMPTY);
+            self.next.push(EMPTY);
+            self.objects.len() - 1
         }
     }
 
@@ -3827,7 +3858,7 @@ impl Table {
         // A fixed ordered_set deletes as an unfixed one does: the tree of
         // ERTS keeps no pseudo-deleted object, and a walk steps from a key
         // that is not in the table (`erl_db_tree.c:3167-3282`).
-        if self.is_fixed() && self.table_type != TableType::OrderedSet {
+        if self.is_fixed() && self.kind != TableType::OrderedSet {
             let node = self
                 .chain_node(hash, key)
                 .expect("a live key has a chain node");
@@ -3846,7 +3877,7 @@ impl Table {
             self.free.push(slot);
             slot = std::mem::replace(&mut self.older[slot], EMPTY);
         }
-        if self.table_type == TableType::OrderedSet {
+        if self.kind == TableType::OrderedSet {
             self.key_order_mut().remove(atoms, key);
             self.compact(atoms, newest);
         }
@@ -4137,7 +4168,7 @@ impl KeyIndex {
             return None;
         }
         let mask = self.slots.len() - 1;
-        let mut slot = hash as usize & mask;
+        let mut slot = hash_word(hash) & mask;
         loop {
             let object = self.slots[slot];
             if object == EMPTY {
@@ -4167,7 +4198,7 @@ impl KeyIndex {
             self.grow();
         }
         let mask = self.slots.len() - 1;
-        let mut slot = hash as usize & mask;
+        let mut slot = hash_word(hash) & mask;
         while self.slots[slot] != EMPTY {
             slot = (slot + 1) & mask;
         }
@@ -4203,7 +4234,7 @@ impl KeyIndex {
             if object == EMPTY {
                 continue;
             }
-            let mut slot = hash as usize & mask;
+            let mut slot = hash_word(hash) & mask;
             while self.slots[slot] != EMPTY {
                 slot = (slot + 1) & mask;
             }
@@ -4228,7 +4259,7 @@ impl KeyIndex {
     /// ```
     fn replace(&mut self, hash: u64, old: usize, new: usize) {
         let mask = self.slots.len() - 1;
-        let mut entry = hash as usize & mask;
+        let mut entry = hash_word(hash) & mask;
         while self.slots[entry] != old {
             entry = (entry + 1) & mask;
         }
@@ -4257,7 +4288,7 @@ impl KeyIndex {
     /// ```
     fn remove(&mut self, hash: u64, object: usize) {
         let mask = self.slots.len() - 1;
-        let mut entry = hash as usize & mask;
+        let mut entry = hash_word(hash) & mask;
         while self.slots[entry] != object {
             entry = (entry + 1) & mask;
         }
@@ -4268,11 +4299,11 @@ impl KeyIndex {
             if self.slots[next] == EMPTY {
                 break;
             }
-            let home = self.hashes[next] as usize & mask;
+            let ideal = hash_word(self.hashes[next]) & mask;
             let blocked = if hole <= next {
-                hole < home && home <= next
+                hole < ideal && ideal <= next
             } else {
-                hole < home || home <= next
+                hole < ideal || ideal <= next
             };
             if !blocked {
                 self.hashes[hole] = self.hashes[next];

@@ -18,9 +18,9 @@ use num_bigint::BigInt;
 use num_traits::Signed;
 
 use super::BifResult::Value;
-use super::*;
+use super::{BifResult, ExceptionClass, Scheduler, Term, erlang, to_i64, to_usize};
 use crate::runtime::scheduler::CONTEXT_REDS;
-use crate::term::{MAX_BIG_DIGITS, fits_big_arity};
+use crate::term::{Division, MAX_BIG_DIGITS, ShiftDirection, fits_big_arity};
 
 /// A BIF result and the reductions that it uses.
 pub(super) type Charged = (BifResult, i32);
@@ -106,7 +106,7 @@ fn system_limit() -> BifResult {
 /// ```
 fn digits(term: &Term) -> usize {
     match term {
-        Term::BigInt(value) => value.bits().div_ceil(64) as usize,
+        Term::BigInt(value) => to_usize(value.bits().div_ceil(64)),
         _ => 1,
     }
 }
@@ -114,6 +114,11 @@ fn digits(term: &Term) -> usize {
 /// Return whether a term is an ERTS small integer.
 fn is_small(term: &Term) -> bool {
     term.small_integer().is_some()
+}
+
+/// Return `count`, at most `CONTEXT_REDS`, as the reductions of a bump.
+fn capped(count: usize) -> i32 {
+    i32::try_from(count).map_or(CONTEXT_REDS, |count| count.min(CONTEXT_REDS))
 }
 
 /// Return the reductions of `bump_reds_linear` (`erl_arith.c:56-72`) for
@@ -129,7 +134,7 @@ fn is_small(term: &Term) -> bool {
 fn linear(words: usize) -> i32 {
     // From `CONTEXT_REDS * 16` words, the count is above `CONTEXT_REDS`,
     // so the bump empties the budget as `BUMP_ALL_REDS` does.
-    (words / WORDS_PER_REDUCTION + 1).min(CONTEXT_REDS as usize) as i32
+    capped(words / WORDS_PER_REDUCTION + 1)
 }
 
 /// Return the reductions of `bump_reds_quadratic` (`erl_arith.c:74-86`)
@@ -145,7 +150,7 @@ fn quadratic(left: usize, right: usize) -> i32 {
     // A size of `CONTEXT_REDS * 16` digits or more gives a count above
     // `CONTEXT_REDS`, so the bump empties the budget as `BUMP_ALL_REDS`
     // does. Each size is at most 2^16 - 1, so the product fits.
-    (left * right / WORDS_PER_REDUCTION + 1).min(CONTEXT_REDS as usize) as i32
+    capped(left * right / WORDS_PER_REDUCTION + 1)
 }
 
 /// Return the integer `value` as a BIF result in its canonical form, or
@@ -247,7 +252,7 @@ fn arith_reductions(op: Arith, left: &Term, right: &Term) -> i32 {
 ///
 /// Two small integers cost no reduction, except `-(2^59) div -1` and
 /// `-(2^59) rem -1`, which cost 1, as the `div` and `rem` instructions of
-/// the arm64 and x86_64 JIT charge them. A direct call of `erlang:'rem'/2`
+/// the arm64 and `x86_64` JIT charge them. A direct call of `erlang:'rem'/2`
 /// in ERTS (`rem_2`, `erl_arith.c:152-156`) charges 0 for `-(2^59) rem -1`;
 /// PBeam charges 1 on each path (row "Integer division reductions" of
 /// `docs/erts-differences.md`). A bignum division costs [`quadratic`] of
@@ -259,20 +264,20 @@ fn arith_reductions(op: Arith, left: &Term, right: &Term) -> i32 {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let (quotient, _) = div_rem(&Term::Integer(-7), &Term::Integer(2), false);
+/// let (quotient, _) = div_rem(&Term::Integer(-7), &Term::Integer(2), Division::Quotient);
 /// assert!(matches!(quotient, BifResult::Value(Term::Integer(-3))));
-/// let (remainder, _) = div_rem(&Term::Integer(-7), &Term::Integer(3), true);
+/// let (remainder, _) = div_rem(&Term::Integer(-7), &Term::Integer(3), Division::Remainder);
 /// assert!(matches!(remainder, BifResult::Value(Term::Integer(-1))));
-/// assert!(matches!(div_rem(&Term::static_atom("a"), &Term::Integer(0), false).0, BifResult::Raise { .. }));
+/// assert!(matches!(div_rem(&Term::static_atom("a"), &Term::Integer(0), Division::Quotient).0, BifResult::Raise { .. }));
 /// ```
-pub(super) fn div_rem(left: &Term, right: &Term, remainder: bool) -> Charged {
+pub(super) fn div_rem(left: &Term, right: &Term, division: Division) -> Charged {
     if *right == Term::Integer(0) {
         return (BifResult::badarith(), 0);
     }
     if let (Term::Integer(left_value), Term::Integer(right_value)) = (left, right) {
         // `i64::MIN rem -1` is 0 and `i64::MIN div -1` is the only quotient
         // outside the i64 range.
-        let value = if remainder {
+        let value = if division == Division::Remainder {
             Some(left_value.wrapping_rem(*right_value))
         } else {
             left_value.checked_div(*right_value)
@@ -294,7 +299,7 @@ pub(super) fn div_rem(left: &Term, right: &Term, remainder: bool) -> Charged {
     let (Some(left_value), Some(right_value)) = (left.bigint(), right.bigint()) else {
         return (BifResult::badarith(), 0);
     };
-    let value = if remainder {
+    let value = if division == Division::Remainder {
         left_value.as_ref() % right_value.as_ref()
     } else {
         left_value.as_ref() / right_value.as_ref()
@@ -319,17 +324,14 @@ fn div_rem_reductions(left: &Term, right: &Term) -> i32 {
 
 /// Compare the magnitudes of two integers, as `big_ucomp` does.
 fn magnitude_order(left: &Term, right: &Term) -> Ordering {
-    match (left, right) {
-        (Term::Integer(left), Term::Integer(right)) => {
-            left.unsigned_abs().cmp(&right.unsigned_abs())
-        }
-        _ => {
-            let (left, right) = (left.bigint(), right.bigint());
-            let magnitude = |value: Option<std::borrow::Cow<'_, BigInt>>| {
-                value.map(|value| value.magnitude().clone())
-            };
-            magnitude(left).cmp(&magnitude(right))
-        }
+    if let (Term::Integer(left), Term::Integer(right)) = (left, right) {
+        left.unsigned_abs().cmp(&right.unsigned_abs())
+    } else {
+        let (left, right) = (left.bigint(), right.bigint());
+        let magnitude = |value: Option<std::borrow::Cow<'_, BigInt>>| {
+            value.map(|value| value.magnitude().clone())
+        };
+        magnitude(left).cmp(&magnitude(right))
     }
 }
 
@@ -401,8 +403,8 @@ pub(super) fn bnot(term: &Term) -> Charged {
     (big_result(!value.into_owned()), linear(digits(term) + 2))
 }
 
-/// Run `erlang:'bsl'/2` (`right_shift` false) or `erlang:'bsr'/2`
-/// (`right_shift` true), as `erts_shift` (`erl_arith.c:190-309`) does. The
+/// Run `erlang:'bsl'/2` ([`ShiftDirection::Left`]) or `erlang:'bsr'/2`
+/// ([`ShiftDirection::Right`]), as `erts_shift` (`erl_arith.c:190-309`) does. The
 /// shift is arithmetic: a right shift rounds toward negative infinity.
 ///
 /// A bignum shift amount is never small: `N bsl` a negative bignum and
@@ -418,13 +420,14 @@ pub(super) fn bnot(term: &Term) -> Charged {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(matches!(shift(&Term::Integer(1), &Term::Integer(4), false).0, BifResult::Value(Term::Integer(16))));
-/// assert!(matches!(shift(&Term::Integer(-16), &Term::Integer(2), true).0, BifResult::Value(Term::Integer(-4))));
-/// let (big, reductions) = shift(&Term::Integer(1), &Term::Integer(64), false);
+/// assert!(matches!(shift(&Term::Integer(1), &Term::Integer(4), ShiftDirection::Left).0, BifResult::Value(Term::Integer(16))));
+/// assert!(matches!(shift(&Term::Integer(-16), &Term::Integer(2), ShiftDirection::Right).0, BifResult::Value(Term::Integer(-4))));
+/// let (big, reductions) = shift(&Term::Integer(1), &Term::Integer(64), ShiftDirection::Left);
 /// assert!(matches!(big, BifResult::Value(Term::BigInt(_))));
 /// assert_eq!(reductions, 1);
 /// ```
-pub(super) fn shift(left: &Term, right: &Term, right_shift: bool) -> Charged {
+pub(super) fn shift(left: &Term, right: &Term, direction: ShiftDirection) -> Charged {
+    let right_shift = direction == ShiftDirection::Right;
     let amount = match right.small_integer() {
         Some(amount) if right_shift => -amount,
         Some(amount) => amount,
@@ -456,11 +459,16 @@ pub(super) fn shift(left: &Term, right: &Term, right_shift: bool) -> Charged {
         if amount < SMALL_SHIFT_LIMIT {
             let shifted = i128::from(small) << amount;
             if (i128::from(MIN_SMALL)..=i128::from(MAX_SMALL)).contains(&shifted) {
-                return (Value(Term::Integer(shifted as i64)), 0);
+                return (
+                    Value(Term::Integer(i64::try_from(shifted).expect(
+                        "the range check bounds the value to a small integer",
+                    ))),
+                    0,
+                );
             }
         }
     }
-    let size = digits(left) as i64;
+    let size = to_i64(digits(left));
     let result_size = if amount > 0 {
         size + amount / DIGIT_BITS
     } else if size <= -amount / DIGIT_BITS {
@@ -468,18 +476,18 @@ pub(super) fn shift(left: &Term, right: &Term, right_shift: bool) -> Charged {
     } else {
         size - (-amount / DIGIT_BITS)
     };
-    if result_size - 8 > MAX_BIG_DIGITS as i64 {
+    if result_size - 8 > to_i64(MAX_BIG_DIGITS) {
         return (system_limit(), 0);
     }
-    let reductions = linear(result_size as usize + 2);
+    let reductions = linear(to_usize(result_size) + 2);
     let value = left
         .bigint()
         .expect("the shifted term is an integer")
         .into_owned();
     let shifted = if amount > 0 {
-        value << amount as u64
+        value << amount.cast_unsigned()
     } else {
-        value >> (-amount) as u64
+        value >> (-amount).cast_unsigned()
     };
     (big_result(shifted), reductions)
 }

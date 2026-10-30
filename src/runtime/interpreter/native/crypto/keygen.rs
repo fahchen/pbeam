@@ -8,7 +8,7 @@
 //! give a runtime error (row "NIF stubs" of `docs/erts-differences.md`).
 
 use super::pkey::{Failure, PKEY_TYPES, badarg, ec_group, failed, finish_in, pkey_type_id};
-use super::*;
+use super::{BeamError, BifResult, Id, PKey, Scheduler, Term, atom_name};
 use openssl::bn::{BigNum, BigNumContext};
 use openssl::ec::{EcKey, EcPoint, PointConversionForm};
 use openssl::pkey_ctx::PkeyCtx;
@@ -171,40 +171,34 @@ fn ec_generate_key(
     let group =
         ec_group(scheduler, parts)?.ok_or_else(|| failed(407, "Couldn't generate EC key"))?;
     let mut context = BigNumContext::new().map_err(|_| failed(492, "Couldn't multiply POINT"))?;
-    let (point, private) = match private {
-        Some(bytes) => {
-            let private =
-                BigNum::from_slice(bytes).map_err(|_| failed(492, "Couldn't multiply POINT"))?;
-            // `EVP_PKEY_get_bn_param` of `priv` fails for a number longer
-            // than the order (`ec.c:488-489`).
-            let mut order_number =
-                BigNum::new().map_err(|_| failed(492, "Couldn't multiply POINT"))?;
-            group
-                .order(&mut order_number, &mut context)
-                .map_err(|_| failed(492, "Couldn't multiply POINT"))?;
-            if private.num_bytes() > order_number.num_bytes() {
-                return Err(badarg(489, 1, "Couldn't get peer priv key bytes"));
-            }
-            let mut point =
-                EcPoint::new(&group).map_err(|_| failed(486, "Couldn't create POINT"))?;
-            point
-                .mul_generator(&group, &private, &context)
-                .map_err(|_| failed(492, "Couldn't multiply POINT"))?;
-            (point, private)
+    let (point, private) = if let Some(bytes) = private {
+        let private =
+            BigNum::from_slice(bytes).map_err(|_| failed(492, "Couldn't multiply POINT"))?;
+        // `EVP_PKEY_get_bn_param` of `priv` fails for a number longer
+        // than the order (`ec.c:488-489`).
+        let mut order_number = BigNum::new().map_err(|_| failed(492, "Couldn't multiply POINT"))?;
+        group
+            .order(&mut order_number, &mut context)
+            .map_err(|_| failed(492, "Couldn't multiply POINT"))?;
+        if private.num_bytes() > order_number.num_bytes() {
+            return Err(badarg(489, 1, "Couldn't get peer priv key bytes"));
         }
-        None => {
-            let key =
-                EcKey::generate(&group).map_err(|_| failed(407, "Couldn't generate EC key"))?;
-            let point = key
-                .public_key()
-                .to_owned(&group)
-                .map_err(|_| failed(407, "Couldn't generate EC key"))?;
-            let private = key
-                .private_key()
-                .to_owned()
-                .map_err(|_| failed(407, "Couldn't generate EC key"))?;
-            (point, private)
-        }
+        let mut point = EcPoint::new(&group).map_err(|_| failed(486, "Couldn't create POINT"))?;
+        point
+            .mul_generator(&group, &private, &context)
+            .map_err(|_| failed(492, "Couldn't multiply POINT"))?;
+        (point, private)
+    } else {
+        let key = EcKey::generate(&group).map_err(|_| failed(407, "Couldn't generate EC key"))?;
+        let point = key
+            .public_key()
+            .to_owned(&group)
+            .map_err(|_| failed(407, "Couldn't generate EC key"))?;
+        let private = key
+            .private_key()
+            .to_owned()
+            .map_err(|_| failed(407, "Couldn't generate EC key"))?;
+        (point, private)
     };
     let public = point
         .to_bytes(&group, PointConversionForm::UNCOMPRESSED, &mut context)

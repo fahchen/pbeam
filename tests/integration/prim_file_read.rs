@@ -1,3 +1,10 @@
+//! Runs the `prim_file` read NIFs (files, directories, links, current directory) on PBeam and
+//! compares them with the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::{
     env,
     ffi::OsStr,
@@ -180,7 +187,7 @@ fn isolated_prim_file_read() {
         .unwrap();
     fs::write(
         env::var_os(RESULT).unwrap(),
-        text(&result.term, result.atoms()) + "\n",
+        format!("{}\n", text(&result.term, result.atoms())),
     )
     .unwrap();
 }
@@ -204,7 +211,9 @@ fn make_files(directory: &Path) {
         fs::create_dir_all(directory.join(name)).unwrap();
     }
     fs::write(directory.join("file"), "hello").unwrap();
-    let big: Vec<u8> = (0..70_000).map(|index| (index % 251) as u8).collect();
+    let big: Vec<u8> = (0..70_000)
+        .map(|index| u8::try_from(index % 251).unwrap())
+        .collect();
     fs::write(directory.join("big"), big).unwrap();
     for name in ["a", "b"] {
         fs::write(directory.join("dir").join(name), name).unwrap();

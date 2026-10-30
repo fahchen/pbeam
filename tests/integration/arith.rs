@@ -1,3 +1,10 @@
+//! Runs integer arithmetic, bignum results and `badarith` jumps on PBeam and compares them with the
+//! pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};
@@ -17,7 +24,7 @@ fn reference(function: &str) -> Vec<u8> {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     reference.stdout
 }
 

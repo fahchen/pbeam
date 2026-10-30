@@ -110,6 +110,10 @@ pub(super) enum Driver {
 /// The data of the spawn driver (`ErtsSysDriverData`,
 /// `sys_drivers.c:108-121`).
 #[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "mirrors the independent port flags of ERTS (`ERTS_PORT_SFLG_SOFT_EOF`, `ERTS_PORT_SFLG_BINARY_IO`, `ERTS_PORT_SFLG_PARALLELISM`) and `exit_status` of `SysDriverOpts`, which `open_port` sets one by one"
+)]
 pub(super) struct Spawn {
     /// True with the `exit_status` option: the port sends
     /// `{Port, {exit_status, Status}}` before it closes at the end of file.
@@ -176,7 +180,7 @@ impl OutputQueue {
     /// Return the number of queued bytes, as `port_info/2` gives
     /// `queue_size` (`erl_bif_info.c:3855-3862`).
     pub(super) fn size(&self) -> u64 {
-        self.bytes.len() as u64
+        u64::try_from(self.bytes.len()).expect("a usize fits in u64")
     }
 
     /// Return true while the port is busy.
@@ -358,7 +362,9 @@ impl Packets {
         if bytes.len() > limit {
             return None;
         }
-        let size = (bytes.len() as u32).to_be_bytes();
+        // The header keeps the low 32 bits of the length, as `put_int32` does.
+        let [b0, b1, b2, b3, ..] = bytes.len().to_le_bytes();
+        let size = [b3, b2, b1, b0];
         let mut framed = size[4 - self.header..].to_vec();
         framed.extend(bytes);
         Some(framed)
@@ -647,7 +653,7 @@ impl Port {
 /// (`erts_port_lock`, io.c:923-1002). The slot holds `None` once the port
 /// closed: a holder of the handle that locks it after the close sees the
 /// closed port, as `erts_port_lookup` checks the state of the port under
-/// its lock (erl_port.h). Code takes a port lock before the table lock or
+/// its lock (`erl_port.h`). Code takes a port lock before the table lock or
 /// after it is released, and never holds two port locks.
 pub(super) type PortCell = Arc<Mutex<Option<Port>>>;
 
@@ -910,7 +916,10 @@ fn read_spawn(spawn: &mut Spawn, input: &mut u64) -> Option<PortEvent> {
         return Some(PortEvent::EndOfFile(spawn.end_of_file()));
     }
     let packets = spawn.packets.split(bytes);
-    *input += packets.iter().map(|bytes| bytes.len() as u64).sum::<u64>();
+    *input += packets
+        .iter()
+        .map(|bytes| u64::try_from(bytes.len()).expect("a usize fits in u64"))
+        .sum::<u64>();
     let messages = spawn.messages(packets);
     (!messages.is_empty()).then_some(PortEvent::Data(messages))
 }

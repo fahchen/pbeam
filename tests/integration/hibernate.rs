@@ -1,3 +1,10 @@
+//! Runs `erlang:hibernate` as an instruction and as a BIF on PBeam and compares them with the
+//! pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 #[path = "../common/mod.rs"]
 mod common;
 
@@ -75,7 +82,7 @@ fn runs_erlang_hibernate_as_the_pinned_erts_instruction() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     assert_eq!(
         reference.stdout,
         b"[{ok,true,[early]},{ok,true,[late]},{ok,ok,ok,[late,queued,fun_late]},{ok,[late]},{waiting,{down,normal}},{ok,[own,child]}]\n"
@@ -107,7 +114,6 @@ fn runs_erlang_hibernate_3_as_the_pinned_erts_bif() {
             .term
     };
     let woke = |tag, message| Term::tuple(vec![atom(tag), atom(message), int(0)]);
-
     // A message in the queue before the call: the process does not wait.
     assert_eq!(run("queued"), pair(woke("queued", "early"), atom("normal")));
     // No message in the queue: the process waits for the next message.
@@ -167,6 +173,33 @@ fn runs_erlang_hibernate_3_as_the_pinned_erts_bif() {
             ),
         ])
     );
+}
+
+#[test]
+fn runs_erlang_hibernate_3_through_apply_funs_and_bifs_as_the_pinned_erts_bif() {
+    // `hibernate_3` checks its arguments, drops the stack and the catches,
+    // and traps to `beam_run_process`, which runs `apply/3` with an empty
+    // stack (`bif.c:1366-1427`). The process waits when its queue has no
+    // message (`beam_common.c:1568-1602`).
+    // The error handler asks the `init` server of `undef_init` to load a
+    // module.
+    let modules = ["erlang", "error_handler", "init", "lists", "proc_lib"].map(pinned_beam);
+    let mut beams: Vec<&[u8]> = modules.iter().map(Vec::as_slice).collect();
+    beams.push(include_bytes!("../../fixtures/undef/undef_init.beam"));
+    beams.push(include_bytes!(
+        "../../fixtures/hibernate/hibernate3_probe.beam"
+    ));
+    let program = BeamProgram::load(&beams).unwrap();
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    let int = Term::Integer;
+    let pair = |a: Term, b: Term| Term::tuple(vec![a, b]);
+    let run = |function| {
+        program
+            .execute("hibernate3_probe", function, &[])
+            .unwrap()
+            .term
+    };
+    let woke = |tag, message| Term::tuple(vec![atom(tag), atom(message), int(0)]);
     // The `apply` instruction and a fun call reach the BIF through its
     // export.
     assert_eq!(
@@ -217,7 +250,7 @@ fn runs_erlang_hibernate_3_as_the_pinned_erts_bif() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     assert_eq!(
         reference.stdout,
         b"[{{queued,early,0},normal},{waiting,{message_queue_len,0},{later,wake,0},normal},{boom,none},{undef,[{hibernate3_probe,missing,[1,2],[]}]},{waiting,stop},[{error,badarg},{error,badarg},{error,badarg},{error,badarg},{error,system_limit},{error,system_limit},{error,badarg}],{undef,256},[{boom,[]},{{nocatch,t},[]},x,{failed,[{hibernate3_probe,fail,[n]}]},{failed,[{hibernate3_probe,fail,[n]},{hibernate3_probe,nested,1}]}],{{apply,wake,0},normal,{'fun',wake,0},normal},{woke,normal,again,normal,stop,applied,normal},{{proc_lib,wake,0},normal},{{reply,true},{reply,true}},[2,1,1]]\n"

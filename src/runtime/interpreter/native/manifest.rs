@@ -233,7 +233,9 @@ fn load_gaps(module: &BeamModule, libraries: &[PathBuf]) -> Vec<NifGap> {
         let Instruction::CallExternal { import, .. } = instruction else {
             continue;
         };
-        if module.imports[*import as usize].kind != ImportKind::LoadNif {
+        if module.imports[usize::try_from(*import).expect("a u32 fits in usize")].kind
+            != ImportKind::LoadNif
+        {
             continue;
         }
         let module = module.name.clone();

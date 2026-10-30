@@ -1,3 +1,9 @@
+//! Checks that the exit of a writer process surfaces as an IO protocol error on PBeam.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};
@@ -35,6 +41,6 @@ fn surfaces_a_writer_process_exit_as_an_io_protocol_error() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     assert_eq!(reference.stdout, b"{{error,write_failed},noise_ok}\n");
 }

@@ -9,10 +9,11 @@
 //! continues with no cost in the next turn.
 
 use super::BifResult::{Trap, TrapBif, Value};
-use super::*;
+use super::{BeamError, BifResult, ProcessState, Term, error, to_i64, to_usize};
 use crate::runtime::scheduler::CONTEXT_REDS;
 use crate::runtime::unicode::{
-    Utf8Output, Utf8State, analyze_utf8, build_utf8, code_points, is_incomplete, utf8_need,
+    CharEncoding, Utf8Output, Utf8State, analyze_utf8, build_utf8, code_points, is_incomplete,
+    utf8_need,
 };
 use crate::term::{AtomTable, debug_term};
 
@@ -43,7 +44,7 @@ const ONHEAP_BINARY_LIMIT: i64 = 64;
 /// assert_eq!(allowed_iterations(&process), 30);
 /// ```
 fn allowed_iterations(process: &ProcessState) -> i64 {
-    let left = process.bif_reductions_or_zero() as i64 * LOOP_FACTOR;
+    let left = to_i64(process.bif_reductions_or_zero()) * LOOP_FACTOR;
     left.min(i64::from(CONTEXT_REDS) * LOOP_FACTOR)
 }
 
@@ -58,7 +59,9 @@ fn allowed_iterations(process: &ProcessState) -> i64 {
 /// assert_eq!(process.fcalls, 7);
 /// ```
 fn cost_to_proc(process: &mut ProcessState, steps: i64) {
-    process.bump_reductions((steps / LOOP_FACTOR) as i32);
+    // `BUMP_REDS` takes a `Sint` of reductions, and a count above `i32::MAX`
+    // empties the budget.
+    process.bump_reductions(i32::try_from(steps / LOOP_FACTOR).unwrap_or(i32::MAX));
 }
 
 /// Run `unicode:characters_to_binary/2`: convert `chardata` to one UTF-8
@@ -105,9 +108,9 @@ pub(super) fn characters_to_binary(
     encoding: &Term,
     atoms: &AtomTable,
 ) -> Result<BifResult, BeamError> {
-    let latin1 = match encoding {
-        Term::Atom(encoding) if encoding.is_static("latin1") => true,
-        Term::Atom(encoding) if encoding.is_one_of(&["unicode", "utf8"]) => false,
+    let charset = match encoding {
+        Term::Atom(encoding) if encoding.is_static("latin1") => CharEncoding::Latin1,
+        Term::Atom(encoding) if encoding.is_one_of(&["unicode", "utf8"]) => CharEncoding::Unicode,
         // ponytail: ERTS traps each other encoding to `unicode:characters_to_binary_int/2`; see "Chardata conversion" in docs/erts-differences.md.
         _ => {
             return Err(error(format!(
@@ -120,13 +123,13 @@ pub(super) fn characters_to_binary(
         Some((binary @ Term::Binary(_), tail)) if tail.is_nil() => binary,
         _ => chardata,
     };
-    let Some(cost) = utf8_need(subject, latin1) else {
+    let Some(cost) = utf8_need(subject, charset) else {
         return Ok(BifResult::badarg());
     };
-    let simple = (cost / SIMPLE_FACTOR) as i64;
+    let simple = to_i64(cost / SIMPLE_FACTOR);
     cost_to_proc(process, simple);
     if let Some(bytes) = subject.binary_bytes()
-        && !latin1
+        && charset == CharEncoding::Unicode
         && std::str::from_utf8(bytes).is_ok()
     {
         return Ok(Value(subject.clone()));
@@ -168,9 +171,13 @@ fn utf8_turn(
     mut left: i64,
     encoding: &Term,
 ) -> Result<BifResult, BeamError> {
-    let latin1 = matches!(encoding, Term::Atom(name) if name.is_static("latin1"));
+    let charset = if matches!(encoding, Term::Atom(name) if name.is_static("latin1")) {
+        CharEncoding::Latin1
+    } else {
+        CharEncoding::Unicode
+    };
     let start = left;
-    let (rest, failed) = build_utf8(chardata, &mut left, latin1, &mut output);
+    let (rest, failed) = build_utf8(chardata, &mut left, charset, &mut output);
     cost_to_proc(process, start - left);
     let done = rest == Term::nil();
     if failed || (done && !output.leftover.is_empty()) {
@@ -272,9 +279,9 @@ pub(super) fn characters_to_list(
     chardata: &Term,
     encoding: &Term,
 ) -> Result<BifResult, BeamError> {
-    let latin1 = match encoding {
-        Term::Atom(encoding) if encoding.is_static("latin1") => true,
-        Term::Atom(encoding) if encoding.is_one_of(&["unicode", "utf8"]) => false,
+    let charset = match encoding {
+        Term::Atom(encoding) if encoding.is_static("latin1") => CharEncoding::Latin1,
+        Term::Atom(encoding) if encoding.is_one_of(&["unicode", "utf8"]) => CharEncoding::Unicode,
         _ => {
             return Ok(Trap {
                 module: "unicode",
@@ -284,14 +291,14 @@ pub(super) fn characters_to_list(
         }
     };
     if let Some(bytes) = chardata.binary_bytes()
-        && !latin1
+        && charset == CharEncoding::Unicode
     {
         return analyze_turn(process, bytes, 0, 0);
     }
-    let Some(cost) = utf8_need(chardata, latin1) else {
+    let Some(cost) = utf8_need(chardata, charset) else {
         return Ok(BifResult::badarg());
     };
-    let simple = (cost / SIMPLE_FACTOR) as i64;
+    let simple = to_i64(cost / SIMPLE_FACTOR);
     cost_to_proc(process, simple);
     let left = (allowed_iterations(process) - simple).max(1);
     Ok(list_turn(
@@ -299,7 +306,7 @@ pub(super) fn characters_to_list(
         Utf8Output::default(),
         chardata,
         left,
-        latin1,
+        charset,
     ))
 }
 
@@ -324,10 +331,10 @@ fn list_turn(
     mut output: Utf8Output,
     chardata: &Term,
     mut left: i64,
-    latin1: bool,
+    charset: CharEncoding,
 ) -> BifResult {
     let start = left;
-    let (rest, failed) = build_utf8(chardata, &mut left, latin1, &mut output);
+    let (rest, failed) = build_utf8(chardata, &mut left, charset, &mut output);
     cost_to_proc(process, start - left);
     let leftover = std::mem::take(&mut output.leftover);
     let nil = Term::nil();
@@ -352,9 +359,12 @@ fn list_turn(
             function: "characters_to_list_trap_1",
             arguments: vec![
                 Term::binary(output.bytes),
-                Term::Integer(output.characters as i64),
+                Term::Integer(to_i64(output.characters)),
                 leftover_before(leftover, rest),
-                Term::static_atom(if latin1 { "latin1" } else { "unicode" }),
+                Term::static_atom(match charset {
+                    CharEncoding::Latin1 => "latin1",
+                    CharEncoding::Unicode => "unicode",
+                }),
             ],
         };
     } else {
@@ -389,12 +399,16 @@ fn list_turn(
 /// let result = list_trap(&mut process, b"a".to_vec(), 1, &Term::list_from(vec![Term::Integer(98)]), false)?;
 /// assert!(matches!(result, BifResult::Value(list) if list.proper_list().is_some_and(|list| list.len() == 2)));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "trap export arm of `bif_trap`; every trap arm returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn list_trap(
     process: &mut ProcessState,
     bytes: Vec<u8>,
     characters: usize,
     rest: &Term,
-    latin1: bool,
+    charset: CharEncoding,
 ) -> Result<BifResult, BeamError> {
     let left = allowed_iterations(process);
     let output = Utf8Output {
@@ -402,7 +416,7 @@ pub(super) fn list_trap(
         characters,
         ..Utf8Output::default()
     };
-    Ok(list_turn(process, output, rest, left, latin1))
+    Ok(list_turn(process, output, rest, left, charset))
 }
 
 /// Run the `analyze_utf8` path of `unicode:characters_to_list/2` for a
@@ -423,6 +437,10 @@ pub(super) fn list_trap(
 /// let result = analyze_turn(&mut process, b"hi", 0, 0)?;
 /// assert!(matches!(result, BifResult::Value(list) if list.proper_list().is_some_and(|list| list.len() == 2)));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "trap export arm of `bif_trap`; every trap arm returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn analyze_turn(
     process: &mut ProcessState,
     bytes: &[u8],
@@ -431,7 +449,7 @@ pub(super) fn analyze_turn(
 ) -> Result<BifResult, BeamError> {
     let mut left = allowed_iterations(process);
     let (state, counted, end) = analyze_utf8(bytes, start, &mut left);
-    cost_to_proc(process, counted as i64);
+    cost_to_proc(process, to_i64(counted));
     let characters = characters + counted;
     if state == Utf8State::AnalyzeMore {
         process.bump_all_reductions();
@@ -440,8 +458,8 @@ pub(super) fn analyze_turn(
             function: "characters_to_list_trap_3",
             arguments: vec![
                 Term::binary(bytes.to_vec()),
-                Term::Integer(end as i64),
-                Term::Integer(characters as i64),
+                Term::Integer(to_i64(end)),
+                Term::Integer(to_i64(characters)),
             ],
         });
     }
@@ -500,12 +518,12 @@ pub(super) fn finish_list(
     if remaining == 0 {
         return Value(result);
     }
-    let built = if left < remaining as i64 {
-        left.max(1) as usize
+    let built = if left < to_i64(remaining) {
+        to_usize(left.max(1))
     } else {
         remaining
     };
-    cost_to_proc(process, built as i64);
+    cost_to_proc(process, to_i64(built));
     if built == remaining {
         return Value(result);
     }
@@ -513,7 +531,7 @@ pub(super) fn finish_list(
     TrapBif {
         module: "erlang",
         function: trap,
-        arguments: vec![result, Term::Integer((remaining - built) as i64)],
+        arguments: vec![result, Term::Integer(to_i64(remaining - built))],
     }
 }
 
@@ -528,6 +546,10 @@ pub(super) fn finish_list(
 /// let result = finish_trap(&mut process, Term::nil(), 5, "characters_to_list_trap_2")?;
 /// assert!(matches!(result, BifResult::Value(_)));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "trap export arm of `bif_trap`; every trap arm returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn finish_trap(
     process: &mut ProcessState,
     result: Term,

@@ -3,7 +3,15 @@
 mod snifs;
 
 use super::BifResult::{Raise, Trap, Value};
-use super::*;
+use super::MessageQueue;
+use super::timer::TimerKind;
+use super::{
+    Arc, BeamError, BifContext, BifResult, Binary, CapabilityKind, ExceptionClass, Operation,
+    Scheduler, SpawnOptions, Target, Term, boot_denial, create_process, current_frame,
+    current_function, denial, error, erts_internal, io_service, is_bif, mfa_stacktrace,
+    other_process_denial,
+};
+use super::{to_i64, to_u64, to_usize};
 use crate::beam::code::Instruction;
 use crate::runtime::capability;
 use crate::runtime::dirty::DIRTY_IO_THREADS;
@@ -12,13 +20,16 @@ use crate::runtime::heap_flags::{
 };
 use crate::runtime::host;
 use crate::runtime::interpreter::DEFAULT_ERROR_HANDLER;
-use crate::runtime::interpreter::code_table::{CodeTable, Finish};
+use crate::runtime::interpreter::code_table::{AfterOnLoad, CodeTable, Finish};
 use crate::runtime::local_node;
 use crate::runtime::process::{Flush, Origin, Priority};
 use crate::runtime::process::{InitialCall, OTHER_PROCESS_INFO_ITEMS};
 use crate::runtime::process::{LinkId, ProcessState};
 use crate::runtime::scheduler::PTAB_SIZE;
-use crate::runtime::scheduler::{AliasMode, CONTEXT_REDS, Flushed, MonitorOptions, MonitorTarget};
+use crate::runtime::scheduler::node::Named;
+use crate::runtime::scheduler::{
+    AliasMode, CONTEXT_REDS, Flushed, MonitorOptions, MonitorTarget, UniqueRange,
+};
 #[cfg(target_os = "linux")]
 use crate::runtime::schedulers::cpu_topology;
 use crate::runtime::schedulers::{Schedulers, logical_processors_available};
@@ -131,9 +142,9 @@ pub(super) fn nodes(
     // ERTS charges one reduction for each 10 nodes of a result of more than
     // 10 nodes (`dist.c:6465-6468`).
     if names.len() > 10 {
-        scheduler
-            .current_process_mut()
-            .bump_reductions((names.len() / 10) as i32);
+        scheduler.current_process_mut().bump_reductions(
+            i32::try_from(names.len() / 10).expect("ERTS counts the nodes of a list in an `int`"),
+        );
     }
     let atoms = &scheduler.atoms;
     Value(Term::list_from(names.into_iter().map(|(name, kind)| {
@@ -188,9 +199,8 @@ const NODES_MONITOR_CONNECTION_ID: u8 = 1 << 4;
 /// assert_eq!(nodes_monitor_key(&Term::Integer(1)), None);
 /// ```
 fn nodes_monitor_key(options: &Term) -> Option<u8> {
-    let options = match options {
-        Term::Map(options) => options,
-        _ => return options.is_nil().then_some(0),
+    let Term::Map(options) = options else {
+        return options.is_nil().then_some(0);
     };
     let mut key = NODES_MONITOR_INFO_MAP;
     for (option, value) in options.iter() {
@@ -201,19 +211,19 @@ fn nodes_monitor_key(options: &Term) -> Option<u8> {
         let boolean = on || value.is_static("false");
         let node_type = option.is_static("node_type");
         key = match () {
-            _ if option.is_static("list") && on => key & !NODES_MONITOR_INFO_MAP,
-            _ if option.is_static("connection_id") && boolean => {
+            () if option.is_static("list") && on => key & !NODES_MONITOR_INFO_MAP,
+            () if option.is_static("connection_id") && boolean => {
                 key | if on { NODES_MONITOR_CONNECTION_ID } else { 0 }
             }
-            _ if option.is_static("nodedown_reason") && boolean => {
+            () if option.is_static("nodedown_reason") && boolean => {
                 key | if on { NODES_MONITOR_DOWN_REASON } else { 0 }
             }
-            _ if node_type && value.is_static("visible") => key | NODES_MONITOR_VISIBLE,
-            _ if node_type && value.is_static("hidden") => key | NODES_MONITOR_HIDDEN,
-            _ if node_type && value.is_static("all") => {
+            () if node_type && value.is_static("visible") => key | NODES_MONITOR_VISIBLE,
+            () if node_type && value.is_static("hidden") => key | NODES_MONITOR_HIDDEN,
+            () if node_type && value.is_static("all") => {
                 key | NODES_MONITOR_VISIBLE | NODES_MONITOR_HIDDEN
             }
-            _ => return None,
+            () => return None,
         };
     }
     Some(key)
@@ -472,14 +482,14 @@ fn process_heap_flag(
     let (process, atoms) = context.scheduler.current_process_and_atoms();
     let flags = &mut process.heap_flags;
     if flag.is_static("max_heap_size") {
-        let Some((size, max_flags)) = max_heap_size(value, node.max_heap_flags)
+        let Some((size, max_flags)) = max_heap_size(value, node.max_heap_settings)
             .filter(|(size, _)| *size == 0 || *size >= flags.min_heap_size)
         else {
             return Ok(BifResult::badarg());
         };
-        let old = max_heap_size_map(atoms, flags.max_heap_size, flags.max_heap_flags);
+        let old = max_heap_size_map(atoms, flags.max_heap_size, flags.max_heap_settings);
         flags.max_heap_size = size;
-        flags.max_heap_flags = max_flags;
+        flags.max_heap_settings = max_flags;
         return Ok(Value(old));
     }
     let Some(size) = value.small_integer().filter(|size| *size >= 0) else {
@@ -494,7 +504,10 @@ fn process_heap_flag(
     };
     let old = if flag.is_static("fullsweep_after") {
         // `max_gen_gcs` is a `Uint16` (`erl_process.h:1145`).
-        i64::from(std::mem::replace(&mut flags.fullsweep_after, size as u16))
+        i64::from(std::mem::replace(
+            &mut flags.fullsweep_after,
+            max_gen_gcs(size),
+        ))
     } else if flag.is_static("min_heap_size") {
         std::mem::replace(&mut flags.min_heap_size, minimum(node.min_heap_size)?)
     } else {
@@ -528,6 +541,28 @@ const UNSUPPORTED_SYSTEM_FLAGS: &[&str] = &[
 /// (`error.h:206`). `system_flag(backtrace_depth, Depth)` sets a larger
 /// depth to this value (`bif.c:5108-5115`).
 const MAX_BACKTRACE_SIZE: i64 = 64;
+
+/// The value of `max_gen_gcs`, a `Uint16` of ERTS (`erl_process.h:1145`): keep
+/// the low 16 bits of the number.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the `Uint16` of ERTS keeps the low 16 bits of the number"
+)]
+fn max_gen_gcs(value: i64) -> u16 {
+    value as u16
+}
+
+/// A number as the C `int` of ERTS keeps it: the low 32 bits.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "the C `int` of ERTS keeps the low 32 bits of the number"
+)]
+pub(super) fn c_int(value: i64) -> i32 {
+    value as i32
+}
 
 /// Run `erlang:system_flag(Item, Value)` as ERTS `system_flag_2`
 /// (`bif.c:4972-5304`) does for the items `system_logger`, `debug_flags`,
@@ -606,7 +641,7 @@ pub(super) fn system_flag(
     let valid = match (atoms.name_of(item), value) {
         ("system_logger", _) => logger,
         ("fullsweep_after" | "min_heap_size" | "min_bin_vheap_size", _) => size.is_some(),
-        ("max_heap_size", _) => max_heap_size(value, defaults.max_heap_flags)
+        ("max_heap_size", _) => max_heap_size(value, defaults.max_heap_settings)
             .is_some_and(|(size, _)| size == 0 || size >= defaults.min_heap_size),
         ("debug_flags", _) => true,
         ("backtrace_depth", _) => value.small_integer().is_some_and(|depth| depth >= 0),
@@ -643,7 +678,7 @@ pub(super) fn system_flag(
                 let new = next_heap_size(size).ok_or_else(|| no_heap_size(size))?;
                 // ERTS keeps `H_MIN_SIZE` and `BIN_VH_MIN_SIZE` as `int`
                 // (`erl_init.c:110-111`), so the value wraps to 32 bits.
-                let new = i64::from(new as i32);
+                let new = i64::from(c_int(new));
                 let mut flags = scheduler.node().heap_flags_mut();
                 let HeapFlags {
                     min_heap_size,
@@ -659,18 +694,21 @@ pub(super) fn system_flag(
             }
             ("max_heap_size", _) => {
                 let mut flags = scheduler.node().heap_flags_mut();
-                let (size, max_flags) =
-                    max_heap_size(value, flags.max_heap_flags).expect("the value passed the check");
-                let old =
-                    max_heap_size_map(&scheduler.atoms, flags.max_heap_size, flags.max_heap_flags);
+                let (size, max_flags) = max_heap_size(value, flags.max_heap_settings)
+                    .expect("the value passed the check");
+                let old = max_heap_size_map(
+                    &scheduler.atoms,
+                    flags.max_heap_size,
+                    flags.max_heap_settings,
+                );
                 flags.max_heap_size = size;
-                flags.max_heap_flags = max_flags;
+                flags.max_heap_settings = max_flags;
                 Value(old)
             }
             ("backtrace_depth", Some(depth)) => {
-                let depth = depth.min(MAX_BACKTRACE_SIZE) as usize;
+                let depth = to_usize(depth.min(MAX_BACKTRACE_SIZE));
                 let old = scheduler.node().swap_backtrace_depth(depth);
-                Value(Term::Integer(old as i64))
+                Value(Term::Integer(to_i64(old)))
             }
             (name, _) => {
                 return Err(error(format!(
@@ -1197,10 +1235,8 @@ pub(super) fn raise(depth: usize, class: &Term, reason: &Term, stacktrace: &Term
     let location = |location: &Term| location.is_list();
     let frame = |frame: &Term| match frame {
         Term::Tuple(elements) => match elements.as_ref() {
-            [Term::Fun(_), _] => true,
-            [Term::Fun(_), _, place] => location(place),
-            [Term::Atom(_), Term::Atom(_), _] => true,
-            [Term::Atom(_), Term::Atom(_), _, place] => location(place),
+            [Term::Fun(_), _] | [Term::Atom(_), Term::Atom(_), _] => true,
+            [Term::Fun(_), _, place] | [Term::Atom(_), Term::Atom(_), _, place] => location(place),
             _ => false,
         },
         _ => false,
@@ -1738,6 +1774,10 @@ pub(super) fn spawn_link(
 /// assert!(matches!(result, BifResult::Value(Term::Tuple(_))));
 /// assert!(matches!(spawn_opt(&mut context, &module, &function, &Term::nil(), &link_x)?, BifResult::Raise { .. }));
 /// ```
+#[expect(
+    clippy::too_many_lines,
+    reason = "option table: one arm for each spawn option, as the option parser of `erl_process.c` (12253-12424); the arms share the state of the loop"
+)]
 pub(super) fn spawn_opt(
     context: &mut BifContext<'_>,
     module: &Term,
@@ -1843,14 +1883,14 @@ pub(super) fn spawn_opt(
                 if let Some(count) = value.small_integer().filter(|count| *count >= 0) =>
             {
                 // `max_gen_gcs` is a `Uint16` (`erl_process.h:1145`).
-                heap.fullsweep_after = count as u16;
+                heap.fullsweep_after = max_gen_gcs(count);
                 use_heap = true;
             }
             (_, Some(("max_heap_size", value)))
-                if let Some((size, flags)) = max_heap_size(value, node.max_heap_flags) =>
+                if let Some((size, flags)) = max_heap_size(value, node.max_heap_settings) =>
             {
                 heap.max_heap_size = size;
-                heap.max_heap_flags = flags;
+                heap.max_heap_settings = flags;
                 use_heap = true;
             }
             (_, Some(("scheduler", value)))
@@ -2101,6 +2141,10 @@ pub(super) fn append(
 /// to 0 (`erl_bif_lists.c:182-211`, `bif.h:71-78`), so
 /// `lists_append_alloc` reads 0 and takes no element
 /// (`erl_bif_lists.c:118-161`).
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "trap export arm of `bif_trap`; every trap arm returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn append_chunk(
     process: &mut ProcessState,
     left: &Term,
@@ -2111,7 +2155,9 @@ pub(super) fn append_chunk(
     let per_reduction = if right.is_nil() { 32 } else { 60 };
     let budget = per_reduction * process.bif_reductions_or_zero();
     let walked = elements.by_ref().take(budget).count();
-    process.bump_reductions((walked / per_reduction) as i32);
+    process.bump_reductions(
+        i32::try_from(walked / per_reduction).expect("the walk reads at most the budget"),
+    );
     let rest = elements.rest();
     if rest.is_nonempty_list() {
         return Ok(BifResult::TrapBif {
@@ -2157,6 +2203,10 @@ pub(super) fn append_chunk(
 ///
 /// ERTS reads the budget into a `Uint` (`erl_bif_guard.c:273-280`), so a
 /// negative budget counts the whole list in the call.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn length(
     process: &mut ProcessState,
     list: &Term,
@@ -2176,14 +2226,16 @@ pub(super) fn length(
         return Ok(BifResult::TrapBif {
             module: "erlang",
             function: "length",
-            arguments: vec![rest.clone(), Term::Integer(count + counted as i64)],
+            arguments: vec![rest.clone(), Term::Integer(count + to_i64(counted))],
         });
     }
     if !rest.is_nil() {
         return Ok(BifResult::badarg());
     }
-    process.bump_reductions((counted / 16) as i32);
-    Ok(Value(Term::Integer(count + counted as i64)))
+    process.bump_reductions(
+        i32::try_from(counted / 16).expect("the count reads at most 16 cells for each reduction"),
+    );
+    Ok(Value(Term::Integer(count + to_i64(counted))))
 }
 
 /// Run `erlang:binary_part/3`: return the `length` bytes of a binary from
@@ -2226,14 +2278,14 @@ pub(super) fn binary_part(binary: &Term, start: &Term, length: &Term) -> BifResu
         };
         (start, length)
     } else {
-        (start, *length as u64)
+        (start, length.cast_unsigned())
     };
     // The start is below 2^63 and the length is at most 2^63, so the sum
     // does not overflow.
     let end = start + length;
     // A bitstring whose size is not a whole number of bytes raises
     // `badarg` (`erts_binary_part`, `erl_bif_binary.c:1995-1997`).
-    if !bytes.bit_size().is_multiple_of(8) || end > (bytes.bit_size() / 8) as u64 {
+    if !bytes.bit_size().is_multiple_of(8) || end > to_u64(bytes.bit_size() / 8) {
         return BifResult::badarg();
     }
     // ERTS makes a sub-binary that refers to the source
@@ -2241,7 +2293,7 @@ pub(super) fn binary_part(binary: &Term, start: &Term, length: &Term) -> BifResu
     // `erl_bif_binary.c:2508-2530`), so the part shares the bytes of the
     // source and keeps their offset.
     Value(Term::Binary(
-        bytes.bits(start as usize * 8, end as usize * 8),
+        bytes.bits(to_usize(start) * 8, to_usize(end) * 8),
     ))
 }
 
@@ -2262,7 +2314,7 @@ pub(super) fn binary_part(binary: &Term, start: &Term, length: &Term) -> BifResu
 /// ```
 pub(super) fn bit_size(term: &Term) -> BifResult {
     match term {
-        Term::Binary(bytes) => Value(Term::Integer(bytes.bit_size() as i64)),
+        Term::Binary(bytes) => Value(Term::Integer(to_i64(bytes.bit_size()))),
         _ => BifResult::badarg(),
     }
 }
@@ -2283,7 +2335,7 @@ pub(super) fn bit_size(term: &Term) -> BifResult {
 /// ```
 pub(super) fn byte_size(term: &Term) -> BifResult {
     match term {
-        Term::Binary(bytes) => Value(Term::Integer(bytes.bit_size().div_ceil(8) as i64)),
+        Term::Binary(bytes) => Value(Term::Integer(to_i64(bytes.bit_size().div_ceil(8)))),
         _ => BifResult::badarg(),
     }
 }
@@ -2295,8 +2347,8 @@ pub(super) fn byte_size(term: &Term) -> BifResult {
 /// In a guard, the `gc_bif` instruction goes to its fail label instead.
 pub(super) fn size(term: &Term) -> BifResult {
     match term {
-        Term::Tuple(elements) => Value(Term::Integer(elements.len() as i64)),
-        Term::Binary(bytes) => Value(Term::Integer((bytes.bit_size() / 8) as i64)),
+        Term::Tuple(elements) => Value(Term::Integer(to_i64(elements.len()))),
+        Term::Binary(bytes) => Value(Term::Integer(to_i64(bytes.bit_size() / 8))),
         _ => BifResult::badarg(),
     }
 }
@@ -2338,11 +2390,11 @@ pub(super) fn tl(list: &Term) -> BifResult {
 pub(super) fn split_binary(binary: &Term, position: &Term) -> BifResult {
     match (binary, position) {
         (Term::Binary(binary), Term::Integer(at))
-            if (0..=(binary.bit_size() / 8) as i64).contains(at) =>
+            if (0..=to_i64(binary.bit_size() / 8)).contains(at) =>
         {
             // The right part of a bitstring keeps the bits after the whole
             // bytes (`split_binary_2`, `binary.c:488-512`).
-            let at = *at as usize;
+            let at = to_usize(*at);
             let (left, right) = binary.bit_bytes().split_at(at);
             let right = Binary::from(right.to_vec()).bits(0, binary.bit_size() - at * 8);
             Value(Term::tuple(vec![
@@ -2361,10 +2413,18 @@ const B2L_BYTES_PER_REDUCTION: usize = 256;
 /// The budget of a call of `erlang:binary_to_list/1,3` that runs in one
 /// chunk after a short budget, as ERTS `B2L_MIN_EXEC_REDS`
 /// (`binary.c:38`).
+#[expect(
+    clippy::as_conversions,
+    reason = "a const cannot call `try_from`, and `CONTEXT_REDS` is 4000"
+)]
 const B2L_MIN_EXEC_REDS: usize = CONTEXT_REDS as usize / 4;
 
 /// The budget at or below which `erlang:binary_to_list/1,3` switches out
 /// before a short binary, as ERTS `B2L_RESCHED_REDS` (`binary.c:39`).
+#[expect(
+    clippy::as_conversions,
+    reason = "a const cannot call `try_from`, and `CONTEXT_REDS` is 4000"
+)]
 const B2L_RESCHED_REDS: usize = CONTEXT_REDS as usize / 40;
 
 /// Run `erlang:binary_to_list/1`, as ERTS `binary_to_list_1`
@@ -2426,19 +2486,19 @@ pub(super) fn binary_to_list_3(
         return Ok(BifResult::badarg());
     };
     let bits = binary.bit_size();
-    let size = (bits / 8) as i64;
+    let size = to_i64(bits / 8);
     if bits % 8 != 0 || *first < 1 || *last > size || last < first {
         return Ok(BifResult::badarg());
     }
     let arguments = vec![term.clone(), start.clone(), stop.clone()];
-    let length = (last - first + 1) as usize;
+    let length = to_usize(last - first + 1);
     b2l_start(
         scheduler,
         "binary_to_list",
         arguments,
         binary,
-        *first as usize - 1..*first as usize - 1 + length,
-        size as usize,
+        to_usize(*first) - 1..to_usize(*first) - 1 + length,
+        to_usize(size),
         Term::nil(),
     )
 }
@@ -2509,6 +2569,12 @@ pub(super) fn bitstring_to_list(
 /// # Errors
 ///
 /// Return the invariant error of [`ProcessState::bif_reductions_left`].
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "ERTS passes the `Uint` cost to `BUMP_REDS` as an `int` (`binary.c:265-266`), which wraps"
+)]
 fn b2l_start(
     scheduler: &mut Scheduler,
     bif: &'static str,
@@ -2520,10 +2586,10 @@ fn b2l_start(
 ) -> Result<BifResult, BeamError> {
     let (offset, length) = (bytes.start, bytes.len());
     let process = scheduler.current_process_mut();
-    let one_chunk = (size as u64)
+    let one_chunk = to_u64(size)
         < process
             .bif_reductions_unsigned()
-            .wrapping_mul(B2L_BYTES_PER_REDUCTION as u64);
+            .wrapping_mul(to_u64(B2L_BYTES_PER_REDUCTION));
     if !one_chunk {
         // Only a budget of 0 or more does not make one chunk.
         let reds_left = process.bif_reductions_left()?;
@@ -2577,7 +2643,10 @@ pub(super) fn b2l_chunk(
     reds_left: usize,
 ) -> BifResult {
     let size = ((reds_left + 1) * B2L_BYTES_PER_REDUCTION).min(remaining);
-    process.bump_reductions(((size - 1) / B2L_BYTES_PER_REDUCTION + 1) as i32);
+    process.bump_reductions(
+        i32::try_from((size - 1) / B2L_BYTES_PER_REDUCTION + 1)
+            .expect("a chunk costs at most the reductions left plus 1"),
+    );
     let rest = remaining - size;
     let list = b2l_cons(binary, offset + rest, offset + remaining, tail);
     if rest == 0 {
@@ -2588,8 +2657,8 @@ pub(super) fn b2l_chunk(
         function: "binary_to_list_continue",
         arguments: vec![
             Term::Binary(binary.clone()),
-            Term::Integer(offset as i64),
-            Term::Integer(rest as i64),
+            Term::Integer(to_i64(offset)),
+            Term::Integer(to_i64(rest)),
             list,
         ],
     }
@@ -2876,6 +2945,12 @@ pub(super) fn integer_to_binary_2(
 /// cost with the `int` budget, which C converts to a `Uint`
 /// (`bif.c:3289`, `binary.c:98`), so a negative budget makes no runtime
 /// error.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "ERTS passes the `Uint` cost to `BUMP_REDS` as an `int` (`bif.c:3289-3296`), which wraps"
+)]
 fn integer_digits(
     process: &mut ProcessState,
     term: &Term,
@@ -2889,10 +2964,8 @@ fn integer_digits(
     }
     if term.small_integer().is_none() {
         let value = term.bigint().expect("the term is an integer");
-        let cost =
-            big_integer_estimate(value.bits(), value.sign() == num_bigint::Sign::Minus, base)
-                / DIGITS_PER_RED;
-        if cost as u64 > process.bif_reductions_unsigned() {
+        let cost = big_integer_estimate(value.bits(), value.sign(), base) / DIGITS_PER_RED;
+        if to_u64(cost) > process.bif_reductions_unsigned() {
             // ponytail: no dirty scheduler; see "Scheduling" in docs/erts-differences.md.
             return Err(error(format!(
                 "unsupported erlang:{name} of a bignum of {} bits with {} reductions left: ERTS runs it on a dirty CPU scheduler",
@@ -2911,7 +2984,8 @@ fn integer_digits(
     let mut magnitude = value.unsigned_abs();
     let mut digits = Vec::new();
     loop {
-        let digit = (magnitude % u64::from(base)) as u32;
+        let digit =
+            u32::try_from(magnitude % u64::from(base)).expect("a remainder is below the base");
         digits.push(char::from_digit(digit, base).map_or('0', |digit| digit.to_ascii_uppercase()));
         magnitude /= u64::from(base);
         if magnitude == 0 {
@@ -2935,15 +3009,22 @@ fn integer_digits(
 ///
 /// ```rust,ignore
 /// // 2^59 has 60 bits: lg 59, 60 / 3.32193 + 1 = 19.06, then the null byte.
-/// assert_eq!(big_integer_estimate(60, false, 10), 20);
-/// assert_eq!(big_integer_estimate(64, true, 10), 22);
+/// assert_eq!(big_integer_estimate(60, Sign::Plus, 10), 20);
+/// assert_eq!(big_integer_estimate(64, Sign::Minus, 10), 22);
 /// // 2^63 - 1 in base 2: lg 62, 63 / 1.0 + 1 = 64, then the null byte.
-/// assert_eq!(big_integer_estimate(63, false, 2), 65);
+/// assert_eq!(big_integer_estimate(63, Sign::Plus, 2), 65);
 /// ```
-fn big_integer_estimate(bits: u64, negative: bool, base: u32) -> usize {
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    reason = "ERTS computes the digit count with a `double` and truncates it to a `Uint` (`big.c:4087-4092`), as the saturating `as` of Rust does"
+)]
+fn big_integer_estimate(bits: u64, sign: num_bigint::Sign, base: u32) -> usize {
     /// `lg2_lookup` (`big.c:4087-4092`): the rounded `log2` of each base
     /// from 2 to 36.
-    #[allow(clippy::approx_constant, reason = "ERTS uses these rounded values")]
+    #[expect(clippy::approx_constant, reason = "ERTS uses these rounded values")]
     const LG2_LOOKUP: [f64; 35] = [
         1.0, 1.58496, 2.0, 2.32193, 2.58496, 2.80735, 3.0, 3.16993, 3.32193, 3.45943, 3.58496,
         3.70044, 3.80735, 3.90689, 4.0, 4.08746, 4.16993, 4.24793, 4.32193, 4.39232, 4.45943,
@@ -2952,7 +3033,7 @@ fn big_integer_estimate(bits: u64, negative: bool, base: u32) -> usize {
     ];
     // `lg + 1` is the number of bits of the magnitude.
     let digits = (bits as f64 / LG2_LOOKUP[base as usize - 2] + 1.0) as usize;
-    digits + usize::from(negative) + 1
+    digits + usize::from(sign == num_bigint::Sign::Minus) + 1
 }
 
 /// Run `erlang:atom_to_list/1`: return the Unicode code points of the atom
@@ -3315,6 +3396,10 @@ const ENDIAN: &str = "little";
 /// Each other item gives a runtime error, also an item that ERTS rejects
 /// with `badarg`. A new atom in a full atom table gives the error of
 /// `AtomTable::put`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "item table: one arm for each `erlang:system_info/1` item, each arm is short"
+)]
 pub(super) fn system_info(scheduler: &mut Scheduler, item: &Term) -> Result<BifResult, BeamError> {
     let schedulers = scheduler.scheduler_count();
     let online = i64::try_from(scheduler.node().scheduler_count()).expect("a scheduler count fits");
@@ -3404,7 +3489,7 @@ pub(super) fn system_info(scheduler: &mut Scheduler, item: &Term) -> Result<BifR
         }
         Term::Atom(atom) if atoms.name_of(atom) == "endian" => Ok(Value(Term::static_atom(ENDIAN))),
         Term::Atom(atom) if atom.is_static("wordsize") => {
-            Ok(Value(Term::Integer(size_of::<usize>() as i64)))
+            Ok(Value(Term::Integer(to_i64(size_of::<usize>()))))
         }
         Term::Atom(atom) if atoms.name_of(atom) == "debug_compiled" => {
             Ok(Value(Term::static_atom("false")))
@@ -3566,7 +3651,7 @@ fn system_info_tuple(
     match elements {
         // `erl_bif_info.c:2520-2527`.
         [selector, which] if name(selector) == "wordsize" => match name(which) {
-            "internal" | "external" => Ok(Value(Term::Integer(size_of::<usize>() as i64))),
+            "internal" | "external" => Ok(Value(Term::Integer(to_i64(size_of::<usize>())))),
             _ => Ok(BifResult::badarg()),
         },
         // `erl_bif_info.c:2541-2546`, `erl_cpu_topology.c:1619-1638`.
@@ -4695,8 +4780,12 @@ pub(super) fn is_integer_3(term: &Term, low: &Term, high: &Term) -> BifResult {
     if !low.is_integer() || !high.is_integer() {
         return BifResult::badarg();
     }
-    let within = term.integer_order(low).is_some_and(|order| order.is_ge())
-        && term.integer_order(high).is_some_and(|order| order.is_le());
+    let within = term
+        .integer_order(low)
+        .is_some_and(std::cmp::Ordering::is_ge)
+        && term
+            .integer_order(high)
+            .is_some_and(std::cmp::Ordering::is_le);
     Value(Term::static_atom(if within { "true" } else { "false" }))
 }
 
@@ -4842,7 +4931,8 @@ fn local_send_result(scheduler: &mut Scheduler, value: Term) -> BifResult {
 pub(super) fn bump_reductions(scheduler: &mut Scheduler, reductions: &Term) -> BifResult {
     match reductions.small_integer() {
         Some(value) if value >= 0 => {
-            let value = value.min(i64::from(CONTEXT_REDS)) as i32;
+            let value = i32::try_from(value.min(i64::from(CONTEXT_REDS)))
+                .expect("a value up to `CONTEXT_REDS` is an `i32`");
             scheduler.current_process_mut().bump_reductions(value);
             Value(Term::static_atom("true"))
         }
@@ -5079,7 +5169,7 @@ pub(super) fn hibernate(module: &Term, function: &Term, arguments: &Term) -> Bif
     let (Term::Atom(_), Term::Atom(_)) = (module, function) else {
         return BifResult::badarg();
     };
-    let limit = MAX_ARG as usize + 1;
+    let limit = to_usize(MAX_ARG) + 1;
     let (count, rest) = match arguments.list_iter() {
         Some(mut cells) => (cells.by_ref().take(limit).count(), cells.rest()),
         None => (0, arguments),
@@ -5119,9 +5209,13 @@ pub(super) fn hibernate(module: &Term, function: &Term, arguments: &Term) -> Bif
 /// ```
 pub(super) fn make_fun(module: &Term, function: &Term, arity: &Term) -> BifResult {
     match (module, function, arity.small_integer()) {
-        (Term::Atom(module), Term::Atom(function), Some(arity @ 0..=MAX_ARG)) => Value(Term::Fun(
-            Fun::external(module.clone(), function.clone(), arity as u32),
-        )),
+        (Term::Atom(module), Term::Atom(function), Some(arity @ 0..=MAX_ARG)) => {
+            Value(Term::Fun(Fun::external(
+                module.clone(),
+                function.clone(),
+                u32::try_from(arity).expect("the arity is in 0..=255"),
+            )))
+        }
         _ => BifResult::badarg(),
     }
 }
@@ -5274,22 +5368,16 @@ pub(super) fn process_info(
                 let current = scheduler.current_reductions();
                 let registered = scheduler.registered_name_of(caller_id);
                 if let Some(items) = item.proper_list() {
-                    let info = caller_info_list(scheduler, items.cloned().collect(), current)?
-                        .ok_or_else(|| unsupported(&scheduler.atoms))?;
+                    let info =
+                        caller_info_list(scheduler, &items.cloned().collect::<Vec<_>>(), current)?
+                            .ok_or_else(|| unsupported(&scheduler.atoms))?;
                     return Ok(Value(info));
                 }
                 // ERTS builds the frames of the calling process from its
                 // continuation pointers, without the current function, which
                 // is `process_info/2`: at most `backtrace_depth` frames
                 // (`erl_bif_info.c:2397-2460`).
-                let stacktrace = match item {
-                    Term::Atom(name) if scheduler.atoms.name_of(name) == "current_stacktrace" => {
-                        let mut frames = mfa_stacktrace(scheduler, 0)?;
-                        frames.truncate(scheduler.node().backtrace_depth());
-                        Some(Term::tuple(vec![item.clone(), Term::list_from(frames)]))
-                    }
-                    _ => None,
-                };
+                let stacktrace = caller_stacktrace(scheduler, item)?;
                 let (caller, code, atoms) = scheduler.current_process_code_and_atoms();
                 let messages = caller.mailbox.message_count();
                 let request = ProcessInfoRequest {
@@ -5297,7 +5385,7 @@ pub(super) fn process_info(
                     atoms,
                     current,
                     messages,
-                    caller: true,
+                    reader: InfoReader::Caller,
                     registered_name: registered,
                 };
                 let info = match stacktrace {
@@ -5307,7 +5395,9 @@ pub(super) fn process_info(
                         .ok_or_else(|| unsupported(atoms))?,
                 };
                 let off_heap = caller.off_heap_message_queue;
-                caller.bump_reductions(1 + super::item_reductions(item, &info, messages, off_heap));
+                caller.bump_reductions(
+                    1 + super::item_reductions(item, &info, messages, MessageQueue::from(off_heap)),
+                );
                 Ok(Value(info))
             },
         );
@@ -5326,28 +5416,10 @@ pub(super) fn process_info(
         // An item that a read of another process does not support stays
         // unsupported here, because the owner reads the item as the target.
         if let Some(index) = scheduler.remote_owner(*id) {
-            if let Term::Atom(name) = item
-                && OTHER_PROCESS_INFO_ITEMS.contains(&scheduler.atoms.name_of(name))
-            {
-                let caller = scheduler.current_process_mut().id;
-                let reference = scheduler.make_ref()?;
-                scheduler.current_process_mut().mailbox.set_save_end();
-                let request = Signal::ProcessInfo {
-                    requester: caller,
-                    reference,
-                    item: item.clone(),
-                };
-                // The pending monitor of the caller goes before the
-                // request, and a target that exits before the owner drains
-                // the inbox is answered with `undefined` there.
-                scheduler.send_signal_to_owner(index, Some(caller), *id, request);
-                return Ok(Trap {
-                    module: "erts_internal",
-                    function: "await_result",
-                    arguments: vec![Term::Reference(reference)],
-                });
-            }
-            return Err(unsupported(&scheduler.atoms));
+            return match remote_process_info(scheduler, index, *id, item)? {
+                Some(trap) => Ok(trap),
+                None => Err(unsupported(&scheduler.atoms)),
+            };
         }
         return Ok(Value(Term::static_atom("undefined")));
     };
@@ -5358,7 +5430,7 @@ pub(super) fn process_info(
         atoms: &scheduler.atoms,
         current: 0,
         messages,
-        caller: false,
+        reader: InfoReader::Other,
         registered_name: registered,
     };
     let info = request
@@ -5374,28 +5446,82 @@ pub(super) fn process_info(
     let forced = matches!(item, Term::Atom(name)
         if matches!(scheduler.atoms.name_of(name), "memory" | "total_heap_size"));
     if forced || target.exiting.is_some() || target.mailbox.has_incoming() {
-        let caller = scheduler.current_process_mut().id;
-        let reference = scheduler.make_ref()?;
-        scheduler.current_process_mut().mailbox.set_save_end();
-        let request = Signal::ProcessInfo {
-            requester: caller,
-            reference,
-            item: item.clone(),
-        };
+        let (caller, reference, request) = process_info_request(scheduler, item)?;
         scheduler
             .send_signal(Some(caller), *id, request)
             .expect("the process is in the process table");
-        return Ok(Trap {
-            module: "erts_internal",
-            function: "await_result",
-            arguments: vec![Term::Reference(reference)],
-        });
+        return Ok(await_result(reference));
     }
     // Only `links` charges extra here: the items with a queue charge
     // went as a request above.
-    let extra = super::item_reductions(item, &info, 0, true);
+    let extra = super::item_reductions(item, &info, 0, MessageQueue::OffHeap);
     scheduler.current_process_mut().bump_reductions(1 + extra);
     Ok(signals_return(scheduler, process, info))
+}
+
+/// The `current_stacktrace` item of the calling process: the frames of the
+/// process, without the current function, at most `backtrace_depth` frames.
+/// Return `None` for another item.
+fn caller_stacktrace(scheduler: &mut Scheduler, item: &Term) -> Result<Option<Term>, BeamError> {
+    Ok(match item {
+        Term::Atom(name) if scheduler.atoms.name_of(name) == "current_stacktrace" => {
+            let mut frames = mfa_stacktrace(scheduler, 0)?;
+            frames.truncate(scheduler.node().backtrace_depth());
+            Some(Term::tuple(vec![item.clone(), Term::list_from(frames)]))
+        }
+        _ => None,
+    })
+}
+
+/// Send the `Signal::ProcessInfo` request for `item` to the scheduler `index`
+/// that owns the process `id`, and trap to wait for the answer. Return `None`
+/// for an item that a read of another process does not support.
+fn remote_process_info(
+    scheduler: &mut Scheduler,
+    index: usize,
+    id: ProcessId,
+    item: &Term,
+) -> Result<Option<BifResult>, BeamError> {
+    if let Term::Atom(name) = item
+        && OTHER_PROCESS_INFO_ITEMS.contains(&scheduler.atoms.name_of(name))
+    {
+        let (caller, reference, request) = process_info_request(scheduler, item)?;
+        // The pending monitor of the caller goes before the
+        // request, and a target that exits before the owner drains
+        // the inbox is answered with `undefined` there.
+        scheduler.send_signal_to_owner(index, Some(caller), id, request);
+        return Ok(Some(await_result(reference)));
+    }
+    Ok(None)
+}
+
+/// Make the reference and the `Signal::ProcessInfo` request of the calling
+/// process for `item`, and set the save pointer of its mailbox to the end for
+/// the wait on the answer. Return the id of the caller, the reference, and the
+/// request.
+fn process_info_request(
+    scheduler: &mut Scheduler,
+    item: &Term,
+) -> Result<(ProcessId, Reference, Signal), BeamError> {
+    let caller = scheduler.current_process_mut().id;
+    let reference = scheduler.make_ref()?;
+    scheduler.current_process_mut().mailbox.set_save_end();
+    let request = Signal::ProcessInfo {
+        requester: caller,
+        reference,
+        item: item.clone(),
+    };
+    Ok((caller, reference, request))
+}
+
+/// The trap that waits in `erts_internal:await_result/1` for the answer to a
+/// request with `reference`.
+fn await_result(reference: Reference) -> BifResult {
+    Trap {
+        module: "erts_internal",
+        function: "await_result",
+        arguments: vec![Term::Reference(reference)],
+    }
 }
 
 /// Return the result of `erlang:process_info/2` for a list of items of the
@@ -5412,7 +5538,7 @@ pub(super) fn process_info(
 ///
 /// ```rust,ignore
 /// let items = vec![Term::static_atom("registered_name"), Term::static_atom("status")];
-/// let info = caller_info_list(scheduler, items, 0)?;
+/// let info = caller_info_list(scheduler, &items, 0)?;
 /// assert!(matches!(info, Some(Term::Cons(_))));
 /// ```
 ///
@@ -5421,7 +5547,7 @@ pub(super) fn process_info(
 /// The errors of `process_info_values` and `process_info_term`.
 fn caller_info_list(
     scheduler: &mut Scheduler,
-    items: Vec<Term>,
+    items: &[Term],
     current: u64,
 ) -> Result<Option<Term>, BeamError> {
     let atoms = &scheduler.atoms;
@@ -5435,7 +5561,8 @@ fn caller_info_list(
     let messages = caller.mailbox.message_count();
     let off_heap = caller.off_heap_message_queue;
     let registered = scheduler.registered_name_of(caller.id);
-    let values = process_info_values(&scheduler.code, caller, current, messages, true, registered)?;
+    let who = InfoReader::Caller;
+    let values = process_info_values(&scheduler.code, caller, current, messages, who, registered)?;
     let all = process_info_term(&scheduler.atoms, values)?;
     let all: Vec<Term> = all.proper_list().expect("a proper list").cloned().collect();
     let mut reductions = 0;
@@ -5451,7 +5578,8 @@ fn caller_info_list(
         // ERTS reads a repeated item once and copies its result
         // (`part_res`, `erl_bif_info.c:1134-1145`), so only its first read costs.
         if !items[..index].contains(item) {
-            reductions += 1 + super::item_reductions(item, &pair, messages, off_heap);
+            reductions +=
+                1 + super::item_reductions(item, &pair, messages, MessageQueue::from(off_heap));
         }
         info.push(pair);
     }
@@ -5594,7 +5722,7 @@ pub(super) fn function_exported(
         return BifResult::badarg();
     };
     let (module, name) = (atoms.name_of(module), atoms.name_of(name));
-    let exported = u32::try_from(arity as i32).is_ok_and(|arity| {
+    let exported = u32::try_from(c_int(arity)).is_ok_and(|arity| {
         let exported_by_code = code.get(module).is_some_and(|loaded| {
             loaded
                 .tables
@@ -5742,18 +5870,18 @@ pub(super) fn finish_after_on_load(
     module: &Term,
     keep: &Term,
 ) -> Result<BifResult, BeamError> {
-    let keep = match keep {
-        Term::Atom(atom) if atom.is_static("true") => true,
-        Term::Atom(atom) if atom.is_static("false") => false,
+    let code = match keep {
+        Term::Atom(atom) if atom.is_static("true") => AfterOnLoad::Keep,
+        Term::Atom(atom) if atom.is_static("false") => AfterOnLoad::Drop,
         _ => return Ok(BifResult::badarg()),
     };
     let Term::Atom(module) = module else {
         return Ok(BifResult::badarg());
     };
     let name = scheduler.atoms.name_of(module).to_owned();
-    if !scheduler.code.finish_after_on_load(&name, keep)? {
+    if !scheduler.code.finish_after_on_load(&name, code)? {
         Ok(BifResult::badarg())
-    } else if keep {
+    } else if code == AfterOnLoad::Keep {
         // ERTS suspends the caller until the code is committed
         // (`beam_bif_load.c:912-916`, `555-566`).
         Ok(BifResult::YieldReturn(Term::static_atom("true")))
@@ -5914,12 +6042,13 @@ pub(super) fn process_info_1(
             let registered = scheduler.registered_name_of(*id);
             let values = {
                 let caller = scheduler.current_process();
-                process_info_values(&scheduler.code, caller, current, messages, true, registered)?
+                let who = InfoReader::Caller;
+                process_info_values(&scheduler.code, caller, current, messages, who, registered)?
             };
             let info = process_info_term(&scheduler.atoms, values)?;
-            scheduler
-                .current_process_mut()
-                .bump_reductions(PROCESS_INFO_1_KEYS.len() as i32);
+            scheduler.current_process_mut().bump_reductions(
+                i32::try_from(PROCESS_INFO_1_KEYS.len()).expect("the key list is short"),
+            );
             Ok(Value(info))
         });
     }
@@ -5940,11 +6069,12 @@ pub(super) fn process_info_1(
     };
     let messages = target.mailbox.message_count();
     let registered = scheduler.registered_name_of(*id);
-    let values = process_info_values(&scheduler.code, target, 0, messages, false, registered)?;
+    let who = InfoReader::Other;
+    let values = process_info_values(&scheduler.code, target, 0, messages, who, registered)?;
     let info = process_info_term(&scheduler.atoms, values)?;
     scheduler
         .current_process_mut()
-        .bump_reductions(PROCESS_INFO_1_KEYS.len() as i32);
+        .bump_reductions(i32::try_from(PROCESS_INFO_1_KEYS.len()).expect("the key list is short"));
     Ok(Value(info))
 }
 
@@ -5955,7 +6085,7 @@ fn process_info_values(
     process: &ProcessState,
     current: u64,
     messages: usize,
-    caller: bool,
+    reader: InfoReader,
     registered_name: Option<Atom>,
 ) -> Result<ProcessInfoValues, BeamError> {
     let current_function = if let Some(frame) = process.frames.last() {
@@ -5972,7 +6102,7 @@ fn process_info_values(
                 } => Some(MfaNames::Names(
                     module.clone(),
                     name.clone(),
-                    *arity as usize,
+                    usize::try_from(*arity).expect("a u32 fits in usize"),
                 )),
                 _ => None,
             })
@@ -6008,7 +6138,7 @@ fn process_info_values(
         "exiting"
     } else if process.suspended {
         "suspended"
-    } else if caller || process.dirty_started() {
+    } else if reader == InfoReader::Caller || process.dirty_started() {
         "running"
     } else if process.waiting {
         "waiting"
@@ -6058,10 +6188,19 @@ fn process_info_values(
     })
 }
 
+/// Who reads a process for `erlang:process_info`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::runtime) enum InfoReader {
+    /// The caller reads its own process.
+    Caller,
+    /// A process reads another process, on the signal path of its scheduler.
+    Other,
+}
+
 /// One `erlang:process_info/2` read: the tables of the scheduler that
 /// reads, the counts of the process, whether the caller reads itself, and
 /// its registered name. The signal path of another scheduler builds the
-/// request with `caller` false.
+/// request with [`InfoReader::Other`].
 pub(in crate::runtime) struct ProcessInfoRequest<'a> {
     /// The code table of the scheduler, for the frames of the process.
     pub(in crate::runtime) code: &'a CodeTable,
@@ -6071,8 +6210,8 @@ pub(in crate::runtime) struct ProcessInfoRequest<'a> {
     pub(in crate::runtime) current: u64,
     /// The number of messages in the queue of the process.
     pub(in crate::runtime) messages: usize,
-    /// True when the caller reads its own process.
-    pub(in crate::runtime) caller: bool,
+    /// Who reads the process.
+    pub(in crate::runtime) reader: InfoReader,
     /// The registered name of the process.
     pub(in crate::runtime) registered_name: Option<Atom>,
 }
@@ -6091,7 +6230,7 @@ impl ProcessInfoRequest<'_> {
             process,
             self.current,
             self.messages,
-            self.caller,
+            self.reader,
             self.registered_name.clone(),
         )?;
         let Term::Atom(name) = item else {
@@ -6149,7 +6288,7 @@ impl ProcessInfoRequest<'_> {
             "max_heap_size" => max_heap_size_map(
                 atoms,
                 values.heap_flags.max_heap_size,
-                values.heap_flags.max_heap_flags,
+                values.heap_flags.max_heap_settings,
             ),
             _ => return Ok(None),
         };
@@ -6350,6 +6489,10 @@ pub(super) fn registered(scheduler: &mut Scheduler) -> Result<BifResult, BeamErr
 /// ```rust,ignore
 /// assert!(matches!(ports(&mut scheduler)?, BifResult::Value(Term::Nil)));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn ports(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> {
     let ports = scheduler.node.ports().ids();
     Ok(Value(Term::list_from(ports.into_iter().map(Term::Port))))
@@ -6427,6 +6570,10 @@ pub(super) fn alias(context: &mut BifContext<'_>, options: &Term) -> Result<BifR
 /// let BifResult::Value(Term::Reference(reference)) = alias else { return };
 /// assert!(matches!(unalias(&mut context, &Term::Reference(reference))?, BifResult::Value(Term::Atom(atom))) if atom.is_static("true"));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn unalias(
     context: &mut BifContext<'_>,
     reference: &Term,
@@ -6493,7 +6640,7 @@ pub(super) fn unique_integer_1(
         return Ok(BifResult::badarg());
     }
     let value = if monotonic {
-        scheduler.unique_monotonic_integer(positive)?
+        scheduler.unique_monotonic_integer(UniqueRange::from(positive))?
     } else if positive {
         scheduler.unique_integer_positive()?
     } else {
@@ -6563,6 +6710,10 @@ pub(super) fn delete_module(
 /// # Errors
 ///
 /// The function has no error.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn has_prepared_code_on_load(
     scheduler: &mut Scheduler,
     reference: &Term,
@@ -6570,9 +6721,9 @@ pub(super) fn has_prepared_code_on_load(
     let Term::Reference(reference) = reference else {
         return Ok(BifResult::badarg());
     };
-    let on_load = if scheduler.code.prepared_module(reference).is_some() {
+    let on_load = if scheduler.code.prepared_module(*reference).is_some() {
         scheduler.code.prepared_on_load(&[*reference])
-    } else if let Some(on_load) = scheduler.code.finished_prepared_on_load(reference) {
+    } else if let Some(on_load) = scheduler.code.finished_prepared_on_load(*reference) {
         on_load
     } else {
         return Ok(BifResult::badarg());
@@ -7049,7 +7200,7 @@ pub(super) fn start_timer(
     receiver: &Term,
     message: &Term,
 ) -> Result<BifResult, BeamError> {
-    bif_timer(context, time, receiver, message, true)
+    bif_timer(context, time, receiver, message, TimerKind::StartTimer)
 }
 
 /// Run `erlang:send_after(Time, Dest, Msg)`, as ERTS `send_after_3`
@@ -7076,19 +7227,19 @@ pub(super) fn send_after(
     receiver: &Term,
     message: &Term,
 ) -> Result<BifResult, BeamError> {
-    bif_timer(context, time, receiver, message, false)
+    bif_timer(context, time, receiver, message, TimerKind::SendAfter)
 }
 
 /// Start the BIF timer of [`start_timer`] and [`send_after`], as
 /// `setup_bif_timer` (`erl_hl_timer.c:1804-1871`) does. A bad time gives
 /// `badarg` with the `error_info` cause `time`, as `BIF_P->fvalue` does
-/// (`erl_hl_timer.c:2573-2576`, `2612-2615`). `wrap` makes the
+/// (`erl_hl_timer.c:2573-2576`, `2612-2615`). [`TimerKind::StartTimer`] makes the
 /// message `{timeout, Reference, Msg}`, and else the message is `Msg`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = bif_timer(&mut context, &Term::Integer(100), &Term::Pid(pid), &msg, false)?;
+/// let result = bif_timer(&mut context, &Term::Integer(100), &Term::Pid(pid), &msg, TimerKind::SendAfter)?;
 /// assert!(matches!(result, BifResult::Value(Term::Reference(_))));
 /// ```
 ///
@@ -7100,7 +7251,7 @@ fn bif_timer(
     time: &Term,
     receiver: &Term,
     message: &Term,
-    wrap: bool,
+    kind: TimerKind,
 ) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
     let end = match *time {
@@ -7110,7 +7261,7 @@ fn bif_timer(
     let Some(end) = end else {
         return Ok(BifResult::badarg_with_cause("time"));
     };
-    super::timer::setup(scheduler, end, receiver, message, wrap)
+    super::timer::setup(scheduler, end, receiver, message, kind)
 }
 
 /// Run `erlang:cancel_timer(TimerRef, Options)`, as ERTS `cancel_timer_2`
@@ -7143,6 +7294,10 @@ fn bif_timer(
 /// let result = cancel_timer(&mut context, &Term::Reference(reference), &Term::nil())?;
 /// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.is_static("false"));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn cancel_timer(
     context: &mut BifContext<'_>,
     reference: &Term,
@@ -7395,7 +7550,7 @@ pub(super) fn port_set_data(
     port: &Term,
     data: &Term,
 ) -> Result<BifResult, BeamError> {
-    let found = erts_internal::found_port(scheduler, port)?;
+    let found = erts_internal::found_port(scheduler, port);
     let mut slot = erts_internal::lock_found(&found);
     let Some(port_state) = erts_internal::open(&mut slot) else {
         return Ok(BifResult::badarg());
@@ -7430,7 +7585,7 @@ pub(super) fn port_get_data(
     scheduler: &mut Scheduler,
     port: &Term,
 ) -> Result<BifResult, BeamError> {
-    let found = erts_internal::found_port(scheduler, port)?;
+    let found = erts_internal::found_port(scheduler, port);
     let mut slot = erts_internal::lock_found(&found);
     let Some(port_state) = erts_internal::open(&mut slot) else {
         return Ok(BifResult::badarg());
@@ -7454,6 +7609,10 @@ const PTAB_INDICES_PER_RED: u64 = 25;
 /// (`ERTS_PTAB_LIST_BIF_MIN_START_REDS`, `erl_ptab.c:44-46`), and the
 /// maximum reductions of one step through the deleted processes
 /// (`ERTS_PTAB_LIST_INSPECT_DELETED_MAX_REDS`, `erl_ptab.c:52-54`).
+#[expect(
+    clippy::as_conversions,
+    reason = "a const cannot call `try_from`, and the quotient is 40"
+)]
 const PTAB_CHUNK_REDS: usize = (PTAB_CHUNK / PTAB_INDICES_PER_RED) as usize;
 /// Deleted processes for one reduction
 /// (`ERTS_PTAB_LIST_BIF_INSPECT_DELETED_PER_RED`, `erl_ptab.c:50`).
@@ -7535,7 +7694,7 @@ pub(super) fn processes(scheduler: &mut Scheduler) -> Result<BifResult, BeamErro
         pid_ix: 0,
         result: Term::Nil,
     };
-    if scheduler.current_process().bif_reductions_signed() < PTAB_CHUNK_REDS as i64 {
+    if scheduler.current_process().bif_reductions_signed() < to_i64(PTAB_CHUNK_REDS) {
         return Ok(ptab_list_trap(scheduler, state));
     }
     ptab_list(scheduler, state)
@@ -7621,79 +7780,90 @@ pub(super) fn ptab_list(
     }
     loop {
         let left = scheduler.current_process().bif_reductions_left()?;
-        let have = if state.tix < PTAB_SIZE as i64 {
-            let end = (state.tix as u64 + PTAB_CHUNK).min(PTAB_SIZE);
-            let ids = if std::mem::take(&mut start) {
-                scheduler.ptab_list_start(end)
-            } else {
-                scheduler.ptab_list_chunk(end)
-            };
-            for id in ids {
-                #[cfg(test)]
-                PTAB_CELLS.set(PTAB_CELLS.get() + 1);
-                if Some(id) != hidden {
-                    ptab_list_push(&mut state.found, &mut state.pid_ix, id);
-                }
-            }
-            let reds = (end - state.tix as u64) / PTAB_INDICES_PER_RED;
-            state.tix = end as i64;
-            let have = left.saturating_sub(reds as usize);
-            let next = (end + PTAB_CHUNK).min(PTAB_SIZE) - end;
-            scheduler.current_process_mut().bump_reductions(reds as i32);
-            if (next / PTAB_INDICES_PER_RED) as usize > have {
-                0
-            } else {
-                have
-            }
-        } else if state.tix == PTAB_SIZE as i64 {
-            let max = left.min(PTAB_CHUNK_REDS);
-            let (mut reds, mut taken) = (0, 0);
-            while reds < max
-                && let Some((entry, free)) = scheduler.ptab_list_deleted()
-            {
-                #[cfg(test)]
-                PTAB_CELLS.set(PTAB_CELLS.get() + 1);
-                taken += 1;
-                reds += usize::from(taken % PTAB_DELETED_PER_RED == 0) + usize::from(free);
-                if let Some(id) = entry
-                    && Some(id) != hidden
-                {
-                    ptab_list_push(&mut state.gone, &mut state.pid_ix, id);
-                }
-            }
-            if scheduler.ptab_list_deleted_done() {
-                scheduler.ptab_list_end();
-                state.tix += 1;
-            }
-            scheduler.current_process_mut().bump_reductions(reds as i32);
-            left.saturating_sub(reds)
-        } else {
-            // The result cells come from the end of the result to its
-            // start: the gone pids, the last first, then the found pids, as
-            // `ptab_list_bif_engine` conses its pid array from the end
-            // (`erl_ptab.c:1201-1254`).
-            let conses = (PTAB_CONSES_PER_RED * left).min(state.pid_ix as usize);
-            for _ in 0..conses {
-                let list = if state.gone.is_nil() {
-                    &mut state.found
+        let have = match state.tix.cmp(&(to_i64(PTAB_SIZE))) {
+            std::cmp::Ordering::Less => {
+                let end = (to_u64(state.tix) + PTAB_CHUNK).min(PTAB_SIZE);
+                let ids = if std::mem::take(&mut start) {
+                    scheduler.ptab_list_start(end)
                 } else {
-                    &mut state.gone
+                    scheduler.ptab_list_chunk(end)
                 };
-                let (pid, tail) = list
-                    .cons_cell()
-                    .expect("the result has a pid for each cell");
-                let pid = pid.clone();
-                *list = tail.clone();
-                #[cfg(test)]
-                PTAB_CELLS.set(PTAB_CELLS.get() + 1);
-                state.result = Term::cons(pid, std::mem::replace(&mut state.result, Term::Nil));
+                for id in ids {
+                    #[cfg(test)]
+                    PTAB_CELLS.set(PTAB_CELLS.get() + 1);
+                    if Some(id) != hidden {
+                        ptab_list_push(&mut state.found, &mut state.pid_ix, id);
+                    }
+                }
+                let reds = (end - to_u64(state.tix)) / PTAB_INDICES_PER_RED;
+                state.tix = to_i64(end);
+                let have = left.saturating_sub(to_usize(reds));
+                let next = (end + PTAB_CHUNK).min(PTAB_SIZE) - end;
+                scheduler.current_process_mut().bump_reductions(
+                    i32::try_from(reds).expect("a chunk costs at most 40 reductions"),
+                );
+                if to_usize(next / PTAB_INDICES_PER_RED) > have {
+                    0
+                } else {
+                    have
+                }
             }
-            state.pid_ix -= conses as i64;
-            let reds = conses / PTAB_CONSES_PER_RED;
-            scheduler.current_process_mut().bump_reductions(reds as i32);
-            left - reds
+            std::cmp::Ordering::Equal => {
+                let max = left.min(PTAB_CHUNK_REDS);
+                let (mut reds, mut taken) = (0, 0);
+                while reds < max
+                    && let Some((entry, free)) = scheduler.ptab_list_deleted()
+                {
+                    #[cfg(test)]
+                    PTAB_CELLS.set(PTAB_CELLS.get() + 1);
+                    taken += 1;
+                    reds += usize::from(taken % PTAB_DELETED_PER_RED == 0) + usize::from(free);
+                    if let Some(id) = entry
+                        && Some(id) != hidden
+                    {
+                        ptab_list_push(&mut state.gone, &mut state.pid_ix, id);
+                    }
+                }
+                if scheduler.ptab_list_deleted_done() {
+                    scheduler.ptab_list_end();
+                    state.tix += 1;
+                }
+                scheduler.current_process_mut().bump_reductions(
+                    i32::try_from(reds)
+                        .expect("the deleted processes cost at most `PTAB_CHUNK_REDS`"),
+                );
+                left.saturating_sub(reds)
+            }
+            std::cmp::Ordering::Greater => {
+                // The result cells come from the end of the result to its
+                // start: the gone pids, the last first, then the found pids, as
+                // `ptab_list_bif_engine` conses its pid array from the end
+                // (`erl_ptab.c:1201-1254`).
+                let conses = (PTAB_CONSES_PER_RED * left).min(to_usize(state.pid_ix));
+                for _ in 0..conses {
+                    let list = if state.gone.is_nil() {
+                        &mut state.found
+                    } else {
+                        &mut state.gone
+                    };
+                    let (pid, tail) = list
+                        .cons_cell()
+                        .expect("the result has a pid for each cell");
+                    let pid = pid.clone();
+                    *list = tail.clone();
+                    #[cfg(test)]
+                    PTAB_CELLS.set(PTAB_CELLS.get() + 1);
+                    state.result = Term::cons(pid, std::mem::replace(&mut state.result, Term::Nil));
+                }
+                state.pid_ix -= to_i64(conses);
+                let reds = conses / PTAB_CONSES_PER_RED;
+                scheduler.current_process_mut().bump_reductions(
+                    i32::try_from(reds).expect("the cells cost at most the reductions left"),
+                );
+                left - reds
+            }
         };
-        if state.tix > PTAB_SIZE as i64 && state.pid_ix == 0 {
+        if state.tix > to_i64(PTAB_SIZE) && state.pid_ix == 0 {
             return Ok(Value(state.result));
         }
         if have == 0 {

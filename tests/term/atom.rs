@@ -89,7 +89,7 @@ fn stops_at_the_erts_atom_limit() {
     for index in count..ATOM_LIMIT {
         table.put(&index.to_string()).unwrap();
     }
-    assert_eq!(table.put("1048575").unwrap().index, 1048575);
+    assert_eq!(table.put("1048575").unwrap().index, 1_048_575);
     // An existing atom still resolves at the limit.
     assert_eq!(table.put("ok").unwrap().index, 506);
     assert_eq!(
@@ -184,10 +184,7 @@ fn imports_a_fun_between_two_atom_tables() {
         Term::list_from([Term::Atom(function_source.clone())]),
         Term::Map(
             Map::from_pairs(
-                vec![(
-                    Term::Atom(module_source.clone()),
-                    Term::Atom(function_source.clone()),
-                )],
+                vec![(Term::Atom(module_source), Term::Atom(function_source))],
                 &source,
             )
             .unwrap(),
@@ -202,8 +199,8 @@ fn imports_a_fun_between_two_atom_tables() {
             Term::Map(
                 Map::from_pairs(
                     vec![(
-                        Term::Atom(module_destination.clone()),
-                        Term::Atom(function_destination.clone()),
+                        Term::Atom(module_destination),
+                        Term::Atom(function_destination),
                     )],
                     &destination,
                 )
@@ -212,7 +209,17 @@ fn imports_a_fun_between_two_atom_tables() {
             Term::Integer(1),
         ])
     );
+}
 
+#[test]
+fn rejects_an_atom_index_outside_the_source_table_on_import() {
+    // The two tables are two copies of one program, so the local fun is of
+    // the program of the destination. The source holds three names that the
+    // destination does not, so each later name gets a higher index in the
+    // source: the module and the function of a fun have different indices
+    // in the two tables.
+    let source = AtomTable::new();
+    let destination = source.clone();
     // An index at or above the source table is not a value of the table, for
     // a term atom and for the module of a local fun.
     let outside_index = u32::try_from(source.read_indices().len()).unwrap();
@@ -275,16 +282,16 @@ fn keeps_the_sharing_of_a_compound_that_the_source_holds_twice() {
     let map = Term::Map(
         Map::from_pairs(vec![(Term::Atom(atom.clone()), Term::Integer(3))], &source).unwrap(),
     );
-    let fun = Term::Fun(Fun::external(atom.clone(), atom.clone(), 1));
+    let fun = Term::Fun(Fun::external(atom.clone(), atom, 1));
     let term = Term::tuple(vec![
         tuple.clone(),
-        tuple.clone(),
+        tuple,
         cell.clone(),
-        cell.clone(),
+        cell,
         map.clone(),
-        map.clone(),
+        map,
         fun.clone(),
-        fun.clone(),
+        fun,
     ]);
     let imported = destination.import_term(&source, &term).unwrap();
     let Term::Tuple(elements) = &imported else {
@@ -390,7 +397,7 @@ fn compares_terms_with_a_memory_of_the_shared_compounds() {
     let shared = Term::tuple(vec![Term::Integer(1)]);
     let copy = Term::tuple(vec![Term::Integer(1)]);
     let left = Term::tuple(vec![shared.clone(), shared.clone()]);
-    let right = Term::tuple(vec![copy.clone(), copy.clone()]);
+    let right = Term::tuple(vec![copy.clone(), copy]);
     assert!(left.eq_shared(&right));
     assert!(shared.eq_shared(&shared.clone()));
     // A tuple pair of a different length.
@@ -478,7 +485,7 @@ fn compares_terms_with_a_memory_of_the_shared_compounds() {
     );
     let atom = Atom::from_static("ok").unwrap();
     let fun = Term::Fun(Fun::external(atom.clone(), atom.clone(), 1));
-    let fun_copy = Term::Fun(Fun::external(atom.clone(), atom.clone(), 1));
+    let fun_copy = Term::Fun(Fun::external(atom.clone(), atom, 1));
     assert!(
         Term::tuple(vec![fun.clone(), fun])
             .eq_shared(&Term::tuple(vec![fun_copy.clone(), fun_copy]))
@@ -585,7 +592,10 @@ fn preloads_the_fixed_atoms_of_runtime_paths_after_the_static_atoms() {
     let count = table.read_indices().len();
     for (position, (atom, name)) in (1150..).zip(constants) {
         assert_eq!(atom.index, position);
-        assert_eq!(PRELOADED_ATOM_NAMES[(position - 1150) as usize], name);
+        assert_eq!(
+            PRELOADED_ATOM_NAMES[usize::try_from(position - 1150).unwrap()],
+            name
+        );
         assert!(Atom::from_static(name).is_none(), "{name} is static");
         assert_eq!(table.get(name), Some(atom.clone()));
         assert_eq!(table.name_of(&atom), name);

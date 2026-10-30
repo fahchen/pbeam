@@ -10,6 +10,10 @@
 //! and drops one term of each shape. A term that needs no walk must allocate
 //! nothing at all. A term whose walk needs a stack keeps its allocation, and
 //! the report prints the count and names the structure that keeps it.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::{alloc::System, cell::Cell, hint::black_box};
 
@@ -39,11 +43,13 @@ thread_local! {
     static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
 }
 
-// SAFETY: the allocator forwards each operation to `System`, which is a
-// valid allocator, and it only adds a count of the current thread.
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
+// SAFETY: each method forwards its arguments to `System`, which is a valid
+// allocator, so the `GlobalAlloc` contract holds. The count only changes a
+// `Cell` of the current thread, which does not allocate, unwind, or touch
+// the memory of the caller.
 unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
         count_one();
@@ -276,6 +282,7 @@ fn counts(shapes: Vec<Shape>) -> Vec<(&'static str, usize)> {
 /// ```rust,ignore
 /// report(&[("an immediate", 0)]);
 /// ```
+#[expect(clippy::print_stdout, reason = "the probe prints its measurement")]
 fn report(counts: &[(&str, usize)]) {
     for (name, count) in counts {
         println!("allocations of the drop of {name}: {count}");

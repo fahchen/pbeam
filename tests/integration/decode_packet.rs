@@ -1,3 +1,10 @@
+//! Runs `decode_packet` for HTTP lines and headers on PBeam and compares the results with the
+//! pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, HostTerm, Map, Term};
@@ -26,7 +33,7 @@ fn reference(function: &str) -> Vec<u8> {
         .output()
         .unwrap();
     assert!(output.status.success());
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, <[u8; 0]>::default());
     output.stdout
 }
 
@@ -112,22 +119,26 @@ fn error_info(result: &HostTerm, pairs: Vec<(Term, Term)>) -> Term {
     ])])
 }
 
-const REQUEST_LINES: &[u8] = br#"[{ok,{http_request,'GET',{abs_path,<<47>>},{1,1}},<<>>},{ok,{http_request,<<112,111,115,116>>,{abs_path,<<47,120>>},{2,0}},<<>>},{ok,{http_request,<<70,79,79>>,{abs_path,<<47>>},{1,1}},<<>>},{ok,{http_request,'GET',{abs_path,<<47>>},{0,9}},<<>>},{ok,{http_request,'OPTIONS','*',{1,1}},<<>>},{ok,{http_request,'GET',{absoluteURI,http,<<101,120,97,109,112,108,101,46,99,111,109>>,8080,<<47,112,63,113>>},{1,1}},<<>>},{ok,{http_request,'GET',{absoluteURI,https,<<91,58,58,49,93>>,4000,<<47,120>>},{1,1}},<<>>},{ok,{http_request,'GET',{absoluteURI,http,<<91,58,58,49,93>>,undefined,<<47,120>>},{1,1}},<<>>},{ok,{http_request,'GET',{absoluteURI,http,<<101,120,97,109,112,108,101,46,99,111,109>>,undefined,<<47>>},{1,1}},<<>>},{ok,{http_request,'GET',{scheme,<<104,116,116,112>>,<<47,120>>},{1,1}},<<>>},{ok,{http_request,'GET',{scheme,<<102,111,111>>,<<98,97,114>>},{1,1}},<<>>},{ok,{http_request,'GET',<<102,111,111>>,{1,1}},<<>>},{ok,{http_request,'GET',{absoluteURI,http,<<101,120,97,109,112,108,101,46,99,111,109>>,undefined,<<47,120>>},{1,1}},<<>>},{ok,{http_request,'GET',{absoluteURI,http,<<91,58,58,49,93>>,undefined,<<47,120>>},{1,1}},<<>>},{ok,{http_request,'GET',{absoluteURI,http,<<91,58,58,49,93>>,undefined,<<47,120>>},{1,1}},<<>>},{ok,{http_response,{1,1},200,<<79,75>>},<<>>},{ok,{http_response,{1,0},404,<<>>},<<>>},{ok,{http_request,'GET',{abs_path,<<47>>},{1,1}},<<88>>}]
-"#;
-const HEADER_LINES: &[u8] = br#"[{ok,{http_header,14,'Host',<<72,111,115,116>>,<<101,120,97,109,112,108,101,46,99,111,109>>},<<13,10>>},{ok,{http_header,38,'Content-Length',<<99,111,110,116,101,110,116,45,108,101,110,103,116,104>>,<<53>>},<<13,10>>},{ok,{http_header,0,<<88,45,70,111,111>>,<<120,45,102,111,111>>,<<98,97,114>>},<<13,10>>},{ok,{http_header,0,<<88,45,76,111,110,103>>,<<88,45,76,111,110,103>>,<<97,13,10,32,98>>},<<13,10>>},{ok,{http_header,0,<<88>>,<<88>>,<<>>},<<13,10>>},{ok,{http_header,0,<<88>>,<<88>>,<<118,97,108,117,101,32,32>>},<<13,10>>},{ok,{http_header,0,<<88>>,<<88>>,<<118,97,108,117,101>>},<<13,10>>},{ok,{http_header,0,<<84,104,105,115,73,115,65,86,101,114,121,76,111,110,103,72,101,97,100,101,114,78,97,109,101,84,104,97,116,69,120,99,101,101,100,115,84,104,101,70,105,102,116,121,67,104,97,114,97,99,116,101,114,76,105,109,105,116>>,<<84,104,105,115,73,115,65,86,101,114,121,76,111,110,103,72,101,97,100,101,114,78,97,109,101,84,104,97,116,69,120,99,101,101,100,115,84,104,101,70,105,102,116,121,67,104,97,114,97,99,116,101,114,76,105,109,105,116>>,<<118>>},<<13,10>>}]
-"#;
-const END_OF_HEADERS: &[u8] = br#"[{ok,http_eoh,<<>>},{ok,http_eoh,<<>>},{ok,{http_header,14,'Host',<<72,111,115,116>>,<<120>>},<<13,10>>}]
-"#;
-const INCOMPLETE: &[u8] = br#"[{more,undefined},{more,undefined},{more,undefined},{more,undefined}]
-"#;
-const MALFORMED: &[u8] = br#"[{ok,{http_error,<<66,79,71,85,83,13,10>>},<<>>},{ok,{http_error,<<13,10>>},<<>>},{ok,{http_error,<<78,111,67,111,108,111,110,13,10>>},<<13,10>>},{ok,{http_error,<<66,97,100,32,72,101,97,100,101,114,13,10>>},<<13,10>>},{ok,{http_error,<<71,69,32,84,32,47,32,72,84,84,80,47,49,46,49,13,10>>},<<>>},{ok,{http_error,<<72,84,84,80,47,49,32,50,48,48,32,79,75,13,10>>},<<>>},{ok,{http_error,<<72,84,84,80,47,49,46,32,50,48,48,32,79,75,13,10>>},<<>>},{ok,{http_error,<<72,84,84,80,47,49,46,49,13,10>>},<<>>},{ok,{http_error,<<72,84,84,80,47,49,46,49,32,50,48,48,79,75,13,10>>},<<>>},{ok,{http_error,<<71,69,84,32,13,10>>},<<>>},{ok,{http_error,<<71,69,84,32,47,32,72,84,80,47,49,46,49,13,10>>},<<>>},{ok,{http_error,<<71,69,84,32,47,32,72,84,84,80,47,49,46,13,10>>},<<>>},{ok,{http_error,<<71,69,84,32,47,32,72,84,84,80,47,120,121,122,13,10>>},<<>>},{ok,{http_error,<<71,69,84,32,47,32,72,84,84,80,47,49,50,120,13,10>>},<<>>},{ok,{http_error,<<71,69,84,32,47,32,72,84,84,80,47,49,50,51,13,10>>},<<>>},{ok,{http_error,<<71,69,84,32,47,32,72,84,84,80,47,49,46,97,13,10>>},<<>>}]
-"#;
-const OPTIONS: &[u8] = br#"[{error,invalid},{ok,{http_request,'GET',{abs_path,<<47>>},{1,1}},<<>>},{ok,{http_request,'GET',{abs_path,<<47>>},{1,1}},<<>>},{error,invalid},{ok,{http_header,14,'Host',<<72,111,115,116>>,<<120>>},<<13,10>>},{error,invalid},{error,invalid}]
-"#;
-const BADARGS: &[u8] = br#"[{error,badarg,[{error_info,#{module => erl_erts_errors}}]},{error,badarg,[{error_info,#{cause => badopt,module => erl_erts_errors}}]},{error,badarg,[{error_info,#{module => erl_erts_errors}}]},{error,badarg,[{error_info,#{module => erl_erts_errors}}]},{error,badarg,[{error_info,#{module => erl_erts_errors}}]},{error,badarg,[{error_info,#{module => erl_erts_errors}}]},{error,badarg,[{error_info,#{module => erl_erts_errors}}]},{error,badarg,[{error_info,#{module => erl_erts_errors}}]},{error,badarg,[{error_info,#{module => erl_erts_errors}}]}]
-"#;
+const REQUEST_LINES: &[u8] = br"[{ok,{http_request,'GET',{abs_path,<<47>>},{1,1}},<<>>},{ok,{http_request,<<112,111,115,116>>,{abs_path,<<47,120>>},{2,0}},<<>>},{ok,{http_request,<<70,79,79>>,{abs_path,<<47>>},{1,1}},<<>>},{ok,{http_request,'GET',{abs_path,<<47>>},{0,9}},<<>>},{ok,{http_request,'OPTIONS','*',{1,1}},<<>>},{ok,{http_request,'GET',{absoluteURI,http,<<101,120,97,109,112,108,101,46,99,111,109>>,8080,<<47,112,63,113>>},{1,1}},<<>>},{ok,{http_request,'GET',{absoluteURI,https,<<91,58,58,49,93>>,4000,<<47,120>>},{1,1}},<<>>},{ok,{http_request,'GET',{absoluteURI,http,<<91,58,58,49,93>>,undefined,<<47,120>>},{1,1}},<<>>},{ok,{http_request,'GET',{absoluteURI,http,<<101,120,97,109,112,108,101,46,99,111,109>>,undefined,<<47>>},{1,1}},<<>>},{ok,{http_request,'GET',{scheme,<<104,116,116,112>>,<<47,120>>},{1,1}},<<>>},{ok,{http_request,'GET',{scheme,<<102,111,111>>,<<98,97,114>>},{1,1}},<<>>},{ok,{http_request,'GET',<<102,111,111>>,{1,1}},<<>>},{ok,{http_request,'GET',{absoluteURI,http,<<101,120,97,109,112,108,101,46,99,111,109>>,undefined,<<47,120>>},{1,1}},<<>>},{ok,{http_request,'GET',{absoluteURI,http,<<91,58,58,49,93>>,undefined,<<47,120>>},{1,1}},<<>>},{ok,{http_request,'GET',{absoluteURI,http,<<91,58,58,49,93>>,undefined,<<47,120>>},{1,1}},<<>>},{ok,{http_response,{1,1},200,<<79,75>>},<<>>},{ok,{http_response,{1,0},404,<<>>},<<>>},{ok,{http_request,'GET',{abs_path,<<47>>},{1,1}},<<88>>}]
+";
+const HEADER_LINES: &[u8] = br"[{ok,{http_header,14,'Host',<<72,111,115,116>>,<<101,120,97,109,112,108,101,46,99,111,109>>},<<13,10>>},{ok,{http_header,38,'Content-Length',<<99,111,110,116,101,110,116,45,108,101,110,103,116,104>>,<<53>>},<<13,10>>},{ok,{http_header,0,<<88,45,70,111,111>>,<<120,45,102,111,111>>,<<98,97,114>>},<<13,10>>},{ok,{http_header,0,<<88,45,76,111,110,103>>,<<88,45,76,111,110,103>>,<<97,13,10,32,98>>},<<13,10>>},{ok,{http_header,0,<<88>>,<<88>>,<<>>},<<13,10>>},{ok,{http_header,0,<<88>>,<<88>>,<<118,97,108,117,101,32,32>>},<<13,10>>},{ok,{http_header,0,<<88>>,<<88>>,<<118,97,108,117,101>>},<<13,10>>},{ok,{http_header,0,<<84,104,105,115,73,115,65,86,101,114,121,76,111,110,103,72,101,97,100,101,114,78,97,109,101,84,104,97,116,69,120,99,101,101,100,115,84,104,101,70,105,102,116,121,67,104,97,114,97,99,116,101,114,76,105,109,105,116>>,<<84,104,105,115,73,115,65,86,101,114,121,76,111,110,103,72,101,97,100,101,114,78,97,109,101,84,104,97,116,69,120,99,101,101,100,115,84,104,101,70,105,102,116,121,67,104,97,114,97,99,116,101,114,76,105,109,105,116>>,<<118>>},<<13,10>>}]
+";
+const END_OF_HEADERS: &[u8] = br"[{ok,http_eoh,<<>>},{ok,http_eoh,<<>>},{ok,{http_header,14,'Host',<<72,111,115,116>>,<<120>>},<<13,10>>}]
+";
+const INCOMPLETE: &[u8] = br"[{more,undefined},{more,undefined},{more,undefined},{more,undefined}]
+";
+const MALFORMED: &[u8] = br"[{ok,{http_error,<<66,79,71,85,83,13,10>>},<<>>},{ok,{http_error,<<13,10>>},<<>>},{ok,{http_error,<<78,111,67,111,108,111,110,13,10>>},<<13,10>>},{ok,{http_error,<<66,97,100,32,72,101,97,100,101,114,13,10>>},<<13,10>>},{ok,{http_error,<<71,69,32,84,32,47,32,72,84,84,80,47,49,46,49,13,10>>},<<>>},{ok,{http_error,<<72,84,84,80,47,49,32,50,48,48,32,79,75,13,10>>},<<>>},{ok,{http_error,<<72,84,84,80,47,49,46,32,50,48,48,32,79,75,13,10>>},<<>>},{ok,{http_error,<<72,84,84,80,47,49,46,49,13,10>>},<<>>},{ok,{http_error,<<72,84,84,80,47,49,46,49,32,50,48,48,79,75,13,10>>},<<>>},{ok,{http_error,<<71,69,84,32,13,10>>},<<>>},{ok,{http_error,<<71,69,84,32,47,32,72,84,80,47,49,46,49,13,10>>},<<>>},{ok,{http_error,<<71,69,84,32,47,32,72,84,84,80,47,49,46,13,10>>},<<>>},{ok,{http_error,<<71,69,84,32,47,32,72,84,84,80,47,120,121,122,13,10>>},<<>>},{ok,{http_error,<<71,69,84,32,47,32,72,84,84,80,47,49,50,120,13,10>>},<<>>},{ok,{http_error,<<71,69,84,32,47,32,72,84,84,80,47,49,50,51,13,10>>},<<>>},{ok,{http_error,<<71,69,84,32,47,32,72,84,84,80,47,49,46,97,13,10>>},<<>>}]
+";
+const OPTIONS: &[u8] = br"[{error,invalid},{ok,{http_request,'GET',{abs_path,<<47>>},{1,1}},<<>>},{ok,{http_request,'GET',{abs_path,<<47>>},{1,1}},<<>>},{error,invalid},{ok,{http_header,14,'Host',<<72,111,115,116>>,<<120>>},<<13,10>>},{error,invalid},{error,invalid}]
+";
+const BADARGS: &[u8] = br"[{error,badarg,[{error_info,#{module => erl_erts_errors}}]},{error,badarg,[{error_info,#{cause => badopt,module => erl_erts_errors}}]},{error,badarg,[{error_info,#{module => erl_erts_errors}}]},{error,badarg,[{error_info,#{module => erl_erts_errors}}]},{error,badarg,[{error_info,#{module => erl_erts_errors}}]},{error,badarg,[{error_info,#{module => erl_erts_errors}}]},{error,badarg,[{error_info,#{module => erl_erts_errors}}]},{error,badarg,[{error_info,#{module => erl_erts_errors}}]},{error,badarg,[{error_info,#{module => erl_erts_errors}}]}]
+";
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "case table: one expected result for each request line"
+)]
 fn serves_http_request_lines_as_pinned_erts() {
     let result = run("request_lines");
     let get = atom(&result, "GET");

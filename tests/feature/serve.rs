@@ -10,7 +10,12 @@
 //! run also serve `GET /` with `accept-encoding: zstd` first, which makes
 //! Bandit compress the body with `zstd:compress/2` and a context, and
 //! compare the compressed response.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
+use std::fmt::Write as _;
 use std::{
     fs,
     io::{BufRead, BufReader, Read, Write},
@@ -270,7 +275,7 @@ fn reports_a_run_that_the_entry_cannot_start() {
     let mut bytes = fs::read(env!("CARGO_BIN_EXE_pbeam")).unwrap();
     bytes.extend_from_slice(&bundle);
     bytes.extend_from_slice(b"PBEAMEMB");
-    bytes.extend_from_slice(&(bundle.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(&u64::try_from(bundle.len()).unwrap().to_le_bytes());
     let path = directory.join("incomplete");
     fs::write(&path, &bytes).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
@@ -293,7 +298,7 @@ fn reports_a_bundle_that_cannot_start() {
     let mut bytes = fs::read(env!("CARGO_BIN_EXE_pbeam")).unwrap();
     bytes.extend_from_slice(&bundle);
     bytes.extend_from_slice(b"PBEAMEMB");
-    bytes.extend_from_slice(&(bundle.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(&u64::try_from(bundle.len()).unwrap().to_le_bytes());
     let path = directory.join("incomplete");
     fs::write(&path, &bytes).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
@@ -320,7 +325,7 @@ fn builds_the_one_file_executable_with_the_mix_task_and_runs_it_clean() {
     // is an empty directory, and `PBEAM_OTP_ROOT` is unset.
     let _serialized = ONE_FILE_RUN
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let directory = test_directory("mix-build");
     let example = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/plug_hello");
     let release = directory.join("release");
@@ -428,7 +433,7 @@ fn gives_the_command_line_arguments_of_the_executable_to_the_release() {
     // becomes a script file.
     let _serialized = ONE_FILE_RUN
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let directory = test_directory("arguments");
     let clean = directory.join("clean");
     let temporary = directory.join("tmp");
@@ -554,7 +559,7 @@ fn erts_release_response(release: &std::path::Path) -> (String, String, String) 
 fn serve_one_file() -> (String, String, String) {
     let _serialized = ONE_FILE_RUN
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let directory = test_directory("one-file");
     let clean = directory.join("clean");
     let temporary = directory.join("tmp");
@@ -732,7 +737,7 @@ fn serve(arguments: &[&str], pbeam: Option<&str>) -> (Response<String>, Response
     // script. The lock covers the build and the run.
     let _serialized = ONE_FILE_RUN
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut command = Command::new("bash");
     command
         .arg("scripts/example.sh")
@@ -930,7 +935,7 @@ fn exchange(mut stream: TcpStream, request: &[u8]) -> Result<Response<Vec<u8>>, 
             content_length = value.trim().parse::<usize>().ok();
         }
         if name != "date" {
-            headers.push_str(&format!("{name}: {}\n", value.trim()));
+            writeln!(headers, "{name}: {}", value.trim()).unwrap();
         }
     }
     let length = content_length.ok_or("the response has no content-length header")?;

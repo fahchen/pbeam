@@ -1,3 +1,10 @@
+//! Runs the Unicode IO BIFs (`characters_to_list` and related) on PBeam and compares them with the
+//! pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 #[path = "../common/mod.rs"]
 mod common;
 
@@ -23,7 +30,7 @@ fn reference(function: &str) -> Vec<u8> {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     reference.stdout
 }
 
@@ -99,7 +106,10 @@ fn converts_chardata_to_a_list_as_pinned_erts() {
             error(&[97], Term::list_from(vec![binary(&[255]), int(98)])),
             error(
                 &[97, 98],
-                Term::list_from(vec![Term::list_from(vec![list(&[1114112, 99])]), int(100)])
+                Term::list_from(vec![
+                    Term::list_from(vec![list(&[1_114_112, 99])]),
+                    int(100)
+                ])
             ),
             error(&[], list(&[1 << 60])),
             error(&[], improper(vec![int(1 << 60)], atom("foo"))),
@@ -122,7 +132,7 @@ fn converts_chardata_to_a_list_as_pinned_erts() {
             incomplete(&[97], binary(&[192])),
             error(&[97], Term::list_from(vec![binary(&[255]), int(1)])),
             error(&[], improper(vec![list(&[-1])], binary(b"x"))),
-            list(&[128512, 97]),
+            list(&[128_512, 97]),
             error(&[], binary(&[128])),
         ])
     );

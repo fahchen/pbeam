@@ -12,6 +12,27 @@ use crate::term::{Atom, AtomTable, Lambda, RecordDef, Term, flatmap_order};
 use std::num::NonZeroU64;
 use std::sync::Arc;
 
+/// Read a compact operand with the expected tag as a 32-bit field of an
+/// instruction: a label, a register, a count, or an arity.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "the loader keeps the low 32 bits of an operand that fills a 32-bit field of an instruction"
+)]
+fn read_operand_u32(data: &[u8], cursor: &mut usize, expected_tag: u8) -> Result<u32, BeamError> {
+    Ok(read_operand(data, cursor, expected_tag)? as u32)
+}
+
+/// Read a compact operand with the expected tag as an index or a count.
+fn read_operand_usize(
+    data: &[u8],
+    cursor: &mut usize,
+    expected_tag: u8,
+) -> Result<usize, BeamError> {
+    Ok(usize::try_from(read_operand(data, cursor, expected_tag)?)
+        .expect("a u64 fits in usize on a 64-bit host"))
+}
+
 const CODE_HEADER_SIZE: usize = WORD_SIZE * 5;
 const CODE_HEADER_SUB_SIZE: u32 = 16;
 const INSTRUCTION_SET_ERLANG: u32 = 0;
@@ -52,11 +73,11 @@ const OPCODE_CATCH: u8 = 62;
 const OPCODE_CATCH_END: u8 = 63;
 /// `bs_get_float2 Fail Ctx Live Size Unit Flags Dst` (genop.tab:448).
 const OPCODE_BS_GET_FLOAT2: u8 = 118;
-/// The `little` flag of a segment (`BSF_LITTLE`, erl_bits.h:462).
+/// The `little` flag of a segment (`BSF_LITTLE`, `erl_bits.h:462`).
 const BSF_LITTLE: u64 = 2;
-/// The `native` flag of a segment (`BSF_NATIVE`, erl_bits.h:465).
+/// The `native` flag of a segment (`BSF_NATIVE`, `erl_bits.h:465`).
 const BSF_NATIVE: u64 = 16;
-/// The `signed` flag of a segment (`BSF_SIGNED`, erl_bits.h:463).
+/// The `signed` flag of a segment (`BSF_SIGNED`, `erl_bits.h:463`).
 const BSF_SIGNED: u64 = 4;
 /// `bs_get_binary2 Fail Ctx Live Size Unit Flags Dst` (genop.tab:449).
 const OPCODE_BS_GET_BINARY2: u8 = 119;
@@ -518,7 +539,7 @@ pub(crate) enum Instruction {
     /// `{gc_bif,'-',{f,0},1,[{tr,{y,0},...},{tr,{x,0},...}],{x,0}}`. The
     /// guard `when -X > 0` of `arith_probe:neg/1` compiles to
     /// `{gc_bif,'-',{f,55},1,[{x,0}],{x,0}}`, and `length(Args)` in
-    /// `proc_lib:trans_init/3` (proc_lib.erl:944) compiles to
+    /// `proc_lib:trans_init/3` (`proc_lib.erl:944`) compiles to
     /// `{gc_bif,length,{f,0},3,[{tr,{x,2},...}],{x,2}}`. The guard
     /// `when binary_part(Binary, Start, Length) =:= <<"ell">>` of
     /// `binary_part_probe:guard/3` compiles to
@@ -1074,7 +1095,7 @@ pub(crate) enum Instruction {
     /// 0x13]`, which fails to label 25 unless `x0` equals `x1`.
     ///
     /// Erlang: the guard `CtrlSync==0` of `logger_h_common:handle_load/2`
-    /// (logger_h_common.erl:250) compiles to an `is_eq` test.
+    /// (`logger_h_common.erl:250`) compiles to an `is_eq` test.
     /// `eq(A, B) when A == B -> id(true);` compiles to
     /// `{test,is_eq,{f,25},[{x,0},{x,1}]}`.
     TestEqual {
@@ -1110,7 +1131,7 @@ pub(crate) enum Instruction {
     /// fails to label 157 when `x0` equals `x3`.
     ///
     /// Erlang: the guard `element(1,Req) =:= User orelse element(1,Req) =:=
-    /// Curr` of `user_drv:server/3` (user_drv.erl:542) compiles to
+    /// Curr` of `user_drv:server/3` (`user_drv.erl:542`) compiles to
     /// `{test,is_ne_exact,{f,157},[{x,0},{x,3}]}`. When the first test is
     /// true, the jump skips the `orelse` test.
     TestExactNotEqual {
@@ -1129,7 +1150,7 @@ pub(crate) enum Instruction {
     ///
     /// Erlang: `width(F) when F < 0 -> left;` compiles to
     /// `{test,is_lt,{f,15},[{x,0},{integer,0}]}`, as the guard of
-    /// `io_lib_format:field_width/3` (io_lib_format.erl:259) does, which
+    /// `io_lib_format:field_width/3` (`io_lib_format.erl:259`) does, which
     /// compares the atom `none` with 0.
     TestLess {
         fail_label: u32,
@@ -1280,7 +1301,7 @@ pub(crate) enum Instruction {
     /// flags 2 (`little`), and the destination `x1`. A literal size that
     /// is not a small integer, such as the bignum 2^64, stays in `size`:
     /// ERTS loads it as `i_bs_get_float2` (jit/arm/ops.tab:1009-1010, `s`
-    /// includes literals per beam_makeops:163) and jumps to the fail label
+    /// includes literals per `beam_makeops:163`) and jumps to the fail label
     /// at run time (`emit_bs_get_field_size`, jit/arm/instr_bs.cpp:58-86).
     ///
     /// Erlang: `<<F:N/float-little, Rest/binary>>` compiles to
@@ -1754,7 +1775,7 @@ pub(crate) enum TestKind {
     /// `compare_probe:kind/1` fails to label 11 unless `x0` is an integer.
     /// Erlang: `kind(X) when is_integer(X) -> integer;` compiles to
     /// `{test,is_integer,{f,11},[{x,0}]}`, as the guard of
-    /// `io_lib_format:field_value/2` (io_lib_format.erl:271) does.
+    /// `io_lib_format:field_value/2` (`io_lib_format.erl:271`) does.
     Integer,
     /// `is_float`, opcode 46. Example: `[0x2E, 0x55, 0x03]` in
     /// `float_test_probe:kind/1` fails to label 5 unless `x0` is a float.
@@ -1774,21 +1795,21 @@ pub(crate) enum TestKind {
     /// `compare_probe:kind/1` fails to label 12 unless `x0` is the atom
     /// `true` or `false`. Erlang: `kind(X) when is_boolean(X) -> boolean;`
     /// compiles to `{test,is_boolean,{f,12},[{x,0}]}`, as the guard of
-    /// `standard_error:check_valid_opts/1` (standard_error.erl:236) does.
+    /// `standard_error:check_valid_opts/1` (`standard_error.erl:236`) does.
     Boolean,
     /// `is_any_native_record`, opcode 186 (genop.tab:722-724). Example:
     /// `[0xBA, 0x55, 0x03]` fails to label 5 unless `x0` is a native
     /// record. Erlang: `kind(T) when is_record(T) -> record;` compiles to
     /// `{test,is_record,{f,5},[{x,0}]}`, as the guard of
-    /// `io_lib:write1/4` (io_lib.erl:843) and of
-    /// `io_lib_pretty:print_length/7` (io_lib_pretty.erl:938) does. PBeam
+    /// `io_lib:write1/4` (`io_lib.erl:843`) and of
+    /// `io_lib_pretty:print_length/7` (`io_lib_pretty.erl:938`) does. PBeam
     /// has no native record term, so the test fails for each term.
     AnyNativeRecord,
 }
 
 /// The source of a `put_record` instruction (`ops.tab:1641-1647`).
 #[derive(Debug, Clone)]
-pub enum PutRecord {
+pub(crate) enum PutRecord {
     /// Create a record of the module from its definition
     /// (`create_local_record`, `generators.tab:255-300`).
     Local(Arc<RecordDef>),
@@ -1802,7 +1823,7 @@ pub enum PutRecord {
 
 /// The record name of a `get_record_field` instruction (`ops.tab:1669-1678`).
 #[derive(Debug, Clone)]
-pub enum RecordId {
+pub(crate) enum RecordId {
     /// A record name of any module, or `'_'` for any record
     /// (`erl_get_local_record_field`, `erl_record.c:470-510`).
     Local(Atom),
@@ -2072,6 +2093,10 @@ fn test_operands(left: &Operand, right: &Operand) -> Option<(TestOperand, TestOp
     clippy::too_many_arguments,
     reason = "each argument is one decoded chunk that the code refers to"
 )]
+#[expect(
+    clippy::too_many_lines,
+    reason = "decode table: one arm for each BEAM opcode that reads its operands in the order of `genop.tab`; each arm is short"
+)]
 pub(super) fn parse_code(
     data: &[u8],
     atom_table: &AtomTable,
@@ -2091,8 +2116,8 @@ pub(super) fn parse_code(
     }
     let number_of_labels =
         read_u32(&data[CODE_LABEL_COUNT_OFFSET..CODE_LABEL_COUNT_OFFSET + WORD_SIZE])?;
-    let declared_function_count =
-        read_u32(&data[CODE_FUNCTION_COUNT_OFFSET..CODE_HEADER_SIZE])? as usize;
+    let declared = read_u32(&data[CODE_FUNCTION_COUNT_OFFSET..CODE_HEADER_SIZE])?;
+    let declared_function_count = usize::try_from(declared).expect("a u32 fits in usize");
     let mut cursor = CODE_HEADER_SIZE;
     let mut instructions = Vec::new();
     let mut function_info_count = 0;
@@ -2107,7 +2132,7 @@ pub(super) fn parse_code(
         cursor += 1;
         let instruction = match opcode {
             OPCODE_LABEL => {
-                let label = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
+                let label = read_operand_u32(data, &mut cursor, TAG_UNSIGNED)?;
                 if label < FIRST_LABEL_NUMBER || label > number_of_labels {
                     return Err(error(format!(
                         "BEAM label {label} is outside declared range 1..={number_of_labels}"
@@ -2141,11 +2166,11 @@ pub(super) fn parse_code(
                     lines.function(instructions.len(), None)?;
                 }
                 function_info_count += 1;
-                let module_index = read_operand(data, &mut cursor, TAG_ATOM)? as usize;
+                let module_index = read_operand_usize(data, &mut cursor, TAG_ATOM)?;
                 let module = atom_table.name_of(atom_at(atoms, module_index)?).to_owned();
-                let name_index = read_operand(data, &mut cursor, TAG_ATOM)? as usize;
+                let name_index = read_operand_usize(data, &mut cursor, TAG_ATOM)?;
                 let name = atom_table.name_of(atom_at(atoms, name_index)?).to_owned();
-                let arity = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
+                let arity = read_operand_u32(data, &mut cursor, TAG_UNSIGNED)?;
                 function = Some((name.clone(), arity, instructions.len() + 1));
                 Instruction::FunctionInfo {
                     module,
@@ -2176,8 +2201,8 @@ pub(super) fn parse_code(
                 Instruction::Return
             }
             OPCODE_CALL => {
-                let arity = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
-                let label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let arity = read_operand_u32(data, &mut cursor, TAG_UNSIGNED)?;
+                let label = read_operand_u32(data, &mut cursor, TAG_LABEL)?;
                 Instruction::Call {
                     arity,
                     function: label,
@@ -2185,18 +2210,18 @@ pub(super) fn parse_code(
                 }
             }
             OPCODE_CALL_ONLY => {
-                let arity = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
-                let label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let arity = read_operand_u32(data, &mut cursor, TAG_UNSIGNED)?;
+                let label = read_operand_u32(data, &mut cursor, TAG_LABEL)?;
                 Instruction::CallOnly {
                     arity,
                     function: label,
                     target: label,
                 }
             }
-            OPCODE_JUMP => Instruction::Jump(read_operand(data, &mut cursor, TAG_LABEL)? as u32),
+            OPCODE_JUMP => Instruction::Jump(read_operand_u32(data, &mut cursor, TAG_LABEL)?),
             OPCODE_SELECT_VAL => {
                 let value = read_move_operand(data, &mut cursor, atoms, literals)?;
-                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let fail_label = read_operand_u32(data, &mut cursor, TAG_LABEL)?;
                 let pair_count = read_pair_count(data, &mut cursor)?;
                 let mut choices = Vec::with_capacity(pair_count);
                 for _ in 0..pair_count {
@@ -2204,7 +2229,7 @@ pub(super) fn parse_code(
                     let Operand::Value(choice) = choice else {
                         return Err(error("unsupported BEAM selection value"));
                     };
-                    let target = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                    let target = read_operand_u32(data, &mut cursor, TAG_LABEL)?;
                     choices.push((choice, target));
                 }
                 Instruction::SelectValue {
@@ -2215,12 +2240,12 @@ pub(super) fn parse_code(
             }
             OPCODE_SELECT_TUPLE_ARITY => {
                 let value = read_move_operand(data, &mut cursor, atoms, literals)?;
-                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let fail_label = read_operand_u32(data, &mut cursor, TAG_LABEL)?;
                 let pair_count = read_pair_count(data, &mut cursor)?;
                 let mut choices = Vec::with_capacity(pair_count);
                 for _ in 0..pair_count {
-                    let arity = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
-                    let target = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                    let arity = read_operand_u32(data, &mut cursor, TAG_UNSIGNED)?;
+                    let target = read_operand_u32(data, &mut cursor, TAG_LABEL)?;
                     choices.push((arity, target));
                 }
                 Instruction::SelectTupleArity {
@@ -2230,14 +2255,14 @@ pub(super) fn parse_code(
                 }
             }
             OPCODE_TEST_ARITY => Instruction::TestArity {
-                fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
+                fail_label: read_operand_u32(data, &mut cursor, TAG_LABEL)?,
                 value: read_move_operand(data, &mut cursor, atoms, literals)?,
-                arity: read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32,
+                arity: read_operand_u32(data, &mut cursor, TAG_UNSIGNED)?,
             },
             OPCODE_CALL_LAST => {
-                let arity = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
-                let label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
-                let deallocate = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
+                let arity = read_operand_u32(data, &mut cursor, TAG_UNSIGNED)?;
+                let label = read_operand_u32(data, &mut cursor, TAG_LABEL)?;
+                let deallocate = read_operand_u32(data, &mut cursor, TAG_UNSIGNED)?;
                 Instruction::CallLast {
                     arity,
                     function: label,
@@ -2246,9 +2271,9 @@ pub(super) fn parse_code(
                 }
             }
             OPCODE_TEST_TAGGED_TUPLE => {
-                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let fail_label = read_operand_u32(data, &mut cursor, TAG_LABEL)?;
                 let value = read_move_operand(data, &mut cursor, atoms, literals)?;
-                let arity = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
+                let arity = read_operand_u32(data, &mut cursor, TAG_UNSIGNED)?;
                 let tag = read_value(data, &mut cursor, atoms)?;
                 Instruction::TestTaggedTuple {
                     fail_label,
@@ -2304,7 +2329,7 @@ pub(super) fn parse_code(
                 }
             }
             OPCODE_BS_START_MATCH3 => {
-                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let fail_label = read_operand_u32(data, &mut cursor, TAG_LABEL)?;
                 let source = read_move_operand(data, &mut cursor, atoms, literals)?;
                 skip_live_registers(data, &mut cursor)?;
                 Instruction::BinaryMatchStart {
@@ -2320,7 +2345,7 @@ pub(super) fn parse_code(
                     .get(cursor)
                     .is_some_and(|first| first & COMPACT_TAG_MASK == TAG_ATOM)
                 {
-                    let atom = atom_at(atoms, read_operand(data, &mut cursor, TAG_ATOM)? as usize)?;
+                    let atom = atom_at(atoms, read_operand_usize(data, &mut cursor, TAG_ATOM)?)?;
                     if atom.is_static("no_fail") {
                         Some(0)
                     } else if atom.is_static("resume") {
@@ -2332,7 +2357,7 @@ pub(super) fn parse_code(
                         )));
                     }
                 } else {
-                    Some(read_operand(data, &mut cursor, TAG_LABEL)? as u32)
+                    Some(read_operand_u32(data, &mut cursor, TAG_LABEL)?)
                 };
                 skip_live_registers(data, &mut cursor)?;
                 let source = read_register(data, &mut cursor)?;
@@ -2359,7 +2384,7 @@ pub(super) fn parse_code(
                 }
             }
             OPCODE_BS_GET_BINARY2 => {
-                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let fail_label = read_operand_u32(data, &mut cursor, TAG_LABEL)?;
                 let context = read_move_operand(data, &mut cursor, atoms, literals)?;
                 skip_live_registers(data, &mut cursor)?;
                 let size = read_move_operand(data, &mut cursor, atoms, literals)?;
@@ -2395,7 +2420,7 @@ pub(super) fn parse_code(
                 }
             }
             OPCODE_BS_GET_FLOAT2 => {
-                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let fail_label = read_operand_u32(data, &mut cursor, TAG_LABEL)?;
                 let context = read_move_operand(data, &mut cursor, atoms, literals)?;
                 skip_live_registers(data, &mut cursor)?;
                 let size = read_move_operand(data, &mut cursor, atoms, literals)?;
@@ -2412,7 +2437,7 @@ pub(super) fn parse_code(
                 }
             }
             OPCODE_BS_GET_INTEGER2 => {
-                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let fail_label = read_operand_u32(data, &mut cursor, TAG_LABEL)?;
                 let context = read_move_operand(data, &mut cursor, atoms, literals)?;
                 skip_live_registers(data, &mut cursor)?;
                 let size = read_move_operand(data, &mut cursor, atoms, literals)?;
@@ -2429,7 +2454,7 @@ pub(super) fn parse_code(
                 }
             }
             OPCODE_BS_SKIP_BITS2 => {
-                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let fail_label = read_operand_u32(data, &mut cursor, TAG_LABEL)?;
                 let context = read_move_operand(data, &mut cursor, atoms, literals)?;
                 let size = read_move_operand(data, &mut cursor, atoms, literals)?;
                 let unit = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
@@ -2455,7 +2480,7 @@ pub(super) fn parse_code(
                 position: read_move_operand(data, &mut cursor, atoms, literals)?,
             },
             OPCODE_BS_GET_UTF8 | OPCODE_BS_SKIP_UTF8 => {
-                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let fail_label = read_operand_u32(data, &mut cursor, TAG_LABEL)?;
                 let context = read_move_operand(data, &mut cursor, atoms, literals)?;
                 skip_live_registers(data, &mut cursor)?;
                 let _flags = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
@@ -2471,7 +2496,7 @@ pub(super) fn parse_code(
             }
             OPCODE_BS_GET_UTF16 | OPCODE_BS_SKIP_UTF16 | OPCODE_BS_GET_UTF32
             | OPCODE_BS_SKIP_UTF32 => {
-                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let fail_label = read_operand_u32(data, &mut cursor, TAG_LABEL)?;
                 let context = read_move_operand(data, &mut cursor, atoms, literals)?;
                 skip_live_registers(data, &mut cursor)?;
                 let little = read_little_flag(data, &mut cursor)?;
@@ -2498,7 +2523,7 @@ pub(super) fn parse_code(
                 }
             }
             OPCODE_BS_MATCH => {
-                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let fail_label = read_operand_u32(data, &mut cursor, TAG_LABEL)?;
                 let context = read_move_operand(data, &mut cursor, atoms, literals)?;
                 let commands =
                     read_binary_match_commands(data, &mut cursor, atom_table, atoms, literals)?;
@@ -2510,7 +2535,7 @@ pub(super) fn parse_code(
                 }
             }
             OPCODE_BS_MATCH_STRING => {
-                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let fail_label = read_operand_u32(data, &mut cursor, TAG_LABEL)?;
                 let context = read_move_operand(data, &mut cursor, atoms, literals)?;
                 let bits = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
                 Instruction::BinaryMatchString {
@@ -2522,7 +2547,7 @@ pub(super) fn parse_code(
             }
             OPCODE_BS_INIT_WRITABLE => Instruction::BinaryInitWritable,
             OPCODE_BS_CREATE_BIN => {
-                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let fail_label = read_operand_u32(data, &mut cursor, TAG_LABEL)?;
                 skip_allocation(data, &mut cursor)?;
                 skip_live_registers(data, &mut cursor)?;
                 let _unit = read_operand(data, &mut cursor, TAG_UNSIGNED)?;
@@ -2533,17 +2558,17 @@ pub(super) fn parse_code(
                 }
             }
             OPCODE_TEST_EQ => Instruction::TestEqual {
-                fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
+                fail_label: read_operand_u32(data, &mut cursor, TAG_LABEL)?,
                 left: read_move_operand(data, &mut cursor, atoms, literals)?,
                 right: read_move_operand(data, &mut cursor, atoms, literals)?,
             },
             OPCODE_TEST_NE => Instruction::TestNotEqual {
-                fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
+                fail_label: read_operand_u32(data, &mut cursor, TAG_LABEL)?,
                 left: read_move_operand(data, &mut cursor, atoms, literals)?,
                 right: read_move_operand(data, &mut cursor, atoms, literals)?,
             },
             OPCODE_TEST_EXACT_EQ => {
-                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let fail_label = read_operand_u32(data, &mut cursor, TAG_LABEL)?;
                 let left = read_move_operand(data, &mut cursor, atoms, literals)?;
                 let right = read_move_operand(data, &mut cursor, atoms, literals)?;
                 match test_operands(&left, &right) {
@@ -2560,32 +2585,32 @@ pub(super) fn parse_code(
                 }
             }
             OPCODE_TEST_EXACT_NE => Instruction::TestExactNotEqual {
-                fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
+                fail_label: read_operand_u32(data, &mut cursor, TAG_LABEL)?,
                 left: read_move_operand(data, &mut cursor, atoms, literals)?,
                 right: read_move_operand(data, &mut cursor, atoms, literals)?,
             },
             OPCODE_TEST_LT => Instruction::TestLess {
-                fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
+                fail_label: read_operand_u32(data, &mut cursor, TAG_LABEL)?,
                 left: read_move_operand(data, &mut cursor, atoms, literals)?,
                 right: read_move_operand(data, &mut cursor, atoms, literals)?,
             },
             OPCODE_TEST_GE => Instruction::TestGreaterEqual {
-                fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
+                fail_label: read_operand_u32(data, &mut cursor, TAG_LABEL)?,
                 left: read_move_operand(data, &mut cursor, atoms, literals)?,
                 right: read_move_operand(data, &mut cursor, atoms, literals)?,
             },
             OPCODE_TRY | OPCODE_CATCH => Instruction::Catch {
-                register: read_operand(data, &mut cursor, TAG_Y_REGISTER)? as u32,
-                label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
+                register: read_operand_u32(data, &mut cursor, TAG_Y_REGISTER)?,
+                label: read_operand_u32(data, &mut cursor, TAG_LABEL)?,
             },
             OPCODE_TRY_END => Instruction::TryEnd {
-                register: read_operand(data, &mut cursor, TAG_Y_REGISTER)? as u32,
+                register: read_operand_u32(data, &mut cursor, TAG_Y_REGISTER)?,
             },
             OPCODE_TRY_CASE => Instruction::TryCase {
-                register: read_operand(data, &mut cursor, TAG_Y_REGISTER)? as u32,
+                register: read_operand_u32(data, &mut cursor, TAG_Y_REGISTER)?,
             },
             OPCODE_CATCH_END => Instruction::CatchEnd {
-                register: read_operand(data, &mut cursor, TAG_Y_REGISTER)? as u32,
+                register: read_operand_u32(data, &mut cursor, TAG_Y_REGISTER)?,
             },
             OPCODE_RAISE => Instruction::Raise {
                 trace: read_move_operand(data, &mut cursor, atoms, literals)?,
@@ -2613,15 +2638,15 @@ pub(super) fn parse_code(
             OPCODE_SEND => Instruction::Send,
             OPCODE_REMOVE_MESSAGE => Instruction::RemoveMessage,
             OPCODE_LOOP_REC => Instruction::LoopReceive {
-                fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
+                fail_label: read_operand_u32(data, &mut cursor, TAG_LABEL)?,
                 destination: read_register(data, &mut cursor)?,
             },
             OPCODE_LOOP_REC_END => {
-                Instruction::LoopReceiveEnd(read_operand(data, &mut cursor, TAG_LABEL)? as u32)
+                Instruction::LoopReceiveEnd(read_operand_u32(data, &mut cursor, TAG_LABEL)?)
             }
-            OPCODE_WAIT => Instruction::Wait(read_operand(data, &mut cursor, TAG_LABEL)? as u32),
+            OPCODE_WAIT => Instruction::Wait(read_operand_u32(data, &mut cursor, TAG_LABEL)?),
             OPCODE_WAIT_TIMEOUT => Instruction::WaitTimeout {
-                label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
+                label: read_operand_u32(data, &mut cursor, TAG_LABEL)?,
                 source: read_move_operand(data, &mut cursor, atoms, literals)?,
             },
             OPCODE_TIMEOUT => Instruction::Timeout,
@@ -2640,7 +2665,7 @@ pub(super) fn parse_code(
             }
             OPCODE_GET_TUPLE_ELEMENT => Instruction::GetTupleElement {
                 tuple: read_register(data, &mut cursor)?,
-                index: read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32,
+                index: read_operand_u32(data, &mut cursor, TAG_UNSIGNED)?,
                 destination: read_register(data, &mut cursor)?,
             },
             OPCODE_UPDATE_RECORD => {
@@ -2682,7 +2707,7 @@ pub(super) fn parse_code(
                 }
             }
             OPCODE_GET_MAP_ELEMENTS => Instruction::GetMapElements {
-                fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
+                fail_label: read_operand_u32(data, &mut cursor, TAG_LABEL)?,
                 map: read_move_operand(data, &mut cursor, atoms, literals)?,
                 pairs: sort_map_key_pairs(
                     read_operand_pairs(data, &mut cursor, atoms, literals)?,
@@ -2690,7 +2715,7 @@ pub(super) fn parse_code(
                 )?,
             },
             OPCODE_HAS_MAP_FIELDS => {
-                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let fail_label = read_operand_u32(data, &mut cursor, TAG_LABEL)?;
                 let map = read_move_operand(data, &mut cursor, atoms, literals)?;
                 let key_count = read_list_count(data, &mut cursor)?;
                 let keys = (0..key_count)
@@ -2714,7 +2739,7 @@ pub(super) fn parse_code(
                 }
             }
             OPCODE_PUT_MAP_EXACT => {
-                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let fail_label = read_operand_u32(data, &mut cursor, TAG_LABEL)?;
                 let map = read_move_operand(data, &mut cursor, atoms, literals)?;
                 let destination = read_register(data, &mut cursor)?;
                 skip_live_registers(data, &mut cursor)?;
@@ -2753,7 +2778,7 @@ pub(super) fn parse_code(
                 }
             }
             OPCODE_CALL_FUN => {
-                let arity = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
+                let arity = read_operand_u32(data, &mut cursor, TAG_UNSIGNED)?;
                 Instruction::CallFun {
                     arity,
                     function: Operand::X(arity),
@@ -2770,9 +2795,9 @@ pub(super) fn parse_code(
                 };
                 let tag = read_operand(data, &mut cursor, tag_kind)?;
                 if tag_kind == TAG_ATOM {
-                    atom_at(atoms, tag as usize)?;
+                    atom_at(atoms, usize::try_from(tag).expect("a u64 fits in usize"))?;
                 }
-                let arity = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
+                let arity = read_operand_u32(data, &mut cursor, TAG_UNSIGNED)?;
                 let function = read_move_operand(data, &mut cursor, atoms, literals)?;
                 if !matches!(function, Operand::X(_) | Operand::Y(_)) {
                     return Err(error("BEAM call_fun2 function is not a register"));
@@ -2804,7 +2829,7 @@ pub(super) fn parse_code(
             | OPCODE_TEST_IS_FLOAT
             | OPCODE_TEST_IS_NUMBER
             | OPCODE_TEST_IS_BOOLEAN => {
-                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let fail_label = read_operand_u32(data, &mut cursor, TAG_LABEL)?;
                 let value = read_move_operand(data, &mut cursor, atoms, literals)?;
                 let kind = test_kind(opcode)?;
                 Instruction::Test {
@@ -2814,7 +2839,7 @@ pub(super) fn parse_code(
                 }
             }
             OPCODE_IS_ANY_NATIVE_RECORD => {
-                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let fail_label = read_operand_u32(data, &mut cursor, TAG_LABEL)?;
                 let value = read_move_operand(data, &mut cursor, atoms, literals)?;
                 // ERTS loads the source only from an x or a y register (emu
                 // `ops.tab:1631`; JIT `jit/arm/ops.tab:1400`).
@@ -2828,7 +2853,7 @@ pub(super) fn parse_code(
                 }
             }
             OPCODE_IS_NATIVE_RECORD => {
-                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let fail_label = read_operand_u32(data, &mut cursor, TAG_LABEL)?;
                 let value = read_record_source(data, &mut cursor, atoms, literals)?;
                 Instruction::IsNativeRecord {
                     fail_label,
@@ -2838,12 +2863,12 @@ pub(super) fn parse_code(
                 }
             }
             OPCODE_IS_RECORD_ACCESSIBLE => Instruction::IsRecordAccessible {
-                fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
+                fail_label: read_operand_u32(data, &mut cursor, TAG_LABEL)?,
                 value: read_record_source(data, &mut cursor, atoms, literals)?,
                 external: read_atom(data, &mut cursor, atoms)?.is_one_of(&["external"]),
             },
             OPCODE_GET_RECORD_ELEMENTS => Instruction::GetRecordElements {
-                fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
+                fail_label: read_operand_u32(data, &mut cursor, TAG_LABEL)?,
                 value: read_record_source(data, &mut cursor, atoms, literals)?,
                 pairs: read_record_pairs(data, &mut cursor, atoms, literals)?,
             },
@@ -2884,7 +2909,7 @@ pub(super) fn parse_code(
                 }
             }
             OPCODE_GET_RECORD_FIELD => {
-                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let fail_label = read_operand_u32(data, &mut cursor, TAG_LABEL)?;
                 let value = read_move_operand(data, &mut cursor, atoms, literals)?;
                 let id = match read_move_operand(data, &mut cursor, atoms, literals)? {
                     Operand::Value(Term::Atom(ref name)) => RecordId::Local(name.clone()),
@@ -2902,7 +2927,7 @@ pub(super) fn parse_code(
                 }
             }
             OPCODE_TEST_IS_FUNCTION2 => Instruction::TestFunctionArity {
-                fail_label: read_operand(data, &mut cursor, TAG_LABEL)? as u32,
+                fail_label: read_operand_u32(data, &mut cursor, TAG_LABEL)?,
                 value: read_move_operand(data, &mut cursor, atoms, literals)?,
                 arity: read_move_operand(data, &mut cursor, atoms, literals)?,
             },
@@ -2943,8 +2968,8 @@ pub(super) fn parse_code(
                 continue;
             }
             OPCODE_CALL_EXT | OPCODE_CALL_EXT_LAST | OPCODE_CALL_EXT_ONLY => {
-                let arity = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
-                let index = read_operand(data, &mut cursor, TAG_UNSIGNED)? as usize;
+                let arity = read_operand_u32(data, &mut cursor, TAG_UNSIGNED)?;
+                let index = read_operand_usize(data, &mut cursor, TAG_UNSIGNED)?;
                 let (module, name, imported_arity) = imports
                     .get(index)
                     .ok_or_else(|| error(format!("BEAM import index {index} out of range")))?;
@@ -2954,7 +2979,7 @@ pub(super) fn parse_code(
                     )));
                 }
                 let deallocate = if opcode == OPCODE_CALL_EXT_LAST {
-                    read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32
+                    read_operand_u32(data, &mut cursor, TAG_UNSIGNED)?
                 } else {
                     0
                 };
@@ -2968,9 +2993,9 @@ pub(super) fn parse_code(
                     ("erlang", "hibernate", 0) => Instruction::Hibernate,
                     ("erlang", "yield", 0) => Instruction::Yield,
                     // An import index of the `ImpT` chunk is below 2^32,
-                    // so the cast keeps every value.
+                    // so the conversion keeps every value.
                     _ => Instruction::CallExternal {
-                        import: index as u32,
+                        import: u32::try_from(index).expect("an import index is below 2^32"),
                         tail: opcode != OPCODE_CALL_EXT,
                         deallocate,
                     },
@@ -2986,9 +3011,9 @@ pub(super) fn parse_code(
                 continue;
             }
             OPCODE_APPLY | OPCODE_APPLY_LAST => {
-                let arity = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
+                let arity = read_operand_u32(data, &mut cursor, TAG_UNSIGNED)?;
                 let deallocate = if opcode == OPCODE_APPLY_LAST {
-                    read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32
+                    read_operand_u32(data, &mut cursor, TAG_UNSIGNED)?
                 } else {
                     0
                 };
@@ -3001,7 +3026,7 @@ pub(super) fn parse_code(
             OPCODE_BIF0 => {
                 let bif = bif_import(
                     imports,
-                    read_operand(data, &mut cursor, TAG_UNSIGNED)? as usize,
+                    read_operand_usize(data, &mut cursor, TAG_UNSIGNED)?,
                     0,
                 )?;
                 Instruction::Bif {
@@ -3013,7 +3038,7 @@ pub(super) fn parse_code(
             }
             OPCODE_BIF1 | OPCODE_BIF2 | OPCODE_BIF3 | OPCODE_GC_BIF1 | OPCODE_GC_BIF2
             | OPCODE_GC_BIF3 => {
-                let fail_label = read_operand(data, &mut cursor, TAG_LABEL)? as u32;
+                let fail_label = read_operand_u32(data, &mut cursor, TAG_LABEL)?;
                 if matches!(opcode, OPCODE_GC_BIF1 | OPCODE_GC_BIF2 | OPCODE_GC_BIF3) {
                     skip_live_registers(data, &mut cursor)?;
                 }
@@ -3024,7 +3049,7 @@ pub(super) fn parse_code(
                 };
                 let bif = bif_import(
                     imports,
-                    read_operand(data, &mut cursor, TAG_UNSIGNED)? as usize,
+                    read_operand_usize(data, &mut cursor, TAG_UNSIGNED)?,
                     argument_count,
                 )?;
                 let arguments = (0..argument_count)
@@ -3038,7 +3063,7 @@ pub(super) fn parse_code(
                 }
             }
             OPCODE_ALLOCATE | OPCODE_ALLOCATE_HEAP => {
-                let stack_size = read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32;
+                let stack_size = read_operand_u32(data, &mut cursor, TAG_UNSIGNED)?;
                 if opcode == OPCODE_ALLOCATE_HEAP {
                     skip_operand(data, &mut cursor)?;
                 }
@@ -3046,11 +3071,11 @@ pub(super) fn parse_code(
                 Instruction::Allocate { stack_size }
             }
             OPCODE_DEALLOCATE => Instruction::Deallocate {
-                stack_size: read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32,
+                stack_size: read_operand_u32(data, &mut cursor, TAG_UNSIGNED)?,
             },
             OPCODE_TRIM => Instruction::Trim {
-                count: read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32,
-                remaining: read_operand(data, &mut cursor, TAG_UNSIGNED)? as u32,
+                count: read_operand_u32(data, &mut cursor, TAG_UNSIGNED)?,
+                remaining: read_operand_u32(data, &mut cursor, TAG_UNSIGNED)?,
             },
             OPCODE_MOVE => {
                 let source = read_move_operand(data, &mut cursor, atoms, literals)?;
@@ -3237,7 +3262,7 @@ fn read_binary_match_commands(
     let mut commands = Vec::new();
     let mut items = 0;
     while items < item_count {
-        let name = atom_at(atoms, read_operand(data, cursor, TAG_ATOM)? as usize)?;
+        let name = atom_at(atoms, read_operand_usize(data, cursor, TAG_ATOM)?)?;
         let (command, operand_count) = if name.is_static("ensure_at_least") {
             let size = read_operand(data, cursor, TAG_UNSIGNED)?;
             let unit = NonZeroU64::new(read_operand(data, cursor, TAG_UNSIGNED)?)
@@ -3345,7 +3370,7 @@ fn read_binary_segments(
     }
     (0..item_count / BINARY_SEGMENT_ITEMS)
         .map(|index| {
-            let kind = atom_at(atoms, read_operand(data, cursor, TAG_ATOM)? as usize)?.clone();
+            let kind = atom_at(atoms, read_operand_usize(data, cursor, TAG_ATOM)?)?.clone();
             let segment = read_operand(data, cursor, TAG_UNSIGNED)?;
             let unit = read_operand(data, cursor, TAG_UNSIGNED)?;
             let flags = read_move_operand(data, cursor, atoms, literals)?;
@@ -3537,7 +3562,7 @@ fn read_record_updates(
     let pair_count = read_pair_count(data, cursor)?;
     let mut updates = Vec::with_capacity(pair_count);
     for _ in 0..pair_count {
-        let position = read_operand(data, cursor, TAG_UNSIGNED)? as u32;
+        let position = read_operand_u32(data, cursor, TAG_UNSIGNED)?;
         updates.push((position, read_move_operand(data, cursor, atoms, literals)?));
     }
     Ok(updates)
@@ -3580,17 +3605,17 @@ fn skip_unsupported_instruction(
 /// ```
 fn unsupported_opcode_operand_count(opcode: u8) -> Option<usize> {
     match opcode {
-        OPCODE_TEST_HEAP => Some(2),
-        OPCODE_BIF0 => Some(2),
-        OPCODE_TEST_EXACT_EQ => Some(3),
-        OPCODE_TEST_TAGGED_TUPLE => Some(4),
-        OPCODE_TEST_IS_ATOM
+        OPCODE_TEST_HEAP
+        | OPCODE_BIF0
+        | OPCODE_TEST_IS_ATOM
         | OPCODE_TEST_IS_PID
         | OPCODE_TEST_IS_BINARY
         | OPCODE_TEST_IS_LIST
-        | OPCODE_TEST_IS_MAP => Some(2),
+        | OPCODE_TEST_IS_MAP
+        | OPCODE_PUT_TUPLE2 => Some(2),
+        OPCODE_TEST_EXACT_EQ => Some(3),
+        OPCODE_TEST_TAGGED_TUPLE => Some(4),
         OPCODE_PUT_MAP_ASSOC => Some(5),
-        OPCODE_PUT_TUPLE2 => Some(2),
         OPCODE_INIT_YREGS => Some(1),
         _ => None,
     }
@@ -3749,7 +3774,8 @@ fn read_segment_string(
 fn skip_allocation(data: &[u8], cursor: &mut usize) -> Result<(), BeamError> {
     const ALLOCATION_LIST_SUBTAG: i128 = 3;
     const MAX_ALLOCATION_ITEMS: u64 = 3;
-    const MAX_HEAP_WORDS: u64 = i32::MAX as u64;
+    /// `i32::MAX`.
+    const MAX_HEAP_WORDS: u64 = (1 << 31) - 1;
     /// `FLOAT_SIZE_OBJECT` on a 64-bit ERTS: a header and one data word.
     const FLOAT_WORDS: u64 = 2;
     /// `ERL_FUN_SIZE` on a 64-bit ERTS: a header and one entry pointer.
@@ -3867,7 +3893,7 @@ fn skip_integer_payload(data: &[u8], cursor: &mut usize, first_byte: u8) -> Resu
     if first_byte & COMPACT_SIGN_FLAG == 0 {
         return skip_bytes(data, cursor, 1);
     }
-    let size_code = (first_byte >> 5) as usize;
+    let size_code = usize::from(first_byte >> 5);
     let byte_count = if size_code == 7 {
         usize::try_from(read_operand(data, cursor, TAG_UNSIGNED)?)
             .map_err(|_| error("BEAM integer operand is too large"))?
@@ -3958,10 +3984,8 @@ fn read_register(data: &[u8], cursor: &mut usize) -> Result<Operand, BeamError> 
         .ok_or_else(|| error("truncated BEAM operand"))?;
     let tag = first & COMPACT_TAG_MASK;
     match tag {
-        TAG_REGISTER => Ok(Operand::X(read_operand(data, cursor, TAG_REGISTER)? as u32)),
-        TAG_Y_REGISTER => Ok(Operand::Y(
-            read_operand(data, cursor, TAG_Y_REGISTER)? as u32
-        )),
+        TAG_REGISTER => Ok(Operand::X(read_operand_u32(data, cursor, TAG_REGISTER)?)),
+        TAG_Y_REGISTER => Ok(Operand::Y(read_operand_u32(data, cursor, TAG_Y_REGISTER)?)),
         _ => Err(error(format!("unsupported BEAM register tag {tag}"))),
     }
 }

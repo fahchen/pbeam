@@ -1,3 +1,5 @@
+//! Checks that the run stops at a function of a NIF library without bindings.
+
 use pbeam_runtime::{BeamProgram, Term};
 
 /// The stand-ins of the modules of the OTP NIF libraries without bindings.

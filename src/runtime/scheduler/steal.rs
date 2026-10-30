@@ -54,7 +54,7 @@ impl Scheduler {
         let system = &self.system;
         let stolen = self.runnable.steal(|id| {
             processes
-                .get(&id)
+                .get(id)
                 .is_some_and(|process| !system.contains(&id) && stealable(process))
         });
         stolen
@@ -63,7 +63,7 @@ impl Scheduler {
             .map(|(order, (id, low))| {
                 let process = self
                     .processes
-                    .remove(&id)
+                    .remove(id)
                     .expect("a stolen process is in the slots");
                 (process, low.filter(|_| order > 0))
             })

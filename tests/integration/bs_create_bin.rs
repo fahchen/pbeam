@@ -1,3 +1,10 @@
+//! Runs the `bs_create_bin` instruction (string, binary, integer, UTF and append segments) on PBeam
+//! and compares it with the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::{process::Command, sync::Arc};
 
 use num_bigint::BigInt;
@@ -205,7 +212,7 @@ fn uses_one_reduction_for_each_1024_bytes_of_a_binary_segment() {
         assert_eq!(
             run(&program, "cost", Term::binary(vec![1; size])),
             Term::tuple(vec![
-                Term::Integer(1 + size as i64 / 1024),
+                Term::Integer(1 + i64::try_from(size).unwrap() / 1024),
                 Term::binary(expected)
             ])
         );
@@ -478,6 +485,10 @@ fn raises_badarg_with_the_erts_error_info_for_an_append_segment() {
             caught(function, segment, reason, value)
         );
     }
+}
+
+#[test]
+fn formats_the_erts_error_info_for_an_append_segment_as_the_reference() {
     let frame = |function: &str, cause: &str| {
         format!(
             "{{error,badarg,{{bs_create_bin_append_probe,{function},2,[{{error_info,\
@@ -652,6 +663,10 @@ fn integer_calls<'a>(
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "case table: one entry for each integer or utf8 segment form, and the entries share the program"
+)]
 fn builds_integer_and_utf8_segments_as_pinned_erts() {
     // Each case runs one segment form that the compiler writes: sizes 0, 8,
     // 16, and 72, the big, little, and native byte orders, sizes in a
@@ -814,6 +829,10 @@ fn jumps_to_the_fail_label_for_integer_and_utf8_segments_that_fail() {
 type FailureCase<'a> = (&'a str, Vec<Term>, &'a str, i64, &'a str, &'a str, Term);
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "case table: one entry for each bad integer, utf8, or binary segment, and the entries share the program"
+)]
 fn raises_the_erts_error_info_for_integer_and_utf8_segments() {
     // The size pass checks the sizes of `integer` segments, the code
     // points of `utf8` segments, and the terms of `binary` segments in
@@ -826,7 +845,7 @@ fn raises_the_erts_error_info_for_integer_and_utf8_segments() {
     let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
     let int = Term::Integer;
     let (one, other) = (atom("one"), atom("other"));
-    let cases: Vec<FailureCase> = vec![
+    let cases: Vec<FailureCase<'_>> = vec![
         (
             "byte",
             vec![other.clone()],
@@ -1087,7 +1106,7 @@ fn raises_the_erts_error_info_for_integer_and_utf8_segments() {
             1,
             "integer",
             "size",
-            one.clone(),
+            one,
         ),
         (
             "sized_code",
@@ -1105,7 +1124,7 @@ fn raises_the_erts_error_info_for_integer_and_utf8_segments() {
             1,
             "integer",
             "type",
-            other.clone(),
+            other,
         ),
     ];
     let caught = |function: &str, arity: usize, reason: &str, cause: Term| {
@@ -1121,7 +1140,7 @@ fn raises_the_erts_error_info_for_integer_and_utf8_segments() {
         let frame = Term::tuple(vec![
             atom("bs_create_bin_integer_probe"),
             atom(function),
-            Term::Integer(arity as i64),
+            Term::Integer(i64::try_from(arity).unwrap()),
             Term::list_from(vec![Term::tuple(vec![
                 atom("error_info"),
                 Term::Map(error_info),
@@ -1151,7 +1170,7 @@ fn raises_the_erts_error_info_for_integer_and_utf8_segments() {
     // fails only when the size times the unit overflows 64 bits
     // (jit/x86/instr_bs.cpp:1942-1943), so ERTS on an x86_64 host stops at
     // the allocation. Compare these cases with ERTS only on arm64.
-    let reference_cases: Vec<&FailureCase> = cases
+    let reference_cases: Vec<&FailureCase<'_>> = cases
         .iter()
         .filter(|(.., value)| cfg!(target_arch = "aarch64") || *value != int(1 << 52))
         .collect();
@@ -1297,12 +1316,7 @@ fn appends_with_private_append_segments_as_pinned_erts() {
         ),
         (
             "floats",
-            vec![list(vec![
-                Term::Float(1.5),
-                int(2),
-                Term::Float(-0.0),
-                big.clone(),
-            ])],
+            vec![list(vec![Term::Float(1.5), int(2), Term::Float(-0.0), big])],
             binary(&float_bytes),
         ),
         (
@@ -1480,6 +1494,10 @@ fn builds_float_segments_and_raises_their_failures_as_pinned_erts() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "case table: one entry for each float value, and the entries share the program"
+)]
 fn builds_16_bit_float_segments_as_pinned_erts() {
     // A 16-bit float segment rounds a float, a small integer, or a bignum
     // once to binary16, ties to even, and keeps the sign of a zero. A value
@@ -1500,8 +1518,8 @@ fn builds_16_bit_float_segments_as_pinned_erts() {
         Term::Float(1.0e-10),
         Term::Float(3.0e-8),
         Term::Float(2.0f64.powi(-25)),
-        Term::Float(1.00146484375),
-        Term::Float(1.00048828125),
+        Term::Float(1.001_464_843_75),
+        Term::Float(1.000_488_281_25),
         Term::Float(2047.9),
         Term::Float(1.0e-20),
         Term::Float(5.0e-324),
@@ -1703,7 +1721,7 @@ fn builds_utf16_and_utf32_segments_as_pinned_erts() {
         run_utf(
             &program,
             "utf16_native",
-            &[vec![Term::Integer(65)], vec![face.clone()]]
+            &[vec![Term::Integer(65)], vec![face]]
         ),
         [
             binary(if cfg!(target_endian = "little") {
@@ -1714,6 +1732,19 @@ fn builds_utf16_and_utf32_segments_as_pinned_erts() {
             binary(&[61, 216, 0, 222]),
         ]
     );
+}
+
+#[test]
+fn builds_utf32_segments_as_pinned_erts() {
+    // A `utf16` segment writes two bytes for a code point below 0x10000 and
+    // four bytes for each other one, in the byte order of the flags
+    // (`erts_bs_put_utf16`, erl_bits.c:1221-1282; `am_utf16` in
+    // jit/arm/instr_bs.cpp:1751-1765, 2407-2427). A `utf32` segment writes
+    // the code point as a 32-bit integer, as an `integer` segment of 32
+    // bits does (jit/arm/instr_bs.cpp:2428-2452).
+    let program = BeamProgram::load(&[BS_CREATE_BIN_UTF_PROBE]).unwrap();
+    let binary = |bytes: &[u8]| Term::binary(bytes.to_vec());
+    let face = Term::Integer(0x1F600);
     assert_eq!(
         run_utf(
             &program,
@@ -1777,7 +1808,7 @@ fn builds_utf16_and_utf32_segments_as_pinned_erts() {
             "append_utf16",
             &[
                 vec![Term::binary(vec![97]), Term::Integer(65)],
-                vec![Term::binary(Vec::new()), face.clone()],
+                vec![Term::binary(Vec::new()), face],
             ]
         ),
         [binary(&[97, 0, 65]), binary(&[216, 61, 222, 0])]
@@ -1806,6 +1837,10 @@ fn builds_utf16_and_utf32_segments_as_pinned_erts() {
 type UtfFailureCase<'a> = (&'a str, Vec<Term>, i64, &'a str, &'a str, Term);
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "case table: one entry for each bad utf16 or utf32 segment, and the entries share the program"
+)]
 fn raises_the_erts_error_info_for_utf16_and_utf32_segments() {
     // A `utf16` segment fails at the construct pass for a term that is not
     // a code point from 0 to 16#10FFFF outside 16#D800 to 16#DFFF, with
@@ -1821,7 +1856,7 @@ fn raises_the_erts_error_info_for_utf16_and_utf32_segments() {
     let int = Term::Integer;
     let other = atom("other");
     let bignum = Term::BigInt(Arc::new(BigInt::from(1u8) << 64u32));
-    let cases: Vec<UtfFailureCase> = vec![
+    let cases: Vec<UtfFailureCase<'_>> = vec![
         ("utf16", vec![int(-1)], 1, "utf16", "type", int(-1)),
         ("utf16", vec![int(0xD800)], 1, "utf16", "type", int(0xD800)),
         ("utf16", vec![int(0xDFFF)], 1, "utf16", "type", int(0xDFFF)),
@@ -1869,14 +1904,7 @@ fn raises_the_erts_error_info_for_utf16_and_utf32_segments() {
             "type",
             other.clone(),
         ),
-        (
-            "utf32",
-            vec![bignum.clone()],
-            1,
-            "utf32",
-            "type",
-            bignum.clone(),
-        ),
+        ("utf32", vec![bignum.clone()], 1, "utf32", "type", bignum),
         (
             "utf32_little",
             vec![int(0x11_0000)],
@@ -1925,7 +1953,7 @@ fn raises_the_erts_error_info_for_utf16_and_utf32_segments() {
             1,
             "utf16",
             "type",
-            other.clone(),
+            other,
         ),
     ];
     let caught = |function: &str, arity: usize, cause: Term| {
@@ -1941,7 +1969,7 @@ fn raises_the_erts_error_info_for_utf16_and_utf32_segments() {
         let frame = Term::tuple(vec![
             atom("bs_create_bin_utf_probe"),
             atom(function),
-            Term::Integer(arity as i64),
+            Term::Integer(i64::try_from(arity).unwrap()),
             Term::list_from(vec![Term::tuple(vec![
                 atom("error_info"),
                 Term::Map(error_info),

@@ -316,6 +316,10 @@ pub(super) struct StartFlags {
 
 /// The execution state and mailbox of one process.
 #[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "mirrors the independent flags of an ERTS process (`ERTS_PSFLG_*`, `F_TRAP_EXIT`, `F_ASYNC_DIST`, `F_OFF_HEAP_MSGQ`), which the scheduler sets and reads one by one"
+)]
 pub(super) struct ProcessState {
     /// Identifier of this process.
     pub(super) id: ProcessId,
@@ -467,6 +471,10 @@ pub(super) struct ProcessState {
     /// timer, as the yield state of the ERTS walk keeps the next node
     /// (`erl_rbtree.h:1392-1396`). `None` until the exit switches out. The
     /// exit then continues with no new bump.
+    #[expect(
+        clippy::option_option,
+        reason = "three states: exit not continued, after the last timer, and the next timer position"
+    )]
     pub(super) continue_exit: Option<Option<WalkPosition>>,
     /// The ERTS flag `EXF_LOG` of the exception that ends the process
     /// (`error.h:73`, `112`). An uncaught `error`, or an uncaught `throw`
@@ -516,6 +524,29 @@ pub(super) struct ProcessState {
     pub(super) root: Option<usize>,
 }
 
+/// How a call enters its target: a tail call replaces the active frame, and a
+/// body call keeps it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CallKind {
+    /// A body call: the caller keeps its frame.
+    Body,
+    /// A tail call: the callee replaces the frame of the caller.
+    Tail,
+}
+
+impl CallKind {
+    /// Whether the call is a tail call.
+    pub(super) fn is_tail(self) -> bool {
+        self == Self::Tail
+    }
+}
+
+impl From<bool> for CallKind {
+    fn from(tail: bool) -> Self {
+        if tail { Self::Tail } else { Self::Body }
+    }
+}
+
 /// A BIF call that continues after a switch: the export of a BIF and the
 /// arguments that the BIF trap gives it.
 #[derive(Debug)]
@@ -526,9 +557,9 @@ pub(super) struct PendingBif {
     pub(super) function: &'static str,
     /// Arguments of the BIF export, in `x0` onwards.
     pub(super) arguments: Vec<Term>,
-    /// True when the BIF call was a tail call through the export: its
-    /// value then returns from the frame with no reduction.
-    pub(super) tail: bool,
+    /// A tail call through the export returns its value from the frame with
+    /// no reduction.
+    pub(super) entry: CallKind,
     /// The BIF call that trapped, or `None` when the call did not give
     /// the BIF frame of its errors.
     pub(super) origin: Option<BifCall>,
@@ -563,8 +594,8 @@ pub(super) struct PendingTrap {
     pub(super) function: &'static str,
     /// Arity of the target, and the number of arguments in `x0` onwards.
     pub(super) arity: u32,
-    /// True when the BIF call was a tail call through the target.
-    pub(super) tail: bool,
+    /// Whether the BIF call was a tail call through the target.
+    pub(super) entry: CallKind,
 }
 
 /// A NIF call that runs on a dirty thread.
@@ -823,7 +854,7 @@ impl ProcessState {
     /// assert_eq!(process.bif_reductions_unsigned(), u64::MAX - 2);
     /// ```
     pub(super) fn bif_reductions_unsigned(&self) -> u64 {
-        i64::from(self.fcalls) as u64
+        i64::from(self.fcalls).cast_unsigned()
     }
 
     /// Return the result of `erlang:process_info/2` for the item `item` of
@@ -993,7 +1024,7 @@ impl ProcessState {
     ///
     /// ```rust,ignore
     /// let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame), vec![]);
-    /// process.pending_bif = Some(PendingBif { module: "lists", function: "member", arguments: vec![Term::Integer(1)], tail: false, origin: None });
+    /// process.pending_bif = Some(PendingBif { module: "lists", function: "member", arguments: vec![Term::Integer(1)], entry: CallKind::Body, origin: None });
     /// assert!(process.pending_bif_bytes() > 0);
     /// ```
     pub(super) fn pending_bif_bytes(&self) -> usize {

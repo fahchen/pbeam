@@ -865,18 +865,13 @@ name = "erts_debug_size"
 path = "tests/integration/erts_debug_size.rs"
 
 # BeautifulRust lints (https://github.com/morganlinton/BeautifulRust, lints/lints.toml).
-# A lint with a hit on main is "allow" until its m23 task fixes the hits.
 # Silence a lint locally with #[expect(clippy::<lint>, reason = "...")].
 [lints.rust]
 unsafe_op_in_unsafe_fn = "warn"                      # each unsafe op needs its own unsafe block
-missing_debug_implementations = "allow"              # #1347 turns on: every public type implements Debug
-missing_docs = "allow"                               # #1347 turns on: [lib] document every public item
-unreachable_pub = "allow"                            # #1346 turns on: pub items that aren't actually exported
+missing_debug_implementations = "warn"               # every public type implements Debug
+missing_docs = "warn"                                # [lib] document every public item
+unreachable_pub = "warn"                             # pub items that aren't actually exported
 rust_2018_idioms = { level = "warn", priority = -1 } # 2018-edition idioms, e.g. Formatter<'_>
-
-# m23 allow list: lints of the groups above with a hit on main. The named task removes the line and fixes the hits.
-# #1346
-elided_lifetimes_in_paths = "allow"
 
 [lints.clippy]
 # Groups first, at lower priority so the individual settings below win.
@@ -884,107 +879,44 @@ all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 
 # Panics: return errors, and give every intentional panic a reason.
-unwrap_used = "allow"        # #1350 turns on: use ?, or expect("why this cannot fail")
-expect_used = "allow"        # expect with a reason is the sanctioned form
-panic_in_result_fn = "allow" # #1350 turns on: a fn returning Result shouldn't also panic
-missing_panics_doc = "allow" # #1347 turns on: [lib] document reachable panics under # Panics
-missing_errors_doc = "allow" # #1347 turns on: [lib] document failures under # Errors
+unwrap_used = "warn"        # use ?, or expect("why this cannot fail")
+expect_used = "allow"       # expect with a reason is the sanctioned form
+panic_in_result_fn = "warn" # a fn returning Result shouldn't also panic
+missing_panics_doc = "warn" # [lib] document reachable panics under # Panics
+missing_errors_doc = "warn" # [lib] document failures under # Errors
 
 # Suppressions must explain themselves and expire when no longer needed.
-allow_attributes = "allow"                # #1352 turns on: prefer #[expect] over #[allow] (needs rust-version 1.81+)
-allow_attributes_without_reason = "allow" # #1352 turns on: every suppression says why (needs rust-version 1.81+)
+allow_attributes = "warn"                # prefer #[expect] over #[allow] (needs rust-version 1.81+)
+allow_attributes_without_reason = "warn" # every suppression says why (needs rust-version 1.81+)
 
 # Unsafe must be justified.
-undocumented_unsafe_blocks = "allow"    # #1348 turns on: // SAFETY: comment on every unsafe block
-multiple_unsafe_ops_per_block = "allow" # #1348 turns on: one unsafe operation per block
+undocumented_unsafe_blocks = "warn"     # // SAFETY: comment on every unsafe block
+multiple_unsafe_ops_per_block = "allow" # a split adds unsafe blocks, which CLAUDE.md forbids
 
 # API shape.
-fn_params_excessive_bools = "allow" # #1349 turns on: bool parameters: use an enum or two methods
-struct_excessive_bools = "allow"    # #1349 turns on: many bool fields: use an enum or bitflags
-clone_on_ref_ptr = "allow"          # #1345 turns on: write Rc::clone(&x) so cheap clones are visible
-redundant_clone = "allow"           # #1345 turns on: a clone whose original is never used again
-rc_buffer = "allow"                 # #1349 turns on: Rc<String> / Rc<Vec<T>>: use Rc<str> / Rc<[T]>
+fn_params_excessive_bools = "warn" # bool parameters: use an enum or two methods
+struct_excessive_bools = "warn"    # many bool fields: use an enum or bitflags
+clone_on_ref_ptr = "warn"          # write Rc::clone(&x) so cheap clones are visible
+redundant_clone = "warn"           # a clone whose original is never used again
+rc_buffer = "warn"                 # Rc<String> / Rc<Vec<T>>: use Rc<str> / Rc<[T]>
 
 # Idioms.
-string_add = "allow"       # #1345 turns on: build strings with format! or push_str, not +
-wildcard_imports = "allow" # #1346 turns on: no glob imports (use super::* in tests is allowed)
+string_add = "warn"       # build strings with format! or push_str, not +
+wildcard_imports = "warn" # no glob imports (use super::* in tests is allowed)
 
 # Output and debugging leftovers.
 dbg_macro = "warn"
 todo = "warn"
-print_stdout = "allow" # #1352 turns on: [lib] libraries log, they don't print
-print_stderr = "allow" # #1352 turns on: [lib] libraries log, they don't print
+print_stdout = "warn" # [lib] libraries log, they don't print
+print_stderr = "warn" # [lib] libraries log, they don't print
 
 # Casts that silently lose information.
-as_conversions = "allow"           # #1351 turns on: prefer From / TryFrom
-cast_possible_truncation = "allow" # #1351 turns on
-cast_sign_loss = "allow"           # #1351 turns on
+as_conversions = "warn"           # prefer From / TryFrom
+cast_possible_truncation = "warn"
+cast_sign_loss = "warn"
 
 # Pedantic lints that are mostly noise in practice, or that the skill disagrees with.
 module_name_repetitions = "allow"
 must_use_candidate = "allow"
 module_inception = "allow"        # a leaf module named after its main item is fine
 enum_glob_use = "allow"           # use Enum::* inside a function that matches on it
-
-# m23 allow list: lints of the groups above with a hit on main. The named task removes the line and fixes the hits.
-# #1345
-redundant_else = "allow"
-unreadable_literal = "allow"
-assert_is_empty = "allow"
-redundant_closure_for_method_calls = "allow"
-single_match_else = "allow"
-match_same_arms = "allow"
-semicolon_if_nothing_returned = "allow"
-items_after_statements = "allow"
-ignored_unit_patterns = "allow"
-format_push_string = "allow"
-if_not_else = "allow"
-format_collect = "allow"
-needless_raw_string_hashes = "allow"
-match_bool = "allow"
-comparison_chain = "allow"
-needless_continue = "allow"
-manual_let_else = "allow"
-default_trait_access = "allow"
-unnested_or_patterns = "allow"
-manual_assert_eq = "allow"
-unnecessary_debug_formatting = "allow"
-nonminimal_bool = "allow"
-match_wildcard_for_single_variants = "allow"
-map_unwrap_or = "allow"
-manual_string_new = "allow"
-float_cmp = "allow"
-case_sensitive_file_extension_comparisons = "allow"
-assigning_clones = "allow"
-zero_sized_map_values = "allow"
-verbose_bit_mask = "allow"
-needless_for_each = "allow"
-manual_midpoint = "allow"
-manual_bit_width = "allow"
-explicit_iter_loop = "allow"
-duration_suboptimal_units = "allow"
-decimal_bitwise_operands = "allow"
-# #1347
-doc_markdown = "allow"
-missing_fields_in_debug = "allow"
-# #1349
-unnecessary_wraps = "allow"
-too_many_lines = "allow"
-similar_names = "allow"
-needless_pass_by_value = "allow"
-unused_self = "allow"
-trivially_copy_pass_by_ref = "allow"
-struct_field_names = "allow"
-option_option = "allow"
-many_single_char_names = "allow"
-large_stack_arrays = "allow"
-# #1350
-manual_assert = "allow"
-# #1351
-cast_possible_wrap = "allow"
-cast_precision_loss = "allow"
-cast_lossless = "allow"
-ref_as_ptr = "allow"
-borrow_as_ptr = "allow"
-ptr_cast_constness = "allow"
-checked_conversions = "allow"

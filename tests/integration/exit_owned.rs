@@ -1,3 +1,10 @@
+//! Checks what a process exit deletes and notifies (owned tables, TTY monitors) on PBeam against
+//! the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::process::Command;
 
 use pbeam_runtime::{AtomTable, BeamProgram, Term};

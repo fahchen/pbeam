@@ -1,6 +1,7 @@
 //! Build the PCRE2 10.47 sources of OTP 29.1.1 in `vendor/pcre2`, which
 //! `re:compile/2` and `re:run/2,3` use.
 
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 /// The PCRE2 sources that the compile path, the match path, and the `export`
@@ -125,29 +126,36 @@ fn generate_match_headers() -> PathBuf {
     let memchr_break = calls("MEMCHR_ERLANG(");
     let mut yield_coverage = String::new();
     for (index, number) in loop_break.iter().chain(&memchr_break).enumerate() {
-        yield_coverage.push_str(&format!("#define ERLANG_YIELD_POINT_{number} {index}\n"));
+        let _ = writeln!(
+            yield_coverage,
+            "#define ERLANG_YIELD_POINT_{number} {index}"
+        );
     }
-    yield_coverage.push_str(&format!(
-        "#define ERLANG_YIELD_POINT_CNT {}\n",
+    let _ = writeln!(
+        yield_coverage,
+        "#define ERLANG_YIELD_POINT_CNT {}",
         loop_break.len() + memchr_break.len()
-    ));
+    );
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
     let headers = [
         (
             "pcre2_match_loop_break_cases.gen.h",
-            loop_break
-                .iter()
-                .map(|number| format!("case {number}: goto L_LOOP_COUNT_{number};\n"))
-                .collect::<String>(),
+            loop_break.iter().fold(String::new(), |mut cases, number| {
+                let _ = writeln!(cases, "case {number}: goto L_LOOP_COUNT_{number};");
+                cases
+            }),
         ),
         (
             "pcre2_match_memchr_break_cases.gen.h",
             memchr_break
                 .iter()
-                .map(|number| {
-                    format!("case {number}: goto ERLANG_PCRE2_MATCH_YIELD_LINE_{number};\n")
-                })
-                .collect::<String>(),
+                .fold(String::new(), |mut cases, number| {
+                    let _ = writeln!(
+                        cases,
+                        "case {number}: goto ERLANG_PCRE2_MATCH_YIELD_LINE_{number};"
+                    );
+                    cases
+                }),
         ),
         ("pcre2_match_yield_coverage.gen.h", yield_coverage),
     ];

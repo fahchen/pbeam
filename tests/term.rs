@@ -126,7 +126,7 @@ fn compares_and_formats_improper_lists_by_elements_and_tail() {
             tail,
         )
     };
-    assert_eq!(improper(&[1], atom("x")), improper(&[1], atom("x")).clone());
+    assert_eq!(improper(&[1], atom("x")), improper(&[1], atom("x")));
     assert_ne!(improper(&[1, 2], atom("a")), improper(&[1, 2], atom("b")));
     assert_ne!(
         improper(&[1], atom("a")),
@@ -176,7 +176,7 @@ fn compares_funs_by_their_lambda_and_free_variables() {
     // ERTS 29.1.1: two funs of one lambda are equal when their free
     // variables are equal (`eq` in `utils.c:1241-1276`).
     let tagged = |tag| fun(0, vec![atom(tag)]);
-    assert_eq!(tagged("a"), tagged("a").clone());
+    assert_eq!(tagged("a"), tagged("a"));
     assert_ne!(tagged("a"), tagged("b"));
     assert_ne!(tagged("a"), fun(1, vec![atom("a")]));
     assert_ne!(tagged("a"), fun(0, vec![]));
@@ -209,7 +209,7 @@ fn compares_external_funs_by_their_mfa() {
         let atom = |name| super::Atom::from_static(name).unwrap();
         Term::Fun(Fun::external(atom("lists"), atom(function), arity))
     };
-    assert_eq!(external("get", 1), external("get", 1).clone());
+    assert_eq!(external("get", 1), external("get", 1));
     assert_ne!(external("get", 1), external("get", 2));
     assert_ne!(external("get", 1), external("put", 1));
     assert_ne!(external("get", 1), fun(0, vec![]));
@@ -329,8 +329,8 @@ fn formats_and_compares_maps_by_their_pairs() {
         map(keys.map(|key| (Term::Integer(key), atom("v"))).collect())
     };
     let forty = hash(&mut (1..=40));
-    assert_eq!(forty.clone(), hash(&mut (1..=40).rev()));
-    assert_eq!(format!("{:?}", forty.clone()), format!("{forty:?}"));
+    assert_eq!(forty, hash(&mut (1..=40).rev()));
+    assert_eq!(format!("{forty:?}"), format!("{forty:?}"));
     assert!(
         debug_term(&forty, &test_atom_table())
             .starts_with("Map([(Integer(18), Atom(\"v\")), (Integer(4), ")
@@ -346,15 +346,15 @@ fn gives_a_reference_its_erts_reference_numbers() {
     // reference has bit 17 of `N1` (`ERTS_REF1_MAGIC_MARKER_BIT__`).
     assert_eq!(
         Reference(0x155F_5681_5BA8_8196).numbers(),
-        [33174, 1537736705, 358569601]
+        [33174, 1_537_736_705, 358_569_601]
     );
     assert_eq!(
         Reference(0x155F_5681_5BA8_8196).magic_reference().numbers(),
-        [33174, 1537867777, 358569601]
+        [33174, 1_537_867_777, 358_569_601]
     );
     assert_eq!(
         Reference(0x155F_5681_5BA8_8196).table_reference().numbers(),
-        [33174, 1537867777, 358569601]
+        [33174, 1_537_867_777, 358_569_601]
     );
     assert_eq!(Reference(0).numbers(), [0, 1, 0]);
 }
@@ -473,7 +473,7 @@ fn walks_compares_and_formats_a_native_record() {
     let (term, atoms) = record();
     assert!(term.record().is_some());
     assert!(!term.contains_fun());
-    assert!(term.clone() == term);
+    assert_eq!(term.clone(), term);
     assert_eq!(
         debug_term(&term, &atoms),
         "Record(nr_def:priv, [Integer(1), Integer(2)])"

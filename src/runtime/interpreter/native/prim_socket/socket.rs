@@ -23,7 +23,7 @@ mod options;
 pub(super) use cmsg::{decode_cmsgs, encode_cmsgs};
 
 use super::supports::atom;
-use super::*;
+use super::{BeamError, BifResult, ExceptionClass, Map, Scheduler, Term, error};
 use crate::runtime::port::inet::errno_name;
 use crate::runtime::resources::lock;
 use crate::runtime::signal::Signal;
@@ -69,7 +69,10 @@ fn socket_counters(counters: &IoCounters) -> [(&'static str, Term); 16] {
 /// (`prim_socket_nif.c:4958-4989`). ERTS makes each value with
 /// `enif_make_uint`, so a value keeps its low 32 bits.
 fn sendfile_counters(counters: &SendfileCounters) -> [(&'static str, Term); 8] {
-    let uint = |value: u64| Term::Integer((value as u32).into());
+    let uint = |value: u64| {
+        let [b0, b1, b2, b3, ..] = value.to_le_bytes();
+        Term::Integer(u32::from_le_bytes([b0, b1, b2, b3]).into())
+    };
     [
         ("sendfile", uint(counters.calls)),
         ("sendfile_byte", uint(counters.byte)),
@@ -97,11 +100,6 @@ fn pairs(
         .iter()
         .map(|(name, value)| Ok((atom(scheduler, name)?, value.clone())))
         .collect()
-}
-
-/// Return the atom `true` or `false`.
-fn boolean(value: bool) -> Term {
-    Term::static_atom(if value { "true" } else { "false" })
 }
 
 /// Return the unsigned integer term of a counter.
@@ -142,11 +140,11 @@ pub(super) fn info_0(scheduler: &mut Scheduler) -> Result<BifResult, BeamError> 
     let backend = pairs(scheduler, &backend)?;
     let backend = map(scheduler, backend);
     let info = [
-        ("debug", boolean(false)),
-        ("socket_debug", boolean(false)),
-        ("eei", boolean(true)),
-        ("use_registry", boolean(true)),
-        ("iow", boolean(false)),
+        ("debug", Term::from(false)),
+        ("socket_debug", Term::from(false)),
+        ("eei", Term::from(true)),
+        ("use_registry", Term::from(true)),
+        ("iow", Term::from(false)),
         ("counters", counters),
         ("iov_max", Term::Integer(1024)),
         ("io_backend", backend),
@@ -533,7 +531,12 @@ pub(super) fn sockaddr(
 ) -> Result<Option<SockAddr>, BeamError> {
     let get = |name: &str| field(&scheduler.atoms, address, name);
     let family = get("family");
-    let port = || get("port").and_then(int).map(|port| port as u16);
+    let port = || {
+        get("port").and_then(int).map(|port| {
+            let [low, high, ..] = port.to_le_bytes();
+            u16::from_le_bytes([low, high])
+        })
+    };
     match family.and_then(|family| atom_name(scheduler, family)) {
         Some("inet") => {
             let address = get("addr").and_then(|address| in_addr(scheduler, address));

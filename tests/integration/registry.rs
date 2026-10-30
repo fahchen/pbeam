@@ -1,3 +1,6 @@
+//! Runs name registration, lookup and send to a name on PBeam and compares them with the pinned
+//! ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};
@@ -39,7 +42,7 @@ fn looks_up_registered_names_as_pinned_erts() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     assert_eq!(
         reference.stdout,
         b"[named,undefined,undefined,badarg,badarg,undefined]\n"
@@ -82,7 +85,7 @@ fn unregisters_names_as_pinned_erts() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     assert_eq!(
         reference.stdout,
         b"[true,undefined,[],badarg,badarg,badarg,true,true]\n"
@@ -122,7 +125,7 @@ fn reads_the_registered_name_of_another_process_as_pinned_erts() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     assert_eq!(
         reference.stdout,
         b"[{registered_name,registry_probe_info},[],undefined,undefined,undefined,badarg]\n"
@@ -170,7 +173,7 @@ fn sends_to_registered_names_as_pinned_erts() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     assert_eq!(
         reference.stdout,
         b"[to_self,received,to_echo,received,to_tuple,received,[badarg,badarg,badarg,badarg,dropped,dropped,badarg,badarg,badarg,dropped],empty]\n"
@@ -194,7 +197,7 @@ fn exits_with_badarg_for_an_uncaught_send_to_a_missing_name() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     assert_eq!(reference.stdout, b"error badarg\n");
 
     // PBeam exits with the same reason but an empty stack trace. This is the

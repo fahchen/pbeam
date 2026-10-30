@@ -1,3 +1,10 @@
+//! Runs the diagnostics BIFs (display, module delete, `process_info`) on PBeam and compares them
+//! with the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::process::Command;
 
 use pbeam_runtime::{AtomTable, BeamProgram, Term};

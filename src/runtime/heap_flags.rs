@@ -26,7 +26,7 @@ pub(in crate::runtime) struct HeapFlags {
     pub(in crate::runtime) max_heap_size: i64,
     /// The `kill`, `error_logger`, and `include_shared_binaries` flags of
     /// the max heap size.
-    pub(in crate::runtime) max_heap_flags: MaxHeapFlags,
+    pub(in crate::runtime) max_heap_settings: MaxHeapFlags,
 }
 
 /// The flags of the max heap size: `MAX_HEAP_SIZE_KILL`,
@@ -49,7 +49,7 @@ impl Default for HeapFlags {
             min_bin_vheap_size: 46422,
             fullsweep_after: u16::MAX,
             max_heap_size: 0,
-            max_heap_flags: MaxHeapFlags {
+            max_heap_settings: MaxHeapFlags {
                 kill: true,
                 error_logger: true,
                 include_shared_binaries: false,
@@ -150,7 +150,7 @@ pub(in crate::runtime) fn max_heap_size(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let map = max_heap_size_map(&atoms, 0, HeapFlags::default().max_heap_flags);
+/// let map = max_heap_size_map(&atoms, 0, HeapFlags::default().max_heap_settings);
 /// ```
 pub(in crate::runtime) fn max_heap_size_map(
     atoms: &AtomTable,
@@ -197,7 +197,7 @@ pub(in crate::runtime) fn garbage_collection_list(
     atoms: &AtomTable,
     flags: HeapFlags,
 ) -> Result<Term, BeamError> {
-    let max_heap_size = max_heap_size_map(atoms, flags.max_heap_size, flags.max_heap_flags);
+    let max_heap_size = max_heap_size_map(atoms, flags.max_heap_size, flags.max_heap_settings);
     let minor_gcs = atoms.put("minor_gcs")?;
     Ok(Term::list_from(vec![
         Term::tuple(vec![Term::static_atom("max_heap_size"), max_heap_size]),

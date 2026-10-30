@@ -3,6 +3,10 @@
 //! `prim_file` NIF except `get_handle_nif/1` on a dirty IO scheduler
 //! (prim_file_nif.c:179-218). Each test runs the same function on the pinned
 //! ERTS and on PBeam, and compares the `~w` text of the results.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 #[path = "../common/mod.rs"]
 mod common;

@@ -1,3 +1,5 @@
+//! Checks that PBeam makes unique integers from the counter of the scheduler.
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};

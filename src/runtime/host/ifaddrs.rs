@@ -8,7 +8,13 @@ use std::ffi::c_int;
 
 /// An entry of the list of `getifaddrs`: `ifa_name`, `ifa_flags`, and
 /// `ifa_addr`, `ifa_netmask`, and `ifa_dstaddr` (see [`copy`]).
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(
+    all(not(target_os = "macos"), not(test)),
+    expect(
+        dead_code,
+        reason = "only the macOS reader of prim_net uses it; the unit tests run each reader"
+    )
+)]
 pub(crate) struct Entry {
     pub(crate) name: Vec<u8>,
     pub(crate) flags: u32,
@@ -19,7 +25,13 @@ pub(crate) struct Entry {
 
 /// A socket address of an entry: its family, and the bytes of the address
 /// that ERTS reads (see [`copy`]).
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(
+    all(not(target_os = "macos"), not(test)),
+    expect(
+        dead_code,
+        reason = "only the macOS reader of prim_net uses it; the unit tests run each reader"
+    )
+)]
 pub(crate) struct Address {
     pub(crate) family: c_int,
     pub(crate) bytes: Vec<u8>,
@@ -57,15 +69,22 @@ pub(crate) fn getifaddrs() -> Result<Vec<Entry>, c_int> {
                     .as_ref()
                     .is_some_and(|address| c_int::from(address.sa_family) == libc::AF_INET)
             };
-            let point_to_point = interface.ifa_flags & libc::IFF_POINTOPOINT as u32 != 0;
+            let point_to_point = interface.ifa_flags & libc::IFF_POINTOPOINT.cast_unsigned() != 0;
+            let as_inet = |inet: bool| {
+                if inet {
+                    Unspecified::AsInet
+                } else {
+                    Unspecified::Keep
+                }
+            };
             entries.push(Entry {
                 name: std::ffi::CStr::from_ptr(interface.ifa_name)
                     .to_bytes()
                     .to_vec(),
                 flags: interface.ifa_flags,
-                addr: copy(interface.ifa_addr, false),
-                netmask: copy(interface.ifa_netmask, inet(interface.ifa_addr)),
-                dstaddr: copy(interface.ifa_dstaddr, point_to_point),
+                addr: copy(interface.ifa_addr, Unspecified::Keep),
+                netmask: copy(interface.ifa_netmask, as_inet(inet(interface.ifa_addr))),
+                dstaddr: copy(interface.ifa_dstaddr, as_inet(point_to_point)),
             });
             entry = interface.ifa_next;
         }
@@ -74,11 +93,21 @@ pub(crate) fn getifaddrs() -> Result<Vec<Entry>, c_int> {
     Ok(entries)
 }
 
+/// How [`copy`] reads an `AF_UNSPEC` address.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Unspecified {
+    /// Keep the family `AF_UNSPEC`.
+    Keep,
+    /// Read the address as `AF_INET`.
+    AsInet,
+}
+
 /// Copy the family of a socket address and the bytes that
 /// `esock_encode_sockaddr` reads with the length -1 (`socket_util.c:723`,
 /// `741-913`): 16 bytes of an `AF_INET` address and 28 bytes of an
 /// `AF_INET6` address; the `sdl_len` bytes of an `AF_LINK` address; and no
-/// bytes of another family. `unspec_as_inet` reads an `AF_UNSPEC` address
+/// bytes of another family. [`Unspecified::AsInet`] reads an `AF_UNSPEC` address
 /// as `AF_INET`. NULL gives `None`.
 ///
 /// ERTS reads the 16 or 28 bytes whatever the `sa_len`, so for a shorter
@@ -93,14 +122,14 @@ pub(crate) fn getifaddrs() -> Result<Vec<Entry>, c_int> {
 /// `address` is NULL or points to a socket address that `getifaddrs`
 /// wrote: its 2 header bytes, and `sa_len` bytes when `sa_len` is larger.
 #[cfg(target_os = "macos")]
-unsafe fn copy(address: *const libc::sockaddr, unspec_as_inet: bool) -> Option<Address> {
+unsafe fn copy(address: *const libc::sockaddr, unspecified: Unspecified) -> Option<Address> {
     if address.is_null() {
         return None;
     }
     // SAFETY: see the function.
     let [written, family] = unsafe { address.cast::<[u8; 2]>().read() };
     let mut family = c_int::from(family);
-    if unspec_as_inet && family == libc::AF_UNSPEC {
+    if unspecified == Unspecified::AsInet && family == libc::AF_UNSPEC {
         family = libc::AF_INET;
     }
     let length = match family {

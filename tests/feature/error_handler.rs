@@ -4,6 +4,10 @@
 //! `init:ensure_loaded/1` (`error_handler.erl:85-98`, `182-198`). The boot of
 //! `examples/hello_world` answers `{ensure_loaded, Module}` for the init
 //! process (`init.erl:730-750`).
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::process::{Command, Output, Stdio};
 

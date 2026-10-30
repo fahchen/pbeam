@@ -12,6 +12,10 @@
 //! The graph of this test has 100000 cells, which keeps the check gate
 //! short. `mise run bench-release` releases a graph of 1000000 cells through
 //! the same paths.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::process::Command;
 
@@ -74,6 +78,6 @@ fn releases_a_large_graph_on_each_path_as_pinned_erts_does() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     assert_eq!(reference.stdout, b"{ok,100000,ok}\n");
 }

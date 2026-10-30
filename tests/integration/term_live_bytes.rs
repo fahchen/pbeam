@@ -19,6 +19,10 @@
 //!
 //! Run the harness on a release build with `mise run bench-live-bytes`. The
 //! check gate runs the same test with the test profile.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::{
     process::Command,
@@ -89,7 +93,7 @@ fn run(program: &BeamProgram) -> (HostTerm, LiveBytes) {
     let mut report = LiveBytes::default();
     let result = program
         .execute_sampled("term_live_bytes_probe", "scene", &[], &mut |live| {
-            report.observe(live)
+            report.observe(live);
         })
         .expect("the scene runs");
     (result, report)
@@ -162,9 +166,9 @@ fn records_the_peak_live_bytes_of_one_terra_scene() {
     let before = rss_kilobytes();
     let sampler = RssSampler::start();
     let (_first_result, first) = run(&program);
-    let sampled = sampler.stop();
+    let peak_sample = sampler.stop();
     let after = rss_kilobytes();
-    let rss_peak = before.max(after).max(sampled);
+    let rss_peak = before.max(after).max(peak_sample);
     // A second run of the same revision gives the spread of the number.
     let (_second_result, second) = run(&program);
 

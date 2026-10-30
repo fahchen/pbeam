@@ -29,7 +29,7 @@ use ::zstd::zstd_safe::{
     find_decompressed_size, get_error_name, zstd_sys::ZSTD_EndDirective,
 };
 
-use super::*;
+use super::{BeamError, BifResult, Binding, ExceptionClass, Job, Scheduler, Term, error};
 use crate::runtime::resources::lock;
 use crate::term::{ProcessId, Reference};
 
@@ -482,7 +482,7 @@ fn compress_parameter(
     // libzstd reads each `int` parameter as an `int`, and the safe API
     // converts the `u32` back to the same `int` (`zstd-safe` `set_parameter`).
     let int = |parameter: fn(u32) -> CParameter| match integer(value) {
-        Some(int) => Ok(Some(parameter(int as u32))),
+        Some(int) => Ok(Some(parameter(int.cast_unsigned()))),
         None => Err(Native::InvalidValue(value.clone())),
     };
     match name {
@@ -508,6 +508,16 @@ fn compress_parameter(
         "dictIDFlag" => flag(CParameter::DictIdFlag),
         _ => Err(Native::InvalidKey(key.clone())),
     }
+}
+
+/// The `ZSTD_c_strategy` value of a strategy, which `zstd-sys` gives as an
+/// enum.
+#[expect(
+    clippy::as_conversions,
+    reason = "Strategy is a plain bindgen enum with the values 1 to 9 and has no conversion to i32"
+)]
+fn strategy_code(strategy: Strategy) -> i32 {
+    strategy as i32
 }
 
 /// Return the strategy parameter of a `strategy` value
@@ -573,7 +583,7 @@ fn set_compress_parameter_nif(
         (Ok(compressor), Ok(Some(parameter))) => match compressor.cctx.set_parameter(parameter) {
             Ok(_) => {
                 if let CParameter::Strategy(strategy) = parameter {
-                    compressor.strategy = strategy as i32;
+                    compressor.strategy = strategy_code(strategy);
                 }
                 Native::Ok
             }
@@ -660,7 +670,7 @@ fn set_decompress_parameter_nif(
         (Ok(decompressor), Some(value)) => {
             match decompressor
                 .dctx
-                .set_parameter(DParameter::WindowLogMax(value as u32))
+                .set_parameter(DParameter::WindowLogMax(value.cast_unsigned()))
             {
                 Ok(_) => Native::Ok,
                 Err(code) => Native::Zstd(code),
@@ -740,23 +750,38 @@ fn decompress_stream_nif(
     data: &Term,
     flush: &Term,
 ) -> Result<BifResult, BeamError> {
-    let flush_true = matches!(flush, Term::Atom(atom) if scheduler.atoms.name_of(atom) == "true");
+    let flush_kind = if matches!(flush, Term::Atom(atom) if scheduler.atoms.name_of(atom) == "true")
+    {
+        FlushArgument::TrueAtom
+    } else {
+        FlushArgument::Other
+    };
     let (kind, current) = contexts(scheduler);
     let mut contexts = lock(&kind);
     let native = match open(&mut contexts.decompress, context, current) {
         Err(reason) => Native::Raise(reason),
-        Ok(decompressor) => decompress(decompressor, data, flush, flush_true),
+        Ok(decompressor) => decompress(decompressor, data, flush, flush_kind),
     };
     result(scheduler, native)
 }
 
+/// The flush argument of a `decompress_stream_nif/3` call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FlushArgument {
+    /// The atom `true`.
+    TrueAtom,
+    /// An integer flush, or another term.
+    Other,
+}
+
 /// Run the stream call of `decompress_stream_nif/3` on an open context.
-/// `flush_true` is true when the flush is the atom `true`.
+/// `flush_kind` is [`FlushArgument::TrueAtom`] when the flush is the atom
+/// `true`.
 fn decompress(
     decompressor: &mut Decompressor,
     data: &Term,
     flush: &Term,
-    flush_true: bool,
+    flush_kind: FlushArgument,
 ) -> Native {
     let mut chunk_size = DCtx::out_size();
     if !decompressor.in_use {
@@ -766,7 +791,7 @@ fn decompress(
         // An empty binary with the flush atom `true` gives `done` and does
         // not start the context (`zstd_nif.c:747-753`). `zstd.erl` passes
         // only an integer flush, so no `zstd` call reaches this result.
-        if binary.is_empty() && flush_true {
+        if binary.is_empty() && flush_kind == FlushArgument::TrueAtom {
             return Native::Codec {
                 tag: "done",
                 remainder: None,
@@ -774,9 +799,9 @@ fn decompress(
             };
         }
         if let Ok(Some(size)) = find_decompressed_size(binary)
-            && size < chunk_size as u64
+            && size < u64::try_from(chunk_size).expect("a usize fits in u64")
         {
-            chunk_size = size as usize;
+            chunk_size = usize::try_from(size).expect("the size is below the usize chunk size");
         }
         decompressor.in_use = true;
     }

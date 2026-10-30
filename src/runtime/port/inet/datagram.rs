@@ -16,7 +16,7 @@ use socket2::SockAddr;
 
 use super::{
     AF_INET, AF_INET6, AF_LOCAL, Control, Event, Inet, OK, State, errno_name, error_reply,
-    stream::Sender,
+    stream::Sender, to_u64,
 };
 use crate::error::{BeamError, error};
 
@@ -187,7 +187,7 @@ impl Inet {
             Err(failure) if failure.kind() == io::ErrorKind::WouldBlock => return Ok(None),
             Err(failure) => return Err(errno_name(&failure)),
         };
-        self.stream.statistics.input(count as u64);
+        self.stream.statistics.input(to_u64(count));
         data.truncate(count);
         Ok(Some((data, super::address_bytes(&SockAddr::from(from)))))
     }
@@ -208,7 +208,7 @@ impl Inet {
             Err(nix::errno::Errno::EAGAIN) => return Ok(None),
             Err(failure) => return Err(errno_name(&failure.into())),
         };
-        self.stream.statistics.input(count as u64);
+        self.stream.statistics.input(to_u64(count));
         data.truncate(count);
         let address = from.map_or_else(|| vec![0], |from| super::local_name_bytes(&from));
         Ok(Some((data, address)))
@@ -264,10 +264,12 @@ impl Inet {
         };
         match u32::from_be_bytes([*l3, *l2, *l1, *l0]) {
             0 => {}
-            size if size as usize > data.len() => return reply(Err("einval")),
+            size if usize::try_from(size).expect("a u32 fits in usize") > data.len() => {
+                return reply(Err("einval"));
+            }
             _ => return Err(self.unsupported("output", "with ancillary data")),
         }
-        self.stream.statistics.output(data.len() as u64);
+        self.stream.statistics.output(to_u64(data.len()));
         let sent = if self.state == State::Connected {
             socket.send(data)
         } else {

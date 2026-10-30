@@ -1,3 +1,9 @@
+//! Checks the `error_info` cause of the ETS BIFs on PBeam against the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::process::Command;
 
 use pbeam_runtime::BeamProgram;

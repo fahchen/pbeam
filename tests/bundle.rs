@@ -15,16 +15,16 @@ const CONSTANT_BEAM: &[u8] = include_bytes!("../fixtures/beam/constant.beam");
 
 /// Write a length-prefixed text, as the writer does.
 fn push_text(out: &mut Vec<u8>, text: &str) {
-    out.extend_from_slice(&(text.len() as u16).to_le_bytes());
+    out.extend_from_slice(&u16::try_from(text.len()).unwrap().to_le_bytes());
     out.extend_from_slice(text.as_bytes());
 }
 
 /// Write a table, as the writer does.
 fn push_table(out: &mut Vec<u8>, entries: &[(&str, &[u8])]) {
-    out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    out.extend_from_slice(&u32::try_from(entries.len()).unwrap().to_le_bytes());
     for (name, bytes) in entries {
         push_text(out, name);
-        out.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+        out.extend_from_slice(&u64::try_from(bytes.len()).unwrap().to_le_bytes());
         out.extend_from_slice(bytes);
     }
 }
@@ -120,8 +120,8 @@ fn accepts_an_empty_module_table_and_an_empty_resource_table() {
     push_table(&mut out, &[]);
     push_table(&mut out, &[]);
     let bundle = Bundle::parse(&out).unwrap();
-    assert!(bundle.modules().is_empty());
-    assert!(bundle.resources().is_empty());
+    assert_eq!(bundle.modules(), []);
+    assert_eq!(bundle.resources(), []);
 }
 
 #[test]
@@ -161,7 +161,11 @@ fn rejects_an_otp_release_over_the_limit() {
     let mut out = Vec::new();
     out.extend_from_slice(b"PBEAMBND");
     out.extend_from_slice(&1u16.to_le_bytes());
-    out.extend_from_slice(&(MAX_OTP_RELEASE_BYTES as u16 + 1).to_le_bytes());
+    out.extend_from_slice(
+        &u16::try_from(MAX_OTP_RELEASE_BYTES + 1)
+            .unwrap()
+            .to_le_bytes(),
+    );
     out.extend_from_slice(&[b'x'; MAX_OTP_RELEASE_BYTES + 1]);
     assert_eq!(
         parse_error(&out),
@@ -417,7 +421,7 @@ fn writer_rejects_a_full_module_table() {
     let mut writer = BundleWriter::new(OTP_RELEASE, COMPILER, "m", "f", 0).unwrap();
     for (index, name) in names.iter().enumerate() {
         let result = writer.add_module(name, b"");
-        if index < MAX_MODULES as usize {
+        if index < usize::try_from(MAX_MODULES).unwrap() {
             result.unwrap();
         } else {
             assert_eq!(

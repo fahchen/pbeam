@@ -1,3 +1,9 @@
+//! Runs the clock, time unit and date BIFs on PBeam and compares them with the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 #[path = "../common/boot.rs"]
 mod boot;
 #[path = "../common/mod.rs"]
@@ -31,7 +37,7 @@ fn reference_with(flags: &[&str], function: &str) -> Vec<u8> {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     reference.stdout
 }
 

@@ -1,3 +1,10 @@
+//! Starts `erl_prim_loader` with the code path of `-pa` and compares the result with the pinned
+//! ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::{
     env, fs,
     path::{Path, PathBuf},

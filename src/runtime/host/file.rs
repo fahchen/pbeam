@@ -15,7 +15,15 @@ use std::{
 
 use nix::sys::{stat::utimes, time::TimeVal};
 
-use super::errno::errno;
+use super::errno::{errno, errno_code};
+
+/// The low 32 bits of a `stat` field, as the C assignment of the field to the
+/// `Uint32` of `efile_fileinfo` keeps them. The field type differs by host:
+/// `st_dev` is `int` on macOS and `dev_t` on Linux.
+fn low_u32(field: impl Into<i128>) -> u32 {
+    let [b0, b1, b2, b3, ..] = field.into().to_le_bytes();
+    u32::from_le_bytes([b0, b1, b2, b3])
+}
 
 /// The type of a host file, as `efile_filetype_t`
 /// (`nifs/common/prim_file_nif.h:56-62`).
@@ -69,6 +77,15 @@ pub(crate) struct FileInfo {
     pub(crate) gid: u32,
 }
 
+/// Whether `stat` follows a symbolic link.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinkMode {
+    /// `stat`: read the file that the link names.
+    Follow,
+    /// `lstat`: read the link itself.
+    NoFollow,
+}
+
 /// Return the information of the file at `path`, as `efile_read_info`
 /// (`unix_prim_file.c:739-769`) gives it on a host without `NO_ACCESS`. With
 /// `follow_links`, `stat` reads the file that a symbolic link names, else
@@ -80,24 +97,21 @@ pub(crate) struct FileInfo {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let info = read_info(c"/bin/sh", true)?;
+/// let info = read_info(c"/bin/sh", LinkMode::Follow)?;
 /// assert_eq!(info.file_type, FileType::Regular);
-/// assert_eq!(read_info(c"/pbeam-missing", true), Err(libc::ENOENT));
+/// assert_eq!(read_info(c"/pbeam-missing", LinkMode::Follow), Err(libc::ENOENT));
 /// ```
 ///
 /// # Errors
 ///
 /// The `errno` of `stat` or `lstat`, for example `ENOENT` or `ENOTDIR`.
-// The `stat` field types differ between hosts, for example `st_mode` is
-// `u16` on macOS and `u32` on Linux, so a cast can have the same type.
-#[allow(clippy::unnecessary_cast)]
-pub(crate) fn read_info(path: &CStr, follow_links: bool) -> Result<FileInfo, c_int> {
+pub(crate) fn read_info(path: &CStr, links: LinkMode) -> Result<FileInfo, c_int> {
     // SAFETY: all zeros is a valid `stat`. `path` is a NUL-terminated
     // string, and `stat` and `lstat` write only into the struct that the
     // second pointer gives.
     let (result, data) = unsafe {
         let mut data: libc::stat = std::mem::zeroed();
-        let result = if follow_links {
+        let result = if links == LinkMode::Follow {
             libc::stat(path.as_ptr(), &raw mut data)
         } else {
             libc::lstat(path.as_ptr(), &raw mut data)
@@ -122,20 +136,20 @@ pub(crate) fn read_info(path: &CStr, follow_links: bool) -> Result<FileInfo, c_i
         _ => FileType::Other,
     };
     Ok(FileInfo {
-        size: data.st_size as i64,
+        size: data.st_size,
         file_type,
         readable,
         writable,
-        atime: data.st_atime as i64,
-        mtime: data.st_mtime as i64,
-        ctime: data.st_ctime as i64,
-        mode: data.st_mode as u32,
-        links: data.st_nlink as u32,
-        major_device: data.st_dev as u32,
-        minor_device: data.st_rdev as u32,
-        inode: data.st_ino as u32,
-        uid: data.st_uid as u32,
-        gid: data.st_gid as u32,
+        atime: data.st_atime,
+        mtime: data.st_mtime,
+        ctime: data.st_ctime,
+        mode: low_u32(data.st_mode),
+        links: low_u32(data.st_nlink),
+        major_device: low_u32(data.st_dev),
+        minor_device: low_u32(data.st_rdev),
+        inode: low_u32(data.st_ino),
+        uid: data.st_uid,
+        gid: data.st_gid,
     })
 }
 
@@ -267,6 +281,10 @@ pub(crate) fn get_cwd() -> Result<Vec<u8>, c_int> {
 /// `efile_translate_modelist` (`prim_file_nif.c:500-539`). An open has
 /// `read`, `write`, or both.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "mirrors the `EFILE_MODE_*` flags of `efile_modes_t` (`prim_file_nif.c:500-539`), which an open sets one by one"
+)]
 pub(crate) struct OpenModes {
     /// `EFILE_MODE_READ`.
     pub(crate) read: bool,
@@ -475,7 +493,7 @@ fn write_vectored(
 /// The `errno` of a failed `close`, for example `EIO` for a write that an
 /// NFS server rejects at the close.
 pub(crate) fn close(file: File) -> Result<(), c_int> {
-    nix::unistd::close(file).map_err(|errno| errno as c_int)
+    nix::unistd::close(file).map_err(errno_code)
 }
 
 /// Move the position of `file` to `offset` from `from`, and return the new
@@ -688,7 +706,12 @@ pub(crate) fn set_permissions(path: &CStr, permissions: u32) -> Result<(), c_int
 ///
 /// The `errno` of `chown`.
 pub(crate) fn set_owner(path: &CStr, uid: i32, gid: i32) -> Result<(), c_int> {
-    std::os::unix::fs::chown(host_path(path), Some(uid as u32), Some(gid as u32)).map_err(os_errno)
+    std::os::unix::fs::chown(
+        host_path(path),
+        Some(uid.cast_unsigned()),
+        Some(gid.cast_unsigned()),
+    )
+    .map_err(os_errno)
 }
 
 /// Set the access time `atime` and the modification time `mtime` of `path`,
@@ -705,9 +728,9 @@ pub(crate) fn set_owner(path: &CStr, uid: i32, gid: i32) -> Result<(), c_int> {
 ///
 /// The `errno` of `utime`.
 pub(crate) fn set_time(path: &CStr, atime: i64, mtime: i64) -> Result<(), c_int> {
-    let atime = TimeVal::new(atime as libc::time_t, 0);
-    let mtime = TimeVal::new(mtime as libc::time_t, 0);
-    utimes(host_path(path), &atime, &mtime).map_err(|errno| errno as c_int)
+    let atime = TimeVal::new(atime, 0);
+    let mtime = TimeVal::new(mtime, 0);
+    utimes(host_path(path), &atime, &mtime).map_err(errno_code)
 }
 
 /// Return the host path of the bytes of `path`.
@@ -718,6 +741,10 @@ fn host_path(path: &CStr) -> &Path {
 /// Return the `errno` of a failed host call. The standard library gives an
 /// error with no `errno` only when its buffer cannot grow, which is
 /// `ENOMEM` in ERTS.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "used as the function of `map_err`, which hands the error over by value"
+)]
 fn os_errno(error: io::Error) -> c_int {
     error.raw_os_error().unwrap_or(libc::ENOMEM)
 }

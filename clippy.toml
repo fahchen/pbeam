@@ -10,3 +10,6 @@ max-fn-params-bools = 0
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-print-in-tests = true
+
+# Project and algorithm names that docs write as words, not code.
+doc-valid-idents = ["PBeam", "MurmurHash3", "SipHash", ".."]

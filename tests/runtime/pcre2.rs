@@ -141,7 +141,7 @@ fn resumes_a_match_that_uses_its_loop_limit() {
     // data; a fresh loop limit and `resume` continue it, as the trap to
     // `erlang:re_run_trap/3` does (`erl_bif_re.c:1852-1866`).
     let code = compile(b"a*b", 0, None, None).unwrap();
-    let subject = vec![b'a'; 200000];
+    let subject = vec![b'a'; 200_000];
     let mut data = MatchData::new(2);
     data.set_loops_left(1);
     assert_eq!(

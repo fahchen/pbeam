@@ -6,15 +6,15 @@ fn gives_the_block_hash_of_erts() {
     // bytes with the seed `HCONST_13` (erl_term_hashing.c:878, 1268-1292);
     // the values come from the pinned ERTS.
     let expected = [
-        (1, 76691218),
-        (4, 39890977),
-        (5, 81915243),
-        (8, 85689312),
-        (9, 46387738),
-        (11, 21612627),
-        (12, 103762329),
-        (13, 92101820),
-        (25, 10118065),
+        (1, 76_691_218),
+        (4, 39_890_977),
+        (5, 81_915_243),
+        (8, 85_689_312),
+        (9, 46_387_738),
+        (11, 21_612_627),
+        (12, 103_762_329),
+        (13, 92_101_820),
+        (25, 10_118_065),
     ];
     for (length, phash2) in expected {
         let bytes: Vec<u8> = (1..=length).collect();
@@ -30,7 +30,7 @@ fn gives_the_block_hash_of_erts() {
 fn encodes_a_local_reference_as_erts() {
     // `#Ref<0.198992582.3052142593.51154>` on the pinned ERTS gives these
     // bytes after its hash.
-    let reference = Reference((198_992_582u64 << 32) | (3_052_142_593 & 0xFFFC_0000) | 51154);
+    let reference = Reference((198_992_582u64 << 32) | (0xB5EC_0001 & 0xFFFC_0000) | 0xC7D2);
     let bytes = local_reference(reference, 7);
     assert_eq!(bytes[..2], [131, 121]);
     assert_eq!(
@@ -50,7 +50,7 @@ fn decodes_only_its_own_local_reference() {
     assert_eq!(decode_local_reference(&bytes, 4), None);
     assert_eq!(decode_local_reference(&bytes[..20], 3), None);
     assert_eq!(decode_local_reference(&[], 3), None);
-    let mut other = bytes.clone();
+    let mut other = bytes;
     other[15] ^= 1;
     assert_eq!(decode_local_reference(&other, 3), None);
     let magic = reference.magic_reference();

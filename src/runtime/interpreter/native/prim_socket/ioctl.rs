@@ -8,7 +8,7 @@
 
 use super::socket::{closed, socket_argument};
 use super::supports::{HOST, IOCTL_REQUESTS, atom};
-use super::*;
+use super::{BeamError, BifResult, Scheduler, Term, error};
 use crate::runtime::resources::lock;
 use crate::runtime::sockets::{CLOSED, CLOSING};
 
@@ -54,7 +54,7 @@ const SWITCHES: [(usize, &[&str]); 3] = [
 /// the host columns of [`IOCTL_REQUESTS`]: `SIOCSIFNETMASK` and
 /// `SIOCSIFHWADDR`.
 const SET_ONLY: [(&str, [Option<u32>; 2]); 2] = [
-    ("sifnetmask", [Some(2149607702), Some(35100)]),
+    ("sifnetmask", [Some(2_149_607_702), Some(35100)]),
     ("sifhwaddr", [None, Some(35108)]),
 ];
 

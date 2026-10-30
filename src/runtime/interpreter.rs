@@ -3,11 +3,11 @@ use super::{
     capability::{Policy, Restriction},
     dirty::{Output, Work},
     process::{
-        BifCall, DirtyCall, Frame, PendingBif, PendingTrap, Priority, ProcessState, ReceiveTimer,
-        StackSlot, Start, StartFlags,
+        BifCall, CallKind, DirtyCall, Frame, PendingBif, PendingTrap, Priority, ProcessState,
+        ReceiveTimer, StackSlot, Start, StartFlags,
     },
-    scheduler::{PolicyEnd, Received, Scheduler, Turn, node::Node},
-    tty::InitialMode,
+    scheduler::{ChildLink, PolicyEnd, Received, Scheduler, Turn, node::Node},
+    tty::{InitialMode, StdinRead},
 };
 use crate::{
     beam::{
@@ -19,8 +19,8 @@ use crate::{
     },
     error::{BeamError, error},
     term::{
-        Atom, AtomTable, Binary, Fun, HostTerm, Insert, Map, MatchState, Target, Term, debug_term,
-        fits_big_arity, print_term, segment_equals, segment_integer,
+        Atom, AtomTable, Binary, Endian, Fun, HostTerm, Insert, Map, MatchState, Signedness,
+        Target, Term, debug_term, fits_big_arity, print_term, segment_equals, segment_integer,
     },
 };
 #[cfg(test)]
@@ -66,7 +66,7 @@ const APPLY_MAX_ARGUMENTS: usize = 1023;
 const APPLY_FUN_MAX_ARGUMENTS: usize = 1022;
 
 /// The bits that ERTS copies for one reduction when it puts a binary in a
-/// new binary (`ERL_BITS_PER_REDUCTION`, erl_bits.h:41).
+/// new binary (`ERL_BITS_PER_REDUCTION`, `erl_bits.h:41`).
 const BITS_PER_REDUCTION: usize = 8 * 1024;
 
 /// The module of the error handler of a process that does not set one, as
@@ -74,6 +74,8 @@ const BITS_PER_REDUCTION: usize = 8 * 1024;
 /// process-specific data holds no handler (`erl_process.h:2420-2430`).
 const DEFAULT_ERROR_HANDLER: &str = "error_handler";
 
+/// A loaded set of BEAM modules with the atom table of the program. Each run
+/// of the program starts from a copy of its modules and its atom table.
 #[derive(Debug)]
 pub struct BeamProgram {
     /// The start modules by name. Each run starts its code table with them
@@ -83,6 +85,26 @@ pub struct BeamProgram {
     /// each emulator, so each run starts its own table from a copy of it.
     /// The `Arc` lets a [`HostTerm`] of this program share the table.
     atoms: Arc<AtomTable>,
+}
+
+/// How the root process of a policy module run gets its capabilities.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RootAuthority {
+    /// The root process starts with the capabilities that `initial/1` of the
+    /// policy module gives.
+    Policy,
+    /// Boot mode: the root process starts with the boot authority and enters
+    /// the runtime with `pbeam_cap:enter_runtime/2`.
+    Boot,
+}
+
+/// Whether an `erlang:apply/3` raise happens at the start of a process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ApplySite {
+    /// The raise happens in a call of `erlang:apply/3`.
+    Call,
+    /// The raise happens in the initial `erlang:apply/3` of a process.
+    ProcessStart,
 }
 
 /// The issuer of the initial capabilities of a run.
@@ -97,10 +119,8 @@ enum Issuer<'a> {
     Module {
         /// The name of the policy module.
         policy: &'a str,
-        /// True in boot mode: the root process starts with the boot
-        /// authority and enters the runtime with
-        /// `pbeam_cap:enter_runtime/2`.
-        boot: bool,
+        /// How the root process gets its capabilities.
+        authority: RootAuthority,
     },
 }
 
@@ -284,9 +304,9 @@ fn idle_step(scheduler: &mut Scheduler, node: &Node) -> Result<(), BeamError> {
     // the mark lets a scheduler with more work give it some at its next
     // step (`Scheduler::serve_steal`), which ends the wait with a delivery.
     let index = scheduler.index();
-    node.set_hungry(index, true);
+    node.set_hungry(index);
     let waited = idle_wait(scheduler, node);
-    node.set_hungry(index, false);
+    node.clear_hungry(index);
     // Each process that a steal gave this scheduler is in the inbox now, and
     // it enters the slots before a timer, an OS signal, or a dirty
     // completion of the next loop step looks for it.
@@ -343,6 +363,12 @@ impl BeamProgram {
     /// let program = BeamProgram::load(&[CALLS, EXTERNAL])?;
     /// assert!(BeamProgram::load(&[CALLS, CALLS]).is_err());
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`BeamError`] when a module is not a valid BEAM file, when
+    /// two modules have one name, or when a module has an `-on_load`
+    /// function.
     pub fn load(modules: &[&[u8]]) -> Result<Self, BeamError> {
         let atoms = AtomTable::new();
         let mut loaded = HashMap::new();
@@ -440,6 +466,12 @@ impl BeamProgram {
     /// register_library(&NATIVE_HASH_LIBRARY).unwrap();
     /// assert!(program.validate_native_declarations().is_ok());
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`BeamError`] that names the first native declaration, in
+    /// the order of the module names, that has no registered
+    /// implementation.
     pub fn validate_native_declarations(&self) -> Result<(), BeamError> {
         let mut names: Vec<&String> = self.modules.keys().collect();
         names.sort();
@@ -548,6 +580,13 @@ impl BeamProgram {
     /// ```rust,ignore
     /// let result = program.execute("process_probe", "main", &[])?;
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`BeamError`] when an argument cannot enter the atom table
+    /// of the run, when the root process exits with a reason, when it waits
+    /// for a message that cannot arrive, or when the run ends with
+    /// [`BeamError::Halt`] or another run error.
     pub fn execute(
         &self,
         module: &str,
@@ -575,6 +614,10 @@ impl BeamProgram {
     /// ```rust,ignore
     /// let result = program.execute_with_policy("process_probe", "main", &[], &AllowAll)?;
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`BeamProgram::execute`].
     pub fn execute_with_policy(
         &self,
         module: &str,
@@ -649,9 +692,9 @@ impl BeamProgram {
         function: &str,
         arguments: &[HostTerm],
         policy: &str,
-        boot: bool,
+        authority: RootAuthority,
     ) -> Result<HostTerm, BeamError> {
-        let issuer = Issuer::Module { policy, boot };
+        let issuer = Issuer::Module { policy, authority };
         self.execute_issued(module, function, arguments, issuer, &mut None)
     }
 
@@ -758,6 +801,11 @@ impl BeamProgram {
     /// error or waits for a message that cannot arrive, the error of an
     /// empty list of roots, and the error of a scheduler that cannot be
     /// created.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a root that returned no error has no result. This does
+    /// not happen: a root that does not exit gives an error.
     pub fn execute_on_schedulers(
         &self,
         roots: &[(&str, &str)],
@@ -871,7 +919,7 @@ impl BeamProgram {
         let selected = results.iter().any(|result| match result {
             Ok(selected) | Err((_, selected)) => *selected,
         });
-        initial_mode.reset(selected);
+        initial_mode.reset(StdinRead::from(selected));
         // Each root result is a term of the shared table of the run.
         let roots = node.take_root_results();
         // A failed root aborts the run. Report its error before the wait
@@ -901,7 +949,7 @@ impl BeamProgram {
     }
 
     /// Apply the outcome of one process turn, as each run loop does.
-    fn apply_outcome(&self, scheduler: &mut Scheduler, outcome: Outcome) -> Result<(), BeamError> {
+    fn apply_outcome(scheduler: &mut Scheduler, outcome: Outcome) -> Result<(), BeamError> {
         match outcome {
             Outcome::Wait => scheduler.park_current(),
             Outcome::Hibernate => scheduler.hibernate_current(),
@@ -928,7 +976,7 @@ impl BeamProgram {
                 let label = scheduler.code.entry_label(module, function, 0)?;
                 let frame = scheduler.code.frame(module, label, 0)?;
                 let id = scheduler.next_pid()?;
-                scheduler.start_with_id(id, slot, frame.into(), Vec::new(), Vec::new())?;
+                scheduler.start_with_id(id, slot, frame.into(), Vec::new(), Vec::new());
             }
             // The first process of the node is `<0.0.0>` and a system
             // process (`erl_init.c:2540`, `333-353`). It starts as
@@ -941,7 +989,7 @@ impl BeamProgram {
                 let frame = initial_start(scheduler, &module, &function, arguments.len())?;
                 let init = scheduler.next_pid()?;
                 scheduler.mark_system(init);
-                scheduler.start_with_id(init, slot, frame, arguments.to_vec(), Vec::new())?;
+                scheduler.start_with_id(init, slot, frame, arguments.to_vec(), Vec::new());
                 // ERTS then starts `erts_code_purger` as a system process
                 // with high priority (`erl_init.c:2550-2557`). `code_server`
                 // sends it each purge and the end of each `-on_load`
@@ -974,7 +1022,7 @@ impl BeamProgram {
             match scheduler.schedule_next()? {
                 Turn::Run => {
                     let outcome = self.run(scheduler)?;
-                    self.apply_outcome(scheduler, outcome)?;
+                    Self::apply_outcome(scheduler, outcome)?;
                 }
                 Turn::Done => {}
                 Turn::Idle => idle_step(scheduler, &node)?,
@@ -1005,6 +1053,10 @@ impl BeamProgram {
     /// let result = program.execute_sampled("terra_probe", "main", &[], &mut |live| peak = peak.max(live))?;
     /// assert!(peak > 0);
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`BeamProgram::execute`].
     pub fn execute_sampled(
         &self,
         module: &str,
@@ -1030,7 +1082,7 @@ impl BeamProgram {
         module: &str,
         function: &str,
         arguments: &[HostTerm],
-        issuer: Issuer,
+        issuer: Issuer<'_>,
         sample: &mut Option<&mut dyn FnMut(usize)>,
     ) -> Result<HostTerm, BeamError> {
         let initial_mode = InitialMode::read();
@@ -1055,7 +1107,7 @@ impl BeamProgram {
             }
             Err(import_error) => Err(import_error),
         };
-        initial_mode.reset(scheduler.node().ttys().input_selected());
+        initial_mode.reset(StdinRead::from(scheduler.node().ttys().input_selected()));
         run?;
         // The node holds the result of the root. The table of the run holds
         // each name that the run created, so the host result can name every
@@ -1115,7 +1167,7 @@ impl BeamProgram {
         module: &str,
         function: &str,
         arguments: &[Term],
-        issuer: Issuer,
+        issuer: Issuer<'_>,
         sample: &mut Option<&mut dyn FnMut(usize)>,
     ) -> Result<(), BeamError> {
         // The root starts as `erl_create_process` starts a process: a
@@ -1127,18 +1179,18 @@ impl BeamProgram {
         let frame = initial_start(scheduler, &module_atom, &function_atom, arguments.len())?;
         let mut root = match issuer {
             Issuer::Unchecked => {
-                scheduler.start(frame, arguments.to_vec(), Vec::new())?;
+                scheduler.start(frame, arguments.to_vec(), Vec::new());
                 None
             }
             Issuer::Host(policy) => {
-                scheduler.start(frame, arguments.to_vec(), policy.initial())?;
+                scheduler.start(frame, arguments.to_vec(), policy.initial());
                 None
             }
-            Issuer::Module { policy, boot } => {
+            Issuer::Module { policy, authority } => {
                 scheduler.code.entry_label(policy, "grant", 3)?;
                 let initial = scheduler.code.entry_label(policy, "initial", 1)?;
                 let initial = scheduler.code.frame(policy, initial, 1)?;
-                if boot {
+                if authority == RootAuthority::Boot {
                     scheduler.start_policy(initial, None)?;
                     scheduler.start_boot(frame, arguments.to_vec());
                     None
@@ -1157,7 +1209,7 @@ impl BeamProgram {
                     error(format!("the policy denied the root process: {cause}"))
                 })?;
                 match root.take() {
-                    Some(frame) => scheduler.start(frame, arguments.to_vec(), capabilities)?,
+                    Some(frame) => scheduler.start(frame, arguments.to_vec(), capabilities),
                     None => scheduler.enter_runtime(capabilities),
                 }
             }
@@ -1170,7 +1222,8 @@ impl BeamProgram {
                 Issuer::Host(policy) => scheduler.revoke_issued(&policy.revocations()),
                 Issuer::Module { policy, .. } => {
                     if let Some((function, arguments)) = scheduler.next_policy_request() {
-                        let arity = arguments.len() as u32;
+                        let arity = u32::try_from(arguments.len())
+                            .expect("an argument list has fewer than 2^32 terms");
                         let frame = scheduler.code.mfa_frame(policy, function, arity)?;
                         scheduler.begin_policy_call(frame, arguments);
                     }
@@ -1183,7 +1236,7 @@ impl BeamProgram {
                 Turn::Run => {
                     let outcome = self.run(scheduler)?;
                     let outcome = policy_turn(scheduler, outcome);
-                    self.apply_outcome(scheduler, outcome)?;
+                    Self::apply_outcome(scheduler, outcome)?;
                 }
                 Turn::Done => {}
                 Turn::Idle => {
@@ -1225,6 +1278,10 @@ impl BeamProgram {
     /// // `{undef, [{undef_target, missing, [p], []}]}`.
     /// assert!(matches!(program.run(&mut scheduler)?, Outcome::Exit { result: None, .. }));
     /// ```
+    #[expect(
+        clippy::too_many_lines,
+        reason = "instruction dispatch loop: one arm for each instruction, and a split would move work out of the hot path"
+    )]
     fn run(&self, scheduler: &mut Scheduler) -> Result<Outcome, BeamError> {
         // ERTS starts each process with `i_apply_only` of its MFA
         // (`erl_process.c:12616`; JIT `jit/beam_jit_main.cpp:258`). Its
@@ -1242,16 +1299,18 @@ impl BeamProgram {
                 // (`beam_common.c:1455-1459`), so the stack trace is the one
                 // frame `{erlang, apply, [Module, Function, Arguments],
                 // [{error_info, ...}]}`.
-                let arity = process.registers.len() as u32;
+                let arity = u32::try_from(process.registers.len())
+                    .expect("the registers number fewer than 2^32");
                 let arguments = call_arguments(&process.registers, arity)?;
                 let call = vec![
                     Term::Atom(module),
                     Term::Atom(function),
                     Term::list_from(arguments),
                 ];
-                self.apply_error(scheduler, call, "system_limit", true)?
+                Self::apply_error(scheduler, call, "system_limit", ApplySite::ProcessStart)?
             } else {
-                let arity = process.registers.len() as u32;
+                let arity = u32::try_from(process.registers.len())
+                    .expect("the registers number fewer than 2^32");
                 // The start of a process is a tail call of the MFA from the
                 // initial function of ERTS (`i_apply_only`,
                 // `erl_process.c:12616`), which goes to the export entry of
@@ -1259,7 +1318,7 @@ impl BeamProgram {
                 // process with no frame, so a BIF or the error handler runs
                 // as a body call of the first frame. The result of the BIF,
                 // or the `return` of the handler, then ends the process.
-                self.call_mfa(scheduler, &module, &function, arity, false)?
+                self.call_mfa(scheduler, &module, &function, arity, CallKind::Body)?
             };
             if let Some(outcome) = outcome {
                 return Ok(outcome);
@@ -1287,7 +1346,7 @@ impl BeamProgram {
                     let entry = (module.as_str(), name.as_str(), arguments, Term::nil());
                     raise_at_entry(scheduler, entry, class, reason)?
                 }
-                result => self.finish_bif(scheduler, result, true)?,
+                result => Self::finish_bif(scheduler, result, CallKind::Tail)?,
             };
             if let Some(outcome) = outcome {
                 return Ok(outcome);
@@ -1299,7 +1358,7 @@ impl BeamProgram {
             module,
             function,
             arguments,
-            tail,
+            entry,
             origin,
         }) = scheduler.current_process_mut().pending_bif.take()
         {
@@ -1316,7 +1375,7 @@ impl BeamProgram {
             // `328-334`).
             let target = matches!((module, function), ("erlang", "crc32" | "adler32"));
             let registers = (module == "lists" || target).then(|| arguments.clone());
-            let result = self.bif_trap(scheduler, module, function, arguments)?;
+            let result = Self::bif_trap(scheduler, module, function, arguments)?;
             let result = match origin {
                 Some(call)
                     if matches!(
@@ -1341,7 +1400,7 @@ impl BeamProgram {
                 }
                 _ => result,
             };
-            if let Some(outcome) = self.finish_bif(scheduler, result, tail)? {
+            if let Some(outcome) = Self::finish_bif(scheduler, result, entry)? {
                 return Ok(outcome);
             }
         }
@@ -1353,9 +1412,9 @@ impl BeamProgram {
             module,
             function,
             arity,
-            tail,
+            entry,
         }) = scheduler.current_process_mut().pending_trap.take()
-            && let Some(outcome) = self.resume_trap(scheduler, module, function, arity, tail)?
+            && let Some(outcome) = Self::resume_trap(scheduler, module, function, arity, entry)?
         {
             return Ok(outcome);
         }
@@ -1405,23 +1464,27 @@ impl BeamProgram {
                     write(process, destination, value)?;
                 }
                 Instruction::Allocate { stack_size } => {
-                    current_frame(process)
-                        .stack
-                        .resize_with(*stack_size as usize, || StackSlot::Empty);
+                    current_frame(process).stack.resize_with(
+                        usize::try_from(*stack_size).expect("a u32 fits in usize"),
+                        || StackSlot::Empty,
+                    );
                 }
                 Instruction::Deallocate { stack_size } => {
                     let stack = &mut current_frame(process).stack;
-                    if stack.len() != *stack_size as usize {
+                    if stack.len() != usize::try_from(*stack_size).expect("a u32 fits in usize") {
                         return Err(error("invalid BEAM stack size"));
                     }
                     stack.clear();
                 }
                 Instruction::Trim { count, remaining } => {
                     let stack = &mut current_frame(process).stack;
-                    if stack.len() != *count as usize + *remaining as usize {
+                    if stack.len()
+                        != usize::try_from(*count).expect("a u32 fits in usize")
+                            + usize::try_from(*remaining).expect("a u32 fits in usize")
+                    {
                         return Err(error("invalid BEAM stack size"));
                     }
-                    stack.drain(..*count as usize);
+                    stack.drain(..usize::try_from(*count).expect("a u32 fits in usize"));
                 }
                 Instruction::Call {
                     arity,
@@ -1450,7 +1513,9 @@ impl BeamProgram {
                     target,
                     deallocate,
                 } => {
-                    if *deallocate as usize != current_frame(process).stack.len() {
+                    if usize::try_from(*deallocate).expect("a u32 fits in usize")
+                        != current_frame(process).stack.len()
+                    {
                         return Err(error("invalid BEAM tail-call stack size"));
                     }
                     check_local_call_arguments(&process.registers, *arity)?;
@@ -1465,7 +1530,7 @@ impl BeamProgram {
                 } => {
                     let passed = matches!(
                         read_ref(process, value)?,
-                        Term::Tuple(elements) if elements.len() == *arity as usize
+                        Term::Tuple(elements) if elements.len() == usize::try_from(*arity).expect("a u32 fits in usize")
                     );
                     if !passed {
                         cursor.position = label_position(*fail_label)?;
@@ -1495,7 +1560,10 @@ impl BeamProgram {
                     let target = match read_ref(process, value)? {
                         Term::Tuple(elements) => choices
                             .iter()
-                            .find(|(arity, _)| *arity as usize == elements.len())
+                            .find(|(arity, _)| {
+                                usize::try_from(*arity).expect("a u32 fits in usize")
+                                    == elements.len()
+                            })
                             .map_or(*fail_label, |(_, label)| *label),
                         _ => *fail_label,
                     };
@@ -1541,13 +1609,16 @@ impl BeamProgram {
                         let call = vec![module, name, Term::list_from(arguments)];
                         let raised =
                             bif_error(scheduler, "erlang", "apply", call, BifResult::badarg(), 0)?;
-                        if let Some(outcome) = self.finish_bif(scheduler, raised, false)? {
+                        if let Some(outcome) = Self::finish_bif(scheduler, raised, CallKind::Body)?
+                        {
                             return Ok(outcome);
                         }
                         cursor.refresh(scheduler)?;
                         continue;
                     };
-                    if let Some(outcome) = self.call_mfa(scheduler, module, name, *arity, *tail)? {
+                    if let Some(outcome) =
+                        self.call_mfa(scheduler, module, name, *arity, CallKind::from(*tail))?
+                    {
                         return Ok(outcome);
                     }
                     cursor.refresh(scheduler)?;
@@ -1578,7 +1649,9 @@ impl BeamProgram {
                         release_frame(process, *deallocate)?;
                     }
                     cursor.commit(process);
-                    if let Some(outcome) = self.call_fun(scheduler, call, *arity, *tail)? {
+                    if let Some(outcome) =
+                        self.call_fun(scheduler, call, *arity, CallKind::from(*tail))?
+                    {
                         return Ok(outcome);
                     }
                     cursor.refresh(scheduler)?;
@@ -1625,7 +1698,7 @@ impl BeamProgram {
                         continue;
                     }
                     let result = if let Some(state) = process.length_trap.take() {
-                        self.bif_trap(scheduler, "erlang", "length", state)?
+                        Self::bif_trap(scheduler, "erlang", "length", state)?
                     } else if is_leaf(*bif) {
                         // The leaf read borrows the process, so the commit
                         // of the advanced position runs first. The commit
@@ -1655,7 +1728,7 @@ impl BeamProgram {
                             values.with(|terms| match_context_size(*bif, arguments, terms))?;
                         match size {
                             Some(size) => BifResult::Value(size),
-                            None => values.with(|terms| self.bif_slice(scheduler, *bif, terms))?,
+                            None => values.with(|terms| Self::bif_slice(scheduler, *bif, terms))?,
                         }
                     };
                     let process = scheduler.current_process_mut();
@@ -1674,7 +1747,7 @@ impl BeamProgram {
                         BifResult::Raise { .. } | BifResult::ErrorWithCause { .. }
                             if *fail_label != 0 =>
                         {
-                            cursor.position = label_position(*fail_label)?
+                            cursor.position = label_position(*fail_label)?;
                         }
                         raised @ (BifResult::Raise { .. } | BifResult::ErrorWithCause { .. }) => {
                             // The BIF wrote no destination, so the operands
@@ -1688,7 +1761,9 @@ impl BeamProgram {
                             let (module_name, name, _) = mfa(*bif);
                             let raised =
                                 bif_error(scheduler, module_name, name, values, raised, 0)?;
-                            if let Some(outcome) = self.finish_bif(scheduler, raised, false)? {
+                            if let Some(outcome) =
+                                Self::finish_bif(scheduler, raised, CallKind::Body)?
+                            {
                                 return Ok(outcome);
                             }
                             cursor.refresh(scheduler)?;
@@ -1710,7 +1785,7 @@ impl BeamProgram {
                     let handler = label_position(*label)?;
                     let slot = current_frame(process)
                         .stack
-                        .get_mut(*register as usize)
+                        .get_mut(usize::try_from(*register).expect("a u32 fits in usize"))
                         .ok_or_else(|| {
                             error(format!("register y{register} is outside allocated range"))
                         })?;
@@ -1941,7 +2016,10 @@ impl BeamProgram {
                     };
                     match result {
                         Ok(value) => write(process, destination, value)?,
-                        Err(_) if *fail_label != 0 => cursor.position = *fail_label as usize,
+                        Err(_) if *fail_label != 0 => {
+                            cursor.position =
+                                usize::try_from(*fail_label).expect("a u32 fits in usize");
+                        }
                         Err(reason) => {
                             cursor.commit(process);
                             if let Some(outcome) = raise_in_function(scheduler, reason)? {
@@ -2022,7 +2100,7 @@ impl BeamProgram {
                     // register keeps its value on a failure
                     // (`beam_common.c:2231-2253`, `erts_gc_update_map_exact`).
                     match update_owned(process, map, destination, |entries| {
-                        update_map_exact(entries, pairs, atoms)
+                        Ok(update_map_exact(entries, pairs, atoms))
                     })? {
                         Update::Written => {}
                         Update::Missing(value) => {
@@ -2040,7 +2118,7 @@ impl BeamProgram {
                             }
                         }
                         Update::Reason(_) if *fail_label != 0 => {
-                            cursor.position = label_position(*fail_label)?
+                            cursor.position = label_position(*fail_label)?;
                         }
                         Update::Reason(reason) => {
                             if let Some(outcome) = raise(process, ExceptionClass::Error, reason) {
@@ -2156,7 +2234,7 @@ impl BeamProgram {
                     let passed = matches!(
                         read_ref(process, value)?,
                         Term::Tuple(fields)
-                            if fields.len() == *arity as usize
+                            if fields.len() == usize::try_from(*arity).expect("a u32 fits in usize")
                                 && fields.first() == Some(tag)
                     );
                     if !passed {
@@ -2256,7 +2334,10 @@ impl BeamProgram {
                     match bytes {
                         Some((bits, ())) => {
                             let position = state.position();
-                            let bits = state.bits_at(position - bits as usize, position);
+                            let bits = state.bits_at(
+                                position - usize::try_from(bits).expect("a u64 fits in usize"),
+                                position,
+                            );
                             write(process, destination, Term::Binary(bits))?;
                         }
                         None => cursor.position = label_position(*fail_label)?,
@@ -2281,7 +2362,7 @@ impl BeamProgram {
                     let (process, atoms) = scheduler.current_process_and_atoms();
                     let state = match_context(process, context, atoms)?;
                     let value = binary_field_size(read_ref(process, size)?, *unit)
-                        .and_then(|bits| state.get_float(bits, *little));
+                        .and_then(|bits| state.get_float(bits, Endian::from(*little)));
                     match value {
                         Some(value) => write(process, destination, Term::Float(value))?,
                         None => cursor.position = label_position(*fail_label)?,
@@ -2311,7 +2392,12 @@ impl BeamProgram {
                     let value =
                         binary_field_size(read_ref(process, size)?, *unit).and_then(|bits| {
                             let read = state.read_bits(bits)?;
-                            bounded_segment_integer(&read, bits as usize, *little, *signed)
+                            bounded_segment_integer(
+                                &read,
+                                usize::try_from(bits).expect("a u64 fits in usize"),
+                                Endian::from(*little),
+                                Signedness::from(*signed),
+                            )
                         });
                     match value {
                         Some(value) => write(process, destination, value)?,
@@ -2326,7 +2412,8 @@ impl BeamProgram {
                 } => {
                     let (process, atoms) = scheduler.current_process_and_atoms();
                     let position = match_context(process, context, atoms)?.position();
-                    write(process, destination, Term::Integer(position as i64))?;
+                    let value = i64::try_from(position).expect("a bit position fits in i64");
+                    write(process, destination, Term::Integer(value))?;
                 }
                 // ERTS `bs_set_position` sets `sb->start` to the unsigned
                 // value of the position (emu bs_instrs.tab:1120-1123). The
@@ -2413,9 +2500,9 @@ impl BeamProgram {
                     let (process, atoms) = scheduler.current_process_and_atoms();
                     let state = match_context(process, context, atoms)?;
                     let code_point = if matches!(instruction, Instruction::BinaryGetUtf16 { .. }) {
-                        state.get_utf16(*little)
+                        state.get_utf16(Endian::from(*little))
                     } else {
-                        state.get_utf32(*little)
+                        state.get_utf32(Endian::from(*little))
                     };
                     match (code_point, destination) {
                         (Some(code_point), Some(destination)) => {
@@ -2432,7 +2519,13 @@ impl BeamProgram {
                     test_heap,
                 } => {
                     let (process, atoms) = scheduler.current_process_and_atoms();
-                    if !binary_match(process, context, commands, *test_heap, atoms)? {
+                    if !binary_match(
+                        process,
+                        context,
+                        commands,
+                        TestHeap::from(*test_heap),
+                        atoms,
+                    )? {
                         cursor.position = label_position(*fail_label)?;
                     }
                 }
@@ -2631,7 +2724,7 @@ impl BeamProgram {
                     let Term::Tuple(fields) = read_ref(process, tuple)? else {
                         return Err(error("BEAM tuple element source is not a tuple"));
                     };
-                    let index = *index as usize;
+                    let index = usize::try_from(*index).expect("a u32 fits in usize");
                     let Some(field) = fields.get(index) else {
                         return Err(error(format!("BEAM tuple has no element {index}")));
                     };
@@ -2659,7 +2752,7 @@ impl BeamProgram {
                     let fields = std::sync::Arc::make_mut(fields.arc_mut());
                     for (position, value) in updates {
                         let value = read(process, value)?;
-                        let field = (*position as usize)
+                        let field = (usize::try_from(*position).expect("a u32 fits in usize"))
                             .checked_sub(1)
                             .and_then(|index| fields.get_mut(index))
                             .ok_or_else(|| {
@@ -2713,7 +2806,7 @@ impl BeamProgram {
                     let to = read(process, &Operand::X(0))?;
                     let message = read(process, &Operand::X(1))?;
                     let result = send(scheduler, &to, message)?;
-                    if let Some(outcome) = self.finish_bif(scheduler, result, false)? {
+                    if let Some(outcome) = Self::finish_bif(scheduler, result, CallKind::Body)? {
                         return Ok(outcome);
                     }
                     cursor.refresh(scheduler)?;
@@ -2859,7 +2952,7 @@ impl BeamProgram {
                                 work,
                                 entry: (module.name.clone(), name.clone(), arguments),
                             })),
-                            result => self.finish_bif(scheduler, result, true),
+                            result => Self::finish_bif(scheduler, result, CallKind::Tail),
                         };
                         if let Some(outcome) = outcome? {
                             return Ok(outcome);
@@ -3074,7 +3167,7 @@ impl BeamProgram {
         scheduler.sync_code();
         // The loader checks each import index against the import table, and
         // the code table makes one slot for each import.
-        let index = import as usize;
+        let index = usize::try_from(import).expect("a u32 fits in usize");
         let Import {
             module,
             name,
@@ -3082,13 +3175,16 @@ impl BeamProgram {
             kind,
         } = &code.imports[index];
         let arity = *arity;
-        let tail = deallocate.is_some();
+        let entry = CallKind::from(deallocate.is_some());
         let process = scheduler.current_process_mut();
         match deallocate {
             Some(deallocate) if matches!(kind, ImportKind::ApplyFun | ImportKind::Apply) => {
                 release_frame(process, deallocate)?;
             }
-            Some(deallocate) if deallocate as usize != current_frame(process).stack.len() => {
+            Some(deallocate)
+                if usize::try_from(deallocate).expect("a u32 fits in usize")
+                    != current_frame(process).stack.len() =>
+            {
                 return Err(error("invalid BEAM tail-call stack size"));
             }
             _ => {}
@@ -3117,7 +3213,7 @@ impl BeamProgram {
                 let process = scheduler.current_process_mut();
                 let arguments = call_arguments(&process.registers, arity)?;
                 let result = bif_error(scheduler, module, name, arguments, result, 0)?;
-                self.finish_bif(scheduler, result, false)
+                Self::finish_bif(scheduler, result, CallKind::Body)
             }
             ImportKind::CallOnLoadFunction => {
                 let module = read_x_register(&process.registers, 0)?.clone();
@@ -3128,17 +3224,14 @@ impl BeamProgram {
                     }
                     _ => None,
                 };
-                match frame {
-                    Some(frame) => {
-                        enter_frame(scheduler.current_process_mut(), frame, false);
-                        Ok(None)
-                    }
-                    None => {
-                        let arguments = vec![module];
-                        let badarg = BifResult::badarg();
-                        let result = bif_error(scheduler, "erlang", name, arguments, badarg, 0)?;
-                        self.finish_bif(scheduler, result, false)
-                    }
+                if let Some(frame) = frame {
+                    enter_frame(scheduler.current_process_mut(), frame, CallKind::Body);
+                    Ok(None)
+                } else {
+                    let arguments = vec![module];
+                    let badarg = BifResult::badarg();
+                    let result = bif_error(scheduler, "erlang", name, arguments, badarg, 0)?;
+                    Self::finish_bif(scheduler, result, CallKind::Body)
                 }
             }
             ImportKind::Bif { bif, heavy } => {
@@ -3146,16 +3239,16 @@ impl BeamProgram {
                     return Ok(Some(Outcome::Yield));
                 }
                 let arguments = call_arguments(&process.registers, arity)?;
-                let result = self.call_bif(scheduler, module, name, bif, &arguments)?;
+                let result = Self::call_bif(scheduler, module, name, bif, &arguments)?;
                 // The loader turns `call_ext_last` and `call_ext_only` of a
                 // BIF into a body call and a return
                 // (`jit/arm/ops.tab:709-714`), so the frame of the caller
                 // is in the stack trace.
                 let result = bif_error(scheduler, module, name, arguments, result, 0)?;
-                self.finish_bif(scheduler, result, false)
+                Self::finish_bif(scheduler, result, CallKind::Body)
             }
-            ImportKind::ApplyFun => self.apply_fun(scheduler, tail),
-            ImportKind::Apply => self.apply_mfa(scheduler, tail),
+            ImportKind::ApplyFun => self.apply_fun(scheduler, entry),
+            ImportKind::Apply => self.apply_mfa(scheduler, entry),
             ImportKind::Export => {
                 // A registered native function runs at the `NifStart`
                 // instruction of its stub, so this path enters the frame and
@@ -3163,14 +3256,14 @@ impl BeamProgram {
                 // registry check stays in `native::call`.
                 let slot = &targets[index];
                 if let Some(target) = slot.get() {
-                    return enter_export(process, target.frame(), arity, tail);
+                    return enter_export(process, target.frame(), arity, entry);
                 }
                 match scheduler.synced_code().export_frame(module, name, arity)? {
                     Some(frame) => {
                         slot.set(Some(ExportTarget::of(&frame)));
-                        enter_export(scheduler.current_process_mut(), frame, arity, tail)
+                        enter_export(scheduler.current_process_mut(), frame, arity, entry)
                     }
-                    None => self.undefined_function(scheduler, module, name, arity, tail),
+                    None => Self::undefined_function(scheduler, module, name, arity, entry),
                 }
             }
         }
@@ -3205,7 +3298,7 @@ impl BeamProgram {
         module: &Atom,
         name: &Atom,
         arity: u32,
-        tail: bool,
+        entry: CallKind,
     ) -> Result<Option<Outcome>, BeamError> {
         // A BIF that reads the code table, such as `erlang:module_loaded/1`,
         // and the export of the MFA see each code operation that returned
@@ -3224,18 +3317,17 @@ impl BeamProgram {
                 let process = scheduler.current_process_mut();
                 call_arguments(&process.registers, arity)?
             };
-            let result = match resolved {
-                Some(id) => self.bif_slice(scheduler, id, &arguments)?,
-                None => {
-                    let (module_name, name) = {
-                        let atoms = &scheduler.atoms;
-                        (
-                            atoms.name_of(module).to_owned(),
-                            atoms.name_of(name).to_owned(),
-                        )
-                    };
-                    self.named_bif(scheduler, &module_name, &name, &arguments)?
-                }
+            let result = if let Some(id) = resolved {
+                Self::bif_slice(scheduler, id, &arguments)?
+            } else {
+                let (module_name, name) = {
+                    let atoms = &scheduler.atoms;
+                    (
+                        atoms.name_of(module).to_owned(),
+                        atoms.name_of(name).to_owned(),
+                    )
+                };
+                Self::named_bif(scheduler, &module_name, &name, &arguments)?
             };
             // A tail apply or a tail fun call removed the frame of the
             // caller in ERTS, so its return address is in the function
@@ -3253,12 +3345,12 @@ impl BeamProgram {
                         atoms.name_of(name).to_owned(),
                     )
                 };
-                let skip = usize::from(tail);
+                let skip = usize::from(entry.is_tail());
                 bif_error(scheduler, &module_name, &name, arguments, result, skip)?
             } else {
                 result
             };
-            return self.finish_bif(scheduler, result, tail);
+            return Self::finish_bif(scheduler, result, entry);
         }
         // A name that PBeam does not resolve as a BIF reaches the export
         // lookup. The name of the atom term comes from the run table.
@@ -3269,7 +3361,7 @@ impl BeamProgram {
                 atoms.name_of(name).to_owned(),
             )
         };
-        self.call_export(scheduler, &module_name, &name, arity, tail)
+        self.call_export(scheduler, &module_name, &name, arity, entry)
     }
 
     /// Call the export of `module:name/arity` with the arguments in the X
@@ -3294,16 +3386,16 @@ impl BeamProgram {
         module: &str,
         name: &str,
         arity: u32,
-        tail: bool,
+        entry: CallKind,
     ) -> Result<Option<Outcome>, BeamError> {
         match (module, name, arity) {
-            ("erlang", "apply", 2) => return self.apply_fun(scheduler, tail),
-            ("erlang", "apply", 3) => return self.apply_mfa(scheduler, tail),
+            ("erlang", "apply", 2) => return self.apply_fun(scheduler, entry),
+            ("erlang", "apply", 3) => return self.apply_mfa(scheduler, entry),
             _ => {}
         }
         match scheduler.synced_code().export_frame(module, name, arity)? {
-            Some(frame) => enter_export(scheduler.current_process_mut(), frame, arity, tail),
-            None => self.undefined_function(scheduler, module, name, arity, tail),
+            Some(frame) => enter_export(scheduler.current_process_mut(), frame, arity, entry),
+            None => Self::undefined_function(scheduler, module, name, arity, entry),
         }
     }
 
@@ -3341,10 +3433,10 @@ impl BeamProgram {
     ///
     /// ```rust,ignore
     /// // `undef_handler:missing(m)` calls the handler with x0 = missing, x1 = [m].
-    /// assert!(program.undefined_function(&mut scheduler, "undef_handler", "missing", 1, false)?.is_none());
+    /// assert!(BeamProgram::undefined_function(&mut scheduler, "undef_handler", "missing", 1, false)?.is_none());
     /// // `undef_target:missing(a)` with no catch tag exits with
     /// // `{undef, [{undef_target, missing, [a], []}]}`.
-    /// let outcome = program.undefined_function(&mut scheduler, "undef_target", "missing", 1, false)?;
+    /// let outcome = BeamProgram::undefined_function(&mut scheduler, "undef_target", "missing", 1, false)?;
     /// assert!(matches!(outcome, Some(Outcome::Exit { result: None, .. })));
     /// ```
     ///
@@ -3354,12 +3446,11 @@ impl BeamProgram {
     /// hold is a runtime error. Each name comes from an import or an atom
     /// term of the program, so the table holds it.
     fn undefined_function(
-        &self,
         scheduler: &mut Scheduler,
         module: &str,
         function: &str,
         arity: u32,
-        tail: bool,
+        entry: CallKind,
     ) -> Result<Option<Outcome>, BeamError> {
         let process = scheduler.current_process_mut();
         let default_handler = process.error_handler.is_none();
@@ -3399,7 +3490,7 @@ impl BeamProgram {
             .export_frame(&handler, "undefined_function", 3)?;
         let process = scheduler.current_process_mut();
         if let Some(frame) = lookup {
-            enter_frame(process, frame, tail);
+            enter_frame(process, frame, entry);
             write(process, &Operand::X(0), module_atom)?;
             write(process, &Operand::X(1), function_atom)?;
             write(process, &Operand::X(2), arguments)?;
@@ -3437,7 +3528,7 @@ impl BeamProgram {
     /// ```rust,ignore
     /// // A decoded fun of `no_such` with x0 = 1 calls the handler with
     /// // x0 = no_such, x1 = Fun, x2 = [1].
-    /// assert!(program.undefined_lambda(&mut scheduler, "no_such", module, fun, 1, false)?.is_none());
+    /// assert!(BeamProgram::undefined_lambda(&mut scheduler, "no_such", module, fun, 1, false)?.is_none());
     /// ```
     ///
     /// # Errors
@@ -3445,13 +3536,12 @@ impl BeamProgram {
     /// The default handler in a run with no code server and no init
     /// process is a runtime error.
     fn undefined_lambda(
-        &self,
         scheduler: &mut Scheduler,
         module: &str,
         module_atom: Term,
         fun: Term,
         arity: u32,
-        tail: bool,
+        entry: CallKind,
     ) -> Result<Option<Outcome>, BeamError> {
         let process = scheduler.current_process_mut();
         let default_handler = process.error_handler.is_none();
@@ -3475,7 +3565,7 @@ impl BeamProgram {
                 Term::static_atom("undef"),
             ));
         };
-        enter_frame(process, frame, tail);
+        enter_frame(process, frame, entry);
         write(process, &Operand::X(0), module_atom)?;
         write(process, &Operand::X(1), fun)?;
         write(process, &Operand::X(2), arguments)?;
@@ -3504,21 +3594,26 @@ impl BeamProgram {
     fn apply_mfa(
         &self,
         scheduler: &mut Scheduler,
-        tail: bool,
+        entry: CallKind,
     ) -> Result<Option<Outcome>, BeamError> {
         let mut call = {
             let process = scheduler.current_process_mut();
             call_arguments(&process.registers, 3)?
         };
-        let start = self.is_start_apply(scheduler)?;
+        let start = Self::is_start_apply(scheduler)?;
+        let site = if start {
+            ApplySite::ProcessStart
+        } else {
+            ApplySite::Call
+        };
         let (module, name, arguments, proper) = loop {
             // Each wrong form raises the same `badarg`, so one pattern checks
             // the function, the module, and the list.
             let [Term::Atom(module), Term::Atom(name), list] = &mut call[..] else {
-                return self.apply_error(scheduler, call, "badarg", start);
+                return Self::apply_error(scheduler, call, "badarg", site);
             };
             let Some((arguments, proper)) = list.list_elements() else {
-                return self.apply_error(scheduler, call, "badarg", start);
+                return Self::apply_error(scheduler, call, "badarg", site);
             };
             let is_apply = {
                 let atoms = &scheduler.atoms;
@@ -3530,12 +3625,13 @@ impl BeamProgram {
             call = arguments;
         };
         if arguments.len() > APPLY_MAX_ARGUMENTS {
-            return self.apply_error(scheduler, call, "system_limit", start);
+            return Self::apply_error(scheduler, call, "system_limit", site);
         }
         if !proper {
-            return self.apply_error(scheduler, call, "badarg", start);
+            return Self::apply_error(scheduler, call, "badarg", site);
         }
-        let arity = arguments.len() as u32;
+        let arity =
+            u32::try_from(arguments.len()).expect("an argument list has fewer than 2^32 terms");
         let process = scheduler.current_process_mut();
         if start {
             // ERTS applies this MFA from `beam_run_process`
@@ -3549,7 +3645,7 @@ impl BeamProgram {
             write(process, &Operand::X(index), argument)?;
         }
         process.start_apply = start;
-        let outcome = self.call_mfa(scheduler, &module, &name, arity, tail);
+        let outcome = self.call_mfa(scheduler, &module, &name, arity, entry);
         scheduler.current_process_mut().start_apply = false;
         outcome
     }
@@ -3567,26 +3663,25 @@ impl BeamProgram {
     /// ```rust,ignore
     /// // `erlang:apply(1, f, [])` raises badarg with the first frame
     /// // {erlang, apply, [1, f, []], [{error_info, #{module => erl_erts_errors}}]}.
-    /// let outcome = program.apply_error(&mut scheduler, call, "badarg", false)?;
+    /// let outcome = BeamProgram::apply_error(&mut scheduler, call, "badarg", ApplySite::Call)?;
     /// ```
     fn apply_error(
-        &self,
         scheduler: &mut Scheduler,
         call: Vec<Term>,
         reason: &'static str,
-        start: bool,
+        site: ApplySite,
     ) -> Result<Option<Outcome>, BeamError> {
         let raised = BifResult::Raise {
             class: ExceptionClass::Error,
             reason: Term::static_atom(reason),
         };
-        scheduler.current_process_mut().start_apply = start;
+        scheduler.current_process_mut().start_apply = site == ApplySite::ProcessStart;
         let raised = bif_error(scheduler, "erlang", "apply", call, raised, 0);
         scheduler.current_process_mut().start_apply = false;
-        self.finish_bif(scheduler, raised?, false)
+        Self::finish_bif(scheduler, raised?, CallKind::Body)
     }
 
-    fn is_start_apply(&self, scheduler: &mut Scheduler) -> Result<bool, BeamError> {
+    fn is_start_apply(scheduler: &mut Scheduler) -> Result<bool, BeamError> {
         let process = scheduler.current_process_mut();
         if let Some(frameless) = process.frameless_apply.replace(false) {
             return Ok(frameless);
@@ -3620,12 +3715,16 @@ impl BeamProgram {
     fn apply_fun(
         &self,
         scheduler: &mut Scheduler,
-        tail: bool,
+        entry: CallKind,
     ) -> Result<Option<Outcome>, BeamError> {
         let process = scheduler.current_process_mut();
         let list = read(process, &Operand::X(1))?;
         // ERTS `apply_fun` raises with the BIF frame of `erlang:apply/2`
         // and its two arguments (`beam_common.c:1734-1762`).
+        #[expect(
+            clippy::match_same_arms,
+            reason = "the guard arm between the two `badarg` arms must win for an improper list with too many elements, so the `badarg` arms cannot merge"
+        )]
         let (arguments, failure) = match list.list_elements() {
             None => (Vec::new(), Some("badarg")),
             Some((arguments, _)) if arguments.len() > APPLY_FUN_MAX_ARGUMENTS => {
@@ -3641,15 +3740,16 @@ impl BeamProgram {
                 reason: Term::static_atom(reason),
             };
             let raised = bif_error(scheduler, "erlang", "apply", call, raised, 0)?;
-            return self.finish_bif(scheduler, raised, false);
+            return Self::finish_bif(scheduler, raised, CallKind::Body);
         }
-        let arity = arguments.len() as u32;
+        let arity =
+            u32::try_from(arguments.len()).expect("an argument list has fewer than 2^32 terms");
         // The arguments replace the fun in x0, so the call reads the fun first.
         let call = FunCall::new(read_ref(process, &Operand::X(0))?, arity);
         for (index, argument) in (0..).zip(arguments) {
             write(process, &Operand::X(index), argument)?;
         }
-        self.call_fun(scheduler, call, arity, tail)
+        self.call_fun(scheduler, call, arity, entry)
     }
 
     /// Call the fun that `call` holds with the arguments in `x0` to `x(arity - 1)`, as ERTS
@@ -3681,7 +3781,7 @@ impl BeamProgram {
         scheduler: &mut Scheduler,
         call: FunCall,
         arity: u32,
-        tail: bool,
+        entry: CallKind,
     ) -> Result<Option<Outcome>, BeamError> {
         let (target, free, fun) = match call {
             FunCall::Enter { target, free, fun } => (target, free, fun),
@@ -3702,7 +3802,7 @@ impl BeamProgram {
             Target::Local(lambda) => lambda,
             Target::External {
                 module, function, ..
-            } if tail
+            } if entry.is_tail()
                 && matches!(
                     (
                         scheduler.atoms.name_of(module),
@@ -3713,13 +3813,14 @@ impl BeamProgram {
                 ) =>
             {
                 let function = function.clone();
-                return self.tail_call_error(scheduler, function, arity);
+                return self.tail_call_error(scheduler, &function, arity);
             }
             Target::External {
                 module, function, ..
-            } => return self.call_mfa(scheduler, module, function, arity, tail),
+            } => return self.call_mfa(scheduler, module, function, arity, entry),
         };
-        let total_arity = arity + free.len() as u32;
+        let total_arity =
+            arity + u32::try_from(free.len()).expect("a fun has fewer than 2^32 free variables");
         scheduler.sync_code();
         let module = scheduler.atoms.name_of(lambda.module()).to_owned();
         let Some(frame) = scheduler.code.fun_frame(&module, lambda, total_arity)? else {
@@ -3730,7 +3831,7 @@ impl BeamProgram {
             // has no such export (`beam_common.c:1708-1728`).
             if scheduler.code.waiting_or_loaded(&module).is_err() {
                 let module_atom = Term::Atom(lambda.module().clone());
-                return self.undefined_lambda(scheduler, &module, module_atom, fun, arity, tail);
+                return Self::undefined_lambda(scheduler, &module, module_atom, fun, arity, entry);
             }
             let process = scheduler.current_process_mut();
             let reason = Term::tuple(vec![Term::static_atom("badfun"), fun]);
@@ -3740,7 +3841,7 @@ impl BeamProgram {
         for (register, value) in (arity..).zip(free) {
             write(process, &Operand::X(register), value)?;
         }
-        enter_frame(scheduler.current_process_mut(), frame, tail);
+        enter_frame(scheduler.current_process_mut(), frame, entry);
         Ok(None)
     }
 
@@ -3773,12 +3874,12 @@ impl BeamProgram {
     fn tail_call_error(
         &self,
         scheduler: &mut Scheduler,
-        function: Atom,
+        function: &Atom,
         arity: u32,
     ) -> Result<Option<Outcome>, BeamError> {
         // The guard of the call admits only `error/1,2,3`, `exit/1`, and
         // `throw/1`, so the class follows from the name.
-        let class = match scheduler.atoms.name_of(&function) {
+        let class = match scheduler.atoms.name_of(function) {
             "exit" => ExceptionClass::Exit,
             "throw" => ExceptionClass::Throw,
             _ => ExceptionClass::Error,
@@ -3787,7 +3888,7 @@ impl BeamProgram {
         process.frames.pop();
         if !process.frames.is_empty() {
             let module = Atom::from_static("erlang").expect("erlang is a static atom");
-            return self.call_mfa(scheduler, &module, &function, arity, false);
+            return self.call_mfa(scheduler, &module, function, arity, CallKind::Body);
         }
         let reason = read(process, &Operand::X(0))?;
         let location = if arity == 3 {
@@ -3802,7 +3903,7 @@ impl BeamProgram {
         let frame = Term::tuple(vec![
             Term::Atom(scheduler.atoms.put(&module)?),
             Term::Atom(scheduler.atoms.put(&function)?),
-            Term::Integer(arity as i64),
+            Term::Integer(i64::try_from(arity).expect("an arity fits in i64")),
             location,
         ]);
         let process = scheduler.current_process_mut();
@@ -3829,23 +3930,22 @@ impl BeamProgram {
     ///
     /// ```rust,ignore
     /// // A value in a body call stays in the frame.
-    /// let outcome = program.finish_bif(&mut scheduler, BifResult::Value(Term::static_atom("ok")), false)?;
+    /// let outcome = BeamProgram::finish_bif(&mut scheduler, BifResult::Value(Term::static_atom("ok")), false)?;
     /// assert!(outcome.is_none());
     /// // `exit(normal)` with no catch tag exits the process.
     /// let raise = BifResult::Raise { class: ExceptionClass::Exit, reason: Term::static_atom("normal") };
-    /// assert!(matches!(program.finish_bif(&mut scheduler, raise, true)?, Some(Outcome::Exit { .. })));
+    /// assert!(matches!(BeamProgram::finish_bif(&mut scheduler, raise, true)?, Some(Outcome::Exit { .. })));
     /// ```
     fn finish_bif(
-        &self,
         scheduler: &mut Scheduler,
         result: BifResult,
-        tail: bool,
+        entry: CallKind,
     ) -> Result<Option<Outcome>, BeamError> {
         let process = scheduler.current_process_mut();
         match result {
             BifResult::Value(value) => {
                 write(process, &Operand::X(0), value)?;
-                if tail {
+                if entry.is_tail() {
                     return_from_frame(process)
                 } else {
                     Ok(None)
@@ -3853,7 +3953,7 @@ impl BeamProgram {
             }
             BifResult::YieldReturn(value) => {
                 write(process, &Operand::X(0), value)?;
-                if tail {
+                if entry.is_tail() {
                     // The process exits at its next run when it returned
                     // from its last frame.
                     return_from_frame(process)?;
@@ -3873,53 +3973,7 @@ impl BeamProgram {
                 module,
                 function,
                 arguments,
-            } => {
-                let arity = u32::try_from(arguments.len())
-                    .map_err(|_| error("arity exceeds BEAM limit"))?;
-                let process = scheduler.current_process_mut();
-                for (index, argument) in (0..).zip(arguments) {
-                    write(process, &Operand::X(index), argument)?;
-                }
-                // ERTS resolves the target through its export entry. A
-                // function that has no loaded export has a stub entry that
-                // calls `error_handler:undefined_function/3`
-                // (`erts_export_get_or_make_stub`, export.c:228-242;
-                // `call_error_handler`, beam_common.c:1294-1342). Thus a
-                // `re:run/2,3` call that runs before the pinned `re` module
-                // is loaded traps to `re:grun/3` or `re:urun/3`, and the
-                // error handler loads `re` and enters that function
-                // (`error_handler.erl:85-98`).
-                let frame = scheduler
-                    .synced_code()
-                    .export_frame(module, function, arity)?;
-                match frame {
-                    Some(frame) => {
-                        let process = scheduler.current_process_mut();
-                        enter_frame(process, frame, tail);
-                        // A BIF trap always switches out the process
-                        // (`context_switch_simplified` in
-                        // `jit/arm/instr_bif.cpp:525-536`, `676-701`). The
-                        // process enters the target when it runs again, so
-                        // the entry costs one reduction of the next turn.
-                        Ok(Some(Outcome::Yield))
-                    }
-                    None => {
-                        // ERTS switches out at the trap, and the export
-                        // stub of the target runs in the next turn
-                        // (`context_switch_simplified` in
-                        // `jit/arm/instr_bif.cpp:525-536`, `676-701`). Keep
-                        // the call for `run`, so the switch out happens
-                        // before the error handler.
-                        scheduler.current_process_mut().pending_trap = Some(PendingTrap {
-                            module,
-                            function,
-                            arity,
-                            tail,
-                        });
-                        Ok(Some(Outcome::Yield))
-                    }
-                }
-            }
+            } => Self::finish_trap(scheduler, module, function, arguments, entry),
             BifResult::TrapBif {
                 module,
                 function,
@@ -3930,7 +3984,7 @@ impl BeamProgram {
                     module,
                     function,
                     arguments,
-                    tail,
+                    entry,
                     origin,
                 });
                 Ok(Some(Outcome::Yield))
@@ -3945,7 +3999,7 @@ impl BeamProgram {
                     module,
                     function,
                     arguments,
-                    tail,
+                    entry,
                     origin: None,
                 });
                 Ok(Some(Outcome::Wait))
@@ -3955,7 +4009,7 @@ impl BeamProgram {
                     module: "pbeam_cap",
                     function: "await_grant",
                     arguments: Vec::new(),
-                    tail,
+                    entry,
                     origin: None,
                 });
                 Ok(Some(Outcome::Wait))
@@ -3993,6 +4047,59 @@ impl BeamProgram {
         }
     }
 
+    /// Write the arguments of a `BifResult::Trap` and enter the target of the
+    /// trap, or keep the call for `run` when the target has no loaded export.
+    fn finish_trap(
+        scheduler: &mut Scheduler,
+        module: &'static str,
+        function: &'static str,
+        arguments: Vec<Term>,
+        entry: CallKind,
+    ) -> Result<Option<Outcome>, BeamError> {
+        let arity =
+            u32::try_from(arguments.len()).map_err(|_| error("arity exceeds BEAM limit"))?;
+        let process = scheduler.current_process_mut();
+        for (index, argument) in (0..).zip(arguments) {
+            write(process, &Operand::X(index), argument)?;
+        }
+        // ERTS resolves the target through its export entry. A
+        // function that has no loaded export has a stub entry that
+        // calls `error_handler:undefined_function/3`
+        // (`erts_export_get_or_make_stub`, export.c:228-242;
+        // `call_error_handler`, beam_common.c:1294-1342). Thus a
+        // `re:run/2,3` call that runs before the pinned `re` module
+        // is loaded traps to `re:grun/3` or `re:urun/3`, and the
+        // error handler loads `re` and enters that function
+        // (`error_handler.erl:85-98`).
+        let frame = scheduler
+            .synced_code()
+            .export_frame(module, function, arity)?;
+        if let Some(frame) = frame {
+            let process = scheduler.current_process_mut();
+            enter_frame(process, frame, entry);
+            // A BIF trap always switches out the process
+            // (`context_switch_simplified` in
+            // `jit/arm/instr_bif.cpp:525-536`, `676-701`). The
+            // process enters the target when it runs again, so
+            // the entry costs one reduction of the next turn.
+            Ok(Some(Outcome::Yield))
+        } else {
+            // ERTS switches out at the trap, and the export
+            // stub of the target runs in the next turn
+            // (`context_switch_simplified` in
+            // `jit/arm/instr_bif.cpp:525-536`, `676-701`). Keep
+            // the call for `run`, so the switch out happens
+            // before the error handler.
+            scheduler.current_process_mut().pending_trap = Some(PendingTrap {
+                module,
+                function,
+                arity,
+                entry,
+            });
+            Ok(Some(Outcome::Yield))
+        }
+    }
+
     /// Resolve the target of a BIF trap that waited for the next turn, as
     /// the ERTS export entry does when the process runs again
     /// (`call_error_handler`, beam_common.c:1294-1342). An export enters its
@@ -4004,26 +4111,25 @@ impl BeamProgram {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let outcome = program.resume_trap(&mut scheduler, "re", "grun", 3, false)?;
+    /// let outcome = BeamProgram::resume_trap(&mut scheduler, "re", "grun", 3, false)?;
     /// assert!(outcome.is_none());
     /// ```
     fn resume_trap(
-        &self,
         scheduler: &mut Scheduler,
         module: &str,
         function: &str,
         arity: u32,
-        tail: bool,
+        entry: CallKind,
     ) -> Result<Option<Outcome>, BeamError> {
         match scheduler
             .synced_code()
             .export_frame(module, function, arity)?
         {
             Some(frame) => {
-                enter_frame(scheduler.current_process_mut(), frame, tail);
+                enter_frame(scheduler.current_process_mut(), frame, entry);
                 Ok(None)
             }
-            None => self.undefined_function(scheduler, module, function, arity, tail),
+            None => Self::undefined_function(scheduler, module, function, arity, entry),
         }
     }
 }
@@ -4094,8 +4200,8 @@ fn loads_modules(scheduler: &Scheduler) -> bool {
 /// enter_frame(&mut process, scheduler.code.mfa_frame("external", "effect", 1)?, false);
 /// assert_eq!(process.frames.len(), 2);
 /// ```
-fn enter_frame(process: &mut ProcessState, frame: Frame, tail: bool) {
-    if tail {
+fn enter_frame(process: &mut ProcessState, frame: Frame, entry: CallKind) {
+    if entry.is_tail() {
         *current_frame(process) = frame;
     } else {
         process.frames.push(frame);
@@ -4121,10 +4227,10 @@ fn enter_export(
     process: &mut ProcessState,
     frame: Frame,
     arity: u32,
-    tail: bool,
+    entry: CallKind,
 ) -> Result<Option<Outcome>, BeamError> {
     check_remote_call_arguments(&process.registers, arity)?;
-    enter_frame(process, frame, tail);
+    enter_frame(process, frame, entry);
     Ok(None)
 }
 
@@ -4195,7 +4301,7 @@ fn create_process(
         start,
         arguments,
         monitor,
-        link,
+        ChildLink::from(link),
         flags,
         capabilities.as_deref(),
     );
@@ -4376,7 +4482,7 @@ fn current_frame(process: &mut ProcessState) -> &mut Frame {
 /// ```
 fn release_frame(process: &mut ProcessState, deallocate: u32) -> Result<(), BeamError> {
     let stack = &mut current_frame(process).stack;
-    if stack.len() != deallocate as usize {
+    if stack.len() != usize::try_from(deallocate).expect("a u32 fits in usize") {
         return Err(error("invalid BEAM tail-call stack size"));
     }
     stack.clear();
@@ -4467,7 +4573,7 @@ fn update_owned(
     update: impl FnOnce(&mut Map) -> Result<Option<Term>, BeamError>,
 ) -> Result<Update, BeamError> {
     let owned = match (register_of(map), register_of(destination)) {
-        (Some(source), Some(target)) if register_index(&source) == register_index(&target) => {
+        (Some(source), Some(target)) if register_index(source) == register_index(target) => {
             take_owned(process, target)
         }
         _ => None,
@@ -4504,7 +4610,7 @@ fn update_owned(
     // The operand is not a map. ERTS raises `{badmap, Map}` and writes no
     // register, so the destination register keeps its value. A take only
     // gives a map (see `take_owned`), so no term goes back here.
-    Ok(Update::Missing(term.clone()))
+    Ok(Update::Missing(term))
 }
 
 /// The result of [`update_owned`].
@@ -4537,25 +4643,20 @@ enum Update {
 /// let atoms = AtomTable::new();
 /// let mut entries = Map::from_pairs(vec![(Term::static_atom("output"), Term::static_atom("raw"))], &atoms)?;
 /// let cooked = vec![(Term::static_atom("output"), Term::static_atom("cooked"))];
-/// assert_eq!(update_map_exact(&mut entries, cooked, &atoms)?, None);
+/// assert_eq!(update_map_exact(&mut entries, cooked, &atoms), None);
 /// let missing = vec![(Term::static_atom("input"), Term::static_atom("cooked"))];
 /// assert_eq!(
-///     update_map_exact(&mut entries, missing, &atoms)?,
+///     update_map_exact(&mut entries, missing, &atoms),
 ///     Some(Term::tuple(vec![Term::static_atom("badkey"), Term::static_atom("input")]))
 /// );
 /// ```
-///
-/// # Errors
-///
-/// Return a runtime error when the key order depends on an alias reference
-/// (`Map::sort_pairs`).
 fn update_map_exact(
     entries: &mut Map,
     mut pairs: Vec<(Term, Term)>,
     atoms: &AtomTable,
-) -> Result<Option<Term>, BeamError> {
+) -> Option<Term> {
     Map::sort_pairs(&mut pairs, atoms);
-    Ok(entries
+    entries
         .update(
             pairs
                 .into_iter()
@@ -4564,7 +4665,7 @@ fn update_map_exact(
             atoms,
         )
         .err()
-        .map(|key| Term::tuple(vec![Term::static_atom("badkey"), key])))
+        .map(|key| Term::tuple(vec![Term::static_atom("badkey"), key]))
 }
 
 /// Give up ownership of the term of the register slot of `destination`, or
@@ -4589,14 +4690,18 @@ fn take_owned(process: &mut ProcessState, destination: Register) -> Option<Term>
     match destination {
         Register::X(index) => process
             .registers
-            .get_mut(index as usize)
+            .get_mut(usize::try_from(index).expect("a u32 fits in usize"))
             .and_then(Option::as_mut)
             .filter(|term| term.unique())
             .map(|slot| std::mem::replace(slot, Term::nil())),
         Register::Y(index) => process
             .frames
             .last_mut()
-            .and_then(|frame| frame.stack.get_mut(index as usize))
+            .and_then(|frame| {
+                frame
+                    .stack
+                    .get_mut(usize::try_from(index).expect("a u32 fits in usize"))
+            })
             .and_then(|slot| match slot {
                 StackSlot::Term(term) if term.unique() => {
                     Some(std::mem::replace(term, Term::nil()))
@@ -4612,19 +4717,20 @@ fn take_owned(process: &mut ProcessState, destination: Register) -> Option<Term>
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(register_index(&Register::X(1)), register_index(&Register::X(1)));
-/// assert_ne!(register_index(&Register::X(1)), register_index(&Register::Y(1)));
+/// assert_eq!(register_index(Register::X(1)), register_index(Register::X(1)));
+/// assert_ne!(register_index(Register::X(1)), register_index(Register::Y(1)));
 /// ```
-fn register_index(register: &Register) -> (bool, u32) {
+fn register_index(register: Register) -> (bool, u32) {
     match register {
-        Register::X(index) => (true, *index),
-        Register::Y(index) => (false, *index),
+        Register::X(index) => (true, index),
+        Register::Y(index) => (false, index),
     }
 }
 
 /// The register slot of a `put_map_assoc` or `put_map_exact` operand. Both
 /// the source and the destination of these instructions are a register, so
 /// the value cannot be a literal.
+#[derive(Clone, Copy)]
 enum Register {
     /// An X register at the index.
     X(u32),
@@ -4917,7 +5023,7 @@ fn label_position(target: u32) -> Result<usize, BeamError> {
     if target == 0 {
         return Err(error("missing BEAM label 0"));
     }
-    Ok(target as usize)
+    Ok(usize::try_from(target).expect("a u32 fits in usize"))
 }
 
 /// Return the label of the choice that equals `value` in the ordered choice
@@ -5050,7 +5156,7 @@ fn read_test_operand<'a>(
 /// ```
 fn read_x_register(registers: &[Option<Term>], index: u32) -> Result<&Term, BeamError> {
     registers
-        .get(index as usize)
+        .get(usize::try_from(index).expect("a u32 fits in usize"))
         .and_then(Option::as_ref)
         .ok_or_else(|| error(format!("register x{index} is unset")))
 }
@@ -5067,7 +5173,7 @@ fn read_x_register(registers: &[Option<Term>], index: u32) -> Result<&Term, Beam
 /// assert!(read_y_register(&stack, 1).is_err());
 /// ```
 fn read_y_register(stack: &[StackSlot], index: u32) -> Result<&Term, BeamError> {
-    match stack.get(index as usize) {
+    match stack.get(usize::try_from(index).expect("a u32 fits in usize")) {
         Some(StackSlot::Term(value)) => Ok(value),
         // The BEAM validator never lets an instruction read a catch tag.
         Some(StackSlot::Catch(_)) => {
@@ -5150,7 +5256,9 @@ fn match_context_size<T: Borrow<Term>>(
         } else {
             bits.div_ceil(8)
         };
-        return Ok(Some(Term::Integer(size as i64)));
+        return Ok(Some(Term::Integer(
+            i64::try_from(size).expect("a size fits in i64"),
+        )));
     }
     match values
         .iter()
@@ -5222,7 +5330,7 @@ fn debug_operand(operand: &Operand, atoms: &AtomTable) -> String {
 /// assert_eq!(read_float_register(&process, 2)?, 1.5);
 /// ```
 fn write_float_register(process: &mut ProcessState, register: u32, value: f64) {
-    let index = register as usize;
+    let index = usize::try_from(register).expect("a u32 fits in usize");
     if index >= process.float_registers.len() {
         process.float_registers.resize(index + 1, 0.0);
     }
@@ -5245,7 +5353,7 @@ fn write_float_register(process: &mut ProcessState, register: u32, value: f64) {
 fn read_float_register(process: &ProcessState, register: u32) -> Result<f64, BeamError> {
     process
         .float_registers
-        .get(register as usize)
+        .get(usize::try_from(register).expect("a u32 fits in usize"))
         .copied()
         .ok_or_else(|| error(format!("float register fr{register} has no value")))
 }
@@ -5472,13 +5580,16 @@ fn read_owned_bif_arguments(
 /// ```
 fn call_arguments(registers: &[Option<Term>], arity: u32) -> Result<Vec<Term>, BeamError> {
     (0..arity)
-        .map(
-            |index| match registers.get(index as usize).and_then(Clone::clone) {
+        .map(|index| {
+            match registers
+                .get(usize::try_from(index).expect("a u32 fits in usize"))
+                .and_then(Clone::clone)
+            {
                 Some(Term::MatchContext(_)) => Err(match_context_escape(&Operand::X(index))),
                 Some(value) => Ok(value),
                 None => Err(error(format!("call argument x{index} is unset"))),
-            },
-        )
+            }
+        })
         .collect()
 }
 
@@ -5496,7 +5607,12 @@ fn call_arguments(registers: &[Option<Term>], arity: u32) -> Result<Vec<Term>, B
 /// assert!(check_local_call_arguments(&registers, 2).is_err());
 /// ```
 fn check_local_call_arguments(registers: &[Option<Term>], arity: u32) -> Result<(), BeamError> {
-    match (0..arity).find(|&index| !matches!(registers.get(index as usize), Some(Some(_)))) {
+    match (0..arity).find(|&index| {
+        !matches!(
+            registers.get(usize::try_from(index).expect("a u32 fits in usize")),
+            Some(Some(_))
+        )
+    }) {
         Some(index) => Err(error(format!("call argument x{index} is unset"))),
         None => Ok(()),
     }
@@ -5517,8 +5633,12 @@ fn check_local_call_arguments(registers: &[Option<Term>], arity: u32) -> Result<
 /// ```
 fn check_remote_call_arguments(registers: &[Option<Term>], arity: u32) -> Result<(), BeamError> {
     check_local_call_arguments(registers, arity)?;
-    match (0..arity).find(|&index| matches!(registers[index as usize], Some(Term::MatchContext(_))))
-    {
+    match (0..arity).find(|&index| {
+        matches!(
+            registers[usize::try_from(index).expect("a u32 fits in usize")],
+            Some(Term::MatchContext(_))
+        )
+    }) {
         Some(index) => Err(match_context_escape(&Operand::X(index))),
         None => Ok(()),
     }
@@ -5530,7 +5650,7 @@ fn check_remote_call_arguments(registers: &[Option<Term>], arity: u32) -> Result
 /// (`emit_bs_get_field_size` in jit/arm/instr_bs.cpp:38-116). That check
 /// also fails a register size from 2^48 and a literal size above
 /// `MAX_SMALL / unit`. The compiler gives a unit from 1 to 256
-/// (`type_to_record` in erl_bits.erl:93), so such a size is always more
+/// (`type_to_record` in `erl_bits.erl:93`), so such a size is always more
 /// bits than a binary has, and `erts_bs_get_binary_2` then fails
 /// (erl_bits.c:400-424). Thus `MatchState::read_bits` gives the same
 /// result for it.
@@ -5587,10 +5707,10 @@ fn match_context_escape(operand: &Operand) -> BeamError {
 /// ```rust,ignore
 /// let equal = BinaryMatchCommand::Equal { size: 8, value: 1 };
 /// let skip = BinaryMatchCommand::Skip { size: 8 };
-/// assert_eq!(equal_read_end(&[skip.clone(), equal, skip], 1, false), 24);
+/// assert_eq!(equal_read_end(&[skip.clone(), equal, skip], 1, TestHeap::Absent), 24);
 /// ```
-fn equal_read_end(commands: &[BinaryMatchCommand], failed: usize, test_heap: bool) -> u64 {
-    let mut heap_need = test_heap
+fn equal_read_end(commands: &[BinaryMatchCommand], failed: usize, test_heap: TestHeap) -> u64 {
+    let mut heap_need = test_heap == TestHeap::Fused
         || commands.iter().any(|command| match command {
             BinaryMatchCommand::Integer { size, .. } => *size >= 60,
             BinaryMatchCommand::Binary { .. } | BinaryMatchCommand::GetTail { .. } => true,
@@ -5656,6 +5776,41 @@ fn equal_read_end(commands: &[BinaryMatchCommand], failed: usize, test_heap: boo
     failed_read.0 + failed_read.1
 }
 
+/// Whether a `bs_match` instruction has a fused `test_heap` instruction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TestHeap {
+    /// No `test_heap` instruction is fused into the match.
+    Absent,
+    /// A `test_heap` instruction follows the match and is fused into it.
+    Fused,
+}
+
+impl From<bool> for TestHeap {
+    fn from(fused: bool) -> Self {
+        if fused { Self::Fused } else { Self::Absent }
+    }
+}
+
+/// The form of the size operand of a `bs_create_bin` segment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SizeForm {
+    /// A literal from 0 to 2^56 - 1, which ERTS computes at load time with
+    /// no check (jit/arm/instr_bs.cpp:1493-1505).
+    Fixed,
+    /// Any other operand, which ERTS checks at run time.
+    Variable,
+}
+
+impl SizeForm {
+    /// Return the form of the size operand `size`.
+    fn of(size: &Operand) -> Self {
+        match size {
+            Operand::Value(Term::Integer(literal)) if (0..1 << 56).contains(literal) => Self::Fixed,
+            _ => Self::Variable,
+        }
+    }
+}
+
 /// Return the value of an integer segment as `segment_integer` gives it,
 /// or `None` for a bignum of more than `BIG_ARITY_MAX` digits: ERTS
 /// `bytes_to_big` then gives `THE_NON_VALUE` (erl_bits.c:343-353), and the
@@ -5664,10 +5819,15 @@ fn equal_read_end(commands: &[BinaryMatchCommand], failed: usize, test_heap: boo
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(bounded_segment_integer(&[0xFF], 8, false, true), Some(Term::Integer(-1)));
+/// assert_eq!(bounded_segment_integer(&[0xFF], 8, Endian::Big, Signedness::Signed), Some(Term::Integer(-1)));
 /// ```
-fn bounded_segment_integer(bits: &[u8], size: usize, little: bool, signed: bool) -> Option<Term> {
-    let value = segment_integer(bits, size, little, signed);
+fn bounded_segment_integer(
+    bits: &[u8],
+    size: usize,
+    endian: Endian,
+    signedness: Signedness,
+) -> Option<Term> {
+    let value = segment_integer(bits, size, endian, signedness);
     match &value {
         Term::BigInt(big) if !fits_big_arity(big) => None,
         _ => Some(value),
@@ -5705,22 +5865,22 @@ fn bounded_segment_integer(bits: &[u8], size: usize, little: bool, signed: bool)
 /// write(&mut process, &Operand::X(0), Term::MatchContext(context))?;
 /// let unit = NonZeroU64::new(8).unwrap();
 /// let byte = BinaryMatchCommand::Integer { size: 8, little: false, signed: false, destination: Operand::X(1) };
-/// assert!(binary_match(&mut process, &Operand::X(0), &[BinaryMatchCommand::EnsureAtLeast { size: 8, unit }, byte], false, &atoms)?);
+/// assert!(binary_match(&mut process, &Operand::X(0), &[BinaryMatchCommand::EnsureAtLeast { size: 8, unit }, byte], TestHeap::Absent, &atoms)?);
 /// assert_eq!(read(&process, &Operand::X(1))?, Term::Integer(7));
-/// assert!(!binary_match(&mut process, &Operand::X(0), &[BinaryMatchCommand::EnsureExactly { size: 0 }], false, &atoms)?);
+/// assert!(!binary_match(&mut process, &Operand::X(0), &[BinaryMatchCommand::EnsureExactly { size: 0 }], TestHeap::Absent, &atoms)?);
 /// ```
 fn binary_match(
     process: &mut ProcessState,
     context: &Operand,
     commands: &[BinaryMatchCommand],
-    test_heap: bool,
+    test_heap: TestHeap,
     atoms: &AtomTable,
 ) -> Result<bool, BeamError> {
     let context = match_context(process, context, atoms)?;
     let state = &*context;
     let start = state.position();
     for (index, command) in commands.iter().enumerate() {
-        let remaining = state.remaining_bits() as u64;
+        let remaining = u64::try_from(state.remaining_bits()).expect("a bit count fits in u64");
         let too_few_bits = |size: &u64| {
             error(format!(
                 "invariant error: a bs_match command needs {size} bits, but {remaining} bits remain"
@@ -5748,13 +5908,18 @@ fn binary_match(
                 // `BIG_ARITY_MAX` digits to the register with no check
                 // (`GET_INTEGER`, jit/arm/instr_bs.cpp:3110-3134), and the
                 // pinned ERTS then fails the `tag_val_def` assertion.
-                let value = bounded_segment_integer(&bits, *size as usize, *little, *signed)
-                    .ok_or_else(|| {
-                        error(format!(
-                            "bs_match integer segment of {size} bits is a bignum above \
+                let value = bounded_segment_integer(
+                    &bits,
+                    usize::try_from(*size).expect("a u64 fits in usize"),
+                    Endian::from(*little),
+                    Signedness::from(*signed),
+                )
+                .ok_or_else(|| {
+                    error(format!(
+                        "bs_match integer segment of {size} bits is a bignum above \
                              BIG_ARITY_MAX digits"
-                        ))
-                    })?;
+                    ))
+                })?;
                 write(process, destination, value)?;
             }
             BinaryMatchCommand::Binary { size, destination } => {
@@ -5770,9 +5935,17 @@ fn binary_match(
             }
             BinaryMatchCommand::Equal { size, value } => {
                 let bits = state.read_bits(*size).ok_or_else(|| too_few_bits(size))?;
-                let equal = segment_equals(&bits, *size as usize, *value);
+                let equal = segment_equals(
+                    &bits,
+                    usize::try_from(*size).expect("a u64 fits in usize"),
+                    *value,
+                );
                 if !equal {
-                    state.set_position(start + equal_read_end(commands, index, test_heap) as usize);
+                    state.set_position(
+                        start
+                            + usize::try_from(equal_read_end(commands, index, test_heap))
+                                .expect("a u64 fits in usize"),
+                    );
                     return Ok(false);
                 }
             }
@@ -5900,7 +6073,7 @@ impl BinaryPart<'_> {
                 value,
                 bits,
             } => match value {
-                Term::Binary(binary) if binary.bit_size() as u64 >= *bits => None,
+                Term::Binary(binary) if bit_size(binary) >= *bits => None,
                 Term::Binary(_) => Some(BinarySegmentFailure::badarg(
                     *segment,
                     "binary",
@@ -5915,7 +6088,7 @@ impl BinaryPart<'_> {
                 )),
             },
             BinaryPart::Shared(binary, _, segment, unit)
-                if !(binary.bit_size() as u64).is_multiple_of(*unit) =>
+                if !bit_size(binary).is_multiple_of(*unit) =>
             {
                 Some(BinarySegmentFailure::badarg(
                     *segment,
@@ -5959,10 +6132,16 @@ impl BinaryPart<'_> {
 /// assert_eq!(float_segment_bits(1, &Term::Integer(-3), 32), Ok(0xC040_0000));
 /// assert!(float_segment_bits(1, &Term::static_atom("a"), 64).is_err());
 /// ```
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    reason = "ERTS converts a small integer or a double to the float of the segment size with one C cast, which rounds (`erts_bs_put_float`, `erl_bits.c:1340-1452`)"
+)]
 fn float_segment_bits(segment: u64, value: &Term, bits: u64) -> Result<i64, BinarySegmentFailure> {
     let fail = |info, term| BinarySegmentFailure::badarg(segment, "float", info, term);
     if !matches!(bits, 16 | 32 | 64) {
-        return Err(fail("invalid", Term::Integer(bits as i64)));
+        return Err(fail("invalid", Term::Integer(bits.cast_signed())));
     }
     let number = match (value.small_integer(), value) {
         (Some(small), _) => Ok(small),
@@ -5974,8 +6153,8 @@ fn float_segment_bits(segment: u64, value: &Term, bits: u64) -> Result<i64, Bina
         _ => return Err(fail("type", value.clone())),
     };
     Ok(match (bits, number) {
-        (64, Ok(small)) => (small as f64).to_bits() as i64,
-        (64, Err(float)) => float.to_bits() as i64,
+        (64, Ok(small)) => (small as f64).to_bits().cast_signed(),
+        (64, Err(float)) => float.to_bits().cast_signed(),
         (32, Ok(small)) => i64::from((small as f32).to_bits()),
         (32, Err(float)) => i64::from((float as f32).to_bits()),
         // `FP16_FROM_FP64` (erl_bits.c:45-53) casts a small integer straight
@@ -6001,8 +6180,8 @@ fn float_segment_bits(segment: u64, value: &Term, bits: u64) -> Result<i64, Bina
 /// ```
 fn f64_to_f16(value: f64) -> u16 {
     let bits = value.to_bits();
-    let sign = ((bits >> 48) & 0x8000) as u16;
-    let exponent = ((bits >> 52) & 0x7FF) as i32;
+    let sign = u16::try_from((bits >> 48) & 0x8000).expect("the mask keeps the sign bit");
+    let exponent = i32::try_from((bits >> 52) & 0x7FF).expect("11 bits fit in i32");
     if exponent == 0 {
         return sign;
     }
@@ -6022,13 +6201,16 @@ fn f64_to_f16(value: f64) -> u16 {
         if exponent > 15 {
             return sign | 0x7C00;
         }
-        return sign | (((exponent + 15) as u16) << 10) | (keep & 0x3FF) as u16;
+        return sign
+            | (u16::try_from(exponent + 15).expect("the exponent is in the range of binary16")
+                << 10)
+            | u16::try_from(keep & 0x3FF).expect("the mask keeps 10 bits");
     }
-    let shift = (28 - exponent) as u32;
+    let shift = u32::try_from(28 - exponent).expect("an exponent below -14 gives a positive shift");
     if shift > 63 {
         return sign;
     }
-    sign | round(mantissa >> shift, shift) as u16
+    sign | u16::try_from(round(mantissa >> shift, shift)).expect("the shift leaves at most 10 bits")
 }
 
 /// Return the size in bits of an `integer` segment, or the exception
@@ -6039,7 +6221,7 @@ fn f64_to_f16(value: f64) -> u16 {
 /// positive bignum and with `badarg` for each other term
 /// (`BSC_REASON_DEPENDS`, jit/beam_jit_common.cpp:968-975). For a unit
 /// other than 1, a size of 2^52 or more fails with `system_limit`, as the
-/// arm64 JIT checks it (jit/arm/instr_bs.cpp:1685). The x86_64 JIT fails
+/// arm64 JIT checks it (`jit/arm/instr_bs.cpp:1685`). The `x86_64` JIT fails
 /// only on an overflow of the size times the unit
 /// (jit/x86/instr_bs.cpp:1942-1943) and then stops at the allocation; row
 /// "Binary construction" of `docs/erts-differences.md` records it.
@@ -6047,16 +6229,18 @@ fn f64_to_f16(value: f64) -> u16 {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(integer_segment_bits(false, &Term::Integer(3), 8), Ok(24));
-/// assert_eq!(integer_segment_bits(false, &Term::Integer(-1), 1), Err("badarg"));
-/// assert_eq!(integer_segment_bits(false, &Term::Integer(1 << 52), 8), Err("system_limit"));
+/// assert_eq!(integer_segment_bits(SizeForm::Variable, &Term::Integer(3), 8), Ok(24));
+/// assert_eq!(integer_segment_bits(SizeForm::Variable, &Term::Integer(-1), 1), Err("badarg"));
+/// assert_eq!(integer_segment_bits(SizeForm::Variable, &Term::Integer(1 << 52), 8), Err("system_limit"));
 /// let size = Term::from_bigint(BigInt::from(1u128 << 64));
-/// assert_eq!(integer_segment_bits(false, &size, 1), Err("system_limit"));
+/// assert_eq!(integer_segment_bits(SizeForm::Variable, &size, 1), Err("system_limit"));
 /// ```
-fn integer_segment_bits(fixed: bool, size: &Term, unit: u64) -> Result<u64, &'static str> {
+fn integer_segment_bits(form: SizeForm, size: &Term, unit: u64) -> Result<u64, &'static str> {
     match (size.small_integer(), size) {
-        (Some(bits), _) if bits >= 0 && (fixed || unit == 1 || bits >> 52 == 0) => {
-            Ok((bits as u64).saturating_mul(unit))
+        (Some(bits), _)
+            if bits >= 0 && (form == SizeForm::Fixed || unit == 1 || bits >> 52 == 0) =>
+        {
+            Ok(bits.cast_unsigned().saturating_mul(unit))
         }
         (Some(bits), _) if bits >= 0 => Err("system_limit"),
         (None, Term::Integer(bits)) if *bits >= 0 => Err("system_limit"),
@@ -6098,6 +6282,10 @@ fn integer_segment_bits(fixed: bool, size: &Term, unit: u64) -> Result<u64, &'st
 /// );
 /// assert!(shared_append_arrays(&[BinaryPart::Utf8(65)]).is_none());
 /// ```
+#[expect(
+    clippy::rc_buffer,
+    reason = "`Binary` shares byte arrays as `Arc<Vec<u8>>` because `append_in_place` grows the vector through `Arc::get_mut`; an `Arc<[u8]>` cannot grow"
+)]
 fn shared_append_arrays(parts: &[BinaryPart<'_>]) -> Option<Vec<(Arc<Vec<u8>>, usize)>> {
     let mut arrays = Vec::new();
     for part in parts {
@@ -6125,7 +6313,7 @@ fn shared_append_arrays(parts: &[BinaryPart<'_>]) -> Option<Vec<(Arc<Vec<u8>>, u
     Some(arrays)
 }
 
-fn integer_type_failure(parts: &[BinaryPart], first: usize) -> BinarySegmentFailure {
+fn integer_type_failure(parts: &[BinaryPart<'_>], first: usize) -> BinarySegmentFailure {
     let mut group = 0..0;
     let mut group_little = false;
     let mut group_bits = 0;
@@ -6174,7 +6362,7 @@ fn integer_type_failure(parts: &[BinaryPart], first: usize) -> BinarySegmentFail
 /// jit/arm/instr_bs.cpp:1442-2490). It has three passes, and the first
 /// failed check gives the failure.
 ///
-/// The size pass reads the segments in order (jit/arm/instr_bs.cpp:
+/// The size pass reads the segments in order (`jit/arm/instr_bs.cpp`:
 /// 1579-1808). A `binary` segment of size `all` with a term that is not a
 /// binary fails with `type`. An `integer` segment checks its size (see
 /// `integer_segment_bits`). A `utf8` segment with a term that is not a
@@ -6194,14 +6382,14 @@ fn integer_type_failure(parts: &[BinaryPart], first: usize) -> BinarySegmentFail
 /// (erl_bits.c:1855-1924). PBeam has no writable binary (row "Binary
 /// construction" of `docs/erts-differences.md`).
 ///
-/// The construct pass writes the segments (jit/arm/instr_bs.cpp:
+/// The construct pass writes the segments (`jit/arm/instr_bs.cpp`:
 /// 1994-2486). A `string` segment keeps its bytes (`erts_bs_put_string`,
 /// erl_bits.c:1641-1654). A `binary` segment keeps its binary and uses one
 /// reduction for each 8192 bits (`beam_jit_bs_put_binary_all`,
 /// jit/beam_jit_common.cpp:1043-1057). An `integer` segment with a term
 /// that is not an integer fails with `type`, in the order of
 /// `integer_type_failure`; else it writes the integer with no reduction
-/// (`erts_bs_put_integer_be` and `erts_bs_put_integer_le`, erl_bits.c:
+/// (`erts_bs_put_integer_be` and `erts_bs_put_integer_le`, `erl_bits.c`:
 /// 926-1167). A `utf8` segment writes the UTF-8 bytes of its code point
 /// (`emit_construct_utf8`). A `binary` part whose size in bits is not a
 /// multiple of its unit fails with `unit` in the construct pass
@@ -6255,6 +6443,10 @@ fn integer_type_failure(parts: &[BinaryPart], first: usize) -> BinarySegmentFail
 /// runtime error. A result whose size in bits is not a multiple of 8 is a
 /// runtime error, because PBeam has no bitstring term. A match context in
 /// a `binary` segment is a runtime invariant error.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one arm for each `bs_create_bin` segment type, as the size pass and the construct pass of `jit/arm/instr_bs.cpp` have one case for each; an arm moved out of the loop needs the bool and the state of the loop as parameters"
+)]
 fn create_binary(
     atoms: &AtomTable,
     process: &mut ProcessState,
@@ -6312,9 +6504,9 @@ fn create_binary(
                 // The size pass checks the size of a `float` segment as the
                 // size of an `integer` segment (jit/arm/instr_bs.cpp:
                 // 1493-1505, 1639-1689).
-                let fixed = matches!(size, Operand::Value(Term::Integer(literal)) if (0..1 << 56).contains(literal));
+                let form = SizeForm::of(size);
                 let size = read(process, size)?;
-                let bits = match integer_segment_bits(fixed, &size, *unit) {
+                let bits = match integer_segment_bits(form, &size, *unit) {
                     Ok(bits) => bits,
                     Err(reason) => {
                         return Ok(Err(BinarySegmentFailure {
@@ -6339,9 +6531,9 @@ fn create_binary(
             } => {
                 // ERTS computes the size of a literal from 0 to 2^56 - 1 at
                 // load time with no check (jit/arm/instr_bs.cpp:1493-1505).
-                let fixed = matches!(size, Operand::Value(Term::Integer(literal)) if (0..1 << 56).contains(literal));
+                let form = SizeForm::of(size);
                 let size = read(process, size)?;
-                let bits = match integer_segment_bits(fixed, &size, *unit) {
+                let bits = match integer_segment_bits(form, &size, *unit) {
                     Ok(bits) => bits,
                     Err(reason) => {
                         return Ok(Err(BinarySegmentFailure {
@@ -6355,7 +6547,7 @@ fn create_binary(
                     value: read(process, source)?,
                     bits,
                     little: *little,
-                    fixed,
+                    fixed: form == SizeForm::Fixed,
                 });
             }
             BinarySegment::Utf8 { segment, source } => {
@@ -6426,7 +6618,7 @@ fn create_binary(
                 segment, "binary", "type", value,
             )));
         };
-        if unit > 1 && !(start.bit_size() as u64).is_multiple_of(unit) {
+        if unit > 1 && !bit_size(start).is_multiple_of(unit) {
             return Ok(Err(BinarySegmentFailure::badarg(
                 segment, "binary", "unit", value,
             )));
@@ -6474,14 +6666,14 @@ fn create_binary(
         }
         return Ok(Ok(Term::Binary(Binary::concat_arrays(start, chunks))));
     }
-    let (bytes, bits) = match write_binary_parts(process, &parts)? {
+    let (bytes, bits) = match write_binary_parts(process, &parts) {
         Ok(written) => written,
         Err(failure) => return Ok(Err(failure)),
     };
     Ok(Ok(Term::Binary(match &prefix {
         Some(start) if bits.is_multiple_of(8) => Binary::concat(start, &bytes),
         Some(start) => {
-            let size = start.bit_size() + bits as usize;
+            let size = start.bit_size() + usize::try_from(bits).expect("a u64 fits in usize");
             Binary::concat(start, &bytes).bits(0, size)
         }
         None => bitstring(bytes, bits),
@@ -6520,12 +6712,12 @@ fn utf_segment_code_point(value: &Term) -> Option<u32> {
 ///
 /// ```rust,ignore
 /// let parts = [BinaryPart::Utf8('a')];
-/// assert_eq!(write_binary_parts(&mut process, &parts)?, Ok((b"a".to_vec(), 8)));
+/// assert_eq!(write_binary_parts(&mut process, &parts), Ok((b"a".to_vec(), 8)));
 /// ```
 fn write_binary_parts(
     process: &mut ProcessState,
     parts: &[BinaryPart<'_>],
-) -> Result<Result<(Vec<u8>, u64), BinarySegmentFailure>, BeamError> {
+) -> Result<(Vec<u8>, u64), BinarySegmentFailure> {
     let mut writer = BitWriter::default();
     for (index, part) in parts.iter().enumerate() {
         match part {
@@ -6534,7 +6726,7 @@ fn write_binary_parts(
                 process.bump_reductions(i32::try_from(*reductions).unwrap_or(i32::MAX));
             }
             BinaryPart::Shared(..) if let Some(failure) = part.type_failure() => {
-                return Ok(Err(failure));
+                return Err(failure);
             }
             BinaryPart::Shared(binary, reductions, ..) => {
                 writer.push_binary(binary, binary.bit_size());
@@ -6544,24 +6736,26 @@ fn write_binary_parts(
                 value: Term::Binary(binary),
                 bits,
                 ..
-            } if binary.bit_size() as u64 >= *bits => {
+            } if bit_size(binary) >= *bits => {
                 // `erts_bs_put_binary` uses one reduction for each 8192
                 // copied bits (erl_bits.c:1306).
-                writer.push_binary(binary, *bits as usize);
-                let reductions = *bits / BITS_PER_REDUCTION as u64;
+                writer.push_binary(binary, usize::try_from(*bits).expect("a u64 fits in usize"));
+                let reductions = *bits
+                    / u64::try_from(BITS_PER_REDUCTION)
+                        .expect("the bits of a reduction fit in u64");
                 process.bump_reductions(i32::try_from(reductions).unwrap_or(i32::MAX));
             }
             BinaryPart::Sized { .. } => {
-                return Ok(Err(part
+                return Err(part
                     .type_failure()
-                    .expect("a sized part that cannot be written has a failure")));
+                    .expect("a sized part that cannot be written has a failure"));
             }
             BinaryPart::Integer {
                 value: Term::Integer(value),
                 bits,
                 little,
                 ..
-            } => writer.push_integer(*value, *bits, *little),
+            } => writer.push_integer(*value, *bits, Endian::from(*little)),
             // A segment keeps the low bits of the two's complement value
             // and repeats the sign bit above the value (`fmt_big_be` and
             // `fmt_big_le`, erl_bits.c:989-1015 and 1119-1145).
@@ -6570,8 +6764,8 @@ fn write_binary_parts(
                 bits,
                 little,
                 ..
-            } => writer.push_bigint(value, *bits, *little),
-            BinaryPart::Integer { .. } => return Ok(Err(integer_type_failure(parts, index))),
+            } => writer.push_bigint(value, *bits, Endian::from(*little)),
+            BinaryPart::Integer { .. } => return Err(integer_type_failure(parts, index)),
             BinaryPart::Utf8(code_point) => {
                 writer.push_bytes(code_point.encode_utf8(&mut [0; 4]).as_bytes());
             }
@@ -6581,37 +6775,46 @@ fn write_binary_parts(
                 little,
             } => match utf_segment_code_point(value) {
                 Some(code_point) if code_point < 0x1_0000 => {
-                    writer.push_integer(i64::from(code_point), 16, *little);
+                    writer.push_integer(i64::from(code_point), 16, Endian::from(*little));
                 }
                 Some(code_point) => {
                     let value = code_point - 0x1_0000;
-                    writer.push_integer(i64::from(0xD800 | (value >> 10)), 16, *little);
-                    writer.push_integer(i64::from(0xDC00 | (value & 0x3FF)), 16, *little);
+                    writer.push_integer(
+                        i64::from(0xD800 | (value >> 10)),
+                        16,
+                        Endian::from(*little),
+                    );
+                    writer.push_integer(
+                        i64::from(0xDC00 | (value & 0x3FF)),
+                        16,
+                        Endian::from(*little),
+                    );
                 }
                 None => {
-                    return Ok(Err(BinarySegmentFailure::badarg(
+                    return Err(BinarySegmentFailure::badarg(
                         *segment,
                         "utf16",
                         "type",
                         value.clone(),
-                    )));
+                    ));
                 }
             },
             BinaryPart::Utf32 { code_point, little } => {
-                writer.push_integer(i64::from(*code_point), 32, *little);
+                writer.push_integer(i64::from(*code_point), 32, Endian::from(*little));
             }
             BinaryPart::Float {
                 segment,
                 value,
                 bits,
                 little,
-            } => match float_segment_bits(*segment, value, *bits) {
-                Ok(float) => writer.push_integer(float, *bits, *little),
-                Err(failure) => return Ok(Err(failure)),
-            },
+            } => writer.push_integer(
+                float_segment_bits(*segment, value, *bits)?,
+                *bits,
+                Endian::from(*little),
+            ),
         }
     }
-    Ok(Ok(writer.into_bytes()))
+    Ok(writer.into_bytes())
 }
 
 /// Return the part of a `binary` segment of a size, or the failure of its
@@ -6635,10 +6838,9 @@ fn sized_binary_part(
     source: &Operand,
     size: &Operand,
 ) -> Result<Result<BinaryPart<'static>, BinarySegmentFailure>, BeamError> {
-    let fixed =
-        matches!(size, Operand::Value(Term::Integer(literal)) if (0..1 << 56).contains(literal));
+    let form = SizeForm::of(size);
     let size = read(process, size)?;
-    Ok(match integer_segment_bits(fixed, &size, unit) {
+    Ok(match integer_segment_bits(form, &size, unit) {
         Ok(bits) => Ok(BinaryPart::Sized {
             segment,
             value: read(process, source)?,
@@ -6649,6 +6851,17 @@ fn sized_binary_part(
             ..BinarySegmentFailure::badarg(segment, "binary", "size", size)
         }),
     })
+}
+
+/// Return the size of `binary` in bits.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(bit_size(&Binary::from(vec![0x10])), 8);
+/// ```
+fn bit_size(binary: &Binary) -> u64 {
+    u64::try_from(binary.bit_size()).expect("a bit size fits in u64")
 }
 
 /// Return the bitstring of the `bits` bits at the start of `bytes`, the
@@ -6665,7 +6878,7 @@ fn bitstring(bytes: Vec<u8>, bits: u64) -> Binary {
     if bits.is_multiple_of(8) {
         binary
     } else {
-        binary.bits(0, bits as usize)
+        binary.bits(0, usize::try_from(bits).expect("a u64 fits in usize"))
     }
 }
 
@@ -6674,12 +6887,12 @@ fn bitstring(bytes: Vec<u8>, bits: u64) -> Binary {
 /// jit/arm/instr_bs.cpp:1865-1881). The segment has no check, and the
 /// other segments write after the bytes of the writable binary in
 /// `source`. ERTS changes the size of that binary term in place, so the
-/// result is also the term of `source` (erl_bits.c:1978, 2017). PBeam
+/// result is also the term of `source` (`erl_bits.c:1978`, 2017). PBeam
 /// takes the binary out of `source`, so the binary has one owner when no
 /// other term holds it, and writes the new bytes in its array
 /// (`Binary::append_in_place`). Else it builds a new binary that shares
 /// the old arrays (`Binary::concat`). PBeam charges no reduction. ERTS
-/// calls `BUMP_REDS` when it grows the buffer (erl_bits.c:1974, 2010), but
+/// calls `BUMP_REDS` when it grows the buffer (`erl_bits.c:1974`, 2010), but
 /// the arm JIT drops that bump (jit/arm/instr_bs.cpp:1876-1880), so the
 /// pinned ERTS on arm64 also charges none. The x86 JIT keeps the bump (row
 /// "Binary construction" of `docs/erts-differences.md`).
@@ -6696,14 +6909,13 @@ fn bitstring(bytes: Vec<u8>, bits: u64) -> Binary {
 ///
 /// A term in `source` that is not a binary is a runtime invariant error,
 /// because the compiler gives this segment only a binary that
-/// `bs_init_writable` made or that an earlier `private_append` gave. The
-/// errors of `write_binary_parts` also apply.
+/// `bs_init_writable` made or that an earlier `private_append` gave.
 fn private_append(
     process: &mut ProcessState,
     source: &Operand,
     parts: &[BinaryPart<'_>],
 ) -> Result<Result<Term, BinarySegmentFailure>, BeamError> {
-    let (bytes, bits) = match write_binary_parts(process, parts)? {
+    let (bytes, bits) = match write_binary_parts(process, parts) {
         Ok(written) => written,
         Err(failure) => return Ok(Err(failure)),
     };
@@ -6714,22 +6926,25 @@ fn private_append(
         )));
     };
     write(process, source, Term::Nil)?;
-    if !binary.bit_size().is_multiple_of(8) {
-        // The bits of the old bitstring do not end on a byte boundary, so
-        // the writer copies them, and then the new bits.
-        let mut writer = BitWriter::default();
-        writer.push_binary(binary, binary.bit_size());
-        writer.push_binary(&bitstring(bytes, bits), bits as usize);
-        let (bytes, bits) = writer.into_bytes();
-        *binary = bitstring(bytes, bits);
-    } else {
-        let size = binary.bit_size() + bits as usize;
+    if binary.bit_size().is_multiple_of(8) {
+        let size = binary.bit_size() + usize::try_from(bits).expect("a u64 fits in usize");
         if !binary.append_in_place(&bytes) {
             *binary = Binary::concat(binary, &bytes);
         }
         if !bits.is_multiple_of(8) {
             *binary = binary.bits(0, size);
         }
+    } else {
+        // The bits of the old bitstring do not end on a byte boundary, so
+        // the writer copies them, and then the new bits.
+        let mut writer = BitWriter::default();
+        writer.push_binary(binary, binary.bit_size());
+        writer.push_binary(
+            &bitstring(bytes, bits),
+            usize::try_from(bits).expect("a u64 fits in usize"),
+        );
+        let (bytes, bits) = writer.into_bytes();
+        *binary = bitstring(bytes, bits);
     }
     write(process, source, value.clone())?;
     Ok(Ok(value))
@@ -6771,7 +6986,7 @@ fn raise_binary_failure(
 ) -> Result<Option<Outcome>, BeamError> {
     let (module_atom, function_atom, arity) = current_function(scheduler, module)?;
     let cause = Term::tuple(vec![
-        Term::Integer(failure.segment as i64),
+        Term::Integer(failure.segment.cast_signed()),
         Term::static_atom(failure.operation),
         Term::static_atom(failure.info),
         failure.value,
@@ -7232,12 +7447,12 @@ fn write_operand(
             return Err(error(format!("unsupported BEAM literal index {index}")));
         }
         Operand::X(index) => {
-            let index = *index as usize;
+            let index = usize::try_from(*index).expect("a u32 fits in usize");
             registers.resize(registers.len().max(index + 1), None);
             registers[index] = Some(value);
         }
         Operand::Y(index) => {
-            let index = *index as usize;
+            let index = usize::try_from(*index).expect("a u32 fits in usize");
             if index >= stack.len() {
                 return Err(error(format!(
                     "register y{index} is outside allocated range"

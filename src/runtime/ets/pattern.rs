@@ -4,7 +4,7 @@
 //! head. PBeam compiles only such a head: a pattern with no guard and the
 //! body `['$$']`.
 
-use crate::term::{AtomTable, Term};
+use crate::term::{AtomTable, Division, ShiftDirection, Term};
 use num_bigint::BigInt;
 use num_traits::{Signed, ToPrimitive};
 
@@ -174,20 +174,17 @@ impl Pattern {
         let mut values = vec![None; self.variables];
         let mut terms: Vec<&Term> = Vec::new();
         let mut code = self.code.iter();
-        match self.code.first() {
+        if let Some(Step::Tuple(size)) = self.code.first() {
             // The object is a tuple, so a tuple pattern reads its elements
             // with no new tuple.
-            Some(Step::Tuple(size)) => {
-                if *size != object.len() {
-                    return None;
-                }
-                code.next();
-                terms.extend(object.iter().rev());
+            if *size != object.len() {
+                return None;
             }
-            _ => {
-                whole = Term::tuple(object.to_vec());
-                terms.push(&whole);
-            }
+            code.next();
+            terms.extend(object.iter().rev());
+        } else {
+            whole = Term::tuple(object.to_vec());
+            terms.push(&whole);
         }
         for step in code {
             let term = terms.pop().expect("each step has a term");
@@ -506,7 +503,8 @@ impl MatchSpec {
             let values = &bindings;
             let whole = Term::tuple(object.to_vec());
             if !clause.guards.iter().all(|guard| {
-                evaluate(atoms, guard, values, &whole, true) == Some(Term::static_atom("true"))
+                evaluate(atoms, guard, values, &whole, Site::Guard)
+                    == Some(Term::static_atom("true"))
             }) {
                 continue;
             }
@@ -514,7 +512,7 @@ impl MatchSpec {
             for body in &clause.body {
                 // A body BIF that fails gives `'EXIT'`, as `matchCatch`
                 // catches the failure of a BIF (`erl_db_util.c:3098-3105`).
-                result = evaluate(atoms, body, values, &whole, false)
+                result = evaluate(atoms, body, values, &whole, Site::Body)
                     .unwrap_or_else(|| Term::static_atom("EXIT"));
             }
             return Some(result);
@@ -618,35 +616,23 @@ fn expression(atoms: &AtomTable, term: &Term, numbers: &[i32]) -> Result<Expr, S
             if name == "andalso" || name == "orelse" {
                 // `dmc_andalso` and `dmc_orelse` accept two or more
                 // operands (`erl_db_util.c:4760-4827`).
-                let mut operands = elements[1..]
-                    .iter()
-                    .map(|operand| expression(atoms, operand, numbers))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let mut operands = operands.drain(..);
-                let first = operands.next().expect("the form has an operand");
-                return Ok(operands.fold(first, |left, right| {
+                return fold_operands(atoms, elements, numbers, |left, right| {
                     let (left, right) = (Box::new(left), Box::new(right));
                     if name == "andalso" {
                         Expr::AndAlso(left, right)
                     } else {
                         Expr::OrElse(left, right)
                     }
-                }));
+                });
             }
             if (name == "and" || name == "or") && elements.len() > 3 {
                 // `dmc_and` and `dmc_or` accept two or more operands
                 // (`erl_db_util.c:4701-4757`). A left fold keeps the
                 // left-to-right evaluation.
                 let function = if name == "and" { Guard::And } else { Guard::Or };
-                let mut operands = elements[1..]
-                    .iter()
-                    .map(|operand| expression(atoms, operand, numbers))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let mut operands = operands.drain(..);
-                let first = operands.next().expect("the form has an operand");
-                return Ok(
-                    operands.fold(first, |left, right| Expr::Call(function, vec![left, right]))
-                );
+                return fold_operands(atoms, elements, numbers, |left, right| {
+                    Expr::Call(function, vec![left, right])
+                });
             }
             let Some(function) = guard(name, elements.len() - 1) else {
                 return Err(if known_guard(name, elements.len() - 1) {
@@ -664,6 +650,24 @@ fn expression(atoms: &AtomTable, term: &Term, numbers: &[i32]) -> Result<Expr, S
         Term::Map(_) => Err(SpecError::Unsupported("map construction".to_owned())),
         _ => Ok(Expr::Constant(term.clone())),
     }
+}
+
+/// Compile the operands of the form `elements` (the name and its operands)
+/// and fold them from the left with `combine`, as the evaluation goes from
+/// left to right. The form has at least one operand.
+fn fold_operands(
+    atoms: &AtomTable,
+    elements: &[Term],
+    numbers: &[i32],
+    combine: impl FnMut(Expr, Expr) -> Expr,
+) -> Result<Expr, SpecError> {
+    let mut operands = elements[1..]
+        .iter()
+        .map(|operand| expression(atoms, operand, numbers))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter();
+    let first = operands.next().expect("the form has an operand");
+    Ok(operands.fold(first, combine))
 }
 
 /// Return the guard function `name/arity`, or `None` when PBeam does not
@@ -738,16 +742,28 @@ fn guard(name: &str, arity: usize) -> Option<Guard> {
 fn known_guard(name: &str, arity: usize) -> bool {
     matches!(
         (name, arity),
-        ("is_record", 3)
-            | ("is_integer", 3)
+        ("is_record" | "is_integer" | "binary_part", 3)
             | ("binary_part", 2)
-            | ("binary_part", 3)
-            | ("round", 1)
-            | ("trunc", 1)
-            | ("float", 1)
-            | ("ceil", 1)
-            | ("floor", 1)
+            | ("round" | "trunc" | "float" | "ceil" | "floor", 1)
     )
+}
+
+/// Where an expression of a match specification runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Site {
+    /// The guard of a clause: a failure fails the guard.
+    Guard,
+    /// The body of a clause: a failure of a part gives `EXIT` for the part.
+    Body,
+}
+
+/// Which term `min/2` or `max/2` returns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pick {
+    /// `min/2`.
+    Smaller,
+    /// `max/2`.
+    Larger,
 }
 
 /// Evaluate one guard or body expression, as `db_prog_match`
@@ -759,7 +775,7 @@ fn evaluate(
     expression: &Expr,
     bindings: &[Term],
     whole: &Term,
-    guard: bool,
+    site: Site,
 ) -> Option<Term> {
     match expression {
         Expr::Constant(term) => Some(term.clone()),
@@ -769,15 +785,15 @@ fn evaluate(
         Expr::Tuple(elements) => Some(Term::tuple(
             elements
                 .iter()
-                .map(|element| part(atoms, element, bindings, whole, guard))
+                .map(|element| part(atoms, element, bindings, whole, site))
                 .collect::<Option<Vec<_>>>()?,
         )),
         Expr::List(elements, tail) => {
             let elements: Vec<Term> = elements
                 .iter()
-                .map(|element| part(atoms, element, bindings, whole, guard))
+                .map(|element| part(atoms, element, bindings, whole, site))
                 .collect::<Option<Vec<_>>>()?;
-            let mut tail = part(atoms, tail, bindings, whole, guard)?;
+            let mut tail = part(atoms, tail, bindings, whole, site)?;
             for element in elements.into_iter().rev() {
                 tail = Term::cons(element, tail);
             }
@@ -786,26 +802,26 @@ fn evaluate(
         Expr::Call(function, arguments) => {
             let arguments: Vec<Term> = arguments
                 .iter()
-                .map(|argument| part(atoms, argument, bindings, whole, guard))
+                .map(|argument| part(atoms, argument, bindings, whole, site))
                 .collect::<Option<Vec<_>>>()?;
             call(atoms, *function, &arguments)
         }
-        Expr::AndAlso(left, right) => match &evaluate(atoms, left, bindings, whole, guard)? {
+        Expr::AndAlso(left, right) => match &evaluate(atoms, left, bindings, whole, site)? {
             Term::Atom(atom) if atom.is_static("false") => Some(Term::static_atom("false")),
             Term::Atom(atom) if atom.is_static("true") => {
-                evaluate(atoms, right, bindings, whole, guard)
+                evaluate(atoms, right, bindings, whole, site)
             }
             _ => None,
         },
-        Expr::OrElse(left, right) => match &evaluate(atoms, left, bindings, whole, guard)? {
+        Expr::OrElse(left, right) => match &evaluate(atoms, left, bindings, whole, site)? {
             Term::Atom(atom) if atom.is_static("true") => Some(Term::static_atom("true")),
             Term::Atom(atom) if atom.is_static("false") => {
-                evaluate(atoms, right, bindings, whole, guard)
+                evaluate(atoms, right, bindings, whole, site)
             }
             _ => None,
         },
         Expr::BooleanOne(expression, checked) => {
-            let value = evaluate(atoms, expression, bindings, whole, guard)?;
+            let value = evaluate(atoms, expression, bindings, whole, site)?;
             if *checked {
                 match &value {
                     Term::Atom(atom) if atom.is_one_of(&["true", "false"]) => Some(value),
@@ -825,10 +841,10 @@ fn part(
     expression: &Expr,
     bindings: &[Term],
     whole: &Term,
-    guard: bool,
+    site: Site,
 ) -> Option<Term> {
-    let value = evaluate(atoms, expression, bindings, whole, guard);
-    if guard {
+    let value = evaluate(atoms, expression, bindings, whole, site);
+    if site == Site::Guard {
         value
     } else {
         Some(value.unwrap_or_else(|| Term::static_atom("EXIT")))
@@ -837,6 +853,10 @@ fn part(
 
 /// Run the guard function `function` over `arguments`, as the BIF of the
 /// match program does. Return `None` for a failure.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one arm for each guard function of the match specification; each arm is one expression or a short check, as the guard calls of `erl_db_util.c` (`db_prog_match`)"
+)]
 fn call(atoms: &AtomTable, function: Guard, arguments: &[Term]) -> Option<Term> {
     let truth = |value: bool| Some(Term::static_atom(if value { "true" } else { "false" }));
     match function {
@@ -875,10 +895,10 @@ fn call(atoms: &AtomTable, function: Guard, arguments: &[Term]) -> Option<Term> 
             let Term::Tuple(elements) = &arguments[1] else {
                 return None;
             };
-            if index < 1 || index as usize > elements.len() {
-                return None;
-            }
-            Some(elements[index as usize - 1].clone())
+            let position = usize::try_from(index)
+                .ok()
+                .filter(|position| (1..=elements.len()).contains(position))?;
+            Some(elements[position - 1].clone())
         }
         Guard::Hd => arguments[0].cons_cell().map(|(head, _)| head.clone()),
         Guard::Tl => arguments[0].cons_cell().map(|(_, tail)| tail.clone()),
@@ -886,7 +906,7 @@ fn call(atoms: &AtomTable, function: Guard, arguments: &[Term]) -> Option<Term> 
             i64::try_from(arguments[0].proper_list()?.count()).ok()?,
         )),
         Guard::MapSize => match &arguments[0] {
-            Term::Map(map) => Some(Term::Integer(map.iter().count() as i64)),
+            Term::Map(map) => Some(Term::Integer(i64::try_from(map.iter().count()).ok()?)),
             _ => None,
         },
         Guard::MapGet => match &arguments[1] {
@@ -900,22 +920,24 @@ fn call(atoms: &AtomTable, function: Guard, arguments: &[Term]) -> Option<Term> 
         // ERTS calls `size_1` (`erl_db_util.c:731-732`), which floors the bit
         // size of a bitstring with `BYTE_SIZE` (`erl_bif_guard.c:323-324`).
         Guard::Size => match &arguments[0] {
-            Term::Tuple(elements) => Some(Term::Integer(elements.len() as i64)),
-            Term::Binary(binary) => Some(Term::Integer((binary.bit_size() / 8) as i64)),
+            Term::Tuple(elements) => Some(Term::Integer(i64::try_from(elements.len()).ok()?)),
+            Term::Binary(binary) => Some(Term::Integer(i64::try_from(binary.bit_size() / 8).ok()?)),
             _ => None,
         },
         Guard::BitSize => match &arguments[0] {
-            Term::Binary(binary) => Some(Term::Integer(binary.bit_size() as i64)),
+            Term::Binary(binary) => Some(Term::Integer(i64::try_from(binary.bit_size()).ok()?)),
             _ => None,
         },
         // ERTS calls `byte_size_1` (`erl_db_util.c:761-762`), which rounds the
         // bit size up with `NBYTES` (`erl_bif_guard.c:385`, `erl_bits.h:27`).
         Guard::ByteSize => match &arguments[0] {
-            Term::Binary(binary) => Some(Term::Integer(binary.bit_size().div_ceil(8) as i64)),
+            Term::Binary(binary) => Some(Term::Integer(
+                i64::try_from(binary.bit_size().div_ceil(8)).ok()?,
+            )),
             _ => None,
         },
         Guard::TupleSize => match &arguments[0] {
-            Term::Tuple(elements) => Some(Term::Integer(elements.len() as i64)),
+            Term::Tuple(elements) => Some(Term::Integer(i64::try_from(elements.len()).ok()?)),
             _ => None,
         },
         Guard::Node0 => Some(Term::static_atom("nonode@nohost")),
@@ -930,24 +952,62 @@ fn call(atoms: &AtomTable, function: Guard, arguments: &[Term]) -> Option<Term> 
         Guard::Minus2 => arithmetic(Arithmetic::Subtract, &arguments[0], &arguments[1]),
         Guard::Times => arithmetic(Arithmetic::Multiply, &arguments[0], &arguments[1]),
         Guard::Div => divide(&arguments[0], &arguments[1]),
-        Guard::IntDiv => integer_division(&arguments[0], &arguments[1], false),
-        Guard::Rem => integer_division(&arguments[0], &arguments[1], true),
+        Guard::IntDiv => integer_division(&arguments[0], &arguments[1], Division::Quotient),
+        Guard::Rem => integer_division(&arguments[0], &arguments[1], Division::Remainder),
         Guard::Band => bitwise(Bitwise::And, &arguments[0], &arguments[1]),
         Guard::Bor => bitwise(Bitwise::Or, &arguments[0], &arguments[1]),
         Guard::Bxor => bitwise(Bitwise::Xor, &arguments[0], &arguments[1]),
         Guard::Bnot => bitwise_not(&arguments[0]),
-        Guard::Bsl => shift(&arguments[0], &arguments[1], false),
-        Guard::Bsr => shift(&arguments[0], &arguments[1], true),
-        Guard::Gt => compare(atoms, &arguments[0], &arguments[1], |order| order.is_gt()),
-        Guard::Ge => compare(atoms, &arguments[0], &arguments[1], |order| order.is_ge()),
-        Guard::Lt => compare(atoms, &arguments[0], &arguments[1], |order| order.is_lt()),
-        Guard::Le => compare(atoms, &arguments[0], &arguments[1], |order| order.is_le()),
-        Guard::Eq => compare(atoms, &arguments[0], &arguments[1], |order| order.is_eq()),
-        Guard::EqExact => compare_exact(atoms, &arguments[0], &arguments[1], |order| order.is_eq()),
-        Guard::Neq => compare(atoms, &arguments[0], &arguments[1], |order| order.is_ne()),
-        Guard::NeqExact => {
-            compare_exact(atoms, &arguments[0], &arguments[1], |order| order.is_ne())
-        }
+        Guard::Bsl => shift(&arguments[0], &arguments[1], ShiftDirection::Left),
+        Guard::Bsr => shift(&arguments[0], &arguments[1], ShiftDirection::Right),
+        Guard::Gt => compare(
+            atoms,
+            &arguments[0],
+            &arguments[1],
+            std::cmp::Ordering::is_gt,
+        ),
+        Guard::Ge => compare(
+            atoms,
+            &arguments[0],
+            &arguments[1],
+            std::cmp::Ordering::is_ge,
+        ),
+        Guard::Lt => compare(
+            atoms,
+            &arguments[0],
+            &arguments[1],
+            std::cmp::Ordering::is_lt,
+        ),
+        Guard::Le => compare(
+            atoms,
+            &arguments[0],
+            &arguments[1],
+            std::cmp::Ordering::is_le,
+        ),
+        Guard::Eq => compare(
+            atoms,
+            &arguments[0],
+            &arguments[1],
+            std::cmp::Ordering::is_eq,
+        ),
+        Guard::EqExact => compare_exact(
+            atoms,
+            &arguments[0],
+            &arguments[1],
+            std::cmp::Ordering::is_eq,
+        ),
+        Guard::Neq => compare(
+            atoms,
+            &arguments[0],
+            &arguments[1],
+            std::cmp::Ordering::is_ne,
+        ),
+        Guard::NeqExact => compare_exact(
+            atoms,
+            &arguments[0],
+            &arguments[1],
+            std::cmp::Ordering::is_ne,
+        ),
         Guard::Not => match &arguments[0] {
             Term::Atom(atom) if atom.is_static("true") => truth(false),
             Term::Atom(atom) if atom.is_static("false") => truth(true),
@@ -956,8 +1016,8 @@ fn call(atoms: &AtomTable, function: Guard, arguments: &[Term]) -> Option<Term> 
         Guard::Xor => boolean(&arguments[0], &arguments[1], |left, right| left != right),
         Guard::And => boolean(&arguments[0], &arguments[1], |left, right| left && right),
         Guard::Or => boolean(&arguments[0], &arguments[1], |left, right| left || right),
-        Guard::Min => Some(choose(atoms, &arguments[0], &arguments[1], false)?),
-        Guard::Max => Some(choose(atoms, &arguments[0], &arguments[1], true)?),
+        Guard::Min => Some(choose(atoms, &arguments[0], &arguments[1], Pick::Smaller)?),
+        Guard::Max => Some(choose(atoms, &arguments[0], &arguments[1], Pick::Larger)?),
     }
 }
 
@@ -996,7 +1056,8 @@ fn compare_exact(
 
 /// Return the smaller or the larger of two terms, as `min/2` and `max/2`
 /// do.
-fn choose(atoms: &AtomTable, left: &Term, right: &Term, larger: bool) -> Option<Term> {
+fn choose(atoms: &AtomTable, left: &Term, right: &Term, pick: Pick) -> Option<Term> {
+    let larger = pick == Pick::Larger;
     let order = left.compare(right, atoms).ok()?;
     Some(match order {
         std::cmp::Ordering::Less => {
@@ -1070,12 +1131,12 @@ fn divide(left: &Term, right: &Term) -> Option<Term> {
 }
 
 /// Return the value of `div` or `rem` of two integers.
-fn integer_division(left: &Term, right: &Term, remainder: bool) -> Option<Term> {
+fn integer_division(left: &Term, right: &Term, division: Division) -> Option<Term> {
     let (left, right) = (integer(left)?, integer(right)?);
     if right == BigInt::from(0) {
         return None;
     }
-    Some(integer_term(if remainder {
+    Some(integer_term(if division == Division::Remainder {
         left % right
     } else {
         left / right
@@ -1106,13 +1167,13 @@ fn bitwise_not(term: &Term) -> Option<Term> {
 }
 
 /// Return the value of `bsl` or `bsr` of two integers.
-fn shift(left: &Term, right: &Term, right_shift: bool) -> Option<Term> {
+fn shift(left: &Term, right: &Term, direction: ShiftDirection) -> Option<Term> {
     /// The largest bignum arity on a 64-bit system (`BIG_ARITY_MAX`,
     /// `erl_term.h:465-466`).
     const BIG_ARITY_MAX: u128 = (1 << 16) - 1;
     let left = integer(left)?;
     let count = integer(right)?;
-    let mut left_shift = !right_shift;
+    let mut left_shift = direction == ShiftDirection::Left;
     let mut huge = false;
     let count = match count.to_i64() {
         // A negative count reverses the direction
@@ -1121,7 +1182,7 @@ fn shift(left: &Term, right: &Term, right_shift: bool) -> Option<Term> {
             left_shift = !left_shift;
             count.unsigned_abs()
         }
-        Some(count) => count as u64,
+        Some(count) => count.cast_unsigned(),
         None => {
             // `N bsl NegativeBigNum` is `N bsr MAX_SMALL`, and
             // `N bsr NegativeBigNum` is `N bsl MAX_SMALL`
@@ -1140,7 +1201,9 @@ fn shift(left: &Term, right: &Term, right_shift: bool) -> Option<Term> {
         if huge || count > u64::from(u32::MAX) {
             return Some(Term::Integer(if left.is_negative() { -1 } else { 0 }));
         }
-        return Some(integer_term(left >> count as usize));
+        return Some(integer_term(
+            left >> usize::try_from(count).expect("a count up to u32::MAX fits in usize"),
+        ));
     }
     if left == BigInt::from(0) {
         return Some(Term::Integer(0));
@@ -1150,11 +1213,13 @@ fn shift(left: &Term, right: &Term, right_shift: bool) -> Option<Term> {
     }
     // The pre-check of `erts_shift` gives `system_limit` when the result
     // would exceed the bignum arity (`erl_arith.c:246-278`).
-    let bits = (left.magnitude().bits() as u128) + u128::from(count);
+    let bits = u128::from(left.magnitude().bits()) + u128::from(count);
     if bits.div_ceil(64) > BIG_ARITY_MAX {
         return None;
     }
-    Some(integer_term(left << count as usize))
+    Some(integer_term(
+        left << usize::try_from(count).expect("a count within the bignum arity fits in usize"),
+    ))
 }
 
 /// Return the value of unary `+`, which requires a number.
@@ -1193,6 +1258,11 @@ fn integer(term: &Term) -> Option<BigInt> {
 }
 
 /// Return the float of a numeric term.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "the C `(double)` conversion of a small integer rounds as `as` does"
+)]
 fn float(term: &Term) -> Option<f64> {
     match term {
         Term::Integer(value) => Some(*value as f64),

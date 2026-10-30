@@ -1,3 +1,10 @@
+//! Runs the small `erlang` BIFs and the operator BIFs on PBeam and compares them with the pinned
+//! ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::process::Command;
 
 use pbeam_runtime::{AtomTable, BeamProgram, Term};

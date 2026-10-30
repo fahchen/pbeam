@@ -34,6 +34,12 @@ use super::{
     match_context::MATCH_CONTEXT_ESCAPE,
 };
 
+/// A `usize` length as `u64`, which holds every `usize`.
+#[inline]
+fn wide(value: usize) -> u64 {
+    u64::try_from(value).expect("a usize fits in u64")
+}
+
 /// The width of the tag of an ERTS small integer or pid word
 /// (`_TAG_IMMED1_SIZE`).
 const IMMED1_TAG_BITS: u32 = 4;
@@ -150,7 +156,7 @@ fn shape(term: &Term) -> Shape<'_> {
         }),
         Term::Integer(value) => match term.small_integer() {
             Some(small) => {
-                Shape::Immediate(((small as u64) << IMMED1_TAG_BITS) | SMALL_INTEGER_TAG)
+                Shape::Immediate((small.cast_unsigned() << IMMED1_TAG_BITS) | SMALL_INTEGER_TAG)
             }
             None => Shape::Bignum(*value < 0, vec![value.unsigned_abs()]),
         },
@@ -222,7 +228,7 @@ fn atom_word(index: u32) -> u64 {
 /// ```
 fn byte(term: &Term) -> Option<u64> {
     match term {
-        Term::Integer(value @ 0..=255) => Some(*value as u64),
+        Term::Integer(value @ 0..=255) => Some(value.cast_unsigned()),
         _ => None,
     }
 }
@@ -381,12 +387,11 @@ impl State {
     /// assert_eq!(stack.len(), 1);
     /// ```
     fn push_term<'a>(&mut self, stack: &mut Vec<Item<'a>>, term: &'a Term) {
-        match shape(term) {
-            Shape::Immediate(word) => self.mix_immediate(word),
-            _ => {
-                self.mix_alpha(TYPE_ARRAY_ELEMENT);
-                stack.push(Item::Term(term));
-            }
+        if let Shape::Immediate(word) = shape(term) {
+            self.mix_immediate(word);
+        } else {
+            self.mix_alpha(TYPE_ARRAY_ELEMENT);
+            stack.push(Item::Term(term));
         }
     }
 
@@ -489,7 +494,7 @@ fn make_internal_hash(term: &Term) -> u64 {
         };
         match item {
             Item::Term(term) => next = state.mix_term(&mut stack, term),
-            Item::Cells(cells) => next = state.mix_cells(&mut stack, cells),
+            Item::Cells(cells) => next = Some(state.mix_cells(&mut stack, cells)),
             Item::Collision(pairs) => next = state.mix_collision(&mut stack, pairs),
             Item::Node(node) => {
                 state.mix_alpha(TYPE_HASHMAP_NODE);
@@ -513,13 +518,17 @@ impl State {
     /// assert!(matches!(state.mix_term(&mut stack, &term), Some(Item::Term(Term::Integer(1)))));
     /// assert_eq!(stack.len(), 1);
     /// ```
+    #[expect(
+        clippy::too_many_lines,
+        reason = "mirrors `make_internal_hash` of `erl_term_hashing.c`: one arm for each term type, and the arms share the stack"
+    )]
     fn mix_term<'a>(&mut self, stack: &mut Vec<Item<'a>>, term: &'a Term) -> Option<Item<'a>> {
         match shape(term) {
             Shape::Immediate(word) => self.mix_immediate(word),
-            Shape::List(cells) => return self.mix_cells(stack, cells),
+            Shape::List(cells) => return Some(self.mix_cells(stack, cells)),
             Shape::Tuple(elements) => {
                 self.mix_alpha(TYPE_TUPLE);
-                self.mix_beta(elements.len() as u64);
+                self.mix_beta(wide(elements.len()));
                 let (last, elements) = elements.split_last()?;
                 for element in elements {
                     self.push_term(stack, element);
@@ -531,7 +540,7 @@ impl State {
             Shape::Record(record) => {
                 let values = record.values();
                 self.mix_alpha(TYPE_RECORD);
-                self.mix_beta(values.len() as u64 + 1);
+                self.mix_beta(wide(values.len()) + 1);
                 self.mix_immediate(
                     (u64::from(record.def().hash) << IMMED1_TAG_BITS) | SMALL_INTEGER_TAG,
                 );
@@ -544,7 +553,7 @@ impl State {
             Shape::Map(map) => match map.form() {
                 Form::Flat(pairs) => {
                     self.mix_alpha(TYPE_FLATMAP);
-                    self.mix_beta(pairs.len() as u64);
+                    self.mix_beta(wide(pairs.len()));
                     let ((last_key, last_value), pairs) = pairs.split_last()?;
                     for (key, value) in pairs {
                         self.push_term(stack, value);
@@ -559,7 +568,7 @@ impl State {
                     } else {
                         TYPE_HASHMAP_HEAD_BITMAP
                     });
-                    self.mix_beta(size as u64);
+                    self.mix_beta(wide(size));
                     self.push_children(stack, root);
                 }
             },
@@ -571,7 +580,7 @@ impl State {
                 let whole = size / 8;
                 let tail = size % 8;
                 self.mix_alpha(TYPE_BINARY);
-                self.mix_beta(size as u64);
+                self.mix_beta(wide(size));
                 let bits = bytes.bit_bytes();
                 self.mix_bytes(&bits[..whole]);
                 if tail != 0 {
@@ -587,7 +596,7 @@ impl State {
                 } else {
                     TYPE_POS_BIGNUM
                 };
-                self.mix_alpha(pair(sign, digits.len() as u64));
+                self.mix_alpha(pair(sign, wide(digits.len())));
                 let (pairs, rest) = digits.as_chunks::<2>();
                 for [low, high] in pairs {
                     self.mix_alpha(*low);
@@ -613,11 +622,11 @@ impl State {
             Shape::Fun(fun) => match fun.target() {
                 Target::Local(lambda) => {
                     let free = fun.free();
-                    self.mix_alpha(pair(TYPE_LOCAL_FUN, free.len() as u64));
+                    self.mix_alpha(pair(TYPE_LOCAL_FUN, wide(free.len())));
                     // ERTS widens the C `int` fields with their sign.
                     self.mix_beta(pair(
-                        i64::from(lambda.index) as u64,
-                        i64::from(lambda.old_unique) as u64,
+                        i64::from(lambda.index).cast_unsigned(),
+                        i64::from(lambda.old_unique).cast_unsigned(),
                     ));
                     self.mix_immediate(atom_word(lambda.module().index()));
                     let (last, free) = free.split_last()?;
@@ -661,18 +670,14 @@ impl State {
     /// let (mut state, mut stack) = (State::default(), Vec::new());
     /// let list = Term::list_from([Term::Integer(104), Term::tuple(vec![])]);
     /// let cells = Cells { first: None, rest: &list };
-    /// assert!(matches!(state.mix_cells(&mut stack, cells), Some(Item::Term(_))));
+    /// assert!(matches!(state.mix_cells(&mut stack, cells), Item::Term(_)));
     /// assert!(matches!(stack[..], [Item::Cells(_), Item::CdrMarker]));
     /// // The `[Key | Value]` cell of a collision node with the value {}.
     /// let (key, value) = (Term::Integer(1), Term::tuple(vec![]));
     /// let next = state.mix_cells(&mut stack, Cells { first: Some(&key), rest: &value });
-    /// assert!(matches!(next, Some(Item::Cells(_))));
+    /// assert!(matches!(next, Item::Cells(_)));
     /// ```
-    fn mix_cells<'a>(
-        &mut self,
-        stack: &mut Vec<Item<'a>>,
-        mut cells: Cells<'a>,
-    ) -> Option<Item<'a>> {
+    fn mix_cells<'a>(&mut self, stack: &mut Vec<Item<'a>>, mut cells: Cells<'a>) -> Item<'a> {
         let (mut chunk, mut count) = (0, 0);
         while let Ok((head, after)) = cells.split()
             && let Some(value) = byte(head)
@@ -690,25 +695,22 @@ impl State {
         }
         let (head, cells) = match cells.split() {
             Ok(split) => split,
-            Err(tail) => return Some(Item::Term(tail)),
+            Err(tail) => return Item::Term(tail),
         };
-        match shape(head) {
-            Shape::Immediate(word) => {
-                self.mix_alpha(pair(TYPE_IMMEDIATE, TYPE_CAR));
-                self.mix_beta(word);
-                if cells.is_empty() {
-                    self.mix_alpha(TYPE_CDR);
-                }
-                Some(Item::Cells(cells))
+        if let Shape::Immediate(word) = shape(head) {
+            self.mix_alpha(pair(TYPE_IMMEDIATE, TYPE_CAR));
+            self.mix_beta(word);
+            if cells.is_empty() {
+                self.mix_alpha(TYPE_CDR);
             }
-            _ => {
-                stack.push(Item::Cells(cells));
-                if cells.is_empty() {
-                    stack.push(Item::CdrMarker);
-                }
-                self.mix_alpha(TYPE_CAR);
-                Some(Item::Term(head))
+            Item::Cells(cells)
+        } else {
+            stack.push(Item::Cells(cells));
+            if cells.is_empty() {
+                stack.push(Item::CdrMarker);
             }
+            self.mix_alpha(TYPE_CAR);
+            Item::Term(head)
         }
     }
 
@@ -736,7 +738,7 @@ impl State {
         pairs: &'a [(Term, Term)],
     ) -> Option<Item<'a>> {
         self.mix_alpha(TYPE_TUPLE);
-        self.mix_beta(pairs.len() as u64);
+        self.mix_beta(wide(pairs.len()));
         let cell = |(key, value): &'a (Term, Term)| {
             Item::Cells(Cells {
                 first: Some(key),
@@ -905,9 +907,18 @@ enum HashStep<'a> {
 /// assert_eq!(make_hash(&atoms, &Term::static_atom("abc")), 26499);
 /// assert_eq!(make_hash(&atoms, &Term::Integer(1)), 1_688_579_892);
 /// ```
+#[expect(
+    clippy::too_many_lines,
+    reason = "mirrors `make_hash` of `erl_term_hashing.c`: one arm for each term type, and the arms share the stack and the hash"
+)]
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "ERTS hashes the low 32 bits of a length, an index, or a word, and reads a signed field as unsigned (erl_term_hashing.c), so the casts keep the C values"
+)]
 pub(crate) fn make_hash(atoms: &AtomTable, term: &Term) -> u32 {
     let mut hash: u32 = 0;
-    let mut stack: Vec<HashStep> = Vec::new();
+    let mut stack: Vec<HashStep<'_>> = Vec::new();
     let mut next = Some(HashStep::Term(term));
     while let Some(step) = next.take().or_else(|| stack.pop()) {
         match step {
@@ -919,11 +930,11 @@ pub(crate) fn make_hash(atoms: &AtomTable, term: &Term) -> u32 {
                 }
                 Term::Integer(value) => match term.small_integer() {
                     Some(small) => hash = small_hash(hash, small),
-                    None => hash = bignum_hash(hash, *value < 0, &[value.unsigned_abs()]),
+                    None => hash = bignum_hash(hash, small_sign(*value), &[value.unsigned_abs()]),
                 },
                 Term::BigInt(value) => {
                     let digits = value.magnitude().to_u64_digits();
-                    hash = bignum_hash(hash, value.sign() == Sign::Minus, &digits);
+                    hash = bignum_hash(hash, value.sign(), &digits);
                 }
                 Term::Float(value) => {
                     // `GET_DOUBLE` reads the two 32-bit words of the double,
@@ -1049,6 +1060,11 @@ fn small_hash(hash: u32, small: i64) -> u32 {
     value.wrapping_mul(if small < 0 { FUNNY_4 } else { FUNNY_3 })
 }
 
+/// Return the sign of an integer that is not a small integer.
+fn small_sign(value: i64) -> Sign {
+    if value < 0 { Sign::Minus } else { Sign::Plus }
+}
+
 /// Mix the digits of a bignum as `BIG_DEF` (`erl_term_hashing.c:340-380`)
 /// does: every byte of every digit below the top digit, then the bytes of
 /// the top digit, of which ERTS skips the four high zero bytes, then the
@@ -1057,9 +1073,13 @@ fn small_hash(hash: u32, small: i64) -> u32 {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(bignum_hash(0, false, &[1]), 1_688_579_892 >> 0);
+/// assert_eq!(bignum_hash(0, Sign::Plus, &[1]), 1_688_579_892 >> 0);
 /// ```
-fn bignum_hash(hash: u32, negative: bool, digits: &[u64]) -> u32 {
+#[expect(
+    clippy::as_conversions,
+    reason = "ERTS hashes the low 32 bits of a length, an index, or a word, and reads a signed field as unsigned (erl_term_hashing.c), so the casts keep the C values"
+)]
+fn bignum_hash(hash: u32, sign: Sign, digits: &[u64]) -> u32 {
     let (top, below) = digits.split_last().expect("a bignum has a digit");
     let mut hash = hash;
     for digit in below {
@@ -1075,7 +1095,11 @@ fn bignum_hash(hash: u32, negative: bool, digits: &[u64]) -> u32 {
             .wrapping_add((digit & 0xFF) as u32);
         digit >>= 8;
     }
-    hash.wrapping_mul(if negative { FUNNY_4 } else { FUNNY_3 })
+    hash.wrapping_mul(if sign == Sign::Minus {
+        FUNNY_4
+    } else {
+        FUNNY_3
+    })
 }
 
 /// Mix the bytes of a binary as the list path of `BITSTRING_DEF`
@@ -1088,13 +1112,18 @@ fn bignum_hash(hash: u32, negative: bool, digits: &[u64]) -> u32 {
 /// ```rust,ignore
 /// assert_eq!(binary_hash(0, &Binary::from(b"abc".to_vec())), 0x28fd5cae);
 /// ```
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "ERTS hashes the low 32 bits of a length, an index, or a word, and reads a signed field as unsigned (erl_term_hashing.c), so the casts keep the C values"
+)]
 fn binary_hash(hash: u32, bytes: &Binary) -> u32 {
     let bit_size = bytes.bit_size();
     let whole = bit_size / 8;
     let tail = bit_size % 8;
     let mut hash = hash;
     let bits = bytes.bit_bytes();
-    for byte in bits[..whole].iter() {
+    for byte in &bits[..whole] {
         hash = hash.wrapping_mul(FUNNY_1).wrapping_add(u32::from(*byte));
     }
     if tail > 0 {
@@ -1122,6 +1151,11 @@ fn binary_hash(hash: u32, bytes: &Binary) -> u32 {
 /// let fun = Term::Fun(Fun::external(module, function, 1));
 /// assert!(fun_hash(&atoms, &fun, 0, &mut stack).is_none());
 /// ```
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "ERTS hashes the low 32 bits of a length, an index, or a word, and reads a signed field as unsigned (erl_term_hashing.c), so the casts keep the C values"
+)]
 fn fun_hash<'a>(
     atoms: &AtomTable,
     fun: &'a Fun,
@@ -1138,9 +1172,9 @@ fn fun_hash<'a>(
                 .wrapping_mul(FUNNY_1)
                 .wrapping_add(module)
                 .wrapping_mul(FUNNY_2)
-                .wrapping_add(lambda.index as u32)
+                .wrapping_add(lambda.index.cast_unsigned())
                 .wrapping_mul(FUNNY_2)
-                .wrapping_add(lambda.old_unique as u32);
+                .wrapping_add(lambda.old_unique.cast_unsigned());
             let (first, rest) = free.split_first()?;
             if !rest.is_empty() {
                 stack.push(HashStep::Array {
@@ -1182,6 +1216,11 @@ fn fun_hash<'a>(
 /// let mut stack = Vec::new();
 /// assert!(cells_hash(&mut 0, &mut stack, &list).is_none());
 /// ```
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "ERTS hashes the low 32 bits of a length, an index, or a word, and reads a signed field as unsigned (erl_term_hashing.c), so the casts keep the C values"
+)]
 fn cells_hash<'a>(
     hash: &mut u32,
     stack: &mut Vec<HashStep<'a>>,
@@ -1212,6 +1251,10 @@ fn cells_hash<'a>(
 /// ```rust,ignore
 /// assert_eq!(uint32_step(0, 0x01020304, FUNNY_2), 0x04030201 * 0);
 /// ```
+#[expect(
+    clippy::as_conversions,
+    reason = "ERTS hashes the low 32 bits of a length, an index, or a word, and reads a signed field as unsigned (erl_term_hashing.c), so the casts keep the C values"
+)]
 fn uint32_step(hash: u32, value: u64, prime: u32) -> u32 {
     let mut hash = hash;
     let mut value = value;
@@ -1341,6 +1384,11 @@ fn hash_with(hash: u32, value: u32, constant: u32) -> u32 {
 /// ```rust,ignore
 /// assert_eq!(block_hash(b"", HCONST_13), 0x3f1a8f42);
 /// ```
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "ERTS hashes the low 32 bits of a length, an index, or a word, and reads a signed field as unsigned (erl_term_hashing.c), so the casts keep the C values"
+)]
 fn block_hash(bytes: &[u8], initval: u32) -> u32 {
     let (blocks, last) = bytes.as_chunks::<BLOCK_BYTES>();
     let mut mix = Mix {
@@ -1389,18 +1437,25 @@ fn block_hash(bytes: &[u8], initval: u32) -> u32 {
 /// assert_eq!(small_hash2(0, 0), 3_175_731_469);
 /// assert_eq!(small_hash2(0, -1), 1_117_813_597);
 /// ```
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "ERTS hashes the low 32 bits of a length, an index, or a word, and reads a signed field as unsigned (erl_term_hashing.c), so the casts keep the C values"
+)]
 fn small_hash2(hash: u32, small: i64) -> u32 {
     if !(-(1 << 27)..(1 << 27)).contains(&small) {
         let (constant, magnitude) = if small < 0 {
             (HCONST_10, small.unsigned_abs())
         } else {
-            (HCONST_11, small as u64)
+            (HCONST_11, small.cast_unsigned())
         };
         return hash2_with(hash, magnitude as u32, (magnitude >> 32) as u32, constant);
     }
-    let hash = match small < 0 {
-        true => hash_with(hash, small.unsigned_abs() as u32, HCONST),
-        false => hash,
+    let hash = if small < 0 {
+        hash_with(hash, small.unsigned_abs() as u32, HCONST)
+    } else {
+        hash
     };
     hash_with(hash, small as i32 as u32, HCONST)
 }
@@ -1414,15 +1469,24 @@ fn small_hash2(hash: u32, small: i64) -> u32 {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert_eq!(bignum_hash2(0, false, &[1]), (hash2_with(0, 1, 0, HCONST_11), 1));
+/// assert_eq!(bignum_hash2(0, Sign::Plus, &[1]), (hash2_with(0, 1, 0, HCONST_11), 1));
 /// ```
-fn bignum_hash2(hash: u32, negative: bool, digits: &[u64]) -> (u32, u64) {
-    let constant = if negative { HCONST_10 } else { HCONST_11 };
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "ERTS hashes the low 32 bits of a length, an index, or a word, and reads a signed field as unsigned (erl_term_hashing.c), so the casts keep the C values"
+)]
+fn bignum_hash2(hash: u32, sign: Sign, digits: &[u64]) -> (u32, u64) {
+    let constant = if sign == Sign::Minus {
+        HCONST_10
+    } else {
+        HCONST_11
+    };
     let mut hash = hash;
     for digit in digits {
         hash = hash2_with(hash, *digit as u32, (*digit >> 32) as u32, constant);
     }
-    (hash, digits.len() as u64)
+    (hash, wide(digits.len()))
 }
 
 /// Push the pairs of a map for [`make_hash2`], with one iteration for each
@@ -1457,7 +1521,7 @@ fn push_children<'a>(
             }
         }
     }
-    *iterations += children.len() as u64;
+    *iterations += wide(children.len());
     children.len()
 }
 
@@ -1477,6 +1541,15 @@ fn push_children<'a>(
 /// assert_eq!(make_hash2(&atoms, &Term::static_atom("abc")), (26499, 0));
 /// assert_eq!(make_hash2(&atoms, &Term::Integer(1)).0, 539_485_162);
 /// ```
+#[expect(
+    clippy::too_many_lines,
+    reason = "mirrors `make_hash2` of `erl_term_hashing.c`: one arm for each term type, and the arms share the stack and the hash"
+)]
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "ERTS hashes the low 32 bits of a length, an index, or a word, and reads a signed field as unsigned (erl_term_hashing.c), so the casts keep the C values"
+)]
 pub(crate) fn make_hash2(atoms: &AtomTable, term: &Term) -> (u32, u64) {
     // The fast paths before the walk (`erl_term_hashing.c:1005-1030`).
     if let Term::Atom(atom) = term {
@@ -1490,7 +1563,7 @@ pub(crate) fn make_hash2(atoms: &AtomTable, term: &Term) -> (u32, u64) {
     let mut hash: u32 = 0;
     let mut xor: u32 = 0;
     let mut iterations: u64 = 0;
-    let mut stack: Vec<Hash2Item> = Vec::new();
+    let mut stack: Vec<Hash2Item<'_>> = Vec::new();
     let mut next: Option<&Term> = Some(term);
     loop {
         let term = match next.take() {
@@ -1548,17 +1621,19 @@ pub(crate) fn make_hash2(atoms: &AtomTable, term: &Term) -> (u32, u64) {
                     hash_with(hash, value, HCONST_3)
                 };
             }
-            Term::Integer(value) => match term.small_integer() {
-                Some(small) => hash = small_hash2(hash, small),
-                None => {
-                    let (value, count) = bignum_hash2(hash, *value < 0, &[value.unsigned_abs()]);
+            Term::Integer(value) => {
+                if let Some(small) = term.small_integer() {
+                    hash = small_hash2(hash, small);
+                } else {
+                    let (value, count) =
+                        bignum_hash2(hash, small_sign(*value), &[value.unsigned_abs()]);
                     hash = value;
                     iterations += count;
                 }
-            },
+            }
             Term::BigInt(value) => {
                 let digits = value.magnitude().to_u64_digits();
-                let (value, count) = bignum_hash2(hash, value.sign() == Sign::Minus, &digits);
+                let (value, count) = bignum_hash2(hash, value.sign(), &digits);
                 hash = value;
                 iterations += count;
             }
@@ -1693,7 +1768,12 @@ pub(crate) fn make_hash2(atoms: &AtomTable, term: &Term) -> (u32, u64) {
                         atom_hash(atoms, lambda.module()) as u32,
                         HCONST,
                     );
-                    hash = hash2_with(hash, lambda.index as u32, lambda.old_unique as u32, HCONST);
+                    hash = hash2_with(
+                        hash,
+                        lambda.index.cast_unsigned(),
+                        lambda.old_unique.cast_unsigned(),
+                        HCONST,
+                    );
                     if let Some((first, rest)) = free.split_first() {
                         for element in rest.iter().rev() {
                             stack.push(Hash2Item::Term(element));

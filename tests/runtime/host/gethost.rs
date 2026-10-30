@@ -128,7 +128,7 @@ impl Fake {
             .set_read_timeout(Some(Duration::from_secs(20)))
             .expect("timeout");
         let gate = Arc::new((Mutex::new(false), Condvar::new()));
-        let shared = gate.clone();
+        let shared = Arc::clone(&gate);
         let answer: Answer = Arc::new(move |query| {
             let Query::Name(_, name) = query else {
                 return Vec::new();
@@ -146,7 +146,7 @@ impl Fake {
             .iter()
             .map(|arg| arg.as_bytes().to_vec())
             .collect::<Vec<_>>();
-        let shared = answer.clone();
+        let shared = Arc::clone(&answer);
         let status = thread::spawn(move || pool(&args, input, &mut output, shared));
         Self {
             erlang,
@@ -194,7 +194,7 @@ impl Fake {
     fn reply(&mut self) -> (u32, String) {
         let mut size = [0; 4];
         self.replies.read_exact(&mut size).expect("size");
-        let mut reply = vec![0; u32::from_be_bytes(size) as usize];
+        let mut reply = vec![0; usize::try_from(u32::from_be_bytes(size)).unwrap()];
         self.replies.read_exact(&mut reply).expect("reply");
         let serial = u32::from_be_bytes(reply[..4].try_into().expect("serial"));
         (

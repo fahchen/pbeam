@@ -95,7 +95,7 @@ fn sign_extends_large_integer_operands_as_erts() {
     // {integer,-101714049538469044}: size code 6 gives eight bytes.
     assert_eq!(
         integer(&[0xD9, 0xFE, 0x96, 0xA3, 0x9C, 0x60, 0x97, 0xD3, 0x4C]),
-        Term::Integer(-101714049538469044)
+        Term::Integer(-101_714_049_538_469_044)
     );
     // A leading zero byte keeps a large payload positive.
     assert_eq!(integer(&[0x39, 0x00, 0xFF, 0xFF]), Term::Integer(65535));
@@ -251,23 +251,25 @@ fn rejects_unsupported_select_val_forms() {
 #[test]
 fn prepares_the_select_value_choices_by_shape() {
     let atoms = AtomTable::new();
+    let limit_signed = i64::try_from(SELECT_VALUE_LINEAR_LIMIT).unwrap();
+    let limit_unsigned = u64::try_from(SELECT_VALUE_LINEAR_LIMIT).unwrap();
     let choices = |values: &[i64]| -> Vec<(Term, u32)> {
         values
             .iter()
             .enumerate()
-            .map(|(index, value)| (Term::Integer(*value), index as u32))
+            .map(|(index, value)| (Term::Integer(*value), u32::try_from(index).unwrap()))
             .collect()
     };
 
     // The boundary: a list of exactly the limit keeps the linear walk.
-    let limit: Vec<i64> = (0..SELECT_VALUE_LINEAR_LIMIT as i64).collect();
+    let limit: Vec<i64> = (0..limit_signed).collect();
     assert!(matches!(
         prepare_select_value_choices(choices(&limit), &atoms),
         SelectValueChoices::Linear(_)
     ));
 
     // One choice more takes the term order.
-    let mut values: Vec<i64> = (0..=SELECT_VALUE_LINEAR_LIMIT as i64).collect();
+    let mut values: Vec<i64> = (0..=limit_signed).collect();
     values.reverse();
     let large = choices(&values);
     let SelectValueChoices::Ordered(ordered) = prepare_select_value_choices(large.clone(), &atoms)
@@ -286,7 +288,7 @@ fn prepares_the_select_value_choices_by_shape() {
 
     // A duplicate choice keeps the linear form and its encoded order, so the
     // interpreter still gives the first match.
-    let mut duplicate_values: Vec<i64> = (0..SELECT_VALUE_LINEAR_LIMIT as i64).collect();
+    let mut duplicate_values: Vec<i64> = (0..limit_signed).collect();
     duplicate_values.push(0);
     let duplicate = choices(&duplicate_values);
     let SelectValueChoices::Linear(kept) = prepare_select_value_choices(duplicate.clone(), &atoms)
@@ -297,8 +299,13 @@ fn prepares_the_select_value_choices_by_shape() {
 
     // Two different references have a term order, so a large list of
     // distinct references takes the ordered form.
-    let references: Vec<(Term, u32)> = (0..=SELECT_VALUE_LINEAR_LIMIT as u64)
-        .map(|index| (Term::Reference(Reference(index)), index as u32))
+    let references: Vec<(Term, u32)> = (0..=limit_unsigned)
+        .map(|index| {
+            (
+                Term::Reference(Reference(index)),
+                u32::try_from(index).unwrap(),
+            )
+        })
         .collect();
     assert!(matches!(
         prepare_select_value_choices(references, &atoms),
@@ -307,11 +314,11 @@ fn prepares_the_select_value_choices_by_shape() {
     // Two different alias references have a PBeam term order
     // (`src/term/order.rs`), so a large list of distinct aliases also takes
     // the ordered form.
-    let aliases: Vec<(Term, u32)> = (0..=SELECT_VALUE_LINEAR_LIMIT as u64)
+    let aliases: Vec<(Term, u32)> = (0..=limit_unsigned)
         .map(|index| {
             (
                 Term::Reference(Reference(index).pid_reference()),
-                index as u32,
+                u32::try_from(index).unwrap(),
             )
         })
         .collect();
@@ -1517,18 +1524,20 @@ fn decodes_the_bs_start_match4_bs_get_binary2_and_bs_get_tail_instructions_of_bs
         code.push(0x03);
         code
     };
-    let (instructions, _, _) = parse_code(
-        &code(&parts),
-        &table,
-        &atoms,
-        &[],
-        &[],
-        &[],
-        &[],
-        &[],
-        &mut LineTable::default(),
-    )
-    .unwrap();
+    let parse = |parts: &[&[u8]]| {
+        parse_code(
+            &code(parts),
+            &table,
+            &atoms,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &mut LineTable::default(),
+        )
+    };
+    let (instructions, _, _) = parse(&parts).unwrap();
     assert!(
         matches!(
             instructions.as_slice(),
@@ -1577,37 +1586,17 @@ fn decodes_the_bs_start_match4_bs_get_binary2_and_bs_get_tail_instructions_of_bs
     );
     // A size `all` with unit 0 has no `ensure_at_least` command.
     assert_eq!(
-        parse_code(
-            &code(&[&[0x77, 0x35, 0x03, 0x20, 0x42, 0x00, 0x00, 0x13]]),
-            &table,
-            &atoms,
-            &[],
-            &[],
-            &[],
-            &[],
-            &[],
-            &mut LineTable::default()
-        )
-        .unwrap_err()
-        .to_string(),
+        parse(&[&[0x77, 0x35, 0x03, 0x20, 0x42, 0x00, 0x00, 0x13]])
+            .unwrap_err()
+            .to_string(),
         "BEAM bs_get_binary2 has unit 0"
     );
     // The ERTS loader has no form of `bs_start_match4` with another atom
     // (jit/arm/ops.tab:1036-1052).
     assert_eq!(
-        parse_code(
-            &code(&[&[0xAA, 0x12, 0x20, 0x03, 0x03]]),
-            &table,
-            &atoms,
-            &[],
-            &[],
-            &[],
-            &[],
-            &[],
-            &mut LineTable::default()
-        )
-        .unwrap_err()
-        .to_string(),
+        parse(&[&[0xAA, 0x12, 0x20, 0x03, 0x03]])
+            .unwrap_err()
+            .to_string(),
         "unsupported BEAM bs_start_match4 fail operand atom1"
     );
 }
@@ -3153,6 +3142,16 @@ fn reads_bs_create_bin_segments_and_rejects_malformed_lists() {
             Some(BinarySegment::Unsupported(kind)) if kind.is_static("append")
         ));
     }
+}
+
+#[test]
+fn reads_bs_create_bin_integer_and_utf_segments_and_rejects_short_lists() {
+    let atoms: Vec<Atom> = ["string", "binary", "all", "integer", "append"]
+        .into_iter()
+        .map(|name| Atom::from_static(name).unwrap())
+        .collect();
+    let read =
+        |bytes: &[u8], strings: &[u8]| read_binary_segments(bytes, &mut 0, &atoms, &[], strings);
     // {atom,integer},1,1,nil,{x,0},{integer,8},
     // {atom,integer},2,8,{literal,[little]},{x,1},{x,2},
     // {atom,integer},3,1,{literal,[signed,native]},{x,0},{integer,16},
@@ -3233,6 +3232,14 @@ fn reads_bs_create_bin_segments_and_rejects_malformed_lists() {
 /// ```rust,ignore
 /// assert_eq!(arm_field_bytes(&Instruction::Label(1)), size_of::<u32>());
 /// ```
+#[expect(
+    clippy::match_same_arms,
+    reason = "each variant has its own arm that names every field, so a changed field is a compile error; merged arms would hide that"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "table: one arm for each instruction, and each arm sums the sizes of its fields"
+)]
 fn arm_field_bytes(instruction: &Instruction) -> usize {
     use std::mem::size_of_val;
     match instruction {

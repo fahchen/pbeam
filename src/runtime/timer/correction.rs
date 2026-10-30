@@ -72,16 +72,24 @@ const ILENGTH: i64 = 32 * TIME_UNIT / (RESOLUTION * 1000);
 
 /// `drift_adj.intervals`: `ilength / short_isecs`, from 5 to 50
 /// (`erl_time_sup.c:1190-1199`). The value is 5 for the pinned host.
-const DRIFT_INTERVALS: usize = {
+const DRIFT_INTERVAL_COUNT: i64 = {
     let intervals = ILENGTH / SHORT_ISECS;
     if intervals > 50 {
         50
     } else if intervals < 5 {
         5
     } else {
-        intervals as usize
+        intervals
     }
 };
+
+/// [`DRIFT_INTERVAL_COUNT`] as the length of the array of intervals.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "the count is clamped to 5 to 50, and TryFrom is not const"
+)]
+const DRIFT_INTERVALS: usize = DRIFT_INTERVAL_COUNT as usize;
 
 /// `drift_adj.error`: the largest assumed error over a short interval,
 /// `32 * monotonic_time_unit / (resolution * short_isecs)`, 2133 nanoseconds
@@ -114,16 +122,16 @@ pub(super) enum Check {
     /// `check_time_offset` (`erl_time_sup.c:789-831`): the OS corrects the
     /// monotonic clock, and the check moves only the time offset.
     #[cfg_attr(
-        not(target_os = "linux"),
-        allow(dead_code, reason = "the host check of Linux; the unit tests use it")
+        all(not(target_os = "linux"), not(test)),
+        expect(dead_code, reason = "the host check of Linux; the unit tests use it")
     )]
     Offset,
     /// `check_time_correction` (`erl_time_sup.c:450-777`): the check moves
     /// the time offset and corrects the Erlang monotonic time for the drift
     /// of the OS monotonic clock and the error to the OS system time.
     #[cfg_attr(
-        target_os = "linux",
-        allow(dead_code, reason = "the host check of macOS; the unit tests use it")
+        all(target_os = "linux", not(test)),
+        expect(dead_code, reason = "the host check of macOS; the unit tests use it")
     )]
     Correction,
 }
@@ -285,6 +293,10 @@ impl Correction {
     /// time differs from the OS system time by more than `2 * small_diff`,
     /// the time offset becomes the OS system time minus the internal
     /// monotonic time. The next check is after 60 seconds.
+    #[expect(
+        clippy::similar_names,
+        reason = "the names `mtime`, `stime`, and `smtime_diff` are the names of `check_time_offset` in `erl_time_sup.c`"
+    )]
     fn check_time_offset(&mut self, (os_mtime, os_stime): (i64, i64)) -> (i64, i64) {
         let erl_mtime = self.monotonic_time(os_mtime);
         let sdiff = erl_mtime + self.offset - os_stime;
@@ -299,6 +311,10 @@ impl Correction {
     /// from the run start to now. A difference between the clocks of more
     /// than `drift_adj.error` plus 1 millisecond per second is a step of the
     /// OS system time, and the setup assumes no drift.
+    #[expect(
+        clippy::similar_names,
+        reason = "the names `mtime`, `stime`, and `smtime_diff` are the names of `init_check_time_correction` in `erl_time_sup.c`"
+    )]
     fn init_drift(&mut self, (mtime, stime): (i64, i64)) {
         let old = self.intervals[0];
         let mtime_diff = mtime - old.time_mon;
@@ -314,15 +330,23 @@ impl Correction {
             time_mon: old.time_mon,
             time_sys: old.time_sys,
         }; DRIFT_INTERVALS];
-        self.acc_sys = stime_diff * DRIFT_INTERVALS as i64;
-        self.acc_mon = mtime_diff * DRIFT_INTERVALS as i64;
+        self.acc_sys = stime_diff * DRIFT_INTERVAL_COUNT;
+        self.acc_mon = mtime_diff * DRIFT_INTERVAL_COUNT;
         self.ix = 0;
-        self.dirty_counter = DRIFT_INTERVALS as i64;
+        self.dirty_counter = DRIFT_INTERVAL_COUNT;
     }
 
     /// `check_time_correction` (`erl_time_sup.c:450-777`) for the
     /// `multi_time_warp` mode and an OS monotonic clock that the OS does not
     /// correct.
+    #[expect(
+        clippy::similar_names,
+        reason = "the names `mtime`, `stime`, and `smtime_diff` are the names of `check_time_correction` in `erl_time_sup.c`"
+    )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "mirrors `check_time_correction` of `erl_time_sup.c` (497-683) step by step: the error check and the drift measurement share the locals of the original"
+    )]
     fn check_time_correction(&mut self, mut os_times: impl FnMut() -> (i64, i64)) -> (i64, i64) {
         let (os_mtime, os_stime) = os_times();
         let ci = self.curr;
@@ -396,22 +420,21 @@ impl Correction {
                     self.dirty_counter -= 1;
                 }
                 let drift_adj = average_drift(self.acc_sys, self.acc_mon);
-                if !(-DRIFT_MAX_ADJ_DIFF..=DRIFT_MAX_ADJ_DIFF)
-                    .contains(&(avg_drift_adj - drift_adj))
+                if (-DRIFT_MAX_ADJ_DIFF..=DRIFT_MAX_ADJ_DIFF).contains(&(avg_drift_adj - drift_adj))
                 {
-                    true
-                } else {
                     let diff =
                         (drift_adj - new.drift).clamp(-DRIFT_MAX_ADJ_DIFF, DRIFT_MAX_ADJ_DIFF);
                     new.drift += diff;
                     set_new |= diff.abs() > DRIFT_MIN_ADJ_DIFF;
                     false
+                } else {
+                    true
                 }
             };
             if dirty {
                 // A step of the OS system time: rotate the intervals out
                 // before the next drift adjustment.
-                self.dirty_counter = DRIFT_INTERVALS as i64;
+                self.dirty_counter = DRIFT_INTERVAL_COUNT;
                 begin_short = true;
             }
         }

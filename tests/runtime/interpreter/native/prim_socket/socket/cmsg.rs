@@ -6,9 +6,7 @@ use crate::term::AtomTable;
 /// Return a scheduler whose current process is a new root process.
 fn scheduler() -> Scheduler {
     let mut scheduler = Scheduler::new(AtomTable::new());
-    scheduler
-        .start(frame(), vec![], AllowAll.initial())
-        .unwrap();
+    scheduler.start(frame(), vec![], AllowAll.initial());
     scheduler.schedule_next().unwrap();
     scheduler
 }
@@ -123,10 +121,7 @@ fn decodes_the_ctrl_list_of_a_message_to_send() {
         decode(Term::list_from([tos.clone()]), bytes.len() - 1),
         None
     );
-    assert_eq!(
-        decode(Term::cons(tos.clone(), Term::Integer(1)), 1024),
-        None
-    );
+    assert_eq!(decode(Term::cons(tos, Term::Integer(1)), 1024), None);
     assert_eq!(decode(Term::Integer(1), 1024), None);
     let socket = atom("socket");
     for data in [atom("true"), atom("false"), Term::Integer(3)] {
@@ -168,7 +163,7 @@ fn decodes_the_ctrl_list_of_a_message_to_send() {
             ("value", Term::Integer(1)),
         ]),
         cmsg(&[
-            ("level", ip.clone()),
+            ("level", ip),
             ("type", Term::Nil),
             ("data", Term::Integer(1)),
         ]),

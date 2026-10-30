@@ -1,3 +1,10 @@
+//! Checks how the `pbeam` binary handles host signals (the signal server, the break menu,
+//! `SIGUSR1`) and compares it with the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::{
     ffi::c_int,
     io::{self, Read, Write},
@@ -460,7 +467,7 @@ fn run_with_a_full_stdout(command: &mut Command) -> Option<i32> {
     // reads no more, so the next write of the run waits.
     let probe = write_end.try_clone().unwrap();
     let filler = thread::spawn(move || {
-        let bytes = [b' '; 1 << 16];
+        let bytes = vec![b' '; 1 << 16];
         for _ in 0..16 {
             // SAFETY: `write` reads the bytes of `bytes`, which holds the
             // length that it gets.
@@ -508,7 +515,7 @@ fn wait_until_full(fd: &OwnedFd) {
             revents: 0,
         };
         // SAFETY: `poll` reads and writes the one `pollfd` that it gets.
-        if unsafe { libc::poll(&mut poll, 1, 0) } == 0 {
+        if unsafe { libc::poll(&raw mut poll, 1, 0) } == 0 {
             return;
         }
         assert!(start.elapsed() < RUN_TIME_LIMIT, "the pipe does not fill");
@@ -531,13 +538,12 @@ fn read_until(fd: &OwnedFd, output: &mut Vec<u8>, text: &[u8]) {
     let start = Instant::now();
     let mut buffer = [0; 4096];
     while !output.windows(text.len()).any(|window| window == text) {
-        if start.elapsed() >= RUN_TIME_LIMIT {
-            panic!(
-                "no {:?} in the output {:?}",
-                String::from_utf8_lossy(text),
-                String::from_utf8_lossy(output)
-            );
-        }
+        assert!(
+            start.elapsed() < RUN_TIME_LIMIT,
+            "no {:?} in the output {:?}",
+            String::from_utf8_lossy(text),
+            String::from_utf8_lossy(output)
+        );
         // SAFETY: `read` writes at most the length of `buffer` into it.
         let count = unsafe { libc::read(fd.as_raw_fd(), buffer.as_mut_ptr().cast(), buffer.len()) };
         match usize::try_from(count) {
@@ -925,7 +931,10 @@ fn set_raw(fd: &OwnedFd) {
         let mut mode = std::mem::zeroed();
         assert_eq!(libc::tcgetattr(fd.as_raw_fd(), &raw mut mode), 0);
         libc::cfmakeraw(&raw mut mode);
-        assert_eq!(libc::tcsetattr(fd.as_raw_fd(), libc::TCSANOW, &mode), 0);
+        assert_eq!(
+            libc::tcsetattr(fd.as_raw_fd(), libc::TCSANOW, &raw const mode),
+            0
+        );
     }
 }
 
@@ -1270,7 +1279,7 @@ fn open_terminal() -> (OwnedFd, OwnedFd) {
 /// ```
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(
+    expect(
         clippy::useless_conversion,
         reason = "the request type is c_ulong, and TIOCSCTTY is c_uint on macOS"
     )

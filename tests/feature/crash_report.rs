@@ -1,3 +1,10 @@
+//! Checks the error report that the `pbeam` binary writes for an uncaught error or throw, as the
+//! pinned ERTS does.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::{
     process::{Command, Stdio},
     time::Duration,

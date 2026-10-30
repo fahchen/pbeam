@@ -1,3 +1,10 @@
+//! Checks that other processes run while a write waits for a full pipe, and how the signals of a
+//! waiting writer end the run.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::{
     io::Read,
     os::fd::{AsFd, AsRawFd},

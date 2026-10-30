@@ -23,13 +23,23 @@ use super::socket::{
     source_term,
 };
 use super::supports::{HOST, MSG_FLAGS, atom};
-use super::*;
+use super::{BeamError, BifResult, ExceptionClass, Scheduler, Term, error};
 use crate::runtime::resources::lock;
 use crate::runtime::scheduler::poll::Direction;
 use crate::runtime::sockets::{CLOSED, CLOSING, SELECTED, SocketState};
 use crate::term::{ProcessId, Reference};
 
 pub(super) mod sendfile;
+
+/// A byte count of one socket call fits in `u64`.
+fn to_u64(count: usize) -> u64 {
+    u64::try_from(count).expect("a byte count fits in u64")
+}
+
+/// A byte count of one socket call fits in `i64`.
+fn to_i64(count: usize) -> i64 {
+    i64::try_from(count).expect("a byte count fits in i64")
+}
 
 /// The most elements of the I/O vector of one `nif_sendv/3` call,
 /// `iov_max`, which is `sysconf(_SC_IOV_MAX)` (`prim_socket_nif.c:18981-18990`):
@@ -187,7 +197,14 @@ fn write(
         None => host.send_with_flags(bytes, flags),
     };
     let request = (key, caller, reference);
-    send_result(scheduler, state, sent, bytes.len(), false, request)
+    send_result(
+        scheduler,
+        state,
+        sent,
+        bytes.len(),
+        IovTail::Absent,
+        request,
+    )
 }
 
 /// Check the socket state before a write, as `essio_send` does
@@ -285,7 +302,14 @@ pub(super) fn sendv(
         .expect("an open socket has a host socket");
     let sent = nix::sys::uio::writev(host, &slices).map_err(io::Error::from);
     let request = (key, caller, reference);
-    send_result(scheduler, state, sent, size, data_in_tail, request)
+    send_result(
+        scheduler,
+        state,
+        sent,
+        size,
+        IovTail::from(data_in_tail),
+        request,
+    )
 }
 
 /// Return the bytes of the binaries that are not empty in the first
@@ -314,6 +338,36 @@ fn iovec(iov: &Term) -> Option<(Vec<&[u8]>, bool)> {
     }
 }
 
+/// Whether the iovec of a send has data after its first `iov_max` elements.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IovTail {
+    /// The iovec ends within `iov_max` elements.
+    Absent,
+    /// A tail follows: the send reports the written bytes as `{iov, Written}`.
+    Present,
+}
+
+impl From<bool> for IovTail {
+    fn from(present: bool) -> Self {
+        if present { Self::Present } else { Self::Absent }
+    }
+}
+
+/// The `Ref` argument of a receive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecvRef {
+    /// The atom `zero`: the receive does not select.
+    Zero,
+    /// A reference: the receive selects after `EAGAIN`.
+    Reference,
+}
+
+impl From<bool> for RecvRef {
+    fn from(zero: bool) -> Self {
+        if zero { Self::Zero } else { Self::Reference }
+    }
+}
+
 /// Handle the result `sent` of a send of `size` bytes, as
 /// `send_check_result` does (`unix_socket_syncio.c:6868-6945`): a partial
 /// write or `EAGAIN` makes the write select; each byte written with
@@ -324,7 +378,7 @@ fn send_result(
     mut state: MutexGuard<'_, SocketState>,
     sent: io::Result<usize>,
     size: usize,
-    data_in_tail: bool,
+    tail: IovTail,
     (key, caller, reference): (Reference, ProcessId, &Term),
 ) -> Result<BifResult, BeamError> {
     match sent {
@@ -336,24 +390,24 @@ fn send_result(
             caller,
             reference,
         )),
-        Ok(written) if data_in_tail => {
+        Ok(written) if tail == IovTail::Present => {
             // `send_check_retry` with the `sendRef` `iov`
             // (`unix_socket_syncio.c:7091-7155`).
-            state.counters.write_pkg_max_count += written as u64;
+            state.counters.write_pkg_max_count += to_u64(written);
             let iov = atom(scheduler, "iov")?;
             let mut writer = state.writer.take();
             make_current(scheduler, &mut writer, caller, &iov, key);
             state.writer = writer;
             Ok(BifResult::Value(Term::tuple(vec![
                 iov,
-                Term::Integer(written as i64),
+                Term::Integer(to_i64(written)),
             ])))
         }
         Ok(written) => {
             let counters = &mut state.counters;
             counters.write_pkg += 1;
-            counters.write_byte += written as u64;
-            counters.write_pkg_max_count += written as u64;
+            counters.write_byte += to_u64(written);
+            counters.write_pkg_max_count += to_u64(written);
             counters.write_pkg_max = counters.write_pkg_max.max(counters.write_pkg_max_count);
             counters.write_pkg_max_count = 0;
             state.writer = None;
@@ -386,7 +440,7 @@ fn send_retry(
     reference: &Term,
 ) -> BifResult {
     if let Some(written) = written {
-        state.counters.write_pkg_max_count += written as u64;
+        state.counters.write_pkg_max_count += to_u64(written);
     }
     let mut writer = state.writer.take();
     make_current(scheduler, &mut writer, caller, reference, key);
@@ -404,7 +458,7 @@ fn send_retry(
     BifResult::Value(match written {
         Some(written) => Term::tuple(vec![
             Term::static_atom("select"),
-            Term::Integer(written as i64),
+            Term::Integer(to_i64(written)),
         ]),
         None => Term::static_atom("select"),
     })
@@ -479,7 +533,14 @@ pub(super) fn sendmsg(
         flags,
     );
     let request = (key, caller, reference);
-    send_result(scheduler, state, sent, size, data_in_tail, request)
+    send_result(
+        scheduler,
+        state,
+        sent,
+        size,
+        IovTail::from(data_in_tail),
+        request,
+    )
 }
 
 /// Return the address of the `addr` of the message `message`, `None`
@@ -596,6 +657,10 @@ pub(super) fn sendmmsg(
 /// `essio_sendmmsg` does on a host without `sendmmsg(2)`
 /// (`unix_socket_syncio.c:4526-4537`).
 #[cfg(not(target_os = "linux"))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "same signature as the Linux variant, which sends and can fail"
+)]
 fn send_messages(
     _scheduler: &mut Scheduler,
     _socket: (Reference, &Mutex<SocketState>),
@@ -683,7 +748,14 @@ fn send_messages(
             }
             Err(failure) if written.is_empty() => {
                 let request = (key, caller, reference);
-                return send_result(scheduler, state, Err(failure), 0, false, request);
+                return send_result(
+                    scheduler,
+                    state,
+                    Err(failure),
+                    0,
+                    IovTail::from(false),
+                    request,
+                );
             }
             Err(_) => break,
         }
@@ -699,8 +771,8 @@ fn send_messages(
         })
         .map(|(index, (sent, _))| {
             Term::tuple(vec![
-                Term::Integer(index as i64),
-                Term::Integer(*sent as i64),
+                Term::Integer(to_i64(index)),
+                Term::Integer(to_i64(*sent)),
             ])
         })
         .collect();
@@ -788,6 +860,10 @@ pub(super) fn recvmmsg(
 /// `essio_recvmmsg` does on a host without `recvmmsg(2)`
 /// (`unix_socket_syncio.c:4297-4309`).
 #[cfg(not(target_os = "linux"))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "same signature as the Linux variant, which receives and can fail"
+)]
 fn receive_messages(
     _scheduler: &mut Scheduler,
     _request: ReadRequest,
@@ -845,7 +921,7 @@ fn receive_messages(
     let control_size = control_buffer_size(&state, control_size);
     state.counters.read_tries += 1;
     let mut received = Vec::new();
-    for _ in 0..(count as usize).min(MMSG_MAX) {
+    for _ in 0..usize::try_from(count).unwrap_or(usize::MAX).min(MMSG_MAX) {
         let mut buffer = vec![0; size];
         let mut control = vec![0; control_size];
         match recv_message(&state, &mut buffer, &mut control, flags) {
@@ -863,7 +939,7 @@ fn receive_messages(
                     scheduler,
                     state,
                     &failure.into(),
-                    zero,
+                    RecvRef::from(zero),
                     key,
                     caller,
                     reference,
@@ -873,10 +949,10 @@ fn receive_messages(
         }
     }
     let counters = &mut state.counters;
-    counters.read_pkg += received.len() as u64;
+    counters.read_pkg += to_u64(received.len());
     for (buffer, ..) in &received {
-        counters.read_byte += buffer.len() as u64;
-        counters.read_pkg_max = counters.read_pkg_max.max(buffer.len() as u64);
+        counters.read_byte += to_u64(buffer.len());
+        counters.read_pkg_max = counters.read_pkg_max.max(to_u64(buffer.len()));
     }
     let mut messages = Vec::new();
     for (buffer, control, from, message_flags) in received {
@@ -1080,11 +1156,19 @@ pub(super) fn recv(
         // unix_socket_syncio.c:10153).
         Err(failure) => {
             state.recv_count_done = 0;
-            return recv_fail(scheduler, state, &failure, zero, key, caller, reference);
+            return recv_fail(
+                scheduler,
+                state,
+                &failure,
+                RecvRef::from(zero),
+                key,
+                caller,
+                reference,
+            );
         }
     };
     buffer.truncate(read);
-    let length = read as u64;
+    let length = to_u64(read);
     state.counters.read_byte += length;
     state.counters.read_pkg_max_count += length;
     if read == buffer_size && size == 0 && stream {
@@ -1200,13 +1284,21 @@ pub(super) fn recvfrom(
         // unix_socket_syncio.c:10153).
         Err(failure) => {
             state.recv_count_done = 0;
-            return recv_fail(scheduler, state, &failure, zero, key, caller, reference);
+            return recv_fail(
+                scheduler,
+                state,
+                &failure,
+                RecvRef::from(zero),
+                key,
+                caller,
+                reference,
+            );
         }
     };
     // A read ends the buffers of `rNum` (unix_socket_syncio.c:3948).
     state.recv_count_done = 0;
     buffer.truncate(read);
-    let length = read as u64;
+    let length = to_u64(read);
     let counters = &mut state.counters;
     counters.read_pkg += 1;
     counters.read_byte += length;
@@ -1325,13 +1417,21 @@ pub(super) fn recvmsg(
         Ok(received) => received,
         Err(failure) => {
             state.recv_count_done = 0;
-            return recv_fail(scheduler, state, &failure, zero, key, caller, reference);
+            return recv_fail(
+                scheduler,
+                state,
+                &failure,
+                RecvRef::from(zero),
+                key,
+                caller,
+                reference,
+            );
         }
     };
     // A read ends the buffers of `rNum` (unix_socket_syncio.c:4082).
     state.recv_count_done = 0;
     buffer.truncate(read);
-    let length = read as u64;
+    let length = to_u64(read);
     let counters = &mut state.counters;
     counters.read_pkg += 1;
     counters.read_byte += length;
@@ -1532,7 +1632,7 @@ fn recv_fail(
     scheduler: &mut Scheduler,
     mut state: MutexGuard<'_, SocketState>,
     failure: &io::Error,
-    zero: bool,
+    recv_ref: RecvRef,
     key: Reference,
     caller: ProcessId,
     reference: &Term,
@@ -1543,7 +1643,7 @@ fn recv_fail(
         drop(state);
         return errno_error(scheduler, failure);
     }
-    if zero {
+    if recv_ref == RecvRef::Zero {
         state.reader = None;
         return Ok(BifResult::Value(Term::static_atom("timeout")));
     }

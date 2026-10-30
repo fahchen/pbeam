@@ -19,7 +19,7 @@
 //! ([`Scheduler::persistent_term_progress`]).
 
 use super::BifResult::Value;
-use super::*;
+use super::{BeamError, BifContext, BifResult, Map, Scheduler, Term, denial, to_i64, to_usize};
 use crate::runtime::capability::{CapabilityKind, Operation};
 use crate::runtime::persistent_term::Change;
 use std::sync::{Arc, atomic::Ordering};
@@ -48,21 +48,26 @@ pub(super) fn resume(
     Some(match (function, arguments) {
         ("get_all_wait", []) => get_all_start(scheduler),
         ("get_all_trap", [all, Term::Integer(entries)]) => {
-            chunk_trap(scheduler, "get_all_trap", all.clone(), *entries as usize)
+            chunk_trap(scheduler, "get_all_trap", all.clone(), to_usize(*entries))
         }
         ("info_wait", []) => info_start(scheduler),
         ("info_trap", [info, Term::Integer(entries)]) => {
-            chunk_trap(scheduler, "info_trap", info.clone(), *entries as usize)
+            chunk_trap(scheduler, "info_trap", info.clone(), to_usize(*entries))
         }
         ("put_wait", [key, value, Term::Atom(new)]) => {
-            put_start(scheduler, key, value, new.is_static("true"))
+            let mode = if new.is_static("true") {
+                PutMode::PutNew
+            } else {
+                PutMode::Put
+            };
+            put_start(scheduler, key, value, mode)
         }
         ("put_common_trap", [key, value, Term::Integer(copied)]) => {
-            put_trap(scheduler, key, value, *copied as usize)
+            put_trap(scheduler, key, value, to_usize(*copied))
         }
         ("erase_wait", [key]) => erase_start(scheduler, key),
         ("erase_trap", [key, Term::Integer(first), Term::Integer(second)]) => {
-            erase_trap(scheduler, key, *first as usize, *second as usize)
+            erase_trap(scheduler, key, to_usize(*first), to_usize(*second))
         }
         ("thread_progress", [value]) => thread_progress(value.clone()),
         _ => return None,
@@ -185,8 +190,8 @@ fn info_start(scheduler: &mut Scheduler) -> BifResult {
     }
     let (count, memory) = scheduler.node().persistent_terms().terms.info();
     let pairs = vec![
-        (Term::static_atom("count"), Term::Integer(count as i64)),
-        (Term::static_atom("memory"), Term::Integer(memory as i64)),
+        (Term::static_atom("count"), Term::Integer(to_i64(count))),
+        (Term::static_atom("memory"), Term::Integer(to_i64(memory))),
     ];
     // ponytail: each key is a static atom, so `from_pairs` cannot fail.
     let map = Map::from_pairs(pairs, &scheduler.atoms).expect("static atom keys fit each map form");
@@ -277,10 +282,12 @@ fn chunk_trap(
         return BifResult::TrapBif {
             module: "persistent_term",
             function,
-            arguments: vec![all, Term::Integer((entries - max_iter) as i64)],
+            arguments: vec![all, Term::Integer(to_i64(entries - max_iter))],
         };
     }
-    process.bump_reductions(entries as i32);
+    process.bump_reductions(
+        i32::try_from(entries).expect("the entries are at most the reductions left"),
+    );
     release(scheduler);
     Value(all)
 }
@@ -370,13 +377,6 @@ fn erase_trap(
     mut first: usize,
     mut second: usize,
 ) -> BifResult {
-    /// `ITERATIONS_PER_RED` of `persistent_term_erase_1`
-    /// (`erl_bif_persistent.c:419`).
-    const ITERATIONS_PER_RED: usize = 32;
-    let process = scheduler.current_process_mut();
-    // `MAX(1, max_iterations)` of a `long` that a negative budget makes
-    // negative (`erl_bif_persistent.c:284`, `429-430`).
-    let limit = (ITERATIONS_PER_RED * process.bif_reductions_or_zero()).max(1);
     // Use at most `limit` slots of one copy in this call, and return true
     // when the copy does not end.
     fn step(remaining: &mut usize, limit: usize, copied: &mut usize) -> bool {
@@ -388,6 +388,14 @@ fn erase_trap(
         *copied += done;
         *remaining > 0
     }
+
+    /// `ITERATIONS_PER_RED` of `persistent_term_erase_1`
+    /// (`erl_bif_persistent.c:419`).
+    const ITERATIONS_PER_RED: usize = 32;
+    let process = scheduler.current_process_mut();
+    // `MAX(1, max_iterations)` of a `long` that a negative budget makes
+    // negative (`erl_bif_persistent.c:284`, `429-430`).
+    let limit = (ITERATIONS_PER_RED * process.bif_reductions_or_zero()).max(1);
     let mut copied = 0;
     let trapped = step(&mut first, limit, &mut copied) || step(&mut second, limit, &mut copied);
     scheduler.node().persistent_terms().copy_step(limit);
@@ -399,12 +407,14 @@ fn erase_trap(
             function: "erase_trap",
             arguments: vec![
                 key.clone(),
-                Term::Integer(first as i64),
-                Term::Integer(second as i64),
+                Term::Integer(to_i64(first)),
+                Term::Integer(to_i64(second)),
             ],
         };
     }
-    process.bump_reductions((copied / ITERATIONS_PER_RED) as i32);
+    process.bump_reductions(
+        i32::try_from(copied / ITERATIONS_PER_RED).expect("the copy is at most the budget"),
+    );
     schedule(
         scheduler,
         Change::Erase(key.clone()),
@@ -443,6 +453,16 @@ fn thread_progress(value: Term) -> BifResult {
     Value(value)
 }
 
+/// The BIF that a `persistent_term` put serves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PutMode {
+    /// `persistent_term:put/2`.
+    Put,
+    /// `persistent_term:put_new/2`, which raises `badarg` for a key that the
+    /// table holds.
+    PutNew,
+}
+
 /// Run `persistent_term:put/2`, or `persistent_term:put_new/2` when `new`
 /// is true: store `value` for `key`, as ERTS `put_common` does
 /// (`erl_bif_persistent.c:314-322`, `642-784`). The call first
@@ -460,7 +480,7 @@ fn thread_progress(value: Term) -> BifResult {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = put(&mut context, &Term::static_atom("key"), &Term::Integer(1), false)?;
+/// let result = put(&mut context, &Term::static_atom("key"), &Term::Integer(1), PutMode::Put)?;
 /// assert!(matches!(result, BifResult::TrapBif { function: "thread_progress", .. }));
 /// ```
 ///
@@ -472,7 +492,7 @@ pub(super) fn put(
     context: &mut BifContext<'_>,
     key: &Term,
     value: &Term,
-    new: bool,
+    mode: PutMode,
 ) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
     let check = denial(
@@ -484,12 +504,12 @@ pub(super) fn put(
     if let Some(denied) = check? {
         return Ok(denied);
     }
-    Ok(put_start(scheduler, key, value, new))
+    Ok(put_start(scheduler, key, value, mode))
 }
 
 /// Seize the update permission and start `put/2` of `key` and `value`.
-fn put_start(scheduler: &mut Scheduler, key: &Term, value: &Term, new: bool) -> BifResult {
-    let new_atom = Term::static_atom(if new { "true" } else { "false" });
+fn put_start(scheduler: &mut Scheduler, key: &Term, value: &Term, mode: PutMode) -> BifResult {
+    let new_atom = Term::from(mode == PutMode::PutNew);
     let wait = vec![key.clone(), value.clone(), new_atom];
     if let Some(wait) = seize(scheduler, "put_wait", wait) {
         return wait;
@@ -506,7 +526,7 @@ fn put_start(scheduler: &mut Scheduler, key: &Term, value: &Term, new: bool) -> 
             release(scheduler);
             Value(Term::static_atom("ok"))
         }
-        Some(_) if new && stored => {
+        Some(_) if mode == PutMode::PutNew && stored => {
             release(scheduler);
             BifResult::badarg()
         }
@@ -559,11 +579,13 @@ fn put_trap(scheduler: &mut Scheduler, key: &Term, value: &Term, copied: usize) 
             arguments: vec![
                 key.clone(),
                 value.clone(),
-                Term::Integer((copied - budget) as i64),
+                Term::Integer(to_i64(copied - budget)),
             ],
         };
     }
-    process.bump_reductions((copied / ITERATIONS_PER_RED) as i32);
+    process.bump_reductions(
+        i32::try_from(copied / ITERATIONS_PER_RED).expect("the copy is at most the budget"),
+    );
     schedule(
         scheduler,
         Change::Put(key.clone(), value.clone()),

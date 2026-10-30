@@ -1,13 +1,17 @@
 //! `erlang:processes/0` and `process_info(Pid, group_leader)`, which the
 //! `application_master` of `kernel` calls when the kernel application stops
 //! (application_master.erl:439-453).
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 #[path = "../common/mod.rs"]
 mod common;
 
 use std::process::Command;
 
 use common::pinned_beam;
-use pbeam_runtime::{BeamProgram, HostTerm, Term};
+use pbeam_runtime::{BeamProgram, HostTerm, RootAuthority, Term};
 
 const PROCESSES_PROBE: &[u8] = include_bytes!("../../fixtures/processes/processes_probe.beam");
 const PROCESSES_POLICY: &[u8] = include_bytes!("../../fixtures/processes/processes_policy.beam");
@@ -68,18 +72,28 @@ fn keeps_the_policy_process_out_of_the_list_of_a_runtime_process() {
     // a policy has only the root process.
     let erlang = pinned_beam("erlang");
     let program = BeamProgram::load(&[&erlang, PROCESSES_PROBE, PROCESSES_POLICY]).unwrap();
-    let alone = |policy: Option<(&str, bool)>| {
+    let alone = |policy: Option<(&str, RootAuthority)>| {
         let result = match policy {
-            Some((policy, boot)) => {
-                program.execute_with_policy_module("processes_probe", "alone", &[], policy, boot)
-            }
+            Some((policy, authority)) => program.execute_with_policy_module(
+                "processes_probe",
+                "alone",
+                &[],
+                policy,
+                authority,
+            ),
             None => program.execute("processes_probe", "alone", &[]),
         };
         result.unwrap().term
     };
     let atom = |name| Term::Atom(program.atom(name).unwrap());
-    assert_eq!(alone(Some(("processes_policy", false))), atom("true"));
-    assert_eq!(alone(Some(("processes_policy", true))), atom("false"));
+    assert_eq!(
+        alone(Some(("processes_policy", RootAuthority::Policy))),
+        atom("true")
+    );
+    assert_eq!(
+        alone(Some(("processes_policy", RootAuthority::Boot))),
+        atom("false")
+    );
     assert_eq!(alone(None), atom("true"));
 }
 

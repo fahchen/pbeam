@@ -317,11 +317,13 @@ impl Code {
     /// assert!(compile(b"(a)", 0, None, None)?.names().is_empty());
     /// ```
     pub(super) fn names(&self) -> Vec<(u32, Vec<u8>)> {
-        let count = self.name_count() as usize;
+        let name_count = self.name_count();
+        let count = usize::try_from(name_count).expect("a u32 fits in usize");
         if count == 0 {
             return Vec::new();
         }
-        let entry_size = self.info(INFO_NAMEENTRYSIZE) as usize;
+        let entry_size_u32 = self.info(INFO_NAMEENTRYSIZE);
+        let entry_size = usize::try_from(entry_size_u32).expect("a u32 fits in usize");
         let mut table = vec![0u8; count * entry_size];
         let mut copied_count = 0u32;
         let mut copied_entry_size = 0u32;
@@ -340,7 +342,7 @@ impl Code {
         assert_eq!(result, 0, "PCRE2 name table copy failed");
         assert_eq!(
             (copied_count, copied_entry_size),
-            (count as u32, entry_size as u32)
+            (name_count, entry_size_u32)
         );
         table
             .chunks_exact(entry_size)
@@ -589,7 +591,7 @@ impl MatchData {
         unsafe { pcre2_set_restart_data_8(data.as_ptr(), &raw mut *restart) };
         Self {
             data,
-            pairs: pairs as usize,
+            pairs: usize::try_from(pairs).expect("a u32 fits in usize"),
             restart,
         }
     }
@@ -760,6 +762,11 @@ impl MatchContext {
         // only write a limit field of the context.
         let context = unsafe { pcre2_match_context_create_8(std::ptr::null_mut()) };
         let context = NonNull::new(context).expect("PCRE2 match context allocation failed");
+        // SAFETY: `context` is non-null and came from
+        // `pcre2_match_context_create_8` above. Nothing else owns or reads
+        // it yet, so the set functions write a limit field of a valid
+        // context. Each set function only fails with a return code, which
+        // cannot happen for a valid context.
         unsafe {
             if let Some(limit) = match_limit {
                 pcre2_set_match_limit_8(context.as_ptr(), limit);
@@ -867,6 +874,10 @@ pub(super) fn is_utf8_error(rc: c_int) -> bool {
 /// # Errors
 ///
 /// Return the PCRE2 message and offset of a pattern that does not compile.
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "a failed PCRE2 allocation is out of memory, not a compile error of the pattern"
+)]
 pub(super) fn compile(
     pattern: &[u8],
     options: u32,

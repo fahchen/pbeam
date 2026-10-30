@@ -2,6 +2,7 @@ use super::*;
 use crate::runtime::capability::{AllowAll, Policy};
 use crate::runtime::interpreter::native::{call, tests::instance};
 use crate::runtime::process::tests::frame;
+use crate::term::AtomTable;
 use crate::term::Reference;
 use num_bigint::BigInt;
 use std::sync::Arc;
@@ -9,9 +10,7 @@ use std::sync::Arc;
 /// Return a scheduler whose current process is a new root process.
 fn scheduler() -> Scheduler {
     let mut scheduler = Scheduler::new(AtomTable::new());
-    scheduler
-        .start(frame(), vec![], AllowAll.initial())
-        .unwrap();
+    scheduler.start(frame(), vec![], AllowAll.initial());
     scheduler.schedule_next().unwrap();
     scheduler
 }
@@ -63,7 +62,7 @@ fn calls_each_binding_of_the_library_through_the_registry() {
         ("skip", vec![buffer.clone(), Term::Integer(1)]),
         ("find_byte_index", vec![buffer.clone(), Term::Integer(10)]),
         ("try_lock", vec![buffer.clone()]),
-        ("unlock", vec![buffer.clone()]),
+        ("unlock", vec![buffer]),
     ];
     for (name, arguments) in calls {
         let result = call(&mut scheduler, &instance("prim_buffer"), name, &arguments);
@@ -91,14 +90,14 @@ fn raises_badarg_for_a_term_that_is_not_a_buffer_resource() {
         ("size", vec![Term::nil()]),
         ("peek_head", vec![reference.clone()]),
         ("copying_read", vec![Term::nil(), Term::Integer(1)]),
-        ("write", vec![reference.clone(), iovec.clone()]),
+        ("write", vec![reference.clone(), iovec]),
         ("skip", vec![Term::nil(), Term::Integer(1)]),
         (
             "find_byte_index",
             vec![reference.clone(), Term::Integer(10)],
         ),
         ("try_lock", vec![Term::nil()]),
-        ("unlock", vec![reference.clone()]),
+        ("unlock", vec![reference]),
     ] {
         let result = call(&mut scheduler, &instance("prim_buffer"), name, &arguments);
         assert!(

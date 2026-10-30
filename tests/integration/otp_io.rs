@@ -1,3 +1,9 @@
+//! Checks that calls into each pinned OTP IO module resolve on PBeam.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};
@@ -44,7 +50,7 @@ fn resolves_calls_into_each_pinned_otp_io_module() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stdout.is_empty());
+    assert_eq!(reference.stdout, <[u8; 0]>::default());
     assert_eq!(reference.stderr, b"{error,enotsup}\n");
 
     // `group:whereis_shell/0` resolves inside the loaded `group` module,
@@ -90,7 +96,7 @@ fn resolves_calls_into_each_pinned_otp_io_module() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stdout.is_empty());
+    assert_eq!(reference.stdout, <[u8; 0]>::default());
     assert_eq!(
         reference.stderr,
         b"[{error,badarg,[{erlang,process_info,[undefined,dictionary]},\

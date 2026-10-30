@@ -17,6 +17,7 @@ use super::Term;
 /// last cell of a proper list is `[]`. The term module drops a chain of
 /// cells with a work stack (`Term::take_nested`), so the drop of a long
 /// list does not recurse.
+#[derive(Debug)]
 pub struct Cons {
     /// The first element of the list.
     pub(super) head: Term,
@@ -30,7 +31,7 @@ pub struct Cons {
 /// `Term` has a `Drop`, so the drop cannot move the `Arc` out of the term,
 /// and an empty reference needs no placeholder allocation. Each other
 /// reader finds a cell.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ConsRef(Option<Arc<Cons>>);
 
 impl ConsRef {
@@ -83,10 +84,9 @@ impl ConsRef {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let cell = ConsRef::new(Term::Integer(1), Term::nil());
-    /// assert_eq!(cell.allocated_bytes(), std::mem::size_of::<Cons>());
+    /// assert_eq!(ConsRef::allocated_bytes(), std::mem::size_of::<Cons>());
     /// ```
-    pub(super) fn allocated_bytes(&self) -> usize {
+    pub(super) fn allocated_bytes() -> usize {
         std::mem::size_of::<Cons>()
     }
 
@@ -111,7 +111,7 @@ impl ConsRef {
     /// assert_ne!(cell.identity(), ConsRef::new(Term::Integer(1), Term::nil()).identity());
     /// ```
     pub(super) fn identity(&self) -> usize {
-        Arc::as_ptr(self.arc()) as usize
+        Arc::as_ptr(self.arc()).addr()
     }
 }
 
@@ -127,7 +127,7 @@ impl Deref for ConsRef {
 /// follows the tail of each cons cell. [`ListIter::rest`] gives the part
 /// of the list that the iterator did not read: after the last element, it
 /// is `[]` for a proper list and the tail of an improper list.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ListIter<'a> {
     /// The cons cell of the next element, or the term after the last
     /// element.

@@ -45,10 +45,11 @@ impl NodeResources {
             .kinds
             .lock()
             .expect("the resource kinds are not poisoned");
-        let kind = kinds
-            .entry(TypeId::of::<T>())
-            .or_insert_with(|| Arc::new(Mutex::new(T::default())))
-            .clone();
+        let kind = Arc::clone(
+            kinds
+                .entry(TypeId::of::<T>())
+                .or_insert_with(|| Arc::new(Mutex::new(T::default()))),
+        );
         kind.downcast()
             .expect("the value of the key has the type of the key")
     }

@@ -1,23 +1,38 @@
 //! Bodies of the `ets` BIFs that do not fit on one table line.
 
 use super::BifResult::Value;
-use super::*;
+use super::{AtomTable, BeamError, BifContext, BifResult, ProcessId, Term, error};
+use super::{to_i64, to_u64, to_usize};
 use crate::runtime::ets::pattern::{MatchSpec, SpecError};
 use crate::runtime::ets::{
-    Access, Busy, EtsTables, ITERATIONS_PER_RED, Lacking, Table, TableType, Transfer,
+    Access, Busy, EtsTables, ITERATIONS_PER_RED, InsertKind, Lacking, Table, TableOptions,
+    TableType, Transfer,
 };
-use crate::term::Reference;
+use crate::term::{Direction, Reference};
 use num_bigint::BigInt;
 use std::cmp::Ordering;
 use std::sync::Arc;
 
 mod tree;
 
+pub(super) use tree::SelectOrder;
+
 /// The fewest and the most locks that the hidden option
 /// `{write_concurrency, {debug_hash_fixed_number_of_locks, N}}` accepts
 /// (`DB_WRITE_CONCURRENCY_MIN_LOCKS` and `DB_WRITE_CONCURRENCY_MAX_LOCKS`,
 /// `erl_db.c:65-66`).
 const LOCKS: std::ops::RangeInclusive<i64> = 1..=32768;
+
+/// The key position as the C `int` of ERTS keeps it, which is the low 32
+/// bits of the number (`erl_db_util.h:346`, `erl_db.c:2597-2710`).
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "the C `int` of ERTS keeps the low 32 bits of the number"
+)]
+fn c_int(value: i64) -> i32 {
+    value as i32
+}
 
 /// Run up to `units` units of the steps of the list insert that took the
 /// table `table`, as `ets_insert_2_list_continue` runs the steps of a
@@ -32,7 +47,7 @@ fn step_inserting(
     table: &Term,
     units: i64,
     mine: Option<ProcessId>,
-) -> Result<(i64, Option<Term>), BeamError> {
+) -> (i64, Option<Term>) {
     let scheduler = &mut *context.scheduler;
     let ets = scheduler.ets.shared();
     // The table of the caller has the list insert that it did not finish:
@@ -43,7 +58,7 @@ fn step_inserting(
     let Some(mut inserting) = (ets.id(&scheduler.atoms, table))
         .and_then(|id| ets.busy(&scheduler.atoms, &Term::Reference(id)))
     else {
-        return Ok((0, None));
+        return (0, None);
     };
     let owner = inserting
         .busy
@@ -54,7 +69,7 @@ fn step_inserting(
     // result: a later insert of the same table takes the table after the
     // call of the earlier one returned (`erl_db.c:2223-2253`).
     if mine.is_some_and(|caller| owner != caller) {
-        return Ok((0, None));
+        return (0, None);
     }
     let (used, result) = inserting.step_busy(&scheduler.atoms, units);
     if let Some(value) = result {
@@ -69,7 +84,7 @@ fn step_inserting(
             ets.put_result(owner, value);
         }
     }
-    Ok((used, None))
+    (used, None)
 }
 
 /// Return the result of a BIF that could not take its table: `badarg`, or
@@ -158,6 +173,10 @@ fn denied(cause: &'static str) -> BifResult {
 /// # Errors
 ///
 /// Return a runtime error for the table type `ordered_set`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "option table of `ets:new/2`: one arm for each table option, as the option loop of `ets_new_2` in `erl_db.c` (2585-2658); the arms share the state of the loop"
+)]
 pub(super) fn new(
     context: &mut BifContext<'_>,
     name: &Term,
@@ -211,7 +230,7 @@ pub(super) fn new(
                 [Term::Atom(key), value] => match (context.scheduler.atoms.name_of(key), value) {
                     ("keypos", value) => match value.small_integer() {
                         // The C `int` keeps the low 32 bits (`erl_db_util.h:346`).
-                        Some(value) if value > 0 => keypos = value as i32,
+                        Some(value) if value > 0 => keypos = c_int(value),
                         _ => return Ok(BifResult::badarg()),
                     },
                     ("write_concurrency", Term::Atom(value))
@@ -292,20 +311,20 @@ pub(super) fn new(
     // `auto` table under contention.
     if fine && table_type != TableType::OrderedSet {
         made.set_locks(match &concurrency {
-            Term::Tuple(locks) => locks[1].small_integer().unwrap_or(64) as usize,
+            Term::Tuple(locks) => to_usize(locks[1].small_integer().unwrap_or(64)),
             _ => 64,
         });
     }
-    made.set_options(
-        if fine {
+    made.set_options(TableOptions {
+        write_concurrency: if fine {
             concurrency
         } else {
             Term::static_atom("false")
         },
         read_concurrency,
-        decentralized,
+        decentralized_counters: decentralized,
         compressed,
-    );
+    });
     let name_text = name.map(|name| context.scheduler.atoms.name_of(name));
     let mut ets = context.scheduler.ets.exclusive();
     // The name check and the create take one lock, so no other scheduler
@@ -360,7 +379,7 @@ pub(super) fn insert(
     table: &Term,
     objects: &Term,
 ) -> Result<BifResult, BeamError> {
-    insert_objects(context, table, objects, false)
+    insert_objects(context, table, objects, InsertKind::Insert)
 }
 
 /// Run `ets:insert_new(Table, Objects)`, as ERTS `ets_insert_new_2`
@@ -392,15 +411,15 @@ pub(super) fn insert_new(
     table: &Term,
     objects: &Term,
 ) -> Result<BifResult, BeamError> {
-    insert_objects(context, table, objects, true)
+    insert_objects(context, table, objects, InsertKind::InsertNew)
 }
 
-/// Run [`insert`], or [`insert_new`] when `new` is true.
+/// Run [`insert`], or [`insert_new`] when `kind` is [`InsertKind::InsertNew`].
 fn insert_objects(
     context: &mut BifContext<'_>,
     table: &Term,
     objects: &Term,
-    new: bool,
+    kind: InsertKind,
 ) -> Result<BifResult, BeamError> {
     // A cons cell with a tail that is not `[]`: at least two objects, or an
     // improper list.
@@ -417,7 +436,10 @@ fn insert_objects(
             done: 0,
             bag: bag.then(Term::nil),
             check: Check::Rest(objects.clone()),
-            new: if new { New::Unlocked } else { New::No },
+            new: match kind {
+                InsertKind::Insert => New::No,
+                InsertKind::InsertNew => New::Unlocked,
+            },
             refused: None,
         };
         return insert_list(context, id, objects, keypos, state);
@@ -435,7 +457,10 @@ fn insert_objects(
             return Ok(retry(
                 context,
                 lacking,
-                if new { "insert_new" } else { "insert" },
+                match kind {
+                    InsertKind::Insert => "insert",
+                    InsertKind::InsertNew => "insert_new",
+                },
                 vec![table.clone(), objects.clone()],
             ));
         }
@@ -448,10 +473,12 @@ fn insert_objects(
     let Some(tuples) = valid_objects(objects, keypos) else {
         return Ok(BifResult::badarg());
     };
-    if new && first_held(&context.scheduler.atoms, &table, &tuples, keypos)?.is_some() {
+    if kind == InsertKind::InsertNew
+        && first_held(&context.scheduler.atoms, &table, &tuples, keypos)?.is_some()
+    {
         return Ok(Value(Term::static_atom("false")));
     }
-    let compared = put_objects(&context.scheduler.atoms, &mut table, &tuples, keypos, new)?;
+    let compared = put_objects(&context.scheduler.atoms, &mut table, &tuples, keypos, kind)?;
     drop(table);
     drop(ets);
     let compared: usize = compared.iter().sum();
@@ -546,6 +573,10 @@ fn insert_objects(
 ///
 /// Return a runtime error for a table with the key position 0: ERTS aborts
 /// the emulator there (`Invalid tag in make_internal_hash`).
+#[expect(
+    clippy::too_many_lines,
+    reason = "mirrors the list insert of `ets_insert_2` in `erl_db.c` (1927-2310) step by step, in one labeled block with one exit for each yield of the original; a split would break the line-by-line mapping"
+)]
 pub(super) fn insert_list(
     context: &mut BifContext<'_>,
     id: Reference,
@@ -602,7 +633,7 @@ pub(super) fn insert_list(
     let caller = process.id;
     // A `long` count, and YCF yields when it is 0 or less (`erl_db.c:2258`,
     // `ycf_yield_fun.c:592-610`): a negative budget does what 0 does.
-    let budget = ITERATIONS_PER_RED * process.bif_reductions_or_zero() as i64;
+    let budget = ITERATIONS_PER_RED * to_i64(process.bif_reductions_or_zero());
     let mut units = Units { left: budget };
     // The tuples of the checked list, for the insert. The walk is part of
     // the units of the insert.
@@ -649,7 +680,7 @@ pub(super) fn insert_list(
         if matches!(check, Check::Done(_))
             && bag.is_none()
             && done == count
-            && count as i64 <= units.left
+            && to_i64(count) <= units.left
             && !locked
         {
             // A second call completes the list insert that holds the
@@ -673,15 +704,16 @@ pub(super) fn insert_list(
             let tuples = tuples();
             if !matches!(new, New::No) {
                 let held = first_held(&context.scheduler.atoms, &table, &tuples, keypos)?;
-                units.left -= held.unwrap_or(count) as i64;
+                units.left -= to_i64(held.unwrap_or(count));
                 if held.is_some() {
                     break 'work Some(Value(Term::static_atom("false")));
                 }
             }
             // The list call does its own membership walk and passes `false`
             // to `db_put` (`erl_db.c:1858`, `1943`).
-            put_objects(&context.scheduler.atoms, &mut table, &tuples, keypos, false)?;
-            units.left -= 2 * count as i64;
+            let kind = InsertKind::Insert;
+            put_objects(&context.scheduler.atoms, &mut table, &tuples, keypos, kind)?;
+            units.left -= 2 * to_i64(count);
             break 'work Some(Value(Term::static_atom("true")));
         }
         let mut took = false;
@@ -712,14 +744,21 @@ pub(super) fn insert_list(
                 }
                 Ok(mut taken_table) => {
                     let tuples = tuples();
-                    let walk = matches!(new, New::Unlocked);
-                    let bif = if walk { "insert_new/2" } else { "insert/2" };
+                    let kind = if matches!(new, New::Unlocked) {
+                        InsertKind::InsertNew
+                    } else {
+                        InsertKind::Insert
+                    };
+                    let bif = match kind {
+                        InsertKind::InsertNew => "insert_new/2",
+                        InsertKind::Insert => "insert/2",
+                    };
                     check_keypos(&tuples, keypos, bif)?;
                     ets.reserve_result(caller);
                     taken_table.busy = Some(Busy::new(
                         caller,
                         tuples.iter().map(|object| object.to_vec()).collect(),
-                        walk,
+                        kind,
                     ));
                     // The call keeps its own BIF: `ets:insert_new/2` marks
                     // the steps of the walk and the insert with
@@ -747,8 +786,8 @@ pub(super) fn insert_list(
             // the insert of the objects, one step for each object
             // (`erl_db.c:1927-1949`, `2091-2107`). The call traps between
             // the objects, and its next turn runs the steps that remain.
-            let (used, _) = step_inserting(&mut *context, &table, units.left, Some(caller))?;
-            done += used as usize;
+            let (used, _) = step_inserting(&mut *context, &table, units.left, Some(caller));
+            done += to_usize(used);
             units.left -= used;
             match context.scheduler.ets.shared().take_result(caller) {
                 Some(value) => break 'work Some(Value(value)),
@@ -765,12 +804,14 @@ pub(super) fn insert_list(
         ))
     };
     let process = context.scheduler.current_process_mut();
-    process.bump_reductions(((budget - units.left) / ITERATIONS_PER_RED) as i32);
+    process.bump_reductions(
+        i32::try_from((budget - units.left) / ITERATIONS_PER_RED).unwrap_or(i32::MAX),
+    );
     Ok(result.unwrap_or_else(|| {
         let mut arguments = vec![
             table,
             objects.clone(),
-            Term::Integer(done as i64),
+            Term::Integer(to_i64(done)),
             Term::Integer(i64::from(keypos)),
             // A refused insert keeps no `bag` steps, and the slot keeps the
             // cause of the refusal.
@@ -839,7 +880,7 @@ impl New {
             New::No => None,
             New::Unlocked => Some(Term::static_atom("true")),
             New::Locked { walk, found } => Some(Term::tuple(vec![
-                Term::Integer(walk as i64),
+                Term::Integer(to_i64(walk)),
                 Term::static_atom(if found { "true" } else { "false" }),
             ])),
         }
@@ -855,7 +896,7 @@ impl New {
     pub(super) fn from_term(term: &Term) -> New {
         match term {
             Term::Tuple(elements) => New::Locked {
-                walk: elements[0].small_integer().expect("a trap keeps the walk") as usize,
+                walk: to_usize(elements[0].small_integer().expect("a trap keeps the walk")),
                 found: elements[1] == Term::static_atom("true"),
             },
             _ => New::Unlocked,
@@ -891,7 +932,7 @@ impl Check {
     fn into_term(self) -> Term {
         match self {
             Check::Rest(rest) => Term::tuple(vec![rest]),
-            Check::Done(count) => Term::Integer(count as i64),
+            Check::Done(count) => Term::Integer(to_i64(count)),
         }
     }
 
@@ -906,7 +947,9 @@ impl Check {
     pub(super) fn from_term(term: &Term) -> Check {
         match term {
             Term::Tuple(elements) => Check::Rest(elements[0].clone()),
-            count => Check::Done(count.small_integer().expect("a trap keeps the count") as usize),
+            count => Check::Done(to_usize(
+                count.small_integer().expect("a trap keeps the count"),
+            )),
         }
     }
 }
@@ -934,10 +977,10 @@ impl Units {
     /// assert_eq!((done, units.left), (3, 0));
     /// ```
     fn run(&mut self, done: &mut usize, end: usize) -> bool {
-        let units = (end - *done) as i64;
+        let units = to_i64(end - *done);
         let limit = self.left.max(1);
         if units >= limit {
-            *done += limit as usize;
+            *done += to_usize(limit);
             self.left -= limit;
             return false;
         }
@@ -984,7 +1027,7 @@ impl Units {
                 break false;
             }
         };
-        *done += walked as usize;
+        *done += to_usize(walked);
         if walked >= limit {
             self.left -= limit;
             return None;
@@ -1003,7 +1046,7 @@ impl Units {
 ///
 /// ```rust,ignore
 /// let object = vec![test_atom("k")];
-/// assert_eq!(put_objects(&atoms, &mut table, &[&object], 1)?, vec![0]);
+/// assert_eq!(put_objects(&atoms, &mut table, &[&object], 1, InsertKind::Insert)?, vec![0]);
 /// assert!(table.object(&atoms, &test_atom("k")).is_some());
 /// ```
 ///
@@ -1016,14 +1059,13 @@ fn put_objects(
     table: &mut Table,
     tuples: &[&[Term]],
     keypos: i32,
-    new: bool,
+    kind: InsertKind,
 ) -> Result<Vec<usize>, BeamError> {
     check_keypos(tuples, keypos, "insert/2")?;
     let objects = tuples.iter().map(|elements| elements.to_vec()).collect();
-    Ok(if new {
-        table.insert_all_new(atoms, objects)
-    } else {
-        table.insert_all(atoms, objects)
+    Ok(match kind {
+        InsertKind::InsertNew => table.insert_all_new(atoms, objects),
+        InsertKind::Insert => table.insert_all(atoms, objects),
     })
 }
 
@@ -1036,7 +1078,7 @@ fn put_objects(
 ///
 /// ```rust,ignore
 /// let object = vec![test_atom("k")];
-/// put_objects(&atoms, &mut table, &[&object], 1)?;
+/// put_objects(&atoms, &mut table, &[&object], 1, InsertKind::Insert)?;
 /// assert_eq!(first_held(&atoms, &table, &[&[test_atom("j")], &object], 1)?, Some(2));
 /// ```
 ///
@@ -1053,7 +1095,7 @@ fn first_held(
     // The check makes the key position at least 1 for each object.
     let held = (tuples.iter()).position(|elements| {
         table
-            .object(atoms, &elements[keypos as usize - 1])
+            .object(atoms, &elements[to_usize(keypos) - 1])
             .is_some()
     });
     Ok(held.map(|index| index + 1))
@@ -1117,7 +1159,7 @@ fn valid_objects<'a>(
 /// ```
 fn valid_object(object: &Term, keypos: i32) -> Option<&[Term]> {
     match object {
-        Term::Tuple(elements) if elements.len() as u64 >= i64::from(keypos) as u64 => {
+        Term::Tuple(elements) if to_u64(elements.len()) >= i64::from(keypos).cast_unsigned() => {
             Some(elements.as_ref())
         }
         _ => None,
@@ -1190,7 +1232,7 @@ pub(super) fn lookup_element(
             },
         });
     }
-    let position = index as i32;
+    let position = c_int(index);
     if position == 0 {
         // ponytail: ERTS crashes here; see "ETS tables" in docs/erts-differences.md.
         return Err(error(format!(
@@ -1224,6 +1266,10 @@ pub(super) fn lookup_element(
 /// assert!(matches!(result, BifResult::Value(objects) if objects.proper_list().is_some_and(|objects| objects.count() == 1)));
 /// assert!(matches!(lookup(&mut context, &test_atom("missing"), &test_atom("k")), BifResult::Raise { .. }));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn lookup(
     context: &mut BifContext<'_>,
     table: &Term,
@@ -1268,6 +1314,10 @@ pub(super) fn lookup(
 /// assert!(matches!(result, BifResult::Value(value) if value == test_atom("true")));
 /// assert!(matches!(member(&mut context, &Term::Integer(1), &test_atom("k")), BifResult::Raise { .. }));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn member(
     context: &mut BifContext<'_>,
     table: &Term,
@@ -1313,6 +1363,10 @@ pub(super) fn member(
 /// assert!(matches!(result, BifResult::Value(value) if value == test_atom("true")));
 /// assert!(matches!(delete(&mut context, &Term::nil(), &test_atom("k")), BifResult::Raise { .. }));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn delete(
     context: &mut BifContext<'_>,
     table: &Term,
@@ -1354,6 +1408,10 @@ pub(super) fn delete(
 /// let result = delete_object(&mut context, &table, &Term::tuple(vec![test_atom("k")]))?;
 /// assert!(matches!(result, BifResult::Value(value) if value == test_atom("true")));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn delete_object(
     context: &mut BifContext<'_>,
     table: &Term,
@@ -1380,7 +1438,7 @@ pub(super) fn delete_object(
     let Term::Tuple(elements) = object else {
         return Ok(BifResult::badarg());
     };
-    if elements.len() < found.keypos() as usize {
+    if elements.len() < usize::try_from(found.keypos()).unwrap_or(usize::MAX) {
         return Ok(BifResult::badarg());
     }
     found.erase_object(&context.scheduler.atoms, elements);
@@ -1401,6 +1459,10 @@ pub(super) fn delete_object(
 /// let result = take(&mut context, &table, &test_atom("k"))?;
 /// assert!(matches!(result, BifResult::Value(objects) if objects.proper_list().is_some_and(|objects| objects.count() == 1)));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn take(
     context: &mut BifContext<'_>,
     table: &Term,
@@ -1516,6 +1578,10 @@ pub(super) fn delete_table(
 /// # Errors
 ///
 /// None: each outcome is a value or an exception.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn give_away(
     context: &mut BifContext<'_>,
     table: &Term,
@@ -1598,6 +1664,10 @@ pub(super) fn give_away(
 /// # Errors
 ///
 /// None: each outcome is a value or an exception.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn setopts(
     context: &mut BifContext<'_>,
     table: &Term,
@@ -1782,7 +1852,7 @@ pub(super) fn info(
     let value = match item {
         Term::Atom(atom) if atom.is_static("type") => Term::static_atom(found.table_type().name()),
         Term::Atom(atom) if atom.is_static("size") => Term::from_bigint(BigInt::from(found.size())),
-        Term::Atom(atom) if atom.is_static("memory") => Term::Integer(found.memory_words() as i64),
+        Term::Atom(atom) if atom.is_static("memory") => Term::Integer(to_i64(found.memory_words())),
         Term::Atom(atom) if atom.is_static("owner") => Term::Pid(found.owner()),
         Term::Atom(atom) if atom.is_static("heir") => {
             found.heir().map_or(Term::static_atom("none"), Term::Pid)
@@ -1794,7 +1864,7 @@ pub(super) fn info(
             found.write_concurrency().clone()
         }
         Term::Atom(atom) if atom.is_static("read_concurrency") => {
-            boolean_term(found.read_concurrency())
+            Term::from(found.read_concurrency())
         }
         Term::Atom(atom) if atom.is_static("name") => Term::Atom(
             atoms
@@ -1803,13 +1873,13 @@ pub(super) fn info(
         ),
         Term::Atom(atom) if atom.is_static("keypos") => Term::Integer(i64::from(found.keypos())),
         Term::Atom(atom) if atom.is_static("node") => Term::static_atom("nonode@nohost"),
-        Term::Atom(atom) if atom.is_static("named_table") => boolean_term(ets.named(id)),
-        Term::Atom(atom) if atom.is_static("compressed") => boolean_term(found.compressed()),
+        Term::Atom(atom) if atom.is_static("named_table") => Term::from(ets.named(id)),
+        Term::Atom(atom) if atom.is_static("compressed") => Term::from(found.compressed()),
         Term::Atom(atom) if atom.is_static("id") => Term::Reference(id),
         Term::Atom(atom) if atom.is_static("decentralized_counters") => {
-            boolean_term(found.decentralized_counters())
+            Term::from(found.decentralized_counters())
         }
-        Term::Atom(atom) if atoms.name_of(atom) == "fixed" => boolean_term(found.is_fixed()),
+        Term::Atom(atom) if atoms.name_of(atom) == "fixed" => Term::from(found.is_fixed()),
         Term::Atom(atom)
             if matches!(
                 atoms.name_of(atom),
@@ -1912,7 +1982,13 @@ pub(super) fn match_objects(
     pattern: &Term,
     limit: Option<&Term>,
 ) -> Result<BifResult, BeamError> {
-    select_objects(context, table, &match_specification(pattern), limit, false)
+    select_objects(
+        context,
+        table,
+        &match_specification(pattern),
+        limit,
+        SelectOrder::Select,
+    )
 }
 
 /// Run `ets:match_object(Table, Pattern)` or, with `Some(Limit)`,
@@ -1941,7 +2017,7 @@ pub(super) fn match_object(
         table,
         &match_object_specification(pattern),
         limit,
-        false,
+        SelectOrder::Select,
     )
 }
 
@@ -1967,9 +2043,9 @@ pub(super) fn select(
     table: &Term,
     spec: &Term,
     limit: Option<&Term>,
-    reverse: bool,
+    order: SelectOrder,
 ) -> Result<BifResult, BeamError> {
-    select_objects(context, table, spec, limit, reverse)
+    select_objects(context, table, spec, limit, order)
 }
 
 /// Run [`select`] over the match specification `spec`.
@@ -1978,12 +2054,12 @@ fn select_objects(
     table: &Term,
     spec: &Term,
     limit: Option<&Term>,
-    reverse: bool,
+    order: SelectOrder,
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
     let chunk = match limit.map(Term::small_integer) {
         None => 0,
-        Some(Some(chunk)) if chunk > 0 => chunk as usize,
+        Some(Some(chunk)) if chunk > 0 => to_usize(chunk),
         Some(_) => return Ok(BifResult::badarg()),
     };
     let reds = context
@@ -2009,11 +2085,11 @@ fn select_objects(
         return Ok(BifResult::badarg());
     };
     if table.table_type() == TableType::OrderedSet {
-        let chunk = chunk as i64;
-        let turn = tree::first_turn(atoms, &table, &compiled, chunk, reverse)?;
+        let chunk = to_i64(chunk);
+        let turn = tree::first_turn(atoms, &table, &compiled, chunk, order)?;
         drop(table);
         drop(ets);
-        return tree::finish(context, name, &compiled, chunk, reverse, turn);
+        return tree::finish(context, name, &compiled, chunk, order, turn);
     }
     // A key position below 1 compares as a large unsigned number with the
     // arity of the pattern (`db_getkey`, `erl_db_util.c:3940-3960`).
@@ -2080,10 +2156,10 @@ fn select_trap_arguments(id: Reference, spec: &Term, chunk: usize) -> Vec<Term> 
         Term::Reference(id),
         spec.clone(),
         Term::Integer(0),
-        Term::Integer(chunk as i64),
+        Term::Integer(to_i64(chunk)),
         Term::nil(),
         Term::Integer(0),
-        Term::Integer(u64::MAX as i64),
+        Term::Integer(u64::MAX.cast_signed()),
     ]
 }
 
@@ -2128,11 +2204,11 @@ pub(super) fn match_trap(
             let arguments = vec![
                 Term::Reference(id),
                 spec.clone(),
-                Term::Integer(bucket as i64),
-                Term::Integer(state.chunk as i64),
+                Term::Integer(to_i64(bucket)),
+                Term::Integer(to_i64(state.chunk)),
                 state.matches.clone(),
-                Term::Integer(state.got as i64),
-                Term::Integer(state.writes as i64),
+                Term::Integer(to_i64(state.got)),
+                Term::Integer(state.writes.cast_signed()),
             ];
             return Ok(retry(context, lacking, "select_trap", arguments));
         }
@@ -2236,11 +2312,11 @@ pub(super) fn select_continue(
             return Ok(BifResult::badarg());
         };
         let compiled = compiled.clone();
-        let (chunk, reverse) = (state.chunk, state.reverse);
+        let (chunk, order) = (state.chunk, state.order);
         let turn = tree::next_turn(atoms, &found, &compiled, state)?;
         drop(found);
         drop(ets);
-        return tree::finish(context, table, &compiled, chunk, reverse, turn);
+        return tree::finish(context, table, &compiled, chunk, order, turn);
     }
     let [_, next, chunk, program, rest, size] = elements.as_ref() else {
         return Ok(BifResult::badarg());
@@ -2260,13 +2336,13 @@ pub(super) fn select_continue(
     };
     let spec = match_specification_of(compiled);
     let compiled = compiled.clone();
-    if *next >= 0 && *next as usize >= bucket {
+    if *next >= 0 && to_usize(*next) >= bucket {
         return Ok(BifResult::badarg());
     }
     let state = MatchState {
-        chunk: *chunk as usize,
+        chunk: to_usize(*chunk),
         matches: rest.clone(),
-        got: *size as usize,
+        got: to_usize(*size),
         writes,
         resumed: true,
     };
@@ -2276,7 +2352,7 @@ pub(super) fn select_continue(
         return match_end(context, id, &compiled, state, *next, MATCH_ITERATIONS);
     }
     let table = found;
-    let mut bucket = *next as usize;
+    let mut bucket = to_usize(*next);
     let mut state = state;
     let mut iterations = MATCH_ITERATIONS;
     let end = match_walk(
@@ -2312,7 +2388,7 @@ pub(super) fn select_continue(
 pub(super) fn select_delete_trap(
     context: &mut BifContext<'_>,
     arguments: &[Term],
-    (table, last, least, program, count): (&Term, &Term, &Term, Reference, i64),
+    (table, last, lower, program, count): (&Term, &Term, &Term, Reference, i64),
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
     let reds = context
@@ -2333,8 +2409,8 @@ pub(super) fn select_delete_trap(
         .program(program)
         .cloned()
         .expect("a trapped select delete keeps its program");
-    let (last, least) = (last.clone(), least.clone());
-    let turn = tree::select_delete_next(atoms, &mut taken, &compiled, last, least, count)?;
+    let lower = lower.clone();
+    let turn = tree::select_delete_next(atoms, &mut taken, &compiled, last, lower, count)?;
     drop(taken);
     drop(ets);
     tree::delete_finish(context, table, &compiled, Some(program), turn)
@@ -2456,7 +2532,7 @@ fn match_walk(
         };
         *bucket = next;
         if state.chunk > 0 && state.got >= state.chunk {
-            break Some(*bucket as i64);
+            break Some(to_i64(*bucket));
         }
         if *iterations <= 0 {
             break None;
@@ -2493,11 +2569,11 @@ fn match_finish(
                 arguments: vec![
                     Term::Reference(id),
                     spec.clone(),
-                    Term::Integer(bucket as i64),
-                    Term::Integer(state.chunk as i64),
+                    Term::Integer(to_i64(bucket)),
+                    Term::Integer(to_i64(state.chunk)),
                     state.matches,
-                    Term::Integer(state.got as i64),
-                    Term::Integer(state.writes as i64),
+                    Term::Integer(to_i64(state.got)),
+                    Term::Integer(state.writes.cast_signed()),
                 ],
             })
         }
@@ -2556,12 +2632,12 @@ fn match_end(
     }
     if !rest.is_empty() || next >= 0 {
         let program = context.scheduler.make_magic_ref()?;
-        let size = rest.len() as i64;
+        let size = to_i64(rest.len());
         (context.scheduler.ets.exclusive()).remember_program(program, compiled.clone());
         let continuation = Term::tuple(vec![
             Term::Reference(id),
             Term::Integer(next),
-            Term::Integer(state.chunk as i64),
+            Term::Integer(to_i64(state.chunk)),
             Term::Reference(program),
             Term::list_from(rest),
             Term::Integer(size),
@@ -2610,6 +2686,10 @@ fn match_end(
 /// # Errors
 ///
 /// See [`crate::runtime::ets::EtsTables::read`] for a table that a list insert or a clear holds busy.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn safe_fixtable(
     context: &mut BifContext<'_>,
     table: &Term,
@@ -2650,12 +2730,21 @@ pub(super) fn safe_fixtable(
     Ok(Value(Term::static_atom("true")))
 }
 
+/// What a walk BIF of a table returns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum WalkResult {
+    /// The key: `ets:first/1`, `ets:last/1`, `ets:next/2`, and `ets:prev/2`.
+    Key,
+    /// `{Key, Objects}`: the `_lookup` forms.
+    KeyWithObjects,
+}
+
 /// Run one of the eight walk BIFs of a table: `ets:first/1`,
 /// `ets:last/1`, `ets:next/2`, `ets:prev/2`, and their `_lookup` forms, as
 /// `ets_first_1`, `ets_last_1`, `ets_next_2`, `ets_prev_2`, and the lookup
 /// BIFs do (`erl_db.c:1170-1350`). `args` holds the table and, for a step,
-/// the key. `backward` selects `last` or `prev`, and `lookup` the form that
-/// returns `{Key, Objects}`.
+/// the key. `direction` selects `last` or `prev` with [`Direction::Backward`],
+/// and `result` the form that returns `{Key, Objects}`.
 ///
 /// - A table that does not exist or that the caller cannot read raises
 ///   `badarg` (`erl_db.c:769-912`).
@@ -2672,15 +2761,15 @@ pub(super) fn safe_fixtable(
 /// # Examples
 ///
 /// ```rust,ignore
-/// let result = walk(&mut context, "last", vec![table], true, false)?;
+/// let result = walk(&mut context, "last", vec![table], Direction::Backward, WalkResult::Key)?;
 /// assert!(matches!(result, BifResult::Value(value) if value == Term::static_atom("$end_of_table")));
 /// ```
 pub(super) fn walk(
     context: &mut BifContext<'_>,
     name: &'static str,
     args: Vec<Term>,
-    backward: bool,
-    lookup: bool,
+    direction: Direction,
+    result: WalkResult,
 ) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
     let reds = context
@@ -2695,13 +2784,13 @@ pub(super) fn walk(
         Err(lacking) => return Ok(retry(context, lacking, name, args)),
     };
     let found = match (table.table_type(), args.get(1)) {
-        (TableType::OrderedSet, None) => table.ordered_end(!backward)?,
+        (TableType::OrderedSet, None) => table.ordered_end(direction),
         // A tree table rejects the end marker as a key
         // (`erl_db_tree.c:654-655`, `729-730`).
         (TableType::OrderedSet, Some(key)) if *key == Term::static_atom("$end_of_table") => {
             return Ok(BifResult::badarg());
         }
-        (TableType::OrderedSet, Some(key)) => table.ordered_step(atoms, key, !backward)?,
+        (TableType::OrderedSet, Some(key)) => table.ordered_step(atoms, key, direction)?,
         (_, None) => table.first_key(),
         (_, Some(key)) => match table.next_key(atoms, key) {
             Some(next) => next,
@@ -2711,7 +2800,7 @@ pub(super) fn walk(
     let Some(key) = found else {
         return Ok(Value(Term::static_atom("$end_of_table")));
     };
-    if !lookup {
+    if result == WalkResult::Key {
         return Ok(Value(key));
     }
     let objects = table
@@ -2742,6 +2831,10 @@ pub(super) fn walk(
 /// let result = update_element(&mut context, &table, &key, &Term::tuple(vec![Term::Integer(2), Term::Integer(9)]), None)?;
 /// assert!(matches!(result, BifResult::Value(value) if value == Term::static_atom("true")));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn update_element(
     context: &mut BifContext<'_>,
     table: &Term,
@@ -2772,7 +2865,12 @@ pub(super) fn update_element(
     // unsigned arity with the C `int` key position, so a negative key
     // position rejects each default (`erl_db.c:1481-1488`).
     let default_elements = match default {
-        Some(Term::Tuple(elements)) if elements.len() as u32 >= keypos as u32 => Some(elements),
+        Some(Term::Tuple(elements))
+            if u32::try_from(elements.len()).expect("a tuple arity is below 2^32")
+                >= keypos.cast_unsigned() =>
+        {
+            Some(elements)
+        }
         Some(_) => return Ok(denied("default")),
         None => None,
     };
@@ -2881,6 +2979,10 @@ fn update_specs(
 /// let result = update_counter(&mut context, &table, &key, &Term::Integer(1), None)?;
 /// assert!(matches!(result, BifResult::Value(Term::Integer(_))));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn update_counter(
     context: &mut BifContext<'_>,
     table: &Term,
@@ -2910,7 +3012,12 @@ pub(super) fn update_counter(
     // ERTS compares the unsigned arity with the C `int` key position
     // (`erl_db.c:1721-1722`).
     let default_elements = match default {
-        Some(Term::Tuple(elements)) if elements.len() as u32 >= keypos as u32 => Some(elements),
+        Some(Term::Tuple(elements))
+            if u32::try_from(elements.len()).expect("a tuple arity is below 2^32")
+                >= keypos.cast_unsigned() =>
+        {
+            Some(elements)
+        }
         Some(_) => return Ok(denied("default")),
         None => None,
     };
@@ -2942,7 +3049,7 @@ pub(super) fn update_counter(
         (None, None) => return Ok(denied("badkey")),
         (None, Some(elements)) => {
             let mut object = elements.as_ref().to_vec();
-            object[keypos as usize - 1] = key.clone();
+            object[to_usize(keypos) - 1] = key.clone();
             object
         }
     };
@@ -3055,6 +3162,10 @@ fn counter_operations<'a>(
 /// # Errors
 ///
 /// Return a runtime error for the items `binary`, `data`, and `stats`.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn info_all(context: &mut BifContext<'_>, table: &Term) -> Result<BifResult, BeamError> {
     let caller = context.scheduler.current_process_mut().id;
     let reds = context
@@ -3080,12 +3191,12 @@ pub(super) fn info_all(context: &mut BifContext<'_>, table: &Term) -> Result<Bif
         ("id", Term::Reference(id)),
         (
             "decentralized_counters",
-            boolean_term(found.decentralized_counters()),
+            Term::from(found.decentralized_counters()),
         ),
-        ("read_concurrency", boolean_term(found.read_concurrency())),
+        ("read_concurrency", Term::from(found.read_concurrency())),
         ("write_concurrency", found.write_concurrency().clone()),
-        ("compressed", boolean_term(found.compressed())),
-        ("memory", Term::Integer(found.memory_words() as i64)),
+        ("compressed", Term::from(found.compressed())),
+        ("memory", Term::Integer(to_i64(found.memory_words()))),
         ("owner", Term::Pid(found.owner())),
         (
             "heir",
@@ -3101,7 +3212,7 @@ pub(super) fn info_all(context: &mut BifContext<'_>, table: &Term) -> Result<Bif
         ),
         ("size", Term::from_bigint(BigInt::from(found.size()))),
         ("node", Term::static_atom("nonode@nohost")),
-        ("named_table", boolean_term(named)),
+        ("named_table", Term::from(named)),
         ("type", Term::static_atom(found.table_type().name())),
         ("keypos", Term::Integer(i64::from(found.keypos()))),
         ("protection", Term::static_atom(access_name(found.access()))),
@@ -3111,11 +3222,6 @@ pub(super) fn info_all(context: &mut BifContext<'_>, table: &Term) -> Result<Bif
         .map(|(item, value)| Term::tuple(vec![Term::static_atom(item), value]))
         .collect();
     Ok(Value(Term::list_from(pairs)))
-}
-
-/// Return the atom `true` or `false` for `value`.
-fn boolean_term(value: bool) -> Term {
-    Term::static_atom(if value { "true" } else { "false" })
 }
 
 /// Return the atom of the access mode, as `ets:info/2` gives it.
@@ -3142,6 +3248,10 @@ fn access_name(access: Access) -> &'static str {
 /// let result = internal_delete_all(&mut context, &table, &Term::static_atom("undefined"))?;
 /// assert!(matches!(result, BifResult::Value(Term::Integer(_))));
 /// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn internal_delete_all(
     context: &mut BifContext<'_>,
     table: &Term,
@@ -3366,7 +3476,7 @@ pub(super) fn select_count_trap(
     let Some(compiled) = compile_spec(atoms, spec)? else {
         return Ok(BifResult::badarg());
     };
-    let writes = found.writes() as i64;
+    let writes = found.writes().cast_signed();
     // The continuation keeps the table identifier, as ERTS does, so a
     // rename while the count traps does not change it.
     let id = ets
@@ -3398,7 +3508,7 @@ pub(super) fn select_count_trap(
         };
         let mut walk = None;
         match (resume, compiled.bound_key(keypos)) {
-            (Some((Term::Integer(bucket), ..)), _) => walk = Some(*bucket as usize),
+            (Some((Term::Integer(bucket), ..)), _) => walk = Some(to_usize(*bucket)),
             _ if compiled.matches_nothing(keypos) => {}
             (_, Some(key)) => {
                 if let Some(bucket) = found.key_bucket(atoms, key) {
@@ -3414,7 +3524,7 @@ pub(super) fn select_count_trap(
             read(bucket, &mut iterations);
             match found.next_bucket(bucket) {
                 Some(next) if iterations <= 0 => {
-                    trap = Some((Term::Integer(next as i64), Term::Nil))
+                    trap = Some((Term::Integer(to_i64(next)), Term::Nil));
                 }
                 next => walk = next,
             }
@@ -3532,7 +3642,7 @@ pub(super) fn select_replace_trap(
     let Some(compiled) = compile_spec(atoms, spec)? else {
         return Ok(BifResult::badarg());
     };
-    if resume.is_some_and(|(_, _, _, before)| before != taken.writes() as i64) {
+    if resume.is_some_and(|(_, _, _, before)| before != taken.writes().cast_signed()) {
         // ponytail: ERTS fixes the table; see "ETS tables" in docs/erts-differences.md.
         return Err(error(
             "unsupported ets:select_replace/2 on a table that changed while the replace trapped",
@@ -3554,46 +3664,9 @@ pub(super) fn select_replace_trap(
         }
         (reductions, trap)
     } else {
-        let table = &mut *taken;
-        let mut iterations = REPLACE_ITERATIONS;
-        let mut read = |table: &mut Table, bucket: usize, iterations: &mut i64| {
-            let (read, replaced) = table.replace_chain(bucket, |object| {
-                let found = compiled.run(atoms, object)?;
-                found.tuple_elements().map(<[Term]>::to_vec)
-            });
-            *iterations -= read;
-            got += replaced;
-        };
-        let mut walk = None;
-        match (resume, compiled.bound_key(keypos)) {
-            (Some((Term::Integer(bucket), ..)), _) => walk = Some(*bucket as usize),
-            _ if compiled.matches_nothing(keypos) => {}
-            (_, Some(key)) => {
-                if let Some(bucket) = table.key_bucket(atoms, key) {
-                    read(table, bucket, &mut iterations);
-                }
-            }
-            _ => walk = Some(0),
-        }
-        // The walk traps at a bucket boundary once it read 1000 objects
-        // (`match_traverse`, `erl_db_hash.c:1895-1960`).
-        let mut trap = None;
-        while let Some(bucket) = walk.take() {
-            read(table, bucket, &mut iterations);
-            match table.next_bucket(bucket) {
-                Some(next) if iterations <= 0 => {
-                    trap = Some((Term::Integer(next as i64), Term::Nil))
-                }
-                next => walk = next,
-            }
-        }
-        // A trap uses all reductions (`on_simple_trap`).
-        (
-            trap.is_none().then_some(REPLACE_ITERATIONS - iterations),
-            trap,
-        )
+        replace_hash(atoms, &mut taken, &compiled, keypos, resume, &mut got)
     };
-    let writes = taken.writes() as i64;
+    let writes = taken.writes().cast_signed();
     drop(taken);
     drop(ets);
     let process = context.scheduler.current_process_mut();
@@ -3623,6 +3696,58 @@ pub(super) fn select_replace_trap(
         function: "select_replace_trap",
         arguments: count_arguments(&id, spec, (&position, &end, got, writes)),
     })
+}
+
+/// Replace the matching objects of a hash table for `select_replace_trap`:
+/// the bucket of a bound key, or the walk over the buckets from the start or
+/// from the bucket of `resume`. Add the replaced objects to `got`. Return the
+/// reductions of the turn, or `None` for a trap that uses all of them, and the
+/// position of the trap.
+fn replace_hash(
+    atoms: &AtomTable,
+    table: &mut Table,
+    compiled: &MatchSpec,
+    keypos: usize,
+    resume: Option<(&Term, &Term, i64, i64)>,
+    got: &mut i64,
+) -> (Option<i64>, Option<(Term, Term)>) {
+    let mut iterations = REPLACE_ITERATIONS;
+    let mut read = |table: &mut Table, bucket: usize, iterations: &mut i64| {
+        let (read, replaced) = table.replace_chain(bucket, |object| {
+            let found = compiled.run(atoms, object)?;
+            found.tuple_elements().map(<[Term]>::to_vec)
+        });
+        *iterations -= read;
+        *got += replaced;
+    };
+    let mut walk = None;
+    match (resume, compiled.bound_key(keypos)) {
+        (Some((Term::Integer(bucket), ..)), _) => walk = Some(to_usize(*bucket)),
+        _ if compiled.matches_nothing(keypos) => {}
+        (_, Some(key)) => {
+            if let Some(bucket) = table.key_bucket(atoms, key) {
+                read(table, bucket, &mut iterations);
+            }
+        }
+        _ => walk = Some(0),
+    }
+    // The walk traps at a bucket boundary once it read 1000 objects
+    // (`match_traverse`, `erl_db_hash.c:1895-1960`).
+    let mut trap = None;
+    while let Some(bucket) = walk.take() {
+        read(table, bucket, &mut iterations);
+        match table.next_bucket(bucket) {
+            Some(next) if iterations <= 0 => {
+                trap = Some((Term::Integer(to_i64(next)), Term::Nil));
+            }
+            next => walk = next,
+        }
+    }
+    // A trap uses all reductions (`on_simple_trap`).
+    (
+        trap.is_none().then_some(REPLACE_ITERATIONS - iterations),
+        trap,
+    )
 }
 
 /// Return whether each clause of `spec` is a 3-tuple whose body keeps the
@@ -3661,8 +3786,8 @@ fn keeps_key(atoms: &AtomTable, keypos: usize, pattern: &Term, body: &Term) -> b
         return false;
     };
     let (object, const_mode) = match &construction[..] {
-        [tag, object] if atom(tag, "const") => (object, true),
-        [object] => (object, false),
+        [tag, object] if atom(tag, "const") => (object, ConstMode::Inside),
+        [object] => (object, ConstMode::Outside),
         _ => return false,
     };
     let Some(body_key) = tuple_key(keypos, object) else {
@@ -3671,7 +3796,7 @@ fn keeps_key(atoms: &AtomTable, keypos: usize, pattern: &Term, body: &Term) -> b
     if match_eq_body(atoms, key, body_key, const_mode) {
         return true;
     }
-    if const_mode {
+    if const_mode == ConstMode::Inside {
         return false;
     }
     matches!(body_key, Term::Tuple(call) if matches!(&call[..],
@@ -3688,12 +3813,21 @@ fn tuple_key(keypos: usize, term: &Term) -> Option<&Term> {
     }
 }
 
+/// Whether a body term is inside a `{const, _}` part.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConstMode {
+    /// The term is outside a `{const, _}` part, so a tuple is `{{...}}`.
+    Outside,
+    /// The term is inside a `{const, _}` part, so a tuple is a literal.
+    Inside,
+}
+
 /// Return whether the body term `body` always builds the term that the
 /// pattern term `pattern` matched, as `db_match_eq_body`
 /// (`erl_db_util.c:1333-1419`) does. Outside a `{const, _}` part, a tuple
 /// of the body is `{{...}}`; a variable, `'_'`, `'$$'`, `'$_'`, or a map
 /// never gives a match.
-fn match_eq_body(atoms: &AtomTable, pattern: &Term, body: &Term, const_mode: bool) -> bool {
+fn match_eq_body(atoms: &AtomTable, pattern: &Term, body: &Term, const_mode: ConstMode) -> bool {
     let mut stack = vec![(pattern, body, const_mode)];
     while let Some((a, b, const_mode)) = stack.pop() {
         match b {
@@ -3707,13 +3841,13 @@ fn match_eq_body(atoms: &AtomTable, pattern: &Term, body: &Term, const_mode: boo
                 stack.push((a_head, b_head, const_mode));
             }
             Term::Tuple(b_elements) => {
-                let b_elements = if const_mode {
+                let b_elements = if const_mode == ConstMode::Inside {
                     b_elements
                 } else {
                     match &b_elements[..] {
                         [Term::Tuple(inner)] => inner,
                         [Term::Atom(tag), object] if atoms.name_of(tag) == "const" => {
-                            stack.push((a, object, true));
+                            stack.push((a, object, ConstMode::Inside));
                             continue;
                         }
                         _ => return false,
@@ -3734,7 +3868,7 @@ fn match_eq_body(atoms: &AtomTable, pattern: &Term, body: &Term, const_mode: boo
                 let name = atoms.name_of(atom);
                 if a != b
                     || matches!(name, "_" | "$$" | "$_")
-                    || (const_mode && is_match_variable(name))
+                    || (const_mode == ConstMode::Inside && is_match_variable(name))
                 {
                     return false;
                 }
@@ -3794,8 +3928,10 @@ pub(super) fn slot(
         return Ok(BifResult::badarg());
     };
     let (objects, end): (Vec<Vec<Term>>, usize) = if found.table_type() == TableType::OrderedSet {
-        let object = found.ordered_walk(atoms, None, true)?.nth(slot);
-        let end = found.ordered_walk(atoms, None, true)?.count();
+        let object = found
+            .ordered_walk(atoms, None, Direction::Forward)?
+            .nth(slot);
+        let end = found.ordered_walk(atoms, None, Direction::Forward)?.count();
         (object.into_iter().map(<[Term]>::to_vec).collect(), end)
     } else if slot < found.bucket_count() {
         let mut objects: Vec<Vec<Term>> = found.chain(slot).map(<[Term]>::to_vec).collect();
@@ -3821,6 +3957,10 @@ pub(super) fn slot(
 /// (`insert_named_tab`, `erl_db.c:2516-2517`). A table that is not named
 /// only changes the name that `ets:info/2` gives, and the call returns
 /// `Table` (`erl_db.c:2523-2526`).
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "BIF entry of the dispatch table in `table.rs`; every BIF returns `Result<BifResult, BeamError>`"
+)]
 pub(super) fn rename(
     context: &mut BifContext<'_>,
     table: &Term,

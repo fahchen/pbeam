@@ -1,7 +1,7 @@
 //! The reduction counter of the BIFs that ERTS runs as Yielding C Fun
 //! (YCF) code, as `erts_ycf_trap_driver` drives them (`utils.c:3733-3819`).
 
-use super::*;
+use super::{ProcessState, to_i64};
 
 /// The end of one call of a YCF BIF.
 #[derive(Debug, PartialEq)]
@@ -34,8 +34,8 @@ pub(super) enum YcfTurn {
 /// ```rust,ignore
 /// process.fcalls = 2;
 /// // 15 units for each reduction: a counter of 30.
-/// assert_eq!(run_units(&mut process, 15, &[1; 20], 0)?, YcfTurn::Done(1));
-/// assert_eq!(run_units(&mut process, 15, &[1; 40], 0)?, YcfTurn::Yield(30));
+/// assert_eq!(run_units(&mut process, 15, &[1; 20], 0), YcfTurn::Done(1));
+/// assert_eq!(run_units(&mut process, 15, &[1; 40], 0), YcfTurn::Yield(30));
 /// assert_eq!(process.fcalls, 0);
 /// ```
 pub(super) fn run_units(
@@ -43,21 +43,19 @@ pub(super) fn run_units(
     per_reduction: usize,
     units: &[u32],
     done: usize,
-) -> Result<YcfTurn, BeamError> {
+) -> YcfTurn {
     // A `long` count (`utils.c:3743`): a negative budget yields after the
     // first unit, as a budget of 0 does.
-    let start = per_reduction as i64 * process.bif_reductions_signed();
+    let start = to_i64(per_reduction) * process.bif_reductions_signed();
     let mut counter = start;
-    let per_reduction = per_reduction as i64;
+    let per_reduction = to_i64(per_reduction);
     for (index, &unit) in units.iter().enumerate().skip(done) {
         counter -= i64::from(unit);
         if counter <= 0 {
             process.bump_all_reductions();
-            return Ok(YcfTurn::Yield(index + 1));
+            return YcfTurn::Yield(index + 1);
         }
     }
     let used = (start - counter) / per_reduction;
-    Ok(YcfTurn::Done(
-        i32::try_from(used).expect("the used units are below the budget"),
-    ))
+    YcfTurn::Done(i32::try_from(used).expect("the used units are below the budget"))
 }

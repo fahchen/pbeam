@@ -2,7 +2,7 @@
 //! `local` for a reference, as in ERTS OTP 29.1.1 (`external.c`).
 //!
 //! PBeam encodes only an ordinary reference with `[local]`, which
-//! `prim_inet:send/3` puts in the header of each send (prim_inet.erl:581):
+//! `prim_inet:send/3` puts in the header of each send (`prim_inet.erl:581`):
 //!
 //! | Bytes | Value |
 //! | --- | --- |
@@ -84,7 +84,7 @@ pub(crate) fn decode_local_reference(bytes: &[u8], seed: u32) -> Option<Referenc
 }
 
 /// The golden ratio, the start value of `a` and `b` (`HCONST`,
-/// erl_term_hashing.c:440).
+/// `erl_term_hashing.c:440`).
 const HCONST: u32 = 0x9e37_79b9;
 
 /// Return the block hash of `bytes` with the start value `seed`, as
@@ -132,7 +132,14 @@ pub(crate) fn iov_block_hash(bytes: &[u8], last: usize, seed: u32) -> u32 {
     }
     let rest = &rest[..rest.len().min(last)];
     // The low byte of `c` holds the length (erl_term_hashing.c:484-503).
-    c = c.wrapping_add(bytes.len() as u32);
+    #[expect(
+        clippy::as_conversions,
+        clippy::cast_possible_truncation,
+        reason = "the hash adds the low 32 bits of the length, as `erl_term_hashing.c:484-503` does"
+    )]
+    {
+        c = c.wrapping_add(bytes.len() as u32);
+    }
     a = a.wrapping_add(word(&rest[..rest.len().min(4)]));
     b = b.wrapping_add(word(rest.get(4..rest.len().min(8)).unwrap_or(&[])));
     c = c.wrapping_add(word(rest.get(8..).unwrap_or(&[])) << 8);

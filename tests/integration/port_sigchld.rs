@@ -1,3 +1,9 @@
+//! Checks that the run stops for the exit status of a child that the host reaped.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::process::Command;
 
 use pbeam_runtime::BeamProgram;

@@ -21,17 +21,17 @@ fn finds_each_process_by_its_pid() {
     table.insert(process(0));
     table.insert(process(1));
     assert!(!table.is_empty());
-    assert!(table.contains_key(&ProcessId(1)));
-    assert!(!table.contains_key(&ProcessId(2)));
+    assert!(table.contains_key(ProcessId(1)));
+    assert!(!table.contains_key(ProcessId(2)));
     assert_eq!(
-        table.get(&ProcessId(0)).map(|process| process.id),
+        table.get(ProcessId(0)).map(|process| process.id),
         Some(ProcessId(0))
     );
-    assert!(table.get(&ProcessId(2)).is_none());
-    table.get_mut(&ProcessId(1)).unwrap().waiting = true;
+    assert!(table.get(ProcessId(2)).is_none());
+    table.get_mut(ProcessId(1)).unwrap().waiting = true;
     assert!(table[&ProcessId(1)].waiting);
     assert!(!table[&ProcessId(0)].waiting);
-    assert!(table.get_mut(&ProcessId(2)).is_none());
+    assert!(table.get_mut(ProcessId(2)).is_none());
     assert_eq!(ids(&table), [ProcessId(0), ProcessId(1)]);
 }
 
@@ -41,11 +41,11 @@ fn uses_a_free_slot_again_for_a_new_process() {
     table.insert(process(0));
     table.insert(process(1));
     assert_eq!(
-        table.remove(&ProcessId(0)).map(|process| process.id),
+        table.remove(ProcessId(0)).map(|process| process.id),
         Some(ProcessId(0))
     );
-    assert!(table.remove(&ProcessId(0)).is_none());
-    assert!(!table.contains_key(&ProcessId(0)));
+    assert!(table.remove(ProcessId(0)).is_none());
+    assert!(!table.contains_key(ProcessId(0)));
     table.insert(process(2));
     assert_eq!(table.slots.len(), 2);
     assert_eq!(
@@ -84,7 +84,7 @@ fn keeps_no_current_process_after_its_slot_has_a_new_process() {
     table.insert(process(0));
     table.set_current(ProcessId(0));
     table.take_current();
-    table.remove(&ProcessId(0));
+    table.remove(ProcessId(0));
     table.insert(process(1));
     assert_eq!(table.slots.len(), 1);
     assert_eq!(table.current_id(), None);
@@ -96,7 +96,7 @@ fn does_not_remove_the_current_process() {
     let mut table = ProcessSlots::default();
     table.insert(process(0));
     table.set_current(ProcessId(0));
-    table.remove(&ProcessId(0));
+    table.remove(ProcessId(0));
 }
 
 #[test]

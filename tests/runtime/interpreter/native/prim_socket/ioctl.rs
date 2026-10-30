@@ -12,9 +12,7 @@ fn gives_badarg_for_a_request_that_is_not_an_integer() {
     // request; `GET_ULONG` rejects it with `badarg`
     // (prim_socket_nif.c:13811-13814).
     let mut scheduler = Scheduler::new(AtomTable::new());
-    scheduler
-        .start(frame(), vec![], AllowAll.initial())
-        .unwrap();
+    scheduler.start(frame(), vec![], AllowAll.initial());
     scheduler.schedule_next().unwrap();
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, None).unwrap();
     let state = SocketState {

@@ -8,6 +8,10 @@
 //! `ExqliteFixture.main/0`. The entry opens an in-memory database, creates
 //! a table, inserts rows with bound parameters of each type, and reads them
 //! back. The PBeam line is the line of the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 #[path = "../common/mix_bundle.rs"]
 mod mix_bundle;

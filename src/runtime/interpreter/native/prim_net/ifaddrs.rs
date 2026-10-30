@@ -8,9 +8,18 @@
 //! `docs/erts-differences.md`).
 
 // Each reader runs on one host; the unit tests run them on each host.
-#![allow(dead_code)]
+#![cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "each reader runs on one host; the unit tests run them on each host"
+    )
+)]
 
-use super::*;
+use super::{
+    AtomTable, BeamError, BifResult, Map, Term, c_int, encode_sockaddr, errno_id, error, failure,
+    header, latin1,
+};
 
 /// A socket address of an entry: the bytes of a full `inet` or `inet6`
 /// socket address for [`encode_sockaddr`], the fields of a `sockaddr_ll`
@@ -172,7 +181,7 @@ const PKTTYPES: [&str; 8] = [
 #[cfg(target_os = "linux")]
 pub(super) fn read() -> Result<Vec<Entry>, Failure> {
     nix::ifaddrs::getifaddrs()
-        .map_err(|errno| Failure::Errno(errno as c_int))?
+        .map_err(|errno| Failure::Errno(super::errno_code(errno)))?
         .map(entry)
         .collect()
 }
@@ -320,7 +329,7 @@ fn link_address(storage: &nix::sys::socket::SockaddrStorage) -> Result<Address, 
         raw.sll_ifindex,
         raw.sll_hatype,
         raw.sll_pkttype,
-        &raw.sll_addr,
+        raw.sll_addr,
         raw.sll_halen,
     )
 }
@@ -342,7 +351,7 @@ pub(super) fn packet(
     ifindex: i32,
     hatype: u16,
     pkttype: u8,
-    sll_addr: &[u8; 8],
+    sll_addr: [u8; 8],
     halen: u8,
 ) -> Result<Address, Failure> {
     let addr = sll_addr

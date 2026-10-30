@@ -1,6 +1,6 @@
 //! The shared node of a multi-scheduler run.
 
-use super::Node;
+use super::{Node, ReceiverSite};
 use crate::term::{PortId, ProcessId, Term};
 
 /// The port counter gives the next identifier, and its end is the overflow
@@ -142,11 +142,11 @@ fn a_remote_timer_requires_a_live_receiver() {
     let receiver = ProcessId(7);
     let reference = crate::term::Reference::ordinary(1).unwrap();
     node.register(receiver, 1);
-    assert!(node.register_timer(reference, 0, 1100, Some(receiver), true));
+    assert!(node.register_timer(reference, 0, 1100, Some(receiver), ReceiverSite::Remote));
     assert_eq!(node.timer_end(reference), Some(1100));
     node.set_exiting(receiver);
     let late = crate::term::Reference::ordinary(2).unwrap();
-    assert!(!node.register_timer(late, 0, 1100, Some(receiver), true));
+    assert!(!node.register_timer(late, 0, 1100, Some(receiver), ReceiverSite::Remote));
     assert_eq!(node.timer_end(late), None);
     // A cancel between the exit start and the take leaves the tree entry
     // for the exit to count.

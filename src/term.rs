@@ -21,20 +21,21 @@ pub use atom::HostTerm;
 pub(crate) use atom::{MAX_ATOM_CHARACTERS, MAX_ATOM_SZ_LIMIT};
 #[cfg(test)]
 pub(crate) use atom::{test_atom, test_atom_table};
-pub use binary::Binary;
+pub(crate) use binary::Binary;
 pub(crate) use flat_size::flat_size;
-pub use fun::Fun;
+pub(crate) use fun::Fun;
 pub(crate) use fun::{Lambda, Target, debug_target};
 pub(crate) use hash::{atom_hash, internal_hash, make_hash, make_hash2};
-pub(crate) use integer::{MAX_BIG_DIGITS, fits_big_arity};
+pub(crate) use integer::{Division, MAX_BIG_DIGITS, ShiftDirection, fits_big_arity};
 use list::{Cons, ConsRef};
 pub(crate) use live_bytes::LiveBytes;
 pub use map::Map;
 pub(crate) use map::{Direction, Drain as MapDrain, Insert, flatmap_order, from_list_units};
-pub use match_context::MatchState;
-pub(crate) use match_context::{segment_equals, segment_integer};
+pub(crate) use match_context::MatchState;
+pub(crate) use match_context::{Endian, Signedness, segment_equals, segment_integer};
+use order::Comparison;
 pub(crate) use print::{print_term, print_term_limited};
-pub use record::Record;
+pub(crate) use record::Record;
 pub(crate) use record::RecordDef;
 use tuple::Tuple;
 
@@ -153,9 +154,19 @@ pub enum Term {
 /// `Term` that is not `Send` or not `Sync` does not satisfy it, so the
 /// crate does not compile. The trait has no function, so it adds no
 /// runtime code and no coverage line.
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "a compile-time check that Term is Send and Sync; no code calls it"
+)]
 trait TermIsSendAndSync: Send + Sync {}
 impl TermIsSendAndSync for Term {}
+
+impl From<bool> for Term {
+    /// Return the atom `true` or `false`.
+    fn from(value: bool) -> Self {
+        Term::static_atom(if value { "true" } else { "false" })
+    }
+}
 
 /// Check at compile time that a term stays 16 bytes: a bignum is one
 /// pointer to its shared value, as each other boxed term is.
@@ -789,7 +800,7 @@ impl PartialEq for Term {
     /// assert_ne!(Term::Integer(1), Term::Float(1.0));
     /// ```
     fn eq(&self, other: &Self) -> bool {
-        self.equal(other, false)
+        self.equal(other, Comparison::Exact)
     }
 }
 
@@ -811,7 +822,7 @@ impl Term {
     /// assert!(!Term::Integer(1).arith_eq(&Term::Float(1.5)));
     /// ```
     pub(crate) fn arith_eq(&self, other: &Term) -> bool {
-        self.equal(other, true)
+        self.equal(other, Comparison::Arithmetic)
     }
 
     /// Return the native record of a record term, or `None` for each other
@@ -845,15 +856,19 @@ impl Term {
     }
 
     /// Compare two terms for exact equality, or for arithmetic equality when
-    /// `arith` is true. See [`PartialEq::eq`] and [`Term::arith_eq`].
+    /// `mode` is [`Comparison::Arithmetic`]. See [`PartialEq::eq`] and [`Term::arith_eq`].
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert!(Term::Integer(2).equal(&Term::Float(2.0), true));
-    /// assert!(!Term::Integer(2).equal(&Term::Float(2.0), false));
+    /// assert!(Term::Integer(2).equal(&Term::Float(2.0), Comparison::Arithmetic));
+    /// assert!(!Term::Integer(2).equal(&Term::Float(2.0), Comparison::Exact));
     /// ```
-    fn equal(&self, other: &Term, arith: bool) -> bool {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "mirrors `eq` of `utils.c`: one arm for each term type pair on the hot path of every term comparison, and a split would move work out of the loop"
+    )]
+    fn equal(&self, other: &Term, mode: Comparison) -> bool {
         let mut pairs = EqStack::new();
         let mut left = self;
         let mut right = other;
@@ -890,7 +905,7 @@ impl Term {
                         true
                     } else {
                         pairs.extend(left.free().iter().zip(right.free()));
-                        let same_target = if arith {
+                        let same_target = if mode == Comparison::Arithmetic {
                             left.target().compare_equal(right.target())
                         } else {
                             left.target() == right.target()
@@ -915,7 +930,7 @@ impl Term {
                     for ((left_key, left_value), (right_key, right_value)) in
                         left.iter().zip(right.iter())
                     {
-                        if arith {
+                        if mode == Comparison::Arithmetic {
                             // Map keys compare exactly also in arithmetic
                             // comparison, so `#{1 => a} == #{1.0 => a}` is
                             // false.
@@ -933,18 +948,24 @@ impl Term {
                 (Term::BigInt(left), Term::BigInt(right)) => left == right,
                 (Term::BigInt(big), Term::Float(float))
                 | (Term::Float(float), Term::BigInt(big))
-                    if arith =>
+                    if mode == Comparison::Arithmetic =>
                 {
                     order::compare_big_float(big, *float).is_eq()
                 }
                 // Exact equality compares the bits, so `0.0 =:= -0.0` is
                 // false (`eq`, `utils.c:1422-1433`). A float term is never
                 // a NaN, so equal bits are the only equal floats.
-                (Term::Float(left), Term::Float(right)) if arith => left == right,
+                #[expect(
+                    clippy::float_cmp,
+                    reason = "arithmetic equality (`==`) compares floats exactly, so `0.0 == -0.0` holds"
+                )]
+                (Term::Float(left), Term::Float(right)) if mode == Comparison::Arithmetic => {
+                    left == right
+                }
                 (Term::Float(left), Term::Float(right)) => left.to_bits() == right.to_bits(),
                 (Term::Integer(integer), Term::Float(float))
                 | (Term::Float(float), Term::Integer(integer))
-                    if arith =>
+                    if mode == Comparison::Arithmetic =>
                 {
                     order::compare_integer_float(*integer, *float).is_eq()
                 }
@@ -1087,6 +1108,11 @@ impl fmt::Debug for Term {
 /// that holds the table calls this function, so its text keeps the atom name.
 /// Every other part of the text is the same as the `Debug` text.
 ///
+/// # Panics
+///
+/// Panics when writing to the `String` fails. This does not happen: a write
+/// to a `String` always succeeds.
+///
 /// # Examples
 ///
 /// ```rust,ignore
@@ -1103,18 +1129,14 @@ pub fn debug_term(term: &Term, atoms: &AtomTable) -> String {
 /// Write the `Debug` text of `term` to `out`, with the atom name from `atoms`
 /// when it is `Some` and the atom index when it is `None`.
 fn write_debug(term: &Term, atoms: Option<&AtomTable>, out: &mut impl fmt::Write) -> fmt::Result {
-    enum Item<'a> {
-        Term(&'a Term),
-        Text(&'static str),
-    }
-    let mut items = vec![Item::Term(term)];
+    let mut items = vec![DebugItem::Term(term)];
     while let Some(item) = items.pop() {
         let term = match item {
-            Item::Text(text) => {
+            DebugItem::Text(text) => {
                 out.write_str(text)?;
                 continue;
             }
-            Item::Term(term) => term,
+            DebugItem::Term(term) => term,
         };
         match term {
             Term::Atom(atom) => match atoms {
@@ -1136,31 +1158,21 @@ fn write_debug(term: &Term, atoms: Option<&AtomTable>, out: &mut impl fmt::Write
                 match tail {
                     None => {
                         out.write_str("List([")?;
-                        items.push(Item::Text("])"));
+                        items.push(DebugItem::Text("])"));
                     }
                     Some(tail) => {
                         out.write_str("ImproperList([")?;
-                        items.push(Item::Text(")"));
-                        items.push(Item::Term(tail));
-                        items.push(Item::Text("], "));
+                        items.push(DebugItem::Text(")"));
+                        items.push(DebugItem::Term(tail));
+                        items.push(DebugItem::Text("], "));
                     }
                 }
-                for (index, element) in elements.iter().enumerate().rev() {
-                    items.push(Item::Term(element));
-                    if index > 0 {
-                        items.push(Item::Text(", "));
-                    }
-                }
+                push_debug_elements(&mut items, elements.iter().copied());
             }
             Term::Tuple(elements) => {
                 out.write_str("Tuple([")?;
-                items.push(Item::Text("])"));
-                for (index, element) in elements.iter().enumerate().rev() {
-                    items.push(Item::Term(element));
-                    if index > 0 {
-                        items.push(Item::Text(", "));
-                    }
-                }
+                items.push(DebugItem::Text("])"));
+                push_debug_elements(&mut items, elements.iter());
             }
             Term::Record(record) => {
                 let def = record.def();
@@ -1172,13 +1184,8 @@ fn write_debug(term: &Term, atoms: Option<&AtomTable>, out: &mut impl fmt::Write
                     None => (def.module.index().to_string(), def.name.index().to_string()),
                 };
                 write!(out, "Record({module}:{name}, [")?;
-                items.push(Item::Text("])"));
-                for (index, element) in record.values().iter().enumerate().rev() {
-                    items.push(Item::Term(element));
-                    if index > 0 {
-                        items.push(Item::Text(", "));
-                    }
-                }
+                items.push(DebugItem::Text("])"));
+                push_debug_elements(&mut items, record.values().iter());
             }
             Term::Fun(fun) => {
                 let (target, free) = (fun.target(), fun.free());
@@ -1190,32 +1197,48 @@ fn write_debug(term: &Term, atoms: Option<&AtomTable>, out: &mut impl fmt::Write
                     }
                     None => write!(out, "Fun({target:?}, [")?,
                 }
-                items.push(Item::Text("])"));
-                for (index, element) in free.iter().enumerate().rev() {
-                    items.push(Item::Term(element));
-                    if index > 0 {
-                        items.push(Item::Text(", "));
-                    }
-                }
+                items.push(DebugItem::Text("])"));
+                push_debug_elements(&mut items, free.iter());
             }
             Term::Map(map) => {
                 out.write_str("Map([")?;
-                items.push(Item::Text("])"));
+                items.push(DebugItem::Text("])"));
                 let pairs: Vec<_> = map.iter().collect();
                 for (index, (key, value)) in pairs.into_iter().enumerate().rev() {
-                    items.push(Item::Text(")"));
-                    items.push(Item::Term(value));
-                    items.push(Item::Text(", "));
-                    items.push(Item::Term(key));
-                    items.push(Item::Text("("));
+                    items.push(DebugItem::Text(")"));
+                    items.push(DebugItem::Term(value));
+                    items.push(DebugItem::Text(", "));
+                    items.push(DebugItem::Term(key));
+                    items.push(DebugItem::Text("("));
                     if index > 0 {
-                        items.push(Item::Text(", "));
+                        items.push(DebugItem::Text(", "));
                     }
                 }
             }
         }
     }
     Ok(())
+}
+
+/// A step of the `Debug` text walk of [`write_debug`]: a term to write, or text
+/// to write after the terms above it on the stack.
+enum DebugItem<'a> {
+    Term(&'a Term),
+    Text(&'static str),
+}
+
+/// Push `elements` on `items` in reverse, so that the walk writes them in
+/// order with ", " between them.
+fn push_debug_elements<'a>(
+    items: &mut Vec<DebugItem<'a>>,
+    elements: impl DoubleEndedIterator<Item = &'a Term> + ExactSizeIterator,
+) {
+    for (index, element) in elements.enumerate().rev() {
+        items.push(DebugItem::Term(element));
+        if index > 0 {
+            items.push(DebugItem::Text(", "));
+        }
+    }
 }
 
 /// An identifier for a process in this runtime. The order of identifiers
@@ -1372,6 +1395,11 @@ impl Reference {
     ///     [33174, 1537736705, 2506053249]
     /// );
     /// ```
+    #[expect(
+        clippy::as_conversions,
+        clippy::cast_possible_truncation,
+        reason = "each number is a masked or shifted field of the 64-bit reference, the cast keeps the low 32 bits"
+    )]
     pub(crate) fn numbers(self) -> [u32; 3] {
         let Reference(value) = self;
         let magic = if value & MAGIC_REFERENCE_MARKER != 0 {

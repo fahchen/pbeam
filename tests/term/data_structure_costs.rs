@@ -47,11 +47,13 @@ thread_local! {
     static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
 }
 
-// SAFETY: the allocator forwards each operation to `System`, which is a
-// valid allocator, and it only adds a count of the current thread.
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
+// SAFETY: each method forwards its arguments to `System`, which is a valid
+// allocator, so the `GlobalAlloc` contract holds. The count only changes a
+// `Cell` of the current thread, which does not allocate, unwind, or touch
+// the memory of the caller.
 unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
         count_one();
@@ -120,6 +122,11 @@ fn report_allocations(rows: &[(&str, usize, usize)]) {
 
 /// Return the nanoseconds for each operation of `body`, as the minimum of
 /// [`RUNS`] timed runs. The caller performs exactly `operations` operations.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    reason = "a benchmark converts a nanosecond count and an operation count to the nearest f64"
+)]
 fn measure(operations: usize, mut body: impl FnMut() -> u64) -> f64 {
     let mut best = f64::INFINITY;
     for _ in 0..RUNS {
@@ -157,7 +164,11 @@ fn compared(left: &Term, right: &Term) -> usize {
 /// assert!(matches!(tuple_of(1), Term::Tuple(_)));
 /// ```
 fn tuple_of(len: usize) -> Term {
-    Term::tuple((0..len).map(|value| Term::Integer(value as i64)).collect())
+    Term::tuple(
+        (0..len)
+            .map(|value| Term::Integer(i64::try_from(value).unwrap()))
+            .collect(),
+    )
 }
 
 /// Return a tuple of `len` elements that holds one nested tuple of the same
@@ -211,6 +222,10 @@ fn map_of(keys: i64) -> Term {
 /// two terms that share one storage, two terms with equal content and
 /// different storage, one deep term, and one long list.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "case table: one entry for each comparison shape, and the entries share the fixtures"
+)]
 fn reports_the_allocation_count_of_one_comparison() {
     let shared_tuple = tuple_of(1000);
     let equal_tuple = tuple_of(1000);
@@ -332,6 +347,10 @@ fn reports_the_allocation_count_of_one_comparison() {
 /// Print the cost of the comparison rows of the audit, and of the compound
 /// shapes that the removal of the pair stack must keep.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "table of measurements: one `report` call for each comparison shape, and the calls share the fixtures"
+)]
 fn prints_the_comparison_cost() {
     let tuple_1000 = tuple_of(1000);
     let other_1000 = tuple_of(1000);

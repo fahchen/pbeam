@@ -1,3 +1,9 @@
+//! Runs a `gen_statem` server that starts with `enter_loop` on PBeam.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Term};
@@ -43,6 +49,6 @@ fn runs_a_gen_statem_server_entered_with_enter_loop() {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     assert_eq!(reference.stdout, b"{1,{1},normal}\n");
 }

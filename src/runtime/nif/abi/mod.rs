@@ -129,16 +129,16 @@ impl Function {
     /// term of the call has, and for a broken contract of `enif_send`.
     pub(crate) fn call(&self, caller: Caller<'_>, arguments: &[Term]) -> Called {
         let mut env = Env::new(caller.atoms, Some(caller.process), arguments);
-        let argv = env.handles();
+        let handles = env.handles();
         // The arity of a BEAM function is at most 255.
-        let argc = c_int::try_from(argv.len()).unwrap_or(c_int::MAX);
+        let argc = c_int::try_from(handles.len()).unwrap_or(c_int::MAX);
         let pointer = &raw mut env;
         let (handle, ended) = process::within(caller.atoms, caller.node, pointer, || {
             // SAFETY: `fptr` is the function of a library that `open`
             // loaded, and the library stays open while `self` is alive. The
-            // env is alive and unique for the call, and `argv` holds `argc`
+            // env is alive and unique for the call, and `handles` holds `argc`
             // handles of it, as the C API gives a NIF its arguments.
-            unsafe { (self.fptr)(pointer, argc, argv.as_ptr()) }
+            unsafe { (self.fptr)(pointer, argc, handles.as_ptr()) }
         });
         let result = match ended.unsupported {
             Some(text) => Err(error(text)),

@@ -14,8 +14,13 @@ use std::sync::MutexGuard;
 use socket2::Socket;
 
 use super::super::socket::count;
-use super::*;
+use super::{
+    Arc, BeamError, BifResult, Direction, ExceptionClass, ProcessId, Reference, SELECTED,
+    Scheduler, SocketState, Term, atom, fd, integer_range, invalid_state, io, lock, make_current,
+    select, socket_argument, write_entry, write_open,
+};
 use crate::runtime::files::{FileData, Files};
+use crate::runtime::host::errno::errno_code;
 use crate::runtime::port::inet::errno_name;
 use crate::runtime::sockets::SendfileCounters;
 
@@ -25,7 +30,7 @@ const CHUNK: u64 = 0x2000_0000;
 
 /// The end of [`send_loop`], as the result of `essio_sendfile`
 /// (`unix_socket_syncio.c:9156-9345`), with the bytes that the call sent.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Sent {
     /// Each byte of the count, or the bytes up to the end of the file, is
     /// sent (0).
@@ -54,19 +59,22 @@ fn send_loop(
         } else {
             CHUNK
         };
-        let (sent, errno) = send(offset, chunk as usize);
-        offset += sent as i64;
+        let (written, errno) = send(
+            offset,
+            usize::try_from(chunk).expect("a chunk of at most CHUNK bytes fits in usize"),
+        );
+        offset += i64::try_from(written).expect("a send writes at most a chunk, which fits in i64");
         counters.calls += 1;
-        if sent != 0 {
-            package += sent;
+        if written != 0 {
+            package += written;
             counters.pkg += 1;
-            counters.byte += sent;
+            counters.byte += written;
             counters.pkg_max = counters.pkg_max.max(package);
-            counters.max_count += sent;
+            counters.max_count += written;
             counters.max = counters.max.max(counters.max_count);
         }
         if count > 0 {
-            count -= sent;
+            count -= written;
             if count == 0 {
                 return Sent::Done(package);
             }
@@ -75,7 +83,7 @@ fn send_loop(
             Some(libc::EAGAIN) => return Sent::Select(package),
             Some(libc::EINTR) => {}
             Some(errno) => return Sent::Failed(errno),
-            None if sent == 0 => return Sent::Done(package),
+            None if written == 0 => return Sent::Done(package),
             None => {}
         }
     }
@@ -90,8 +98,8 @@ fn host_sendfile(socket: &Socket, file: &File, offset: i64, count: usize) -> (u6
     let mut moved = offset;
     let result = nix::sys::sendfile::sendfile(socket, file, Some(&mut moved), count);
     (
-        (moved - offset) as u64,
-        result.err().map(|errno| errno as i32),
+        (moved - offset).cast_unsigned(),
+        result.err().map(errno_code),
     )
 }
 
@@ -101,11 +109,17 @@ fn host_sendfile(socket: &Socket, file: &File, offset: i64, count: usize) -> (u6
 /// `EINTR` sends no byte.
 #[cfg(target_vendor = "apple")]
 fn host_sendfile(socket: &Socket, file: &File, offset: i64, count: usize) -> (u64, Option<i32>) {
-    let (result, sent) =
-        nix::sys::sendfile::sendfile(file, socket, offset, Some(count as i64), None, None);
-    match result.err().map(|errno| errno as i32) {
+    let (result, sent) = nix::sys::sendfile::sendfile(
+        file,
+        socket,
+        offset,
+        Some(i64::try_from(count).expect("a chunk of at most CHUNK bytes fits in i64")),
+        None,
+        None,
+    );
+    match result.err().map(errno_code) {
         Some(errno) if errno != libc::EAGAIN && errno != libc::EINTR => (0, Some(errno)),
-        errno => (sent as u64, errno),
+        errno => (sent.cast_unsigned(), errno),
     }
 }
 

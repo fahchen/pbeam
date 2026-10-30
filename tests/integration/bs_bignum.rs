@@ -2,6 +2,10 @@
 //! writes them (`fmt_big_be` and `fmt_big_le`, erl_bits.c:989-1015 and
 //! 1119-1145), and `bs_match` and `bs_get_integer2` read them
 //! (`erts_bs_get_integer_2`, erl_bits.c:280-356).
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::{process::Command, sync::Arc};
 
@@ -67,7 +71,7 @@ fn run_both(cases: &[(&str, Vec<Term>)]) -> (String, String) {
         .output()
         .unwrap();
     assert!(erts.status.success());
-    assert!(erts.stderr.is_empty());
+    assert_eq!(erts.stderr, <[u8; 0]>::default());
     (
         format!("[{}]\n", results.join(",")),
         String::from_utf8(erts.stdout).unwrap(),

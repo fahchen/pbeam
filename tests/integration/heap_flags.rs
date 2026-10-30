@@ -3,10 +3,15 @@
 //! node, and reports them. PBeam has no garbage collector, so the values
 //! change only what the BIFs report (row "Heap limit" in
 //! `docs/erts-differences.md`).
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 #[path = "../common/mod.rs"]
 mod common;
 
+use std::fmt::Write as _;
 use std::process::Command;
 
 use common::pinned_beam;
@@ -96,10 +101,10 @@ fn sets_and_reports_the_heap_flags_as_pinned_erts() {
         .output()
         .unwrap();
     assert!(reference.status.success(), "{reference:?}");
-    let expected: String = results
-        .iter()
-        .map(|(_, result)| format!("{result}\n"))
-        .collect();
+    let expected: String = results.iter().fold(String::new(), |mut text, (_, result)| {
+        let _ = writeln!(text, "{result}");
+        text
+    });
     assert_eq!(String::from_utf8(reference.stdout).unwrap(), expected);
 }
 

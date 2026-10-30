@@ -163,11 +163,8 @@ impl Scheduler {
 }
 
 /// Return the reply `{check_process_code, Tag, Result}` of a
-/// `check_process_code` system task (`erl_process.c:11309-11492`).
-pub(in crate::runtime) fn check_process_code_reply(tag: Term, refers: bool) -> Term {
-    Term::tuple(vec![
-        Term::static_atom("check_process_code"),
-        tag,
-        Term::static_atom(if refers { "true" } else { "false" }),
-    ])
+/// `check_process_code` system task (`erl_process.c:11309-11492`). `result` is
+/// the atom `true` or `false`.
+pub(in crate::runtime) fn check_process_code_reply(tag: Term, result: Term) -> Term {
+    Term::tuple(vec![Term::static_atom("check_process_code"), tag, result])
 }

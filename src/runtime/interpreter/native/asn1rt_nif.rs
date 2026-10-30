@@ -11,7 +11,8 @@
 //! stops the run for it (see "NIF stubs" in `docs/erts-differences.md`).
 
 use super::bif::iodata_bytes;
-use super::*;
+use super::{BeamError, BifResult, Binding, Job, Scheduler, Term, error};
+use std::cmp::Ordering;
 
 /// The functions of the `asn1rt_nif` NIF library, as `(name, arity)` in
 /// the order of `nif_funcs` (`asn1_erl_nif.c:1343-1347`).
@@ -136,7 +137,7 @@ impl Per<'_> {
 
     /// Set the output byte at `ptr` to the low byte of `value`.
     fn set(&mut self, value: i32) {
-        self.out[self.p] = value as u8;
+        self.out[self.p] = value.to_le_bytes()[0];
     }
 
     /// Set the output byte at `ptr` to itself or `value`.
@@ -157,51 +158,57 @@ impl Per<'_> {
     fn insert_most_sign_bits(&mut self, no_bits: i32, val: i32) {
         let unused = self.unused;
         self.or(shr(val, 8 - unused));
-        if no_bits < unused {
-            self.unused -= no_bits;
-        } else if no_bits == unused {
-            self.unused = 8;
-            self.advance();
-        } else {
-            self.advance();
-            self.or(shl(val, unused));
-            self.unused = 8 - (no_bits - unused);
+        match no_bits.cmp(&unused) {
+            Ordering::Less => self.unused -= no_bits,
+            Ordering::Equal => {
+                self.unused = 8;
+                self.advance();
+            }
+            Ordering::Greater => {
+                self.advance();
+                self.or(shl(val, unused));
+                self.unused = 8 - (no_bits - unused);
+            }
         }
     }
 
     /// `per_insert_least_sign_bits` (`asn1_erl_nif.c:529-553`).
     fn insert_least_sign_bits(&mut self, no_bits: i32, val: i32) -> i32 {
         let unused = self.unused;
-        if no_bits < unused {
-            self.or(shl(val, unused - no_bits));
-            self.unused -= no_bits;
-            0
-        } else if no_bits == unused {
-            self.or(val);
-            self.unused = 8;
-            self.advance();
-            1
-        } else {
-            self.or(shr(val, no_bits - unused));
-            self.advance();
-            self.or(shl(val, 8 - (no_bits - unused)));
-            self.unused = 8 - (no_bits - unused);
-            1
+        match no_bits.cmp(&unused) {
+            Ordering::Less => {
+                self.or(shl(val, unused - no_bits));
+                self.unused -= no_bits;
+                0
+            }
+            Ordering::Equal => {
+                self.or(val);
+                self.unused = 8;
+                self.advance();
+                1
+            }
+            Ordering::Greater => {
+                self.or(shr(val, no_bits - unused));
+                self.advance();
+                self.or(shl(val, 8 - (no_bits - unused)));
+                self.unused = 8 - (no_bits - unused);
+                1
+            }
         }
     }
 
     /// Add one bit, as the cases 0 and 1 of `per_complete` and of
     /// `per_insert_octets_as_bits` do. Return whether a new byte starts.
-    fn insert_bit(&mut self, bit: bool) -> bool {
+    fn insert_bit(&mut self, bit: Bit) -> bool {
         if self.unused == 1 {
-            if bit {
+            if bit == Bit::One {
                 self.or(1);
             }
             self.unused = 8;
             self.advance();
             true
         } else {
-            if bit {
+            if bit == Bit::One {
                 self.or(shl(1, self.unused - 1));
             }
             self.unused -= 1;
@@ -213,7 +220,7 @@ impl Per<'_> {
     fn pad_bits(&mut self, mut no_bits: i32) -> i32 {
         let mut ret = 0;
         while no_bits > 0 {
-            if self.insert_bit(false) {
+            if self.insert_bit(Bit::Zero) {
                 ret += 1;
             }
             no_bits -= 1;
@@ -226,31 +233,36 @@ impl Per<'_> {
     /// `Bin`.
     fn insert_bits_as_bits(&mut self, desired_no: i32, no_bytes: i32) -> i32 {
         let unused = self.unused;
-        if desired_no == no_bytes * 8 {
-            self.insert_octets_unaligned(no_bytes, unused)
-        } else if desired_no < no_bytes * 8 {
-            self.insert_octets_unaligned(desired_no / 8, unused);
-            let val = self.next();
-            self.insert_most_sign_bits(desired_no % 8, val);
-            ceil(desired_no, 8)
-        } else {
-            self.insert_octets_unaligned(no_bytes, unused);
-            self.pad_bits(desired_no - no_bytes * 8);
-            ceil(desired_no, 8)
+        match desired_no.cmp(&(no_bytes * 8)) {
+            Ordering::Equal => self.insert_octets_unaligned(no_bytes, unused),
+            Ordering::Less => {
+                self.insert_octets_unaligned(desired_no / 8, unused);
+                let val = self.next();
+                self.insert_most_sign_bits(desired_no % 8, val);
+                ceil(desired_no, 8)
+            }
+            Ordering::Greater => {
+                self.insert_octets_unaligned(no_bytes, unused);
+                self.pad_bits(desired_no - no_bytes * 8);
+                ceil(desired_no, 8)
+            }
         }
     }
 
     /// `per_insert_octets_as_bits_exact_len` (`asn1_erl_nif.c:621-651`).
     fn insert_octets_as_bits_exact_len(&mut self, desired_len: i32, in_len: i32) -> Option<i32> {
-        if desired_len == in_len {
-            self.insert_octets_as_bits(in_len)
-        } else if desired_len > in_len {
-            let ret = self.insert_octets_as_bits(in_len)?;
-            Some(ret + self.pad_bits(desired_len - in_len))
-        } else {
-            let ret = self.insert_octets_as_bits(desired_len)?;
-            self.ip += (in_len - desired_len) as usize;
-            Some(ret)
+        match desired_len.cmp(&in_len) {
+            Ordering::Equal => self.insert_octets_as_bits(in_len),
+            Ordering::Greater => {
+                let ret = self.insert_octets_as_bits(in_len)?;
+                Some(ret + self.pad_bits(desired_len - in_len))
+            }
+            Ordering::Less => {
+                let ret = self.insert_octets_as_bits(desired_len)?;
+                self.ip += usize::try_from(in_len - desired_len)
+                    .expect("the Less arm has in_len above desired_len");
+                Some(ret)
+            }
         }
     }
 
@@ -262,8 +274,8 @@ impl Per<'_> {
         let used_bits = 8 - self.unused;
         while no_bytes > 0 {
             match self.next() {
-                0 => self.insert_bit(false),
-                1 => self.insert_bit(true),
+                0 => self.insert_bit(Bit::Zero),
+                1 => self.insert_bit(Bit::One),
                 _ => return None,
             };
             no_bytes -= 1;
@@ -317,17 +329,19 @@ impl Per<'_> {
         let val = self.next();
         let no_bits = 8 - in_unused;
         self.or(shr(val, 8 - unused));
-        if no_bits < unused {
-            self.unused = unused - no_bits;
-        } else if no_bits == unused {
-            self.advance();
-            ret += 1;
-            self.unused = 8;
-        } else {
-            self.advance();
-            ret += 1;
-            self.or(shl(val, unused));
-            self.unused = 8 - (no_bits - unused);
+        match no_bits.cmp(&unused) {
+            Ordering::Less => self.unused = unused - no_bits,
+            Ordering::Equal => {
+                self.advance();
+                ret += 1;
+                self.unused = 8;
+            }
+            Ordering::Greater => {
+                self.advance();
+                ret += 1;
+                self.or(shl(val, unused));
+                self.unused = 8 - (no_bits - unused);
+            }
         }
         Some(ret)
     }
@@ -346,12 +360,12 @@ fn checked(ret: i32) -> Option<i32> {
 /// The C `int` shift `value << amount`. The shift instructions of the
 /// pinned ERTS hosts use the amount modulo 32.
 fn shl(value: i32, amount: i32) -> i32 {
-    value.wrapping_shl(amount as u32)
+    value.wrapping_shl(amount.cast_unsigned())
 }
 
 /// The C `int` shift `value >> amount`, with the amount modulo 32.
 fn shr(value: i32, amount: i32) -> i32 {
-    value.wrapping_shr(amount as u32)
+    value.wrapping_shr(amount.cast_unsigned())
 }
 
 /// The C macro `CEIL(X,Y)` (`asn1_erl_nif.c:57`).
@@ -359,11 +373,48 @@ fn ceil(x: i32, y: i32) -> i32 {
     (x - 1) / y + 1
 }
 
-/// Read a length of `wide` bytes, big endian, as the cases of
+/// The size of a length that `per_complete` reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LengthWidth {
+    /// One byte.
+    Narrow,
+    /// Two bytes, big endian.
+    Wide,
+}
+
+impl From<bool> for LengthWidth {
+    fn from(wide: bool) -> Self {
+        if wide { Self::Wide } else { Self::Narrow }
+    }
+}
+
+/// A bit that `per_complete` inserts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Bit {
+    /// The bit 0.
+    Zero,
+    /// The bit 1.
+    One,
+}
+
+/// The form of a BER tag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TagForm {
+    /// The value is a binary.
+    Primitive,
+    /// The value is a list of `{Tag, Value}` tuples.
+    Constructed,
+}
+
+/// Read a length of `width` bytes, big endian, as the cases of
 /// `per_complete` do.
-fn read_length(per: &mut Per, wide: bool) -> i32 {
+fn read_length(per: &mut Per<'_>, width: LengthWidth) -> i32 {
     let high = per.next();
-    if wide { (high << 8) | per.next() } else { high }
+    if width == LengthWidth::Wide {
+        (high << 8) | per.next()
+    } else {
+        high
+    }
 }
 
 /// Run `per_complete` (`asn1_erl_nif.c:119-493`) on the non-empty `input`
@@ -378,7 +429,7 @@ fn read_length(per: &mut Per, wide: bool) -> i32 {
 /// outside the term and gives no stable result. Set `truncated` and return
 /// `None` for that input.
 fn per_complete(input: &[u8], truncated: &mut bool) -> Option<Vec<u8>> {
-    let in_len = input.len() as i64;
+    let in_len = i64::try_from(input.len()).expect("a binary length fits in i64");
     let mut per = Per {
         input,
         ip: 0,
@@ -394,7 +445,7 @@ fn per_complete(input: &[u8], truncated: &mut bool) -> Option<Vec<u8>> {
         let opcode = input.get(per.ip).copied().unwrap_or(0);
         match opcode {
             0 | 1 => {
-                if per.insert_bit(opcode == 1) {
+                if per.insert_bit(if opcode == 1 { Bit::One } else { Bit::Zero }) {
                     buf_space -= 1;
                 }
             }
@@ -416,7 +467,7 @@ fn per_complete(input: &[u8], truncated: &mut bool) -> Option<Vec<u8>> {
                 buf_space -= i64::from(per.insert_least_sign_bits(no_bits, val));
             }
             20 | 21 => {
-                let no_bytes = read_length(&mut per, opcode == 21);
+                let no_bytes = read_length(&mut per, LengthWidth::from(opcode == 21));
                 counter -= i64::from(no_bytes) + if opcode == 21 { 2 } else { 1 };
                 if counter < 0 {
                     return None;
@@ -425,7 +476,7 @@ fn per_complete(input: &[u8], truncated: &mut bool) -> Option<Vec<u8>> {
             }
             30 | 31 => {
                 let in_unused = per.next();
-                let no_bytes = read_length(&mut per, opcode == 31);
+                let no_bytes = read_length(&mut per, LengthWidth::from(opcode == 31));
                 counter -= i64::from(no_bytes) + if opcode == 31 { 3 } else { 2 };
                 if counter < 0 {
                     return None;
@@ -435,8 +486,8 @@ fn per_complete(input: &[u8], truncated: &mut bool) -> Option<Vec<u8>> {
             40..=43 | 45..=47 => {
                 let wide_desired = matches!(opcode, 42 | 43 | 46 | 47);
                 let wide_bytes = matches!(opcode, 41 | 43 | 47);
-                let desired_len = read_length(&mut per, wide_desired);
-                let no_bytes = read_length(&mut per, wide_bytes);
+                let desired_len = read_length(&mut per, LengthWidth::from(wide_desired));
+                let no_bytes = read_length(&mut per, LengthWidth::from(wide_bytes));
                 let saved_mem = buf_space - counter;
                 let needed = if opcode == 40 {
                     let pad_bits = desired_len - no_bytes - per.unused;
@@ -479,7 +530,7 @@ fn per_complete(input: &[u8], truncated: &mut bool) -> Option<Vec<u8>> {
 /// (`asn1_erl_nif.c:954-958`), so the depth of the `unknown` error depends
 /// on the stack frame size of the ERTS build: the pinned ERTS on
 /// aarch64-apple-darwin decodes 454 calls and stops at 455, and the pinned
-/// ERTS on x86_64 Linux decodes more. PBeam decodes the depth that each
+/// ERTS on `x86_64` Linux decodes more. PBeam decodes the depth that each
 /// build decodes and stops the run for a deeper input.
 const MAX_DECODE_DEPTH: u32 = 454;
 
@@ -515,24 +566,28 @@ impl Ber<'_> {
         if self.ib + 2 > end {
             return self.fail("invalid_value");
         }
-        let (tag, constructed) = self.decode_tag(end)?;
+        let (tag, form) = self.decode_tag(end)?;
         if self.ib >= end {
             return self.fail("invalid_tag");
         }
-        let value = self.decode_value(constructed, end, depth + 1)?;
+        let value = self.decode_value(form, end, depth + 1)?;
         Ok(Term::tuple(vec![Term::Integer(tag), value]))
     }
 
     /// `ber_decode_tag` (`asn1_erl_nif.c:895-939`): the tag number with
     /// the class in bits 16 and 17, and whether the form is constructed.
-    fn decode_tag(&mut self, end: usize) -> Result<(i64, bool), BerError> {
+    fn decode_tag(&mut self, end: usize) -> Result<(i64, TagForm), BerError> {
         let first = self.input[self.ib];
         let class = i64::from(first & 0xc0) << 10;
-        let constructed = first & 0x20 != 0;
+        let form = if first & 0x20 != 0 {
+            TagForm::Constructed
+        } else {
+            TagForm::Primitive
+        };
         let number = first & 0x1f;
         if number < 31 {
             self.ib += 1;
-            return Ok((class | i64::from(number), constructed));
+            return Ok((class | i64::from(number), form));
         }
         if self.ib + 3 > end {
             return self.fail("invalid_value");
@@ -548,17 +603,12 @@ impl Ber<'_> {
         }
         tag |= i64::from(self.input[self.ib]);
         self.ib += 1;
-        Ok((tag, constructed))
+        Ok((tag, form))
     }
 
     /// `ber_decode_value` (`asn1_erl_nif.c:946-1018`) at the call depth
     /// `depth`.
-    fn decode_value(
-        &mut self,
-        constructed: bool,
-        end: usize,
-        depth: u32,
-    ) -> Result<Term, BerError> {
+    fn decode_value(&mut self, form: TagForm, end: usize, depth: u32) -> Result<Term, BerError> {
         if depth > MAX_DECODE_DEPTH {
             return self.fail(TOO_DEEP);
         }
@@ -568,7 +618,7 @@ impl Ber<'_> {
             len = usize::from(first);
         } else if first == 0x80 {
             self.ib += 1;
-            if self.ib + 1 >= end || !constructed {
+            if self.ib + 1 >= end || form == TagForm::Primitive {
                 return self.fail("invalid_length");
             }
             let mut elements = Vec::new();
@@ -598,7 +648,7 @@ impl Ber<'_> {
         }
         self.ib += 1;
         let value_end = self.ib + len;
-        if constructed {
+        if form == TagForm::Constructed {
             let mut elements = Vec::new();
             while self.ib < value_end {
                 elements.push(self.decode(value_end, depth)?);
@@ -644,7 +694,10 @@ fn decode_ber_tlv_raw(scheduler: &mut Scheduler, data: &Term) -> Result<BifResul
         )),
         Err(BerError { reason, position }) => {
             let reason = Term::Atom(scheduler.atoms.put(reason)?);
-            let detail = Term::tuple(vec![reason, Term::Integer(position as i64)]);
+            let detail = Term::tuple(vec![
+                reason,
+                Term::Integer(i64::try_from(position).expect("a binary position fits in i64")),
+            ]);
             error_tuple(scheduler, detail)
         }
     }
@@ -707,16 +760,16 @@ fn ber_encode(tlv: &Term, reversed: &mut Vec<u8>) -> Option<()> {
 /// and 17 of `tag`, and the tag number from its low 16 bits, in reverse
 /// order.
 fn ber_encode_tag(tag: u32, form: u8, reversed: &mut Vec<u8>) {
-    let head = form | ((tag & 0x30000) >> 10) as u8;
+    let head = form | u8::try_from((tag & 0x30000) >> 10).expect("two class bits fit in u8");
     let mut number = tag & 0xffff;
     if number <= 30 {
-        reversed.push(head | number as u8);
+        reversed.push(head | u8::try_from(number).expect("a tag number up to 30 fits in u8"));
         return;
     }
-    reversed.push((number & 127) as u8);
+    reversed.push(u8::try_from(number & 127).expect("7 bits fit in u8"));
     number >>= 7;
     while number > 0 {
-        reversed.push((number & 127) as u8 | 0x80);
+        reversed.push(u8::try_from(number & 127).expect("7 bits fit in u8") | 0x80);
         number >>= 7;
     }
     reversed.push(head | 0x1f);
@@ -725,12 +778,12 @@ fn ber_encode_tag(tag: u32, form: u8, reversed: &mut Vec<u8>) {
 /// `ber_encode_length` (`asn1_erl_nif.c:1137-1163`), in reverse order.
 fn ber_encode_length(mut size: usize, reversed: &mut Vec<u8>) {
     if size < 128 {
-        reversed.push(size as u8);
+        reversed.push(u8::try_from(size).expect("a size below 128 fits in u8"));
         return;
     }
     let mut chunks = 0u8;
     while size > 0 {
-        reversed.push((size & 0xff) as u8);
+        reversed.push(size.to_le_bytes()[0]);
         size >>= 8;
         chunks += 1;
     }

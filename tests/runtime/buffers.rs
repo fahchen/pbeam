@@ -52,7 +52,7 @@ fn accumulates_the_writes_of_the_buffer() {
     buffer.write(&[binary(&two_thousand)]);
     buffer.write(&[binary(&hundred)]);
     assert_eq!(buffer.size(), 2100);
-    assert_eq!(head(&mut buffer), Some(two_thousand.clone()));
+    assert_eq!(head(&mut buffer), Some(two_thousand));
     assert_eq!(buffer.size(), 2100);
     // A write of 3000 bytes is at least half of ACCUMULATOR_SIZE, so it
     // goes into the queue as its own element with no accumulation.
@@ -60,9 +60,9 @@ fn accumulates_the_writes_of_the_buffer() {
     buffer.write(&[binary(b""), binary(&three_thousand), binary(b"de")]);
     assert_eq!(buffer.size(), 5102);
     assert!(buffer.skip(2000));
-    assert_eq!(head(&mut buffer), Some(hundred.clone()));
+    assert_eq!(head(&mut buffer), Some(hundred));
     assert!(buffer.skip(100));
-    assert_eq!(head(&mut buffer), Some(three_thousand.clone()));
+    assert_eq!(head(&mut buffer), Some(three_thousand));
     assert!(buffer.skip(3000));
     assert_eq!(head(&mut buffer), Some(b"de".to_vec()));
 }

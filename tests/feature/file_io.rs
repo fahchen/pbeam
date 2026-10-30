@@ -1,3 +1,10 @@
+//! Opens, writes, positions and closes a file through the `pbeam` binary and compares the result
+//! with the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::{
     fs,
     process::{Command, Output},

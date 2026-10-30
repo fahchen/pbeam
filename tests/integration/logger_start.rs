@@ -1,3 +1,10 @@
+//! Runs the BIFs of the `logger_start` probe (list reverse, map keys, ETS keys and access rights)
+//! on PBeam and compares them with the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Map, Term};
@@ -30,7 +37,7 @@ fn reference_call(call: &str) -> Vec<u8> {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     reference.stdout
 }
 
@@ -1043,11 +1050,11 @@ fn walks_collision_nodes_and_bignum_paths_as_pinned_erts() {
         322, 137, 141, 308, 315, 230, 104, 187,
     ];
     let deep = [
-        329898321527737274,
-        446694106686689078,
-        413866500823436792,
-        -101714049538469044,
-        -74925715755171563,
+        329_898_321_527_737_274,
+        446_694_106_686_689_078,
+        413_866_500_823_436_792,
+        -101_714_049_538_469_044,
+        -74_925_715_755_171_563,
     ];
     let keys = |parts: &[&[Term]]| Term::list_from(parts.concat());
     let chunk = |keys: Term, path: Term| Term::tuple(vec![keys, path]);

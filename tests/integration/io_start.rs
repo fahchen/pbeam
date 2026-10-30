@@ -1,3 +1,10 @@
+//! Loads the pinned `io_lib` modules and runs the BIFs of the `io_start` probe (list tail,
+//! booleans, key member) on PBeam against the pinned ERTS.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Map, Term};
@@ -23,7 +30,7 @@ fn reference(function: &str) -> Vec<u8> {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     reference.stdout
 }
 
@@ -454,7 +461,7 @@ fn returns_the_host_os_type_as_pinned_erts() {
     let Some(results) = result
         .term
         .proper_list()
-        .map(|results| results.collect::<Vec<_>>())
+        .map(std::iter::Iterator::collect::<Vec<_>>)
     else {
         panic!("io_start_probe:system/0 must return a list");
     };

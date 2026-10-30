@@ -6,6 +6,10 @@
 //! twice, at two lengths, and divides the difference by the length
 //! difference. The constant cost of one run cancels, so the result is the
 //! allocation count of one iteration.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 use std::{alloc::System, cell::Cell, hint::black_box};
 
@@ -37,11 +41,13 @@ thread_local! {
     static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
 }
 
-// SAFETY: the allocator forwards each operation to `System`, which is a
-// valid allocator, and it only adds a count of the current thread.
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
+// SAFETY: each method forwards its arguments to `System`, which is a valid
+// allocator, so the `GlobalAlloc` contract holds. The count only changes a
+// `Cell` of the current thread, which does not allocate, unwind, or touch
+// the memory of the caller.
 unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
         count_one();
@@ -96,7 +102,7 @@ fn counted() -> usize {
 /// assert!(count > 0);
 /// ```
 fn allocations(program: &BeamProgram, function: &str, length: usize) -> usize {
-    let counter = Term::Integer(length as i64);
+    let counter = Term::Integer(i64::try_from(length).unwrap());
     let tuple = || Term::tuple(vec![Term::Integer(1), Term::Integer(2), Term::Integer(3)]);
     let terms: Vec<Term> = match function {
         "floor_loop" => vec![counter],

@@ -1,3 +1,5 @@
+//! Runs the `to_existing_atom` functions on PBeam and compares the results with the pinned ERTS.
+
 use std::process::Command;
 
 use pbeam_runtime::{BeamProgram, Map, Term};
@@ -13,6 +15,10 @@ const EXPECTED: &[u8] = include_bytes!("../../fixtures/existing_atom/existing_at
 const BITS_EXPECTED: &[u8] = b"{error,badarg}\n";
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "case table: one expected result for each name and encoding, and the entries share the helpers"
+)]
 fn reads_atoms_that_exist_as_pinned_erts() {
     // `erlang:list_to_existing_atom/1` follows `list_to_existing_atom_1`
     // (bif.c:3239-3258), which reads the name with `erts_unicode_list_to_buf`
@@ -86,7 +92,7 @@ fn reads_atoms_that_exist_as_pinned_erts() {
             vec![Term::Integer(111), Term::Integer(107)],
             atom("bad"),
         )),
-        failed_list(list(&[111, 0x110000])),
+        failed_list(list(&[111, 0x0011_0000])),
         failed_list(list(&[111, 0xD800])),
         failed_list(Term::list_from(vec![Term::Integer(111), Term::Float(1.0)])),
         failed_list(list(&[111, -1])),

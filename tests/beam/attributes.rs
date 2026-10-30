@@ -212,6 +212,10 @@ fn reads_an_improper_tail_and_refuses_a_missing_one() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "case table: one entry for each external term tag that the attribute walk skips"
+)]
 fn skips_every_supported_tag() {
     // One attribute of each tag shape before the declaration.
     let mut new_pid = vec![88];
@@ -585,7 +589,10 @@ fn attr_chunk(bytes: &[u8]) -> Option<&[u8]> {
     let mut pos = 12;
     while pos + 8 <= bytes.len() {
         let id = &bytes[pos..pos + 4];
-        let size = u32::from_be_bytes(bytes[pos + 4..pos + 8].try_into().unwrap()) as usize;
+        let size = usize::try_from(u32::from_be_bytes(
+            bytes[pos + 4..pos + 8].try_into().unwrap(),
+        ))
+        .unwrap();
         if id == b"Attr" {
             return bytes.get(pos + 8..pos + 8 + size);
         }

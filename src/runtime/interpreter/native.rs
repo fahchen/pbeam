@@ -30,7 +30,10 @@
 //! and the functions of the library run for the loaded module instance.
 
 use super::bif::denial;
-use super::*;
+use super::{
+    Arc, Atom, AtomTable, BeamError, BeamModule, BifResult, Binary, ExceptionClass, Instruction,
+    Map, Scheduler, Term, bif, call_arguments, error, print_term,
+};
 use crate::runtime::{
     Job, NifContext,
     capability::{CapabilityKind, Operation},
@@ -404,8 +407,8 @@ pub(super) fn call(
                     atoms: &scheduler.atoms,
                     node: &scheduler.node,
                 };
-                let called = function.call(caller, arguments);
-                finish_shared(scheduler, called)
+                let outcome = function.call(caller, arguments);
+                finish_shared(scheduler, outcome)
             }
             Job::CpuBound | Job::IoBound => Ok(BifResult::Dirty(Work::Shared {
                 library: Arc::clone(&library),

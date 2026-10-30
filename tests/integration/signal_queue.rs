@@ -1,6 +1,10 @@
 //! The signal queue on one scheduler: the time when a process handles a
 //! control signal, the order of messages and signals, and the reductions
 //! of the handling, compared with pinned ERTS (`erl +S 1`).
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
 
 #[path = "../common/mod.rs"]
 mod common;

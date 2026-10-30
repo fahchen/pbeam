@@ -14,6 +14,25 @@ use crate::{
     term::{Binary, Term},
 };
 
+/// The encoding of the characters of a chardata, which the `Encoding`
+/// argument of `unicode:characters_to_binary/2` and
+/// `unicode:characters_to_list/2` names, and which the atom tags of the
+/// external term format name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CharEncoding {
+    /// The `unicode` or `utf8` encoding.
+    Unicode,
+    /// The `latin1` encoding.
+    Latin1,
+}
+
+impl From<bool> for CharEncoding {
+    /// Return `Latin1` for `true` and `Unicode` for `false`.
+    fn from(latin1: bool) -> Self {
+        if latin1 { Self::Latin1 } else { Self::Unicode }
+    }
+}
+
 /// The UTF-8 output of a chardata walk, as the target buffer of
 /// `do_build_utf8` keeps it (`erl_unicode.c:508-749`).
 #[derive(Debug, Default)]
@@ -57,13 +76,14 @@ pub(super) enum Utf8State {
 ///
 /// ```rust,ignore
 /// let list = Term::list_from(vec![Term::Integer(97), Term::binary(vec![195, 169])]);
-/// assert_eq!(utf8_need(&list, false), Some(2));
-/// assert_eq!(utf8_need(&list, true), Some(5));
-/// assert_eq!(utf8_need(&Term::static_atom("foo"), false), None);
+/// assert_eq!(utf8_need(&list, CharEncoding::Unicode), Some(2));
+/// assert_eq!(utf8_need(&list, CharEncoding::Latin1), Some(5));
+/// assert_eq!(utf8_need(&Term::static_atom("foo"), CharEncoding::Unicode), None);
 /// // [1 bsl 60 | x]: the walk stops at the big integer.
-/// assert_eq!(utf8_need(&Term::list_with_tail(vec![Term::Integer(1 << 60)], Term::static_atom("x")), false), Some(0));
+/// assert_eq!(utf8_need(&Term::list_with_tail(vec![Term::Integer(1 << 60)], Term::static_atom("x")), CharEncoding::Unicode), Some(0));
 /// ```
-pub(super) fn utf8_need(chardata: &Term, latin1: bool) -> Option<usize> {
+pub(super) fn utf8_need(chardata: &Term, charset: CharEncoding) -> Option<usize> {
+    let latin1 = charset == CharEncoding::Latin1;
     let binary_cost = |bytes: &[u8]| {
         if latin1 {
             bytes.len() + bytes.iter().filter(|&&byte| byte >= 0x80).count()
@@ -138,14 +158,14 @@ fn checked_bytes(binary: &Binary) -> &[u8] {
 /// let mut output = Utf8Output::default();
 /// let mut left = 2;
 /// let list = Term::list_from(vec![Term::Integer(97), Term::Integer(98), Term::Integer(99)]);
-/// let (rest, error) = build_utf8(&list, &mut left, false, &mut output);
+/// let (rest, error) = build_utf8(&list, &mut left, CharEncoding::Unicode, &mut output);
 /// assert_eq!((rest, error, left), (Term::list_from(vec![Term::Integer(99)]), false, 0));
 /// assert_eq!(output.bytes, b"ab");
 /// ```
 pub(super) fn build_utf8(
     chardata: &Term,
     left: &mut i64,
-    latin1: bool,
+    charset: CharEncoding,
     output: &mut Utf8Output,
 ) -> (Term, bool) {
     let nil = || Term::nil();
@@ -154,7 +174,7 @@ pub(super) fn build_utf8(
     }
     // Each frame is the rest of a list: its next cons cell, or its tail.
     let mut frames = match chardata {
-        Term::Binary(bytes) => return build_binary(checked_bytes(bytes), left, latin1, output),
+        Term::Binary(bytes) => return build_binary(checked_bytes(bytes), left, charset, output),
         _ if chardata.is_list() => vec![chardata],
         _ => return (chardata.clone(), true),
     };
@@ -164,7 +184,7 @@ pub(super) fn build_utf8(
         let Some((element, after)) = frame.cons_cell() else {
             match frame {
                 Term::Binary(bytes) => {
-                    let (rest, error) = build_binary(checked_bytes(bytes), left, latin1, output);
+                    let (rest, error) = build_binary(checked_bytes(bytes), left, charset, output);
                     if error || *left == 0 {
                         break (rest, error);
                     }
@@ -181,7 +201,7 @@ pub(super) fn build_utf8(
         match element {
             Term::Binary(bytes) => {
                 frames[top] = after;
-                let (rest, error) = build_binary(checked_bytes(bytes), left, latin1, output);
+                let (rest, error) = build_binary(checked_bytes(bytes), left, charset, output);
                 if error || rest != nil() {
                     break (Term::cons(rest, after.clone()), error);
                 }
@@ -189,7 +209,10 @@ pub(super) fn build_utf8(
             Term::Integer(_) | Term::BigInt(_) => {
                 let character = element
                     .small_integer()
-                    .filter(|&value| output.leftover.is_empty() && (!latin1 || value <= 255))
+                    .filter(|&value| {
+                        output.leftover.is_empty()
+                            && (charset == CharEncoding::Unicode || value <= 255)
+                    })
                     .and_then(|value| u32::try_from(value).ok())
                     .and_then(char::from_u32);
                 let Some(character) = character else {
@@ -234,26 +257,29 @@ pub(super) fn build_utf8(
 /// ```rust,ignore
 /// let mut output = Utf8Output::default();
 /// let mut left = 1;
-/// let (rest, error) = build_binary(&[195, 169, 97], &mut left, false, &mut output);
+/// let (rest, error) = build_binary(&[195, 169, 97], &mut left, CharEncoding::Unicode, &mut output);
 /// // The split moves past the continuation byte 169.
 /// assert_eq!((rest, error, left), (Term::binary(vec![97]), false, 0));
 /// ```
 fn build_binary(
     bytes: &[u8],
     left: &mut i64,
-    latin1: bool,
+    charset: CharEncoding,
     output: &mut Utf8Output,
 ) -> (Term, bool) {
+    let latin1 = charset == CharEncoding::Latin1;
     let mut size = bytes.len();
+    let total = i64::try_from(size).expect("a binary length fits in i64");
+    let position = |left: i64| usize::try_from(left).expect("the budget of a walk is positive");
     if !latin1 {
-        while size as i64 > *left && bytes[*left as usize] & 0xC0 == 0x80 {
+        while total > *left && bytes[position(*left)] & 0xC0 == 0x80 {
             *left += 1;
         }
     }
     let mut rest = Term::nil();
-    if size as i64 > *left {
-        rest = Term::binary(bytes[*left as usize..].to_vec());
-        size = *left as usize;
+    if total > *left {
+        rest = Term::binary(bytes[position(*left)..].to_vec());
+        size = position(*left);
     }
     if latin1 {
         for &byte in &bytes[..size] {
@@ -266,7 +292,7 @@ fn build_binary(
     } else if let Err(position) = copy_utf8_bin(&bytes[..size], output) {
         return (Term::binary(bytes[position..].to_vec()), true);
     }
-    *left -= size as i64;
+    *left -= i64::try_from(size).expect("a binary length fits in i64");
     (rest, false)
 }
 

@@ -14,7 +14,7 @@ use super::socket::{
     closed, errno_error, invalid, send_registry, sockaddr, socket_argument, socket_message,
 };
 use super::supports::atom;
-use super::*;
+use super::{Arc, BeamError, BifResult, ExceptionClass, Scheduler, Term, error};
 use crate::runtime::resources::lock;
 use crate::runtime::scheduler::poll::{Direction, NodePoll};
 use crate::runtime::signal::Signal;
@@ -418,7 +418,7 @@ pub(super) fn cancel(
     };
     let caller = scheduler.current_process().id;
     let name = scheduler.atoms.name_of(operation).to_owned();
-    let poll = scheduler.node().poll.clone();
+    let poll = Arc::clone(&scheduler.node().poll);
     let mut state = lock(&socket);
     // The `connect` cancel gives `{error, not_found}`; the others give
     // `not_found` (`unix_socket_syncio.c:4967-5132`, `5144-5355`). The

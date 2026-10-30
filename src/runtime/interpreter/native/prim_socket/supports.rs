@@ -23,7 +23,7 @@
 
 use std::{fs, iter, str};
 
-use super::*;
+use super::{BeamError, BifResult, Scheduler, Term};
 
 /// The column of the host OS in the tables of this file.
 #[cfg(target_os = "macos")]
@@ -49,14 +49,14 @@ const FEATURES: [(&str, [bool; 2]); 5] = [
 /// The rows of `esock_msg_flags` (`prim_socket_nif.c:526-624`), as
 /// `(name, flag)`. A flag that the host does not define is 0.
 pub(super) const MSG_FLAGS: [(&str, [i32; 2]); 12] = [
-    ("cmsg_cloexec", [0, 1073741824]),
+    ("cmsg_cloexec", [0, 1_073_741_824]),
     ("confirm", [0, 2048]),
     ("ctrunc", [32, 8]),
     ("dontroute", [4, 4]),
     ("eor", [8, 128]),
     ("errqueue", [0, 8192]),
     ("more", [0, 32768]),
-    ("nosignal", [524288, 16384]),
+    ("nosignal", [524_288, 16384]),
     ("oob", [1, 1]),
     ("peek", [2, 2]),
     ("trunc", [16, 32]),
@@ -91,9 +91,9 @@ const IOCTL_FLAGS: [(&str, [i32; 2]); 34] = [
     ("cantconfig", [0, 0]),
     ("lower_up", [0, 65536]),
     ("ppromisc", [0, 0]),
-    ("dormant", [0, 131072]),
+    ("dormant", [0, 131_072]),
     ("monitor", [0, 0]),
-    ("echo", [0, 262144]),
+    ("echo", [0, 262_144]),
     ("staticarp", [0, 0]),
     ("dying", [0, 0]),
     ("renaming", [0, 0]),
@@ -106,25 +106,25 @@ const IOCTL_FLAGS: [(&str, [i32; 2]); 34] = [
 /// (`prim_socket_nif.c:5509-5626`), in source order, as `(name, request)`.
 /// `None` is a request that the host does not define.
 pub(super) const IOCTL_REQUESTS: [(&str, [Option<u32>; 2]); 20] = [
-    ("gifconf", [Some(3222038820), Some(35090)]),
-    ("nread", [Some(1074030207), Some(21531)]),
-    ("atmark", [Some(1074033415), Some(35077)]),
+    ("gifconf", [Some(3_222_038_820), Some(35090)]),
+    ("nread", [Some(1_074_030_207), Some(21531)]),
+    ("atmark", [Some(1_074_033_415), Some(35077)]),
     ("gifname", [None, Some(35088)]),
     ("gifindex", [None, Some(35123)]),
-    ("gifflags", [Some(3223349521), Some(35091)]),
-    ("gifaddr", [Some(3223349537), Some(35093)]),
-    ("gifdstaddr", [Some(3223349538), Some(35095)]),
-    ("gifbrdaddr", [Some(3223349539), Some(35097)]),
-    ("gifnetmask", [Some(3223349541), Some(35099)]),
-    ("gifmtu", [Some(3223349555), Some(35105)]),
+    ("gifflags", [Some(3_223_349_521), Some(35091)]),
+    ("gifaddr", [Some(3_223_349_537), Some(35093)]),
+    ("gifdstaddr", [Some(3_223_349_538), Some(35095)]),
+    ("gifbrdaddr", [Some(3_223_349_539), Some(35097)]),
+    ("gifnetmask", [Some(3_223_349_541), Some(35099)]),
+    ("gifmtu", [Some(3_223_349_555), Some(35105)]),
     ("gifhwaddr", [None, Some(35111)]),
     ("gifmap", [None, Some(35184)]),
     ("giftxqlen", [None, Some(35138)]),
-    ("sifflags", [Some(2149607696), Some(35092)]),
-    ("sifaddr", [Some(2149607692), Some(35094)]),
-    ("sifdstaddr", [Some(2149607694), Some(35096)]),
-    ("sifbrdaddr", [Some(2149607699), Some(35098)]),
-    ("sifmtu", [Some(2149607732), Some(35106)]),
+    ("sifflags", [Some(2_149_607_696), Some(35092)]),
+    ("sifaddr", [Some(2_149_607_692), Some(35094)]),
+    ("sifdstaddr", [Some(2_149_607_694), Some(35096)]),
+    ("sifbrdaddr", [Some(2_149_607_699), Some(35098)]),
+    ("sifmtu", [Some(2_149_607_732), Some(35106)]),
     ("siftxqlen", [None, Some(35139)]),
 ];
 

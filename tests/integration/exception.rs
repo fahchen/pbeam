@@ -1,3 +1,10 @@
+//! Checks `try` and `catch` of error and exit exceptions, and the stack trace of a caught error, on
+//! PBeam.
+#![expect(
+    clippy::unwrap_used,
+    reason = "test helpers report a failure by a panic"
+)]
+
 use std::process::Command;
 
 #[path = "../common/mod.rs"]
@@ -30,7 +37,7 @@ fn erl_reference(expression: &str) -> Vec<u8> {
         .output()
         .unwrap();
     assert!(reference.status.success());
-    assert!(reference.stderr.is_empty());
+    assert_eq!(reference.stderr, <[u8; 0]>::default());
     reference.stdout
 }
 
