@@ -1279,7 +1279,7 @@ fn open_terminal() -> (OwnedFd, OwnedFd) {
 /// ```
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(
+    expect(
         clippy::useless_conversion,
         reason = "the request type is c_ulong, and TIOCSCTTY is c_uint on macOS"
     )
