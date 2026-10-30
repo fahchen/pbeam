@@ -248,7 +248,8 @@ fn shuts_down_each_side_and_rejects_a_wrong_how_and_sendfile() {
     );
 }
 
-/// `{packet, raw}` changes nothing, and another packet type stops the run.
+/// `{packet, raw}` changes nothing, and a packet type other than `raw`, 1,
+/// 2, and 4 (here `asn1`, 4) stops the run.
 /// `nopush` reads `TCP_CORK` on Linux and 0 on macOS
 /// (inet_drv.c:1101-1105, 7506-7521, 9451-9460).
 #[test]
@@ -267,7 +268,7 @@ fn keeps_a_raw_packet_and_runs_nopush_as_the_host_does() {
         Control::Reply(vec![1, 48, 0, 0, 0, on])
     );
     assert!(
-        port.control(MAGIC + 7, &[23, 0, 0, 0, 2], ProcessId(1))
+        port.control(MAGIC + 7, &[23, 0, 0, 0, 4], ProcessId(1))
             .is_err()
     );
 }

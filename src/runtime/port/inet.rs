@@ -495,6 +495,16 @@ impl Inet {
                 if count > 0 {
                     return Ok(Control::Passive { reply, count });
                 }
+                // A change of the packet type in active mode drops the
+                // remaining length of the packet (inet_drv.c:7975-7981).
+                if self.packet != old_packet
+                    && old != 0
+                    && self.active != 0
+                    && self.state == State::Connected
+                    && self.socket_type == SocketType::Stream
+                {
+                    self.stream.remain = 0;
+                }
                 return Ok(self.set_active_result(old, old_packet, reply));
             }
             8 => self.get_options(request)?,
@@ -1095,8 +1105,10 @@ impl Inet {
     }
 
     /// Return the result of a `SETOPTS` with the reply `reply` that changed
-    /// the option `active` from `old`: [`Control::Active`] when a connected
-    /// socket became active or a socket whose connection ended is active,
+    /// the option `active` from `old` and the option `packet` from
+    /// `old_packet`: [`Control::Active`] when a connected socket became
+    /// active, an active socket changed its packet type, or a socket whose
+    /// connection ended is active,
     /// else the reply (inet_drv.c:7001-7011, 7949-7981). A connected
     /// `udp_inet` socket gives the reply, so a receive that waits does not
     /// read for the owner (inet_drv.c:4335-4357). PBeam runs no

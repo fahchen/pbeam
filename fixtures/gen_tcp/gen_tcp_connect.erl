@@ -147,16 +147,24 @@ packet(L, P, H) ->
                      gen_tcp:recv(A, 1, 1000)];
                _ -> []
            end,
+    %% A change of the packet type in active mode delivers the bytes of
+    %% the buffer (inet_drv.c:7971-7981, 11132-11138).
+    Switch = case H of
+                 1 -> [];
+                 _ -> [inet:setopts(S, [{packet, H}, {active, true}]), gen_tcp:send(A, <<0>>),
+                       timer:sleep(50), message(), inet:setopts(S, [{packet, raw}]), message()]
+             end,
     [ok = gen_tcp:close(X) || X <- [S, A]],
-    [Send, Receive, Buffered, Once, Many, Change, Long].
+    [Send, Receive, Buffered, Once, Many, Change, Long, Switch].
 
-%% A packet that packet_size does not allow, and a buffer smaller than the
-%% header, give emsgsize to a passive receive, and the socket can then not
-%% read (inet_drv.c:12849-12890, 13007-13019).
+%% A packet that packet_size does not allow, here the second packet, and a
+%% buffer smaller than the header give emsgsize to a passive receive, and
+%% the socket can then not read (inet_drv.c:12849-12890, 13007-13019,
+%% 13167-13171, 13227-13228).
 limit(L, P, Options) ->
     {ok, S} = gen_tcp:connect({127, 0, 0, 1}, P, [binary, {active, false}, {packet, 4} | Options]),
     {ok, A} = gen_tcp:accept(L, 5000),
-    ok = gen_tcp:send(A, <<5:32, "hello", 2:32, "ok">>),
+    ok = gen_tcp:send(A, <<2:32, "ok", 5:32, "hello">>),
     timer:sleep(50),
     Result = [inet:getopts(S, [packet_size, buffer]), gen_tcp:recv(S, 0, 1000),
               gen_tcp:recv(S, 0, 100), gen_tcp:send(S, <<"z">>), gen_tcp:recv(A, 0, 1000)],

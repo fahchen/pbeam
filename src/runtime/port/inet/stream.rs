@@ -1,5 +1,6 @@
 //! The receive and send state of a connected socket of a `tcp_inet` port
-//! in passive and active mode with `{packet, raw}`, as `tcp_descriptor` keeps it
+//! in passive and active mode with `{packet, raw}`, `{packet, 1}`,
+//! `{packet, 2}`, and `{packet, 4}`, as `tcp_descriptor` keeps it
 //! (`inet_drv.c:1308`, 1050-1064, 12268-12325, 12657-12731, 12783-12890,
 //! 12967-13240, 13613-13852, 14234-14370).
 //!
@@ -26,6 +27,15 @@
 //! after one message. The end of the connection gives `{tcp_error, S,
 //! Reason}` for a failed read, then `{tcp_closed, S}`, and the port ends
 //! (inet_drv.c:3987-4095, 12783-12890, 13042-13128, 13613-13662).
+//!
+//! With `{packet, 1}`, `{packet, 2}`, or `{packet, 4}` (the `packet`
+//! values 1, 2, and 3), each send starts with a big-endian header of 1, 2,
+//! or 4 bytes that holds the low bytes of the length: `<<"abc">>` with
+//! `{packet, 2}` writes `[0, 3, $a, $b, $c]`. A receive takes the length 0
+//! and gives one whole packet without its header, and an active socket
+//! gives one message for each whole packet. A length above `packet_size`
+//! gives `emsgsize` (inet_drv.c:4279-4304, 12967-13235, 13736-13885;
+//! packet_parser.c:248-284, 483-494).
 
 use std::{
     collections::VecDeque,
@@ -263,7 +273,7 @@ pub(in crate::runtime) struct Stream {
     /// The size of the input buffer, 0 without a buffer (`i_bufsz`).
     input_size: usize,
     /// The bytes that the receive of a length still needs (`i_remain`).
-    remain: usize,
+    pub(super) remain: usize,
     /// The receive that waits for data.
     pub(in crate::runtime) receiver: Option<Receiver>,
     /// The connect that waits for the write select of the socket.

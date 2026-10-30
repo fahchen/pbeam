@@ -242,7 +242,8 @@ fn frames_packets_with_a_header_of_1_2_and_4_bytes_as_pinned_erts() {
     // packet without its header for each receive (inet_drv.c:4279-4304,
     // 12967-13235; packet_parser.c:248-284, 483-494), a split packet, two
     // packets in one read, `{active, once}` and `{active, true}`, a change
-    // of the option with bytes in the buffer, the length byte of a send of
+    // of the option with bytes in the buffer, also in active mode
+    // (inet_drv.c:7968-7982), the length byte of a send of
     // 300 bytes with `{packet, 1}`, `packet_size`, a buffer smaller than
     // the header (inet_drv.c:13007-13019), and `emsgsize` in passive and
     // active mode (inet_drv.c:12849-12890, 13118-13119).
@@ -252,21 +253,23 @@ fn frames_packets_with_a_header_of_1_2_and_4_bytes_as_pinned_erts() {
          ok,{ok,<<0>>}],[{ok,<<120,121,122>>},{error,timeout},{error,einval}],[{ok,<<115,112,\
          108,105,116>>},{ok,<<111,110,101>>},{ok,<<>>}],[{tcp,[116,119,111]},missing,{ok,[{active,\
          false}]}],[{tcp,<<116,104,114,101,101>>},{tcp,<<102,111,117,114>>}],[ok,{ok,<<6,116>>},\
-         ok,{error,timeout},ok,{ok,[{packet,0}]}],[ok,{ok,<<44>>}]],[[{ok,[{packet,2},{packet_size,\
+         ok,{error,timeout},ok,{ok,[{packet,0}]}],[ok,{ok,<<44>>}],[]],[[{ok,[{packet,2},{packet_size,\
          0}]},ok,{ok,<<0,3,97,98,99>>},ok,{ok,<<0,3,100,101,102>>},ok,{ok,<<0,0>>}],[{ok,<<120,\
          121,122>>},{error,timeout},{error,einval}],[{ok,<<115,112,108,105,116>>},{ok,<<111,\
          110,101>>},{ok,<<>>}],[{tcp,[116,119,111]},missing,{ok,[{active,false}]}],[{tcp,<<116,\
          104,114,101,101>>},{tcp,<<102,111,117,114>>}],[ok,{ok,<<0,6,116>>},ok,{error,timeout},\
-         ok,{ok,[{packet,0}]}],[]],[[{ok,[{packet,4},{packet_size,0}]},ok,{ok,<<0,0,0,3,97,\
-         98,99>>},ok,{ok,<<0,0,0,3,100,101,102>>},ok,{ok,<<0,0,0,0>>}],[{ok,<<120,121,122>>},\
-         {error,timeout},{error,einval}],[{ok,<<115,112,108,105,116>>},{ok,<<111,110,101>>},\
-         {ok,<<>>}],[{tcp,[116,119,111]},missing,{ok,[{active,false}]}],[{tcp,<<116,104,114,\
-         101,101>>},{tcp,<<102,111,117,114>>}],[ok,{ok,<<0,0,0,6,116>>},ok,{error,timeout},\
-         ok,{ok,[{packet,0}]}],[]]],[[{ok,[{packet_size,4},{buffer,9216}]},{error,emsgsize},\
-         {error,enotconn},{error,enotconn},{error,closed}],[{ok,[{packet_size,0},{buffer,2}]},\
-         {error,emsgsize},{error,enotconn},{error,enotconn},{error,closed}],[{ok,[{packet_size,\
-         8},{buffer,2}]},{ok,<<104,101,108,108,111>>},{ok,<<111,107>>},ok,{ok,<<0,0,0,1,122>>}]],\
-         [{tcp,<<97>>},missing,{tcp_error,emsgsize},tcp_closed,missing],[]]\n",
+         ok,{ok,[{packet,0}]}],[],[ok,ok,ok,missing,ok,{tcp,<<111,32,114,97,119,0,4,98,97,\
+         99,107,0>>}]],[[{ok,[{packet,4},{packet_size,0}]},ok,{ok,<<0,0,0,3,97,98,99>>},ok,\
+         {ok,<<0,0,0,3,100,101,102>>},ok,{ok,<<0,0,0,0>>}],[{ok,<<120,121,122>>},{error,timeout},\
+         {error,einval}],[{ok,<<115,112,108,105,116>>},{ok,<<111,110,101>>},{ok,<<>>}],[{tcp,\
+         [116,119,111]},missing,{ok,[{active,false}]}],[{tcp,<<116,104,114,101,101>>},{tcp,\
+         <<102,111,117,114>>}],[ok,{ok,<<0,0,0,6,116>>},ok,{error,timeout},ok,{ok,[{packet,\
+         0}]}],[],[ok,ok,ok,missing,ok,{tcp,<<111,32,114,97,119,0,0,0,4,98,97,99,107,0>>}]]],\
+         [[{ok,[{packet_size,4},{buffer,9216}]},{ok,<<111,107>>},{error,emsgsize},{error,enotconn},\
+         {error,closed}],[{ok,[{packet_size,0},{buffer,2}]},{error,emsgsize},{error,enotconn},\
+         {error,enotconn},{error,closed}],[{ok,[{packet_size,8},{buffer,2}]},{ok,<<111,107>>},\
+         {ok,<<104,101,108,108,111>>},ok,{ok,<<0,0,0,1,122>>}]],[{tcp,<<97>>},missing,{tcp_error,\
+         emsgsize},tcp_closed,missing],[]]\n",
     );
 }
 
