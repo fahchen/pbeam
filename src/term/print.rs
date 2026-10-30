@@ -22,14 +22,8 @@
 //! | pid | `<0.Number.Serial>` |
 //! | reference | `#Ref<0.N2.N1.N0>` |
 
+use super::external_id::{ExternalData, LOCAL_NODE, PID_NUMBER_BITS, PID_NUMBER_MASK};
 use super::{AtomTable, Reference, Target, Term, match_context::MATCH_CONTEXT_ESCAPE};
-
-/// The number of low bits of the pid data that ERTS prints as the pid
-/// number (`_PID_NUM_SIZE`, `erl_term.h:646-656`). The higher bits are the
-/// serial.
-const PID_NUMBER_BITS: u32 = 28;
-/// The mask of the pid number in the pid data.
-const PID_NUMBER_MASK: u64 = (1 << PID_NUMBER_BITS) - 1;
 
 /// An item of the work stack of `print_term`: a term to print, or a fixed
 /// text, as the `PRT_*` markers of `print_term` are.
@@ -242,6 +236,32 @@ fn print_term_counted(term: &Term, atoms: &AtomTable, dcount: &mut i64) -> Vec<u
                 );
             }
             Term::Port(port) => text.extend_from_slice(format!("#Port<0.{}>", port.0).as_bytes()),
+            // The channel number of a node of another node is the atom
+            // index of its name (`dist_entry_channel_no`,
+            // `erl_node_container_utils.h:109-116`, `erl_printf_term.c:497-531`).
+            Term::External(id) => {
+                // An old incarnation of the local node has the dist entry of
+                // the local node, whose channel number is 0.
+                let channel = if atoms.name_of(&id.node) == LOCAL_NODE {
+                    0
+                } else {
+                    id.node.index()
+                };
+                let printed = match &id.data {
+                    ExternalData::Pid { number, serial } => {
+                        format!("<{channel}.{number}.{serial}>")
+                    }
+                    ExternalData::Port(number) => format!("#Port<{channel}.{number}>"),
+                    ExternalData::Reference(numbers) => {
+                        let parts: Vec<String> = std::iter::once(channel)
+                            .chain(numbers.iter().rev().copied())
+                            .map(|part| part.to_string())
+                            .collect();
+                        format!("#Ref<{}>", parts.join("."))
+                    }
+                };
+                text.extend_from_slice(printed.as_bytes());
+            }
             Term::Reference(_) | Term::Resource(_) => {
                 let [n0, n1, n2] = term.reference().map_or([0; 3], Reference::numbers);
                 text.extend_from_slice(format!("#Ref<0.{n2}.{n1}.{n0}>").as_bytes());

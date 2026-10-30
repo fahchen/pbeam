@@ -40,14 +40,30 @@ use num_bigint::BigInt;
 use num_traits::FromPrimitive;
 use std::io::Write;
 
+use crate::term::external_id::{is_reference, pid_parts, port_number};
 use crate::term::{
     Atom, AtomTable, Fun, MAX_ATOM_CHARACTERS, MAX_ATOM_SZ_LIMIT, MAX_TUPLE_SIZE, Map, ProcessId,
     Reference, SMALL_INTEGER_MAX, SMALL_INTEGER_MIN, debug_term, external, print_term,
 };
 
+/// Return the runtime error of the BIF `operation` with a pid, a port, or a
+/// reference of another node, which needs a connection to that node
+/// (row "Distribution" of `docs/erts-differences.md`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// return Err(remote_unsupported("erlang:link/1"));
+/// ```
+pub(in crate::runtime::interpreter) fn remote_unsupported(operation: &str) -> BeamError {
+    error(format!(
+        "unsupported {operation} with a pid, a port, or a reference of another node: see \"Distribution\" in docs/erts-differences.md"
+    ))
+}
+
 /// Run `erlang:node/1`: return the node of a pid, a port, or a reference,
-/// which is the local node, and raise `badarg` for another term, as ERTS
-/// `node_1` does (`dist.c:6219-6225`).
+/// the local node or the node of an identifier of another node, and raise
+/// `badarg` for another term, as ERTS `node_1` does (`dist.c:6219-6225`).
 ///
 /// # Examples
 ///
@@ -60,6 +76,7 @@ pub(super) fn node(term: &Term) -> BifResult {
         Term::Pid(_) | Term::Port(_) | Term::Reference(_) | Term::Resource(_) => {
             Value(local_node())
         }
+        Term::External(id) => Value(Term::Atom(id.node.clone())),
         _ => BifResult::badarg(),
     }
 }
@@ -1296,6 +1313,7 @@ pub(super) fn link(scheduler: &mut Scheduler, target: &Term) -> Result<BifResult
     let target = match *target {
         Term::Pid(pid) => LinkId::Process(pid),
         Term::Port(port) => LinkId::Port(port),
+        Term::External(_) => return Err(remote_unsupported("erlang:link/1")),
         _ => return Ok(BifResult::badarg()),
     };
     if let Some(denied) = denial(scheduler, CapabilityKind::Process, Operation::Link, None)? {
@@ -1433,6 +1451,7 @@ fn send_exit(
             (Some(owner), Some(reference))
         }
         (Term::Port(_), _) => (None, None),
+        (Term::External(_), _) => return Err(remote_unsupported("erlang:exit/2,3")),
         _ => return Ok(BifResult::badarg()),
     };
     if target != Some(caller_id) {
@@ -1595,6 +1614,7 @@ pub(super) fn monitor(
     // support. It comes after the capability check.
     let target = match (context.scheduler.atoms.name_of(kind), target) {
         ("process", Term::Pid(id)) => Some(Ok(MonitorTarget::Process(*id))),
+        ("process", Term::External(_)) => Some(Err(remote_unsupported("erlang:monitor/2,3"))),
         ("process", target) => local_name(target).map(|name| Ok(MonitorTarget::ProcessName(name))),
         ("port", Term::Port(port)) => Some(Ok(MonitorTarget::Port(*port))),
         ("port", target) => local_name(target).map(|name| Ok(MonitorTarget::PortName(name))),
@@ -2779,7 +2799,7 @@ pub(super) fn integer_to_list_2(
 /// ```
 pub(super) fn pid_to_list(term: &Term, atoms: &AtomTable) -> BifResult {
     match term {
-        Term::Pid(_) => term_text_list(term, atoms),
+        _ if pid_parts(term).is_some() => term_text_list(term, atoms),
         _ => BifResult::badarg(),
     }
 }
@@ -2817,7 +2837,7 @@ pub(super) fn fun_to_list(term: &Term, atoms: &AtomTable) -> BifResult {
 /// ```
 pub(super) fn port_to_list(term: &Term, atoms: &AtomTable) -> BifResult {
     match term {
-        Term::Port(_) => term_text_list(term, atoms),
+        _ if port_number(term).is_some() => term_text_list(term, atoms),
         _ => BifResult::badarg(),
     }
 }
@@ -4964,10 +4984,15 @@ enum Destination<'a> {
     /// process has drops the message. The caller reads the name through the
     /// owning atom table.
     NodeName(&'a Atom),
-    /// `{Name, Node}` with another node, as an atom.
+    /// `{Name, Node}` with another node, as an atom, or a pid or a
+    /// reference of another node.
     Remote(&'a Atom),
     /// A local port.
     Port(crate::term::PortId),
+    /// A pid, a port, or a reference of an old incarnation of the local
+    /// node: ERTS logs an error report and drops the message
+    /// (`bif.c:2489-2503`, `2537-2549`).
+    OldIncarnation,
 }
 
 /// Return the destination of `to`, or `None` for a term that `do_send`
@@ -4993,6 +5018,11 @@ fn destination(to: &Term) -> Option<Destination<'_>> {
         Term::Resource(resource) => Destination::Alias(resource.reference()),
         Term::Atom(name) => Destination::Name(name),
         Term::Port(id) => Destination::Port(*id),
+        Term::External(id) if Term::Atom(id.node.clone()) == local_node() => {
+            Destination::OldIncarnation
+        }
+        // A port of another node raises `badarg` (`bif.c:2537-2695`).
+        Term::External(id) if port_number(to).is_none() => Destination::Remote(&id.node),
         Term::Tuple(elements) => match elements.as_ref() {
             [Term::Atom(name), node @ Term::Atom(_)] if *node == local_node() => {
                 Destination::NodeName(name)
@@ -5087,6 +5117,11 @@ fn deliver_to(
             return Ok(Ok(Sent::NoConnect));
         }
         Destination::Port(id) => return port_send(scheduler, id, &message),
+        Destination::OldIncarnation => {
+            return Err(error(
+                "unsupported send to a pid, a port, or a reference of an old incarnation of the local node: ERTS logs an error report: see \"Distribution\" in docs/erts-differences.md",
+            ));
+        }
     };
     if let Some(target) = target {
         if let Some(denied) = io_service::send_denial(scheduler, target, &message)? {
@@ -6846,7 +6881,7 @@ fn write_display(writer: &mut dyn Write, bytes: &[u8]) -> BifResult {
 /// ```
 pub(super) fn ref_to_list(term: &Term, atoms: &AtomTable) -> BifResult {
     match term {
-        Term::Reference(_) | Term::Resource(_) => term_text_list(term, atoms),
+        _ if is_reference(term) => term_text_list(term, atoms),
         _ => BifResult::badarg(),
     }
 }

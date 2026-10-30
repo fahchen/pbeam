@@ -28,8 +28,11 @@ use super::{
 use crate::runtime::interpreter::code_table::CodeTable;
 use crate::runtime::unicode::CharEncoding;
 use crate::term::{
-    AtomTable, Fun, Lambda, MAX_ATOM_CHARACTERS, MAX_TUPLE_SIZE, ProcessId, Record, RecordDef,
-    Reference, Target, external, float_text,
+    AtomTable, ExternalId, Fun, Lambda, MAX_ATOM_CHARACTERS, MAX_TUPLE_SIZE, ProcessId, Record,
+    RecordDef, Reference, Target,
+    external::{self},
+    external_id::ExternalData,
+    float_text,
 };
 
 /// `VERSION_MAGIC`, the first byte of the external term format
@@ -621,6 +624,38 @@ fn encode_parts(
                 out.extend_from_slice(&port.0.to_be_bytes());
                 out.extend_from_slice(&0u32.to_be_bytes());
             }
+            // An identifier of another node gives its node name and its
+            // creation (`enc_pid`, `external.c:3025-3060`, `enc_term_int`,
+            // `external.c:3602-3700`).
+            Term::External(id) => {
+                let node = atoms.name_of(&id.node);
+                match &id.data {
+                    ExternalData::Pid { number, serial } => {
+                        out.push(88);
+                        encode_atom(node, options, &mut out);
+                        out.extend_from_slice(&number.to_be_bytes());
+                        out.extend_from_slice(&serial.to_be_bytes());
+                    }
+                    ExternalData::Port(number) => {
+                        out.push(120);
+                        encode_atom(node, options, &mut out);
+                        out.extend_from_slice(&number.to_be_bytes());
+                    }
+                    ExternalData::Reference(numbers) => {
+                        out.push(90);
+                        let count = u16::try_from(numbers.len())
+                            .expect("a reference has at most 5 numbers");
+                        out.extend_from_slice(&count.to_be_bytes());
+                        encode_atom(node, options, &mut out);
+                    }
+                }
+                out.extend_from_slice(&id.creation.to_be_bytes());
+                if let ExternalData::Reference(numbers) = &id.data {
+                    for number in numbers {
+                        out.extend_from_slice(&number.to_be_bytes());
+                    }
+                }
+            }
             // A resource term is its magic reference.
             Term::Reference(_) | Term::Resource(_) => {
                 let reference = term.reference().unwrap_or(Reference(0));
@@ -719,6 +754,23 @@ fn encode_sysname(atoms: &AtomTable, options: &Options, out: &mut Vec<u8>) {
             crate::term::Atom::from_static("nonode@nohost").expect("the local node atom is static");
         encode_atom(atoms.name_of(&atom), options, out);
     }
+}
+
+/// Return the term of the pid, port, or reference `data` of the node `node`
+/// with the creation `creation`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let port = remote_id(node, 5, ExternalData::Port(7));
+/// assert!(matches!(port, Term::External(_)));
+/// ```
+fn remote_id(node: crate::term::Atom, creation: u32, data: ExternalData) -> Term {
+    Term::External(std::sync::Arc::new(ExternalId {
+        node,
+        creation,
+        data,
+    }))
 }
 
 /// Write an atom as `enc_atom` (`external.c:2877-2957`) does: with
@@ -2010,6 +2062,21 @@ impl Decoder<'_> {
         }
     }
 
+    /// Return the node name of `sysname` and `creation` when they do not
+    /// name the local node, as `dec_get_node` (`external.c:3133-3139`)
+    /// gives another node entry.
+    fn remote(
+        &self,
+        sysname: Option<crate::term::Atom>,
+        creation: u32,
+    ) -> Option<crate::term::Atom> {
+        if self.is_local(sysname.clone(), creation) {
+            None
+        } else {
+            sysname
+        }
+    }
+
     /// Decode a pid as `dec_pid` (`external.c:3133-3200`) does. `tag` is 4
     /// for `NEW_PID_EXT` and 1 for `PID_EXT`.
     fn pid(&mut self, tag: u8) -> Result<Term, DecodeError> {
@@ -2025,8 +2092,12 @@ impl Decoder<'_> {
             }
             creation
         };
-        if !self.is_local(sysname, creation) {
-            return Err(DecodeError::Unsupported("a pid of another node"));
+        if let Some(node) = self.remote(sysname, creation) {
+            return Ok(remote_id(
+                node,
+                creation,
+                ExternalData::Pid { number, serial },
+            ));
         }
         if number > MAX_PID_NUMBER {
             return Err(DecodeError::Badarg);
@@ -2060,8 +2131,8 @@ impl Decoder<'_> {
         number: u64,
         creation: u32,
     ) -> Result<Term, DecodeError> {
-        if !self.is_local(sysname, creation) {
-            return Err(DecodeError::Unsupported("a port of another node"));
+        if let Some(node) = self.remote(sysname, creation) {
+            return Ok(remote_id(node, creation, ExternalData::Port(number)));
         }
         if number > MAX_PORT_NUMBER {
             return Err(DecodeError::Badarg);
@@ -2089,20 +2160,24 @@ impl Decoder<'_> {
         };
         // ERTS reads the first reference number even when the count is
         // zero (`dec_term`, `external.c:4795-4796`).
+        let mut read = vec![self.u32()?];
+        for _ in 1..count {
+            read.push(self.u32()?);
+        }
+        // A reference of another node keeps its `count` numbers; ERTS sets
+        // the first number word of a count of 0 to 0
+        // (`external.c:4859-4890`).
+        if let Some(node) = self.remote(sysname, creation) {
+            read.truncate(count);
+            return Ok(remote_id(
+                node,
+                creation,
+                ExternalData::Reference(read.into_boxed_slice()),
+            ));
+        }
         let mut numbers = [0u32; 3];
-        numbers[0] = self.u32()?;
-        for number in numbers
-            .iter_mut()
-            .skip(1)
-            .take(count.saturating_sub(1).min(2))
-        {
-            *number = self.u32()?;
-        }
-        for _ in 3..count {
-            self.u32()?;
-        }
-        if !self.is_local(sysname, creation) {
-            return Err(DecodeError::Unsupported("a reference of another node"));
+        for (number, value) in numbers.iter_mut().zip(&read) {
+            *number = *value;
         }
         if numbers[0] >= MAX_REFERENCE {
             return Err(DecodeError::Badarg);
@@ -2169,11 +2244,17 @@ impl Decoder<'_> {
         if creation > MAX_TINY_CREATION {
             return Err(DecodeError::Badarg);
         }
-        if !self.is_local(sysname, creation) {
-            return Err(DecodeError::Unsupported("a reference of another node"));
-        }
         if number >= MAX_REFERENCE {
             return Err(DecodeError::Badarg);
+        }
+        // A reference of another node keeps its one number
+        // (`external.c:4753-4766`, `4797-4890`).
+        if let Some(node) = self.remote(sysname, creation) {
+            return Ok(remote_id(
+                node,
+                creation,
+                ExternalData::Reference(Box::new([number])),
+            ));
         }
         // An old reference has no scheduler number, so its second reference
         // number is 0 (`dec_term`, `external.c:4786-4855`). PBeam holds the

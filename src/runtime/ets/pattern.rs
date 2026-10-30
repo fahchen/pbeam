@@ -4,6 +4,7 @@
 //! head. PBeam compiles only such a head: a pattern with no guard and the
 //! body `['$$']`.
 
+use crate::term::external_id::{is_reference, pid_parts, port_number};
 use crate::term::{AtomTable, Division, ShiftDirection, Term};
 use num_bigint::BigInt;
 use num_traits::{Signed, ToPrimitive};
@@ -868,12 +869,9 @@ fn call(atoms: &AtomTable, function: Guard, arguments: &[Term]) -> Option<Term> 
             arguments[0],
             Term::Integer(_) | Term::BigInt(_) | Term::Float(_)
         )),
-        Guard::IsPid => truth(matches!(arguments[0], Term::Pid(_))),
-        Guard::IsPort => truth(matches!(arguments[0], Term::Port(_))),
-        Guard::IsReference => truth(matches!(
-            arguments[0],
-            Term::Reference(_) | Term::Resource(_)
-        )),
+        Guard::IsPid => truth(pid_parts(&arguments[0]).is_some()),
+        Guard::IsPort => truth(port_number(&arguments[0]).is_some()),
+        Guard::IsReference => truth(is_reference(&arguments[0])),
         Guard::IsTuple => truth(matches!(arguments[0], Term::Tuple(_))),
         Guard::IsMap => truth(matches!(arguments[0], Term::Map(_))),
         // ERTS calls `is_binary_1` (`erl_db_util.c:641-642`).
@@ -941,11 +939,13 @@ fn call(atoms: &AtomTable, function: Guard, arguments: &[Term]) -> Option<Term> 
             _ => None,
         },
         Guard::Node0 => Some(Term::static_atom("nonode@nohost")),
-        Guard::Node1 => matches!(
-            arguments[0],
-            Term::Pid(_) | Term::Port(_) | Term::Reference(_) | Term::Resource(_)
-        )
-        .then(|| Term::static_atom("nonode@nohost")),
+        Guard::Node1 => match &arguments[0] {
+            Term::Pid(_) | Term::Port(_) | Term::Reference(_) | Term::Resource(_) => {
+                Some(Term::static_atom("nonode@nohost"))
+            }
+            Term::External(id) => Some(Term::Atom(id.node.clone())),
+            _ => None,
+        },
         Guard::Plus1 => number(&arguments[0]),
         Guard::Minus1 => negate(&arguments[0]),
         Guard::Plus2 => arithmetic(Arithmetic::Add, &arguments[0], &arguments[1]),

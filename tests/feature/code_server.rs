@@ -271,6 +271,7 @@ fn reports_ml_kem_encapsulation_as_unsupported() {
 /// The probe of `crypto:strong_rand_bytes/1`.
 const CRYPTO_PROBE: &str = "fixtures/code_server/crypto_probe";
 const CRYPTO_SIGN_PROBE: &str = "fixtures/code_server/crypto_sign_probe";
+const REMOTE_ID_PROBE: &str = "fixtures/code_server/remote_id_probe";
 const CRYPTO_CRYPT_PROBE: &str = "fixtures/code_server/crypto_crypt_probe";
 const CRYPTO_KEYGEN_PROBE: &str = "fixtures/code_server/crypto_keygen_probe";
 const CRYPTO_BN_PROBE: &str = "fixtures/code_server/crypto_bn_probe";
@@ -1297,6 +1298,65 @@ const MAC_CONTEXTS_HOST: &str = "[[{error,{error,{\"mac.c\",840},\"mac update\"}
 /// let output = run(&mut erts_probe(ON_LOAD_PROBE, "on_load_server_probe", "main", &[]));
 /// ```
 /// The output of `crypto_probe:oneshot_host/0` on the pinned macOS ERTS.
+#[test]
+fn gives_the_pids_ports_and_references_of_another_node_as_pinned_erts() {
+    // binary_to_term/1 of a pid, a port, and a reference of another node
+    // (external.c:3133-3200, 4685-4740, 4786-4890): node/1, the type tests,
+    // the text with the atom index of the node name (erl_printf_term.c:
+    // 497-531), the term order (utils.c:1715-1806, 2212-2310), phash/2 and
+    // phash2/1 (erl_term_hashing.c:273-291, 1459-1474), term_to_binary/1,
+    // the sizes, and the sends (bif.c:2489-2549).
+    let erts = run(&mut erts_probe(
+        REMOTE_ID_PROBE,
+        "remote_id_probe",
+        "main",
+        &[],
+    ));
+    assert!(erts.contains("#Ref<"), "{erts}");
+    assert_eq!(
+        run(&mut pbeam_probe(
+            REMOTE_ID_PROBE,
+            "remote_id_probe",
+            "main",
+            &[]
+        )),
+        erts
+    );
+}
+
+#[test]
+fn stops_with_a_runtime_error_for_each_signal_to_another_node() {
+    // A link, an unlink, a monitor, an exit signal, and a group leader of a
+    // pid of another node need a connection (bif.c:811-925, 1295-1350,
+    // 1804-1862, 4943); a send to an old incarnation of the local node logs
+    // an error report (bif.c:2489-2503).
+    for (function, expected) in [
+        ("link", "unsupported erlang:link/1 with a pid"),
+        ("unlink", "unsupported erlang:unlink/1 with a pid"),
+        ("monitor", "unsupported erlang:monitor/2,3 with a pid"),
+        ("exit", "unsupported erlang:exit/2,3 with a pid"),
+        (
+            "group_leader",
+            "unsupported erlang:group_leader/2 with a pid",
+        ),
+        (
+            "old_send",
+            "unsupported send to a pid, a port, or a reference of an old incarnation",
+        ),
+    ] {
+        let output = pbeam_probe(REMOTE_ID_PROBE, "remote_id_probe", function, &[])
+            .env("TERM", "dumb")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            !output.status.success() && stderr.contains(expected),
+            "{function}: {stderr}"
+        );
+    }
+}
+
 #[test]
 fn signs_and_verifies_as_pinned_erts() {
     // pkey_sign_nif/5 and pkey_verify_nif/6 (pkey.c:212-1122) with RSA,

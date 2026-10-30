@@ -9,6 +9,7 @@ use super::{
     scheduler::{ChildLink, PolicyEnd, Received, Scheduler, Turn, node::Node},
     tty::{InitialMode, StdinRead},
 };
+use crate::term::external_id::{is_reference, pid_parts, port_number};
 use crate::{
     beam::{
         BeamModule, Import, ImportKind, NameId,
@@ -1829,11 +1830,9 @@ impl BeamProgram {
                     let value = read_ref(process, value)?;
                     let passed = match kind {
                         TestKind::Atom => matches!(value, Term::Atom(_)),
-                        TestKind::Pid => matches!(value, Term::Pid(_)),
-                        TestKind::Port => matches!(value, Term::Port(_)),
-                        TestKind::Reference => {
-                            matches!(value, Term::Reference(_) | Term::Resource(_))
-                        }
+                        TestKind::Pid => pid_parts(value).is_some(),
+                        TestKind::Port => port_number(value).is_some(),
+                        TestKind::Reference => is_reference(value),
                         TestKind::Tuple => matches!(value, Term::Tuple(_)),
                         // `is_list` and `is_nonempty_list` test the cons tag, so an
                         // improper list passes (emu `instrs.tab:879-891`; JIT

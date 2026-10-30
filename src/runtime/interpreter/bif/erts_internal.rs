@@ -29,6 +29,7 @@ use crate::runtime::{
     unicode::native_filename,
 };
 use crate::term::PortId;
+use crate::term::external_id::ExternalData;
 
 /// Run `erts_internal:group_leader(Leader, Target)`, which
 /// `erlang:group_leader/2` in `erlang.beam` calls, as
@@ -63,6 +64,9 @@ pub(super) fn group_leader(
     target: &Term,
 ) -> Result<BifResult, BeamError> {
     let (Term::Pid(leader), Term::Pid(target)) = (leader, target) else {
+        if matches!(leader, Term::External(_)) || matches!(target, Term::External(_)) {
+            return Err(super::erlang::remote_unsupported("erlang:group_leader/2"));
+        }
         return Ok(Value(Term::static_atom("badarg")));
     };
     let scheduler = &mut *context.scheduler;
@@ -2574,6 +2578,11 @@ pub(super) fn term_type(atoms: &AtomTable, term: &Term) -> Result<BifResult, Bea
         Term::Port(_) => "port",
         Term::Atom(_) => "atom",
         Term::Nil => "nil",
+        Term::External(id) => match id.data {
+            ExternalData::Pid { .. } => "external_pid",
+            ExternalData::Port(_) => "external_port",
+            ExternalData::Reference(_) => "external_reference",
+        },
         Term::Binary(_) | Term::Record(_) | Term::MatchContext(_) => {
             return Err(error(
                 "erts_internal:term_type/1 cannot name the ERTS form of a binary or a native record"
