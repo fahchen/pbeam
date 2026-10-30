@@ -382,11 +382,80 @@ socket_acceptors() ->
     {ok, L} = socket:open(inet, stream, tcp),
     ok = socket:bind(L, #{family => inet, addr => loopback, port => 0}),
     ok = socket:listen(L),
-    {select, _} = socket:accept(L, nowait),
-    Parent = self(),
-    spawn(fun() -> Parent ! socket:accept(L, nowait) end),
-    receive Result -> erlang:display(Result) end,
+    {ok, Addr} = socket:sockname(L),
+    Self = self(),
+    New = fun(_) -> spawn(fun() -> acceptor(Self, L, none) end) end,
+    Call = fun(P, Command) -> P ! Command, receive {P, R} -> R after 5000 -> timeout end end,
+    Event = fun(P) -> receive {P, What, Info} -> {What, Info} after 5000 -> timeout end end,
+    Connect = fun() -> {ok, C} = socket:open(inet, stream, tcp), ok = socket:connect(C, Addr), C end,
+    Num = fun() -> maps:get(num_acceptors, socket:info(L)) end,
+    [A, B, C, D] = [New(T) || T <- [a, b, c, d]],
+    Queued = seq([fun() -> [Call(P, accept) || P <- [A, B, C, D]] end, Num,
+                  fun() -> Call(B, accept) end]),
+    _ = Connect(),
+    First = seq([fun() -> Event(A) end, fun() -> Call(A, accept) end, Num]),
+    Cancel = seq([fun() -> Call(C, cancel) end, fun() -> Call(C, cancel) end, Num]),
+    Down = settle(Num, fun() -> exit(B, kill) end),
+    _ = Connect(),
+    Next = seq([fun() -> Event(D) end, fun() -> Call(D, accept) end, Num]),
+    [E, F, G, H] = [New(T) || T <- [e, f, g, h]],
+    Again = [Call(P, accept) || P <- [E, F, G, H]],
+    Exit = settle(Num, fun() -> exit(E, kill) end),
+    _ = Connect(),
+    Activated = seq([fun() -> Event(F) end, fun() -> Call(F, accept) end, Num]),
+    Current = seq([fun() -> Call(G, cancel) end, Num]),
+    ok = socket:close(L),
+    Closed = seq([fun() -> Event(H) end, fun() -> Call(H, accept) end]),
+    io:format("~w~n", [{socket_acceptors, [Queued, First, Cancel, Down, Next, Again, Exit,
+                                           Activated, Current, Closed]}]),
     init:stop().
+
+%% Run `Kill` and give `num_acceptors` from `Num` once it changes: the
+%% exit of the acceptor runs after the exit signal.
+settle(Num, Kill) ->
+    Before = Num(),
+    Kill(),
+    settle(Num, Before, 1000).
+
+settle(Num, Before, 0) -> {timeout, Before, Num()};
+settle(Num, Before, N) ->
+    case Num() of
+        Before -> receive after 1 -> settle(Num, Before, N - 1) end;
+        After -> [Before, After]
+    end.
+
+%% Run each fun of `Funs` in order and give the results.
+seq(Funs) -> [F() || F <- Funs].
+
+%% An acceptor of `socket_acceptors/0`: run each request of the parent on
+%% the listen socket `L` and give each socket message to the parent, with
+%% `ref` for the reference of the last accept.
+acceptor(Parent, L, Ref) ->
+    receive
+        accept ->
+            {Result, Next} =
+                case catch socket:accept(L, nowait) of
+                    {select, {select_info, accept, H}} -> {select, H};
+                    {ok, S} -> ok = socket:close(S), {ok, Ref};
+                    {'EXIT', {Reason, _}} -> {{'EXIT', Reason}, Ref};
+                    Other -> {Other, Ref}
+                end,
+            Parent ! {self(), Result},
+            acceptor(Parent, L, Next);
+        cancel ->
+            Cancelled = case socket:cancel(L, {select_info, accept, Ref}) of
+                            {error, {invalid, {select_info, accept, Ref}}} -> {error, {invalid, ref}};
+                            Result -> Result
+                        end,
+            Parent ! {self(), Cancelled},
+            acceptor(Parent, L, Ref);
+        num ->
+            Parent ! {self(), maps:get(num_acceptors, socket:info(L))},
+            acceptor(Parent, L, Ref);
+        {'$socket', L, What, Info} ->
+            Parent ! {self(), What, case Info of Ref -> ref; {Ref, Why} -> {ref, Why}; _ -> Info end},
+            acceptor(Parent, L, Ref)
+    end.
 
 %% `-s kernel_boot_probe socket_connect_invalid` connects to an address
 %% that the NIF does not decode.

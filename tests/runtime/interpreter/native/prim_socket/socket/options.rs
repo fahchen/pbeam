@@ -50,6 +50,7 @@ fn raises_invalid_for_an_otp_option_number_without_a_getter() {
         meta: Term::Nil,
         connector: None,
         acceptor: None,
+        acceptors: std::collections::VecDeque::new(),
         reader: None,
         writer: None,
         counters: IoCounters::default(),

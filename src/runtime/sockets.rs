@@ -7,7 +7,7 @@
 //! each socket until the end of the run, as it keeps a buffer of
 //! `prim_buffer`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::sync::{Arc, Mutex};
 
@@ -70,15 +70,18 @@ impl Sockets {
     /// closes the host socket, adds the states `closing` and `closed`, and
     /// counts the socket out. A close also stops the selects (see
     /// [`SocketState::stop`]). The exit of the connector or the current
-    /// acceptor clears it. Return the requestors to abort, and the registry
-    /// to send `{'$socket', del, Socket}` to, if the registry knows the
-    /// socket and the socket closed.
+    /// acceptor clears it, or makes the next waiting acceptor current when
+    /// the socket stays open, and the exit of a waiting acceptor removes it
+    /// from the queue. Return the requestors to abort, the registry to send
+    /// `{'$socket', del, Socket}` to, if the registry knows the socket and
+    /// the socket closed, and the acceptor that became current, which needs
+    /// a read select.
     pub(super) fn monitor_down(
         &mut self,
         reference: Reference,
         pid: ProcessId,
         poll: &NodePoll,
-    ) -> (Vec<(ProcessId, Term)>, Option<ProcessId>) {
+    ) -> (Vec<(ProcessId, Term)>, Option<ProcessId>, Option<Activated>) {
         // PBeam keeps each socket until the end of the run.
         let socket = self
             .by_reference
@@ -98,14 +101,15 @@ impl Sockets {
             socket.connector = None;
             socket.write &= !CONNECTING;
         }
-        if socket
+        // The current acceptor: the next waiting acceptor becomes current
+        // when the socket stays open (`essio_down_acceptor`,
+        // `unix_socket_syncio.c:10583-10622`); the caller makes its select.
+        // A waiting acceptor leaves the queue.
+        let current_acceptor = socket
             .acceptor
             .as_ref()
-            .is_some_and(|(owner, _)| *owner == pid)
-        {
-            socket.acceptor = None;
-            socket.read &= !ACCEPTING;
-        }
+            .is_some_and(|(owner, _)| *owner == pid);
+        socket.acceptors.retain(|(waiting, _)| *waiting != pid);
         // The current reader and writer: clear them and keep the select, as
         // `essio_down_reader` and `essio_down_writer` do
         // (`unix_socket_syncio.c:10632-10716`).
@@ -128,10 +132,15 @@ impl Sockets {
         } else if socket.owner == Some(pid) {
             socket.owner = None;
             if socket.read & (CLOSING | CLOSED) != 0 {
-                return (Vec::new(), None);
+                return (Vec::new(), None, None);
             }
         } else {
-            return (Vec::new(), None);
+            let activated = if current_acceptor && socket.read & (CLOSING | CLOSED) == 0 {
+                socket.activate_next_acceptor()
+            } else {
+                None
+            };
+            return (Vec::new(), None, activated);
         }
         // A close cancels each select before the fd closes.
         let aborted = socket.stop(poll);
@@ -143,7 +152,7 @@ impl Sockets {
         let registered = socket.registered;
         drop(socket);
         self.counters.count(domain, kind, protocol, -1);
-        (aborted, registered.then_some(self.registry).flatten())
+        (aborted, registered.then_some(self.registry).flatten(), None)
     }
 }
 
@@ -327,6 +336,11 @@ pub(super) struct SocketState {
     /// The current acceptor and its reference, as
     /// `descP->currentAcceptorP`.
     pub(super) acceptor: Option<(ProcessId, Term)>,
+    /// The waiting acceptors and their references, oldest first, as
+    /// `descP->acceptorsQ`. Each has a monitor of the socket, and none has
+    /// a select (`essio_accept_accepting_other`,
+    /// `unix_socket_syncio.c:2746-2758`).
+    pub(super) acceptors: VecDeque<(ProcessId, Term)>,
     /// The current reader and its reference, as `descP->currentReaderP`.
     pub(super) reader: Option<(ProcessId, Term)>,
     /// The current writer and its reference, as `descP->currentWriterP`.
@@ -346,13 +360,49 @@ pub(super) struct SocketState {
     pub(super) sendfile_counters: Option<SendfileCounters>,
 }
 
+/// A waiting acceptor that became the current acceptor: its pid, its
+/// reference, and the fd of the listen socket. It needs a read select that
+/// sends `{'$socket', Socket, select, Ref}`.
+pub(super) type Activated = (ProcessId, Term, i32);
+
 impl SocketState {
+    /// Make the first waiting acceptor the current acceptor and add the
+    /// read state `selected`, or, with no waiting acceptor, clear the
+    /// current acceptor and the read state `accepting`, as
+    /// `esock_activate_next_acceptor` and its callers do
+    /// (`prim_socket_nif.c:17796-17870`). Return the new current acceptor.
+    /// The caller makes its read select.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// state.acceptors.push_back((ProcessId(2), reference.clone()));
+    /// assert_eq!(state.activate_next_acceptor(), Some((ProcessId(2), reference, fd)));
+    /// assert_eq!(state.activate_next_acceptor(), None);
+    /// ```
+    pub(super) fn activate_next_acceptor(&mut self) -> Option<Activated> {
+        let Some((pid, reference)) = self.acceptors.pop_front() else {
+            self.acceptor = None;
+            self.read &= !ACCEPTING;
+            return None;
+        };
+        self.read |= SELECTED;
+        self.acceptor = Some((pid, reference.clone()));
+        let fd = std::os::fd::AsRawFd::as_raw_fd(
+            self.socket
+                .as_ref()
+                .expect("an open socket has a host socket"),
+        );
+        Some((pid, reference, fd))
+    }
+
     /// Cancel both selects of the socket on `poll` and clear the current
     /// writer, the connect in progress, the current reader, and the current
-    /// acceptor, as `do_stop` does at a close
-    /// (`unix_socket_syncio.c:4600-4730`). Return the requestors whose
-    /// select was still active, in this order: each gets `{'$socket',
-    /// Socket, abort, {Ref, closed}}` (`esock_stop_handle_current`).
+    /// acceptor, and empty the acceptor queue, as `do_stop` does at a close
+    /// (`unix_socket_syncio.c:4600-4762`). Return the requestors whose
+    /// select was still active, in this order, and then each waiting
+    /// acceptor: each gets `{'$socket', Socket, abort, {Ref, closed}}`
+    /// (`esock_stop_handle_current`, `esock_inform_waiting_procs`).
     pub(super) fn stop(&mut self, poll: &NodePoll) -> Vec<(ProcessId, Term)> {
         let fd = std::os::fd::AsRawFd::as_raw_fd(
             self.socket
@@ -369,6 +419,7 @@ impl SocketState {
         ]
         .into_iter()
         .filter_map(|(requestor, cancelled)| requestor.filter(|_| cancelled))
+        .chain(self.acceptors.drain(..))
         .collect()
     }
 }
