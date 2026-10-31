@@ -12,8 +12,7 @@
 //!
 //! Run the release measurement with
 //! `cargo test --locked --release --test select_val records_the_select_val_cost -- --nocapture --test-threads=1`.
-//! The check gate runs the same tests under the test profile, which measures
-//! slower numbers but proves that the probes and the ERTS reference run.
+//! CI runs the correctness checks without the timing measurement.
 #![expect(
     clippy::unwrap_used,
     reason = "test helpers report a failure by a panic"
@@ -128,6 +127,15 @@ fn select_val_choice_counts() -> HashMap<String, usize> {
         .collect()
 }
 
+/// Select whether the ERTS reference also records timing.
+#[derive(Clone, Copy)]
+enum ReferenceMode {
+    /// Return the results only.
+    Results,
+    /// Return the results and timing measurements.
+    Measurement,
+}
+
 /// The Erlang expression of the ERTS reference run. It prints one
 /// `result <key> <value>` line for each probe and each `bucket/1` value. The
 /// keys match the PBeam runs, so the two runs measure the same work.
@@ -135,16 +143,20 @@ fn select_val_choice_counts() -> HashMap<String, usize> {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(erts_expression().contains("select_val_probe"));
+/// assert!(erts_expression(ReferenceMode::Results).contains("select_val_probe"));
 /// ```
-fn erts_expression() -> String {
+fn erts_expression(mode: ReferenceMode) -> String {
     let mut expression = String::from(
         "{module, M} = code:ensure_loaded(select_val_probe), \
-         jit = erlang:system_info(emu_flavor), \
-         Run = fun(F) -> lists:min([begin \
+         jit = erlang:system_info(emu_flavor), ",
+    );
+    if matches!(mode, ReferenceMode::Measurement) {
+        expression.push_str(
+            "Run = fun(F) -> lists:min([begin \
              S = erlang:monotonic_time(nanosecond), _ = F(), \
              erlang:monotonic_time(nanosecond) - S end || _ <- lists:seq(1, 9)]) end, ",
-    );
+        );
+    }
     let _ = write!(
         expression,
         "io:format(\"result ordered_loop ~w~n\", [M:ordered_loop({LENGTH}, 0)]), \
@@ -163,13 +175,15 @@ fn erts_expression() -> String {
             "io:format(\"result nibble_{value} ~w~n\", [M:nibble({value})]), "
         );
     }
-    let _ = write!(
-        expression,
-        "io:format(\"time ordered_loop ~b~n\", [Run(fun() -> M:ordered_loop({LENGTH}, 0) end)]), \
+    if matches!(mode, ReferenceMode::Measurement) {
+        let _ = write!(
+            expression,
+            "io:format(\"time ordered_loop ~b~n\", [Run(fun() -> M:ordered_loop({LENGTH}, 0) end)]), \
          io:format(\"time nibble_loop ~b~n\", [Run(fun() -> M:nibble_loop({LENGTH}, 0) end)]), \
-         io:format(\"time linear_loop ~b~n\", [Run(fun() -> M:linear_loop({LENGTH}, 0) end)]), \
-         halt()."
-    );
+         io:format(\"time linear_loop ~b~n\", [Run(fun() -> M:linear_loop({LENGTH}, 0) end)]), "
+        );
+    }
+    expression.push_str("halt().");
     expression
 }
 
@@ -179,10 +193,10 @@ fn erts_expression() -> String {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let lines = run_erts();
+/// let lines = run_erts(ReferenceMode::Results);
 /// assert!(lines.iter().any(|line| line.starts_with("result ordered_loop ")));
 /// ```
-fn run_erts() -> Vec<String> {
+fn run_erts(mode: ReferenceMode) -> Vec<String> {
     let directory = probe_path().parent().unwrap().to_path_buf();
     let output = Command::new("erl")
         .args([
@@ -192,7 +206,7 @@ fn run_erts() -> Vec<String> {
             "-pa",
             directory.to_str().unwrap(),
             "-eval",
-            &erts_expression(),
+            &erts_expression(mode),
         ])
         .output()
         .unwrap();
@@ -213,7 +227,7 @@ fn run_erts() -> Vec<String> {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let lines = run_erts();
+/// let lines = run_erts(ReferenceMode::Results);
 /// assert_eq!(erts_result(&lines, "bucket_0"), 0);
 /// ```
 fn erts_result(lines: &[String], key: &str) -> i64 {
@@ -230,7 +244,7 @@ fn erts_result(lines: &[String], key: &str) -> i64 {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let lines = run_erts();
+/// let lines = run_erts(ReferenceMode::Measurement);
 /// assert!(erts_nanos(&lines, "ordered_loop") > 0);
 /// ```
 fn erts_nanos(lines: &[String], key: &str) -> u128 {
@@ -278,7 +292,7 @@ fn keeps_the_measured_select_val_shapes() {
 #[test]
 fn checks_the_select_val_results_against_erts() {
     let program = BeamProgram::load(&[SELECT_VAL_PROBE]).unwrap();
-    let lines = run_erts();
+    let lines = run_erts(ReferenceMode::Results);
 
     let counter = program.host_term(Term::Integer(i64::try_from(LENGTH).unwrap()));
     let zero = program.host_term(Term::Integer(0));
@@ -331,7 +345,7 @@ fn checks_the_select_val_results_against_erts() {
 )]
 fn records_the_select_val_cost() {
     let program = BeamProgram::load(&[SELECT_VAL_PROBE]).unwrap();
-    let lines = run_erts();
+    let lines = run_erts(ReferenceMode::Measurement);
     let counter = program.host_term(Term::Integer(i64::try_from(LENGTH).unwrap()));
     let zero = program.host_term(Term::Integer(0));
     let args = [counter, zero];

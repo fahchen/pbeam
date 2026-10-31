@@ -245,24 +245,6 @@ impl ReleaseStack {
     fn iter(&self) -> impl Iterator<Item = &Release> {
         self.chunks.iter().flat_map(|chunk| chunk.iter())
     }
-
-    /// Return the number of bytes of the chunks of the stack and of the slots
-    /// of each chunk.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert_eq!(ReleaseStack::new().allocated_bytes(), 0);
-    /// ```
-    #[cfg(test)]
-    fn allocated_bytes(&self) -> usize {
-        self.chunks.capacity() * std::mem::size_of::<Vec<Release>>()
-            + self
-                .chunks
-                .iter()
-                .map(|chunk| chunk.capacity() * std::mem::size_of::<Release>())
-                .sum::<usize>()
-    }
 }
 
 /// The target of `erlang:monitor/2`, after the BIF checked the type and the

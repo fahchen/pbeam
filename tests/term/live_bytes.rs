@@ -73,6 +73,20 @@ fn counts_a_flat_map_and_walks_its_pairs() {
 }
 
 #[test]
+fn counts_a_shared_map_once() {
+    let map = Term::Map(
+        Map::from_pairs(
+            vec![(Term::Integer(1), Term::tuple(vec![Term::Integer(2)]))],
+            &crate::term::test_atom_table(),
+        )
+        .unwrap(),
+    );
+    let one = bytes(&map);
+    let pair = Term::tuple(vec![map.clone(), map]);
+    assert_eq!(bytes(&pair), 2 * size_of::<Term>() + one);
+}
+
+#[test]
 fn counts_a_hash_map_and_walks_its_nodes() {
     let pairs: Vec<_> = (0..40)
         .map(|key| (Term::Integer(key), Term::tuple(vec![Term::Integer(key)])))
