@@ -260,6 +260,12 @@ fn cancels_a_request_of_the_global_queue_or_a_worker_queue() {
     fake.cancel(2);
     fake.cancel(3);
     fake.cancel(9);
+    // The pool handles a worker reply before it reads the pending input, as
+    // the main loop of `inet_gethost` handles the worker fds before fd 0
+    // (`inet_gethost.c:832-856`, `check_que` at `853`). Wait until the
+    // reader thread of the pool has read the cancels, so the reply of
+    // `slow.x` starts `e.y` and not `b.y`.
+    std::thread::sleep(Duration::from_millis(100));
     fake.open();
     assert_eq!(fake.reply(), (1, "slow.x".into()));
     assert_eq!(fake.reply(), (4, "e.y".into()));
