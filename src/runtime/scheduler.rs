@@ -4186,7 +4186,9 @@ impl Scheduler {
                             // reason after the signals of the process
                             // (`erl_process.c:14115-14145`).
                             LinkId::Remote(remote) => {
-                                self.node.dist().remove_link(id, remote);
+                                self.node
+                                    .dist()
+                                    .remove_link(id, remote, unlinking.connection);
                                 if unlinking.is_active() {
                                     if signals::is_immediate(&reason) {
                                         let connection = unlinking.connection;

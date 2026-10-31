@@ -544,17 +544,30 @@ impl DistTable {
         true
     }
 
-    /// Remove the link of `process` to `remote` from the entry of its node.
+    /// Remove the link of `process` to `remote` from the connection
+    /// `connection` of the entry of its node. The entry holds the links of
+    /// its current connection only, because the end of a connection
+    /// detaches its list (`dist.c:1065-1066`), so a signal of an older
+    /// connection removes nothing here.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// table.remove_link(ProcessId(1), remote);
+    /// table.remove_link(ProcessId(1), remote, 1);
     /// ```
-    pub(in crate::runtime) fn remove_link(&mut self, process: ProcessId, remote: RemotePid) {
-        if let Some(entry) = self.entries.get_mut(&remote.node) {
-            entry.links.retain(|&link| link != (process, remote));
+    pub(in crate::runtime) fn remove_link(
+        &mut self,
+        process: ProcessId,
+        remote: RemotePid,
+        connection: u32,
+    ) {
+        let Some(entry) = self.entries.get_mut(&remote.node) else {
+            return;
+        };
+        if entry.connection_id != connection {
+            return;
         }
+        entry.links.retain(|&link| link != (process, remote));
     }
 
     /// Make each pending entry idle and return the links of each connection

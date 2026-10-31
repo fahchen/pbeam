@@ -2384,6 +2384,159 @@ fn keeps_the_noconnection_of_a_link_of_the_connection_before_a_reconnect() {
 }
 
 #[test]
+fn keeps_the_link_of_a_new_connection_after_a_noconnection_of_the_old_one() {
+    use super::{dist_table::Controller, signals::HandlingPoint};
+    use crate::runtime::process::RemotePid;
+    // The end of a connection detaches its list of links (dist.c:1065-1066),
+    // so a `LINK` packet of the next connection registers its link in the
+    // entry of that connection. The `noconnection` of the old connection
+    // removes the link of the process only (erl_proc_sig_queue.c:4693-4706),
+    // and the link of the new connection stays, so its end gives
+    // `noconnection` too.
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let id = current(&mut scheduler);
+    scheduler.current_process_mut().trap_exit = true;
+    let name = scheduler.atoms.put("other@host").unwrap();
+    let remote = RemotePid {
+        node: name.index(),
+        creation: 1,
+        number: 2,
+        serial: 0,
+    };
+    let first = Controller::Process(ProcessId(90));
+    let second = Controller::Process(ProcessId(91));
+    {
+        let mut dist = scheduler.node.dist();
+        dist.insert(&name, Reference(7), 0);
+        dist.new_connection(&name);
+        assert!(dist.connect(&name, first, 0).is_some());
+    }
+    scheduler.link_on(id, LinkId::Remote(remote), remote, 1);
+    let ended = {
+        let mut dist = scheduler.node.dist();
+        dist.controller_exits(first)
+            .expect("the connection has the link")
+    };
+    {
+        let mut dist = scheduler.node.dist();
+        dist.new_connection(&name);
+        assert!(dist.connect(&name, second, 0).is_some());
+        assert_eq!(dist.connection_id(&name), 2);
+    }
+    scheduler.dist_connection_down(&ended);
+    scheduler
+        .net_link(&name, 2, &remote.term(), &Term::Pid(id))
+        .unwrap();
+    scheduler
+        .handle_signals(id, 100, 100, HandlingPoint::ScheduleIn)
+        .unwrap();
+    let state = scheduler.processes[&id]
+        .links
+        .get(&LinkId::Remote(remote))
+        .copied()
+        .expect("the link of the new connection stays");
+    assert_eq!(state.connection, 2);
+    assert_eq!(
+        messages(&scheduler, id.0),
+        [Term::tuple(vec![
+            atom("EXIT"),
+            remote.term(),
+            atom("noconnection"),
+        ])]
+    );
+    let ended = {
+        let mut dist = scheduler.node.dist();
+        dist.controller_exits(second)
+            .expect("the entry keeps the link of the new connection")
+    };
+    assert_eq!(ended.connection, 2);
+    scheduler.dist_connection_down(&ended);
+    scheduler
+        .handle_signals(id, 100, 100, HandlingPoint::ScheduleIn)
+        .unwrap();
+    assert!(
+        scheduler.processes[&id]
+            .links
+            .get(&LinkId::Remote(remote))
+            .is_none()
+    );
+    assert_eq!(
+        messages(&scheduler, id.0),
+        [
+            Term::tuple(vec![atom("EXIT"), remote.term(), atom("noconnection")]),
+            Term::tuple(vec![atom("EXIT"), remote.term(), atom("noconnection")]),
+        ]
+    );
+}
+
+#[test]
+fn deletes_the_link_of_a_new_connection_of_a_pair_that_is_linked_already() {
+    use super::{dist_table::Controller, signals::HandlingPoint};
+    use crate::runtime::process::RemotePid;
+    // A `LINK` packet of a new connection registers its dist link when the
+    // node decodes it (dist.c:2246-2258), and the target deletes that link
+    // when it is linked already (erl_proc_sig_queue.c:6641-6658). The
+    // `noconnection` of the old connection then ends the link, and the new
+    // connection has no link to end.
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let id = current(&mut scheduler);
+    scheduler.current_process_mut().trap_exit = true;
+    let name = scheduler.atoms.put("other@host").unwrap();
+    let remote = RemotePid {
+        node: name.index(),
+        creation: 1,
+        number: 2,
+        serial: 0,
+    };
+    let first = Controller::Process(ProcessId(90));
+    let second = Controller::Process(ProcessId(91));
+    {
+        let mut dist = scheduler.node.dist();
+        dist.insert(&name, Reference(7), 0);
+        dist.new_connection(&name);
+        assert!(dist.connect(&name, first, 0).is_some());
+    }
+    scheduler.link_on(id, LinkId::Remote(remote), remote, 1);
+    let ended = {
+        let mut dist = scheduler.node.dist();
+        dist.controller_exits(first)
+            .expect("the connection has the link")
+    };
+    {
+        let mut dist = scheduler.node.dist();
+        dist.new_connection(&name);
+        assert!(dist.connect(&name, second, 0).is_some());
+    }
+    scheduler
+        .net_link(&name, 2, &remote.term(), &Term::Pid(id))
+        .unwrap();
+    scheduler.dist_connection_down(&ended);
+    scheduler
+        .handle_signals(id, 100, 100, HandlingPoint::ScheduleIn)
+        .unwrap();
+    assert!(
+        scheduler.processes[&id]
+            .links
+            .get(&LinkId::Remote(remote))
+            .is_none()
+    );
+    let ended = scheduler.node.dist().controller_exits(second);
+    assert!(ended.is_none(), "the new connection has no link to end");
+    assert_eq!(
+        messages(&scheduler, id.0),
+        [Term::tuple(vec![
+            atom("EXIT"),
+            remote.term(),
+            atom("noconnection"),
+        ])]
+    );
+}
+
+#[test]
 fn stops_a_break_key_with_no_data_at_a_second_break() {
     // `sys_get_key` retries a read with no data, and a second break stops
     // the run while the read waits (`sys.c:1051-1071`, `611-624`).
