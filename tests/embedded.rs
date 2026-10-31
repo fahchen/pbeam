@@ -390,6 +390,42 @@ fn a_release_with_a_boot_script_boots_with_pbeam_erl() {
 }
 
 #[test]
+fn keeps_sigpipe_ignored_after_a_boot_that_the_host_cannot_start() {
+    use std::io::Write;
+
+    // `Command::exec` sets `SIGPIPE` to `SIG_DFL` before the `exec`
+    // (`library/std/src/sys/process/unix/unix.rs` in Rust 1.99.0,
+    // `prepare_sigpipe`), and a failed `exec` keeps that disposition in
+    // this process. The embedded boot restores the ignore of ERTS
+    // (`sys_drivers.c:175`), so a later write to a pipe without a reader
+    // gives `EPIPE` and does not stop the process with `SIGPIPE`.
+    let directory = directory("failed-boot-sigpipe");
+    let error = boot_release(
+        Path::new("/nonexistent/pbeam"),
+        crate::Entry {
+            module: "elixir",
+            function: "start_cli",
+            arity: 0,
+        },
+        &directory,
+        "17.1",
+        "0.1.0",
+        None,
+        &[],
+    );
+    assert!(error.to_string().contains("No such file"), "{error}");
+    let (reader, mut writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let error = writer.write_all(b"x").unwrap_err();
+    assert_eq!(
+        error.kind(),
+        std::io::ErrorKind::BrokenPipe,
+        "write: {error}"
+    );
+    fs::remove_dir_all(&directory).unwrap();
+}
+
+#[test]
 fn splits_the_erl_options_at_space_tab_and_newline_only() {
     // The default `IFS` of sh is space, tab, and newline, so `\r` and
     // `\x0C` stay in a word (`releases/<vsn>/elixir:229`).
