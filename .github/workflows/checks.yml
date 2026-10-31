@@ -19,7 +19,7 @@ env:
   # The cached target/ holds no incremental state, and with incremental compilation the tests of the `opt-level = 1` test profile ran slower in the measurement of #354. The value is explicit, because the profile default enables it.
   CARGO_INCREMENTAL: "0"
 
-# The lint job and the test jobs run in parallel. The `checks` job is the status that the ruleset of main requires. It passes only when the lint job and each test job pass, and when the coverage reports of all test jobs together cover each application line.
+# The lint, fixture, and test jobs run in parallel. The `checks` job is the status that the ruleset of main requires. It passes only when each job passes, and when the coverage reports of all test jobs together cover each application line.
 jobs:
   lint:
     name: lint
@@ -48,7 +48,50 @@ jobs:
       - name: Run the lint checks
         run: mise run lint
 
-  # Each test job builds the instrumented tests, runs one slice of them, and keeps its coverage report as an artifact. A build in each job takes less time than a transfer of the built tests between jobs.
+  fixtures:
+    name: fixture checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Select the checks
+        id: select
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          task=check
+          if [[ $EVENT == pull_request ]]; then
+            paths=$(git diff --no-renames --name-only "$BASE...$HEAD")
+            task=$(bash scripts/ci_task.sh <<<"$paths")
+          fi
+          echo "task=$task" >>"$GITHUB_OUTPUT"
+
+      - name: Set up mise
+        if: steps.select.outputs.task == 'check'
+        uses: jdx/mise-action@v5.1.1
+        with:
+          version: 2026.10.7
+          install: true
+
+      - name: Cache cargo
+        if: steps.select.outputs.task == 'check'
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: checks
+          save-if: false
+
+      - name: Run fixture checks
+        if: steps.select.outputs.task == 'check'
+        run: mise exec -- bash scripts/fixture_checks.sh
+
+  # Each test job builds the instrumented tests, runs one slice of them, and keeps its coverage report as an artifact.
   test:
     name: test (${{ matrix.partition }})
     runs-on: ubuntu-latest
@@ -110,6 +153,7 @@ jobs:
         env:
           NEXTEST_PROFILE: ci
           PBEAM_TEST_PARTITION: slice:${{ matrix.partition }}/${{ strategy.job-total }}
+          PBEAM_FIXTURE_MODE: prepare
         run: mise run test
 
       - name: Keep the coverage report
@@ -125,7 +169,7 @@ jobs:
 
   checks:
     name: checks
-    needs: [lint, test]
+    needs: [lint, fixtures, test]
     # The job runs also when a needed job fails or is cancelled, so that the required status is always reported.
     if: always()
     runs-on: ubuntu-latest
@@ -134,10 +178,11 @@ jobs:
       - name: Check the results of the jobs
         env:
           LINT: ${{ needs.lint.result }}
+          FIXTURES: ${{ needs.fixtures.result }}
           TEST: ${{ needs.test.result }}
         run: |
-          echo "lint: $LINT, test: $TEST"
-          [[ $LINT == success && $TEST == success ]]
+          echo "lint: $LINT, fixtures: $FIXTURES, test: $TEST"
+          [[ $LINT == success && $FIXTURES == success && $TEST == success ]]
 
       - name: Check out source
         if: needs.test.outputs.task == 'check'
