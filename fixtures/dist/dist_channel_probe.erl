@@ -4,7 +4,8 @@
 -compile(nowarn_deprecated_catch).
 -export([main/0, net_kernel_exit/0, port_channel/0, no_mandatory/0, message/0,
          port_message/0, deliver_port/0, deliver_udp/0, input/0, reject/1,
-         trace_token/0, link_op/0, atom_cache/0, output/0, port_output/0,
+         trace_token/0, exit_trace_token/0, payload_exit_trace_token/0,
+         link_op/0, atom_cache/0, output/0, port_output/0,
          alias_ext/0, dead_alias/1, exit_input/0]).
 
 main() ->
@@ -472,9 +473,25 @@ atom_cache() ->
 
 %% A control message with a trace token.
 trace_token() ->
+    trace_token_packet({12, '', self(), []}, m).
+
+%% EXIT2_TT reads the token at tuple[4], before the reason (dist.c:2822-2828).
+exit_trace_token() ->
+    trace_token_packet({18, remote_pid(zz@nohost), self(), [], boom}, none).
+
+%% PAYLOAD_EXIT2_TT reads the token at tuple[4], after `from` and `to`
+%% (dist.c:2835-2840).
+payload_exit_trace_token() ->
+    trace_token_packet({27, remote_pid(zz@nohost), self(), []}, none).
+
+trace_token_packet(Control, Message) ->
     erts_internal:new_connection(zz@nohost),
     {ok, DH} = erts_internal:create_dist_channel(zz@nohost, self(), {mandatory(), 1}),
-    erlang:dist_ctrl_put_data(DH, packet({12, '', self(), []}, m)).
+    Packet = case Message of
+                 none -> packet_only(Control);
+                 _ -> packet(Control, Message)
+             end,
+    erlang:dist_ctrl_put_data(DH, Packet).
 
 %% An operation of another task (LINK).
 link_op() ->

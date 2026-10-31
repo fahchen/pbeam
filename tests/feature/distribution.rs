@@ -255,6 +255,14 @@ fn stops_at_a_part_of_a_channel_that_pbeam_does_not_have() {
             "unsupported distribution message with a trace token",
         ),
         (
+            "exit_trace_token()".to_owned(),
+            "unsupported distribution message with a trace token",
+        ),
+        (
+            "payload_exit_trace_token()".to_owned(),
+            "unsupported distribution message with a trace token",
+        ),
+        (
             "link_op()".to_owned(),
             "unsupported distribution operation 1",
         ),
