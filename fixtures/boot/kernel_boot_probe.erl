@@ -105,12 +105,19 @@ supports() ->
 %% out (`erts_fire_nif_monitor`, `erl_nif.c:3059-3119`, runs in the exit
 %% path of the owner, `erl_process.c:13797-13834`). The parent can run on
 %% another scheduler before that callback, so the probe waits for the
-%% registry, not for a fixed time.
-wait_closed(_Socket, 0) -> ok;
-wait_closed(Socket, N) ->
+%% registry. A socket that stays registered after 5 seconds is a failure,
+%% not a state to read.
+wait_closed(Socket) ->
+    wait_closed(Socket, erlang:monotonic_time(millisecond) + 5000).
+
+wait_closed(Socket, Deadline) ->
     case lists:member(Socket, socket:which_sockets()) of
         false -> ok;
-        true -> erlang:yield(), wait_closed(Socket, N - 1)
+        true ->
+            case erlang:monotonic_time(millisecond) < Deadline of
+                true -> erlang:yield(), wait_closed(Socket, Deadline);
+                false -> erlang:error({socket_not_closed, Socket})
+            end
     end.
 
 %% `erl -noshell -boot start_clean -pa fixtures/boot -s kernel_boot_probe
@@ -192,14 +199,14 @@ socket() ->
     {Child, MRef} = spawn_monitor(fun() -> {ok, C} = socket:open(inet, stream, tcp), Parent ! {child, C} end),
     Down = receive {child, C} -> C end,
     receive {'DOWN', MRef, process, Child, normal} -> ok end,
-    wait_closed(Down, 1000),
+    wait_closed(Down),
     {Closer, CRef} = spawn_monitor(fun() -> {ok, U2} = socket:open(inet, dgram, udp), ok = socket:close(U2) end),
     receive {'DOWN', CRef, process, Closer, normal} -> ok end,
     {ok, K} = socket:open(inet, stream, tcp),
     {_, KRef} = K,
     {Killer, KMRef} = spawn_monitor(fun() -> ok = prim_socket:close(KRef) end),
     receive {'DOWN', KMRef, process, Killer, normal} -> ok end,
-    wait_closed(K, 1000),
+    wait_closed(K),
     CloserDown = [maps:get(counters, socket:info()), lists:member(K, socket:which_sockets()),
                   maps:get(rstates, socket:info(K)), socket:close(K)],
     OwnerDown = [CloserDown, maps:get(counters, socket:info()),Owner(maps:remove(counters, socket:info(Down))),
