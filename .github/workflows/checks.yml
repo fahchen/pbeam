@@ -108,6 +108,7 @@ jobs:
       - name: Run the tests
         if: steps.select.outputs.task == 'check'
         env:
+          NEXTEST_PROFILE: ci
           PBEAM_TEST_PARTITION: slice:${{ matrix.partition }}/${{ strategy.job-total }}
         run: mise run test
 

@@ -1,9 +1,8 @@
 //! Temporary measurement of the append tree candidate: the copy cost of a
 //! repeated append and the match throughput of a doubling build.
 //!
-//! The test profile holds debug assertions, so the constants scale the runs
-//! down and the check gate stays short. The release profile of `cargo test`
-//! holds the measurement runs.
+//! The test profile uses fewer runs. The release profile of `cargo test`
+//! holds the measurement runs. CI runs the separate append correctness test.
 #![expect(
     clippy::unwrap_used,
     reason = "test helpers report a failure by a panic"

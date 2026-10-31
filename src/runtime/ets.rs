@@ -3987,20 +3987,6 @@ impl Table {
 
 #[cfg(test)]
 impl Table {
-    /// Return the bytes of the two vectors of the key index. The measurement
-    /// harness of [#539](https://github.com/fahchen/pbeam/issues/539) reports
-    /// it, so the space of the index is a measured number.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert_eq!(Table::new(ProcessId(0), Access::Public, 1, TableType::Set).index_bytes(), 0);
-    /// ```
-    pub(super) fn index_bytes(&self) -> usize {
-        self.index.hashes.capacity() * std::mem::size_of::<u64>()
-            + self.index.slots.capacity() * std::mem::size_of::<usize>()
-    }
-
     /// Return the live objects in slot order, for a test.
     ///
     /// # Examples
@@ -4400,6 +4386,10 @@ fn key_hash(atoms: &AtomTable, key: &Term) -> u64 {
         _ => internal_hash(key),
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/runtime/ets/measurement.rs"]
+mod measurement;
 
 #[cfg(test)]
 #[path = "../../tests/runtime/ets.rs"]

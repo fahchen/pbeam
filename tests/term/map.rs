@@ -1040,8 +1040,7 @@ fn counts_the_steps_of_the_erts_hashmap_merge() {
 const MAP_COST_RUNS: usize = 9;
 
 /// The number of rounds of one timed run of a map operation. The test profile
-/// runs fewer rounds, because the check gate only proves that the measurement
-/// runs; the report numbers come from the release profile.
+/// runs fewer rounds; the report numbers come from the release profile.
 const MAP_COST_ROUNDS: usize = if cfg!(debug_assertions) { 20 } else { 200 };
 
 /// The number of keys of the map of [`records_the_map_operation_cost`].

@@ -9,11 +9,9 @@
 //! result, and it checks the disassembly of each loop, so the interpreter
 //! cannot remove the work that the benchmark measures.
 //!
-//! Run the release measurement with `mise run bench-dispatch`. The check
-//! gate runs the same test under the test profile, which measures slower
-//! numbers but proves that the probes and the ERTS reference run. The test
-//! profile holds debug assertions, so the constants scale the loop lengths
-//! and the runs down and the gate stays short.
+//! Run the release measurement with `mise run bench-dispatch`. CI does not
+//! run the measurements. The test profile uses shorter loops and fewer runs;
+//! its numbers are not the report numbers.
 #![expect(
     clippy::unwrap_used,
     reason = "test helpers report a failure by a panic"
@@ -589,6 +587,72 @@ fn keeps_the_measured_instructions_in_each_loop() {
         "the floor loop must start with the test of the counter: {}",
         instructions[3]
     );
+}
+
+/// Compare each dispatch probe result with the pinned ERTS.
+#[test]
+fn dispatch_probes_return_the_pinned_erts_results() {
+    let program = BeamProgram::load(&[DISPATCH_PROBE, POSITION_PROBE]).unwrap();
+    let tuple = program.execute("dispatch_probe", "tuple3", &[]).unwrap();
+    let list = program.execute("dispatch_probe", "list3", &[]).unwrap();
+    let map = program.execute("dispatch_probe", "map_1000", &[]).unwrap();
+    let key = program.execute("dispatch_probe", "key", &[]).unwrap();
+    let probes: Vec<_> = probes()
+        .into_iter()
+        .map(|mut probe| {
+            probe.length = 40;
+            probe
+        })
+        .collect();
+    let mut expression = String::from(
+        "{module, M} = code:ensure_loaded(dispatch_probe), \
+         {module, P} = code:ensure_loaded(dispatch_position_probe), \
+         Map = M:map_1000(), Tuple = {a, b, c}, List = [a, b, c], Key = 500, ",
+    );
+    for probe in &probes {
+        write!(expression, "io:format(\"~w~n\", [{}]), ", call_text(probe)).unwrap();
+    }
+    expression.push_str("halt().");
+    let reference = Command::new("erl")
+        .args([
+            "+S",
+            "1",
+            "-noshell",
+            "-pa",
+            "fixtures/dispatch",
+            "-eval",
+            &expression,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        reference.status.success() && reference.stderr.is_empty(),
+        "ERTS failed: {reference:?}"
+    );
+    let output = String::from_utf8(reference.stdout).unwrap();
+    let lines: Vec<_> = output.lines().collect();
+    assert_eq!(lines.len(), probes.len());
+    for (probe, expected) in probes.iter().zip(lines) {
+        let args = arguments(
+            &program,
+            probe.function,
+            probe.length,
+            &tuple.term,
+            &list.term,
+            &map.term,
+            &key.term,
+        );
+        let result = program
+            .execute(probe.module, probe.function, &args)
+            .unwrap();
+        assert_eq!(
+            text(&result.term, result.atoms()),
+            expected,
+            "{}:{}",
+            probe.module,
+            probe.function
+        );
+    }
 }
 
 /// Record the interpreter dispatch baseline: run each probe on PBeam and on

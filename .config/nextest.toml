@@ -2,3 +2,39 @@
 # names it, before the 15-minute limit of the CI job (#1169).
 [profile.default]
 slow-timeout = { period = "60s", terminate-after = 7 }
+
+# Keep measurements available to local benchmark commands, but do not run them in CI.
+[profile.ci]
+default-filter = '''
+not (
+  test(=beam::code::instruction::tests::records_the_decoded_form_layout) |
+  test(=runtime::interpreter::tests::records_the_decoded_loop_body) |
+  test(=runtime::interpreter::data_structure_costs::prints_the_cost_of_every_derivation) |
+  test(=runtime::interpreter::data_structure_costs::prints_the_size_of_every_structure) |
+  test(=runtime::interpreter::dispatch_attribution_costs::prints_the_cost_of_every_instruction_part) |
+  test(=runtime::interpreter::bif::tests::prints_the_cost_of_the_two_classification_scans) |
+  test(=runtime::scheduler::release_costs::records_the_release_pause_of_a_large_graph) |
+  test(=term::costs::prints_the_cost_of_a_term_operation) |
+  test(=term::costs::prints_the_cost_of_a_binary_view) |
+  test(=term::data_structure_costs::prints_the_comparison_cost) |
+  test(=term::data_structure_costs::reports_the_allocation_count_of_one_comparison) |
+  test(=term::fun::tests::prints_the_cost_of_a_fun_payload) |
+  test(=term::map::tests::prints_the_cost_of_a_map_payload) |
+  test(=term::map::tests::prints_the_cost_of_a_map_put) |
+  test(=term::map::tests::records_the_map_operation_cost) |
+  test(=appends_and_matches) |
+  test(=records_the_drop_cost_of_a_term) |
+  test(=drops_a_term_without_a_walk_with_no_allocation) |
+  test(=records_the_allocations_of_the_drop_path_that_stay) |
+  test(=passes_borrowed_bif_arguments_with_no_allocation) |
+  test(=records_the_interpreter_dispatch_baseline) |
+  test(=keeps_the_measured_instructions_in_each_loop) |
+  test(=keeps_the_measured_select_val_shapes) |
+  test(=records_the_instruction_stream_cache_proxy) |
+  test(=records_the_attribution_reference_points) |
+  test(=records_the_select_val_cost) |
+  test(=records_the_ets_program_cost) |
+  test(=records_the_peak_live_bytes_of_one_terra_scene) |
+  test(=compares_the_runtime_with_the_pinned_erts)
+)
+'''

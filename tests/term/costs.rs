@@ -20,9 +20,7 @@
 //!
 //! Run the release measurement with `mise run bench-term`, which writes
 //! `target/term-costs.txt` with the revision, the host, the toolchain, the
-//! load, and the lines below. The check gate runs the same tests under the
-//! test profile, which proves that every shape runs; those numbers are not
-//! the report numbers.
+//! load, and the lines below. CI does not run the measurement tests.
 
 use std::{hint::black_box, rc::Rc, sync::Arc, time::Instant};
 
@@ -252,6 +250,18 @@ fn prints_the_cost_of_a_term_operation() {
     // The shapes stay alive to the end of the test, so the compiler keeps
     // the storage that the measurement shares.
     black_box((&tuple, &binary, &cons, &map, &tuple_with_map, &fun, &cell));
+}
+
+#[test]
+fn checks_binary_view_sharing() {
+    let binary = Binary::from(vec![7u8; 4]);
+    let copy = binary.clone();
+    assert!(binary.same_view(&copy));
+    assert!(!binary.same_view(&Binary::from(b"abcd".to_vec())));
+    let part = binary.bits(0, 16);
+    assert!(binary.same_bytes(&part));
+    let packed = binary.bits(4, 12);
+    assert!(packed.packed_backing().is_some());
 }
 
 #[test]

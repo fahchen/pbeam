@@ -49,9 +49,15 @@ fn looks_up_a_key_in_a_loop_as_pinned_erts() {
     // reads each key again in a loop of 2000 lookups. The result is the sum
     // of the values that the lookups read, and the pinned ERTS gives the same
     // result. The loop is the program-level evidence of the key index of
-    // #543, and the test prints the least of 9 timed runs of the program.
+    // #543.
     let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
-    assert_eq!(timed(&program, "lookup_loop"), Term::Integer(2_002_000));
+    assert_eq!(
+        program
+            .execute("ets_probe", "lookup_loop", &[])
+            .unwrap()
+            .term,
+        Term::Integer(2_002_000)
+    );
     assert_eq!(reference("lookup_loop"), b"2002000\n");
 }
 
@@ -63,10 +69,21 @@ fn inserts_objects_in_a_loop_as_pinned_erts() {
     // The pinned ERTS gives the same result.
     let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
     assert_eq!(
-        timed(&program, "insert_loop"),
+        program
+            .execute("ets_probe", "insert_loop", &[])
+            .unwrap()
+            .term,
         Term::list_from([Term::tuple(vec![Term::Integer(1000), Term::Integer(2000)])])
     );
     assert_eq!(reference("insert_loop"), b"[{1000,2000}]\n");
+}
+
+/// Measure both program loops with `cargo test --release --test ets records_the_ets_program_cost -- --nocapture`.
+#[test]
+fn records_the_ets_program_cost() {
+    let program = BeamProgram::load(&[ETS_PROBE]).unwrap();
+    let _ = timed(&program, "lookup_loop");
+    let _ = timed(&program, "insert_loop");
 }
 
 /// Run `ets_probe:Function()` 9 times on PBeam, print the least of the timed

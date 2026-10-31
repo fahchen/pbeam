@@ -23,9 +23,8 @@
 //!
 //! One number is the pause of one timed run, in microsecond, and the load of
 //! the run is printed with it. The report gives the maximum pause of each
-//! path, because the row asks for the maximum scheduler pause. The check gate
-//! runs the same test under the test profile, which proves that every path
-//! runs; those numbers are not the report numbers.
+//! path, because the row asks for the maximum scheduler pause. CI does not
+//! run this measurement.
 //!
 //! Run the release measurement with
 //! `cargo test --locked --release --lib release_costs -- --nocapture --test-threads=1`
@@ -37,7 +36,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::{ChildLink, LinkId, RELEASE_BATCH, Release, Scheduler, StartFlags, Turn};
+use super::{ChildLink, LinkId, RELEASE_BATCH, Release, ReleaseStack, Scheduler, StartFlags, Turn};
 use crate::{
     runtime::signal::Signal,
     runtime::{
@@ -49,6 +48,25 @@ use crate::{
     },
     term::{Map, ProcessId, Term},
 };
+
+impl ReleaseStack {
+    /// Return the number of bytes of the chunks of the stack and of the slots
+    /// of each chunk.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(ReleaseStack::new().allocated_bytes(), 0);
+    /// ```
+    fn allocated_bytes(&self) -> usize {
+        self.chunks.capacity() * std::mem::size_of::<Vec<Release>>()
+            + self
+                .chunks
+                .iter()
+                .map(|chunk| chunk.capacity() * std::mem::size_of::<Release>())
+                .sum::<usize>()
+    }
+}
 
 /// The number of cells of the list and of levels of the chain of the report.
 const CELLS: usize = 1_000_000;

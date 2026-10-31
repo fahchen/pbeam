@@ -13,10 +13,7 @@
 //! start of the runtime, of ERTS, and of the process is part of neither
 //! number, so the ratio is the cost of the work and not the cost of the boot.
 //!
-//! The check gate runs the test with [`RUNS`] and [`Scenario::count`] scaled
-//! down, as `tests/integration/dispatch_baseline.rs` scales its probes, so the
-//! gate stays short and still proves that the two runtimes return the same
-//! result for each scenario.
+//! A separate correctness test compares the scenario results on both runtimes.
 #![expect(
     clippy::unwrap_used,
     reason = "test helpers report a failure by a panic"
@@ -32,8 +29,8 @@ use std::{
 use pbeam_runtime::{AtomTable, BeamProgram, HostTerm, Term};
 
 /// The number of timed runs of each scenario. The report gives the minimum,
-/// which the other processes of the host disturb the least. The check gate
-/// runs two rounds, because it needs the results and it must stay short.
+/// which the other processes of the host disturb the least. The test profile
+/// uses two runs.
 const RUNS: usize = if cfg!(debug_assertions) { 2 } else { 9 };
 
 /// One scenario of the benchmark. Its module exports `function/1`, which
@@ -53,7 +50,7 @@ struct Scenario {
 
 impl Scenario {
     /// Return the count of one run. The recorded count applies to the release
-    /// profile. The check gate runs one twentieth of it, so the debug
+    /// profile. The test profile uses one twentieth of it, so the debug
     /// interpreter runs each scenario for about the same time as the release
     /// interpreter.
     ///
@@ -334,6 +331,54 @@ fn erts_measure(lines: &[String], module: &str) -> (String, u128) {
         .rsplit_once(' ')
         .unwrap_or_else(|| panic!("the ERTS measure line of {module} has no time"));
     (result.to_owned(), nanos.parse().unwrap())
+}
+
+#[test]
+fn scenarios_return_the_pinned_erts_results() {
+    let directory = beam_directory().with_file_name(format!("correctness-{}", std::process::id()));
+    compile_scenarios(&directory);
+    let beams: Vec<_> = SCENARIOS
+        .iter()
+        .map(|scenario| read_beam(&directory, scenario.module))
+        .collect();
+    let slices: Vec<_> = beams.iter().map(Vec::as_slice).collect();
+    let program = BeamProgram::load(&slices).unwrap();
+    let mut expression = String::new();
+    for scenario in SCENARIOS {
+        write!(
+            expression,
+            "io:format(\"~w~n\", [{}:{}(40)]), ",
+            scenario.module, scenario.function
+        )
+        .unwrap();
+    }
+    expression.push_str("halt().");
+    let reference = Command::new("erl")
+        .args(["+S", "1", "-noshell", "-pa"])
+        .arg(&directory)
+        .args(["-eval", &expression])
+        .output()
+        .unwrap();
+    assert!(
+        reference.status.success() && reference.stderr.is_empty(),
+        "ERTS failed: {reference:?}"
+    );
+    let output = String::from_utf8(reference.stdout).unwrap();
+    let lines: Vec<_> = output.lines().collect();
+    assert_eq!(lines.len(), SCENARIOS.len());
+    for (scenario, expected) in SCENARIOS.iter().zip(lines) {
+        let argument = program.host_term(Term::Integer(40));
+        let result = program
+            .execute(scenario.module, scenario.function, &[argument])
+            .unwrap();
+        assert_eq!(
+            text(&result.term, result.atoms()),
+            expected,
+            "{}",
+            scenario.title
+        );
+    }
+    std::fs::remove_dir_all(directory).unwrap();
 }
 
 /// Compile the scenarios, run each of them on PBeam and on the pinned ERTS,

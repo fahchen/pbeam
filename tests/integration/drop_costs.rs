@@ -13,11 +13,9 @@
 //! other holder alive across the timer, so the timer measures the drop of a
 //! shared holder and not the release of the storage.
 //!
-//! Run the release measurement with `mise run bench-drop`. The check gate
-//! runs the same test under the test profile, which proves that every shape
-//! runs; its numbers are not the report numbers. The test profile holds
-//! debug assertions, so the constants scale the population down and the
-//! gate stays short.
+//! Run the release measurement with `mise run bench-drop`. CI does not run
+//! this measurement. The test profile uses a smaller population; its
+//! numbers are not the report numbers.
 #![expect(
     clippy::unwrap_used,
     reason = "test helpers report a failure by a panic"

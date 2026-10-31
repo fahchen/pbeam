@@ -17,8 +17,8 @@
 //! thread. The two numbers measure different things, and the test states
 //! the relation instead of claiming that either is exact.
 //!
-//! Run the harness on a release build with `mise run bench-live-bytes`. The
-//! check gate runs the same test with the test profile.
+//! Run the harness on a release build with `mise run bench-live-bytes`. CI
+//! runs the separate release-work correctness test, not the measurement.
 #![expect(
     clippy::unwrap_used,
     reason = "test helpers report a failure by a panic"

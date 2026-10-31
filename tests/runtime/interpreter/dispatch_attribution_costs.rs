@@ -17,9 +17,7 @@
 //! Every number is the minimum of [`RUNS`] timed runs of one operation, in
 //! nanosecond for each operation, and every result passes through
 //! [`black_box`]. The test asserts no time, because the load of the host
-//! changes the number. The check gate runs the same test under the test
-//! profile, which proves that every measured operation runs; those numbers are
-//! not the report numbers.
+//! changes the number. CI does not run this measurement.
 //!
 //! Run the release measurement with
 //! `cargo test --locked --release --lib -- dispatch_attribution_costs -- --nocapture --test-threads=1`
