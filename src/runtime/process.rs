@@ -93,6 +93,16 @@ impl RemotePid {
             },
         }))
     }
+
+    /// Return the pid data as `sys_memcmp` reads it: the number and then
+    /// the serial, each in little-endian memory order
+    /// (`erl_term.h:1143-1147`).
+    pub(super) fn data(self) -> [u8; 8] {
+        let mut data = [0; 8];
+        data[..4].copy_from_slice(&self.number.to_le_bytes());
+        data[4..].copy_from_slice(&self.serial.to_le_bytes());
+        data
+    }
 }
 
 impl LinkId {
@@ -500,7 +510,7 @@ pub(super) struct ProcessState {
     /// immediate (`ctxt->dist_links`, `erl_process.c:14142-14145`). The
     /// exit inserts them in the walk order of `links`, so the walk of this
     /// tree gives the ERTS order. Empty before the exit.
-    pub(super) dist_links: MonitorLinkTree<LinkId, LinkState>,
+    pub(super) dist_links: MonitorLinkTree<RemotePid, LinkState>,
     /// The monitor tree: the monitors that this process holds and its
     /// aliases, by reference (`ERTS_P_MONITORS`).
     pub(super) monitors: MonitorLinkTree<Reference, Origin>,

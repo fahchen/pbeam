@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 
 use super::{MonitorLinkTree, TreeKey};
-use crate::runtime::process::LinkId;
+use crate::runtime::process::{LinkId, RemotePid};
 use crate::term::{PortId, ProcessId, Reference};
 
 /// Link sequences of a process on pinned ERTS 29.1.1 with one scheduler,
@@ -183,6 +183,39 @@ fn orders_link_ids_by_the_tag_and_then_the_number() {
     assert_eq!(pid(1).compare(pid(2)), Ordering::Less);
     assert_eq!(port(2).compare(port(1)), Ordering::Greater);
     assert_eq!(port(2).compare(port(2)), Ordering::Equal);
+    // A pid of another node is a boxed term, which comes after each
+    // immediate term (erl_monitor_link.c:138-139, 186-187).
+    let remote = |node, creation, number, serial| {
+        LinkId::Remote(RemotePid {
+            node,
+            creation,
+            number,
+            serial,
+        })
+    };
+    assert_eq!(pid(1).compare(remote(0, 0, 0, 0)), Ordering::Less);
+    assert_eq!(port(1).compare(remote(0, 0, 0, 0)), Ordering::Less);
+}
+
+#[test]
+fn orders_remote_pids_by_node_creation_and_data() {
+    // Two pids of other nodes compare the atom words of their node names,
+    // then the creations, then the pid data with `sys_memcmp`
+    // (erl_monitor_link.c:216-230).
+    let pid = |node, creation, number, serial| RemotePid {
+        node,
+        creation,
+        number,
+        serial,
+    };
+    assert_eq!(pid(1, 2, 3, 4).compare(pid(1, 2, 3, 4)), Ordering::Equal);
+    assert_eq!(pid(1, 2, 3, 4).compare(pid(2, 1, 9, 9)), Ordering::Less);
+    assert_eq!(pid(1, 2, 3, 4).compare(pid(1, 3, 0, 0)), Ordering::Less);
+    assert_eq!(pid(1, 2, 3, 4).compare(pid(1, 2, 4, 0)), Ordering::Less);
+    assert_eq!(pid(1, 2, 3, 4).compare(pid(1, 2, 3, 5)), Ordering::Less);
+    // The data compares as the memory bytes: the low byte of the number
+    // first (erl_term.h:1143-1147).
+    assert_eq!(pid(1, 2, 256, 0).compare(pid(1, 2, 1, 0)), Ordering::Less);
 }
 
 #[test]

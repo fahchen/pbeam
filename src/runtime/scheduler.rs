@@ -4186,7 +4186,7 @@ impl Scheduler {
                                     let connection = unlinking.connection;
                                     self.dist_link_exit(id, remote, connection, &reason)?;
                                 } else {
-                                    process.dist_links.insert(linked, unlinking);
+                                    process.dist_links.insert(remote, unlinking);
                                 }
                             }
                             LinkId::Process(_) | LinkId::Remote(_) => {}
@@ -4282,16 +4282,14 @@ impl Scheduler {
                     };
                     loop {
                         let position = walk.position();
-                        let Some((&linked, &state)) = walk.next() else {
+                        let Some((&remote, &state)) = walk.next() else {
                             break;
                         };
                         if reds <= 0 {
                             self.switch_out_freed(process, ExitPhase::DistLinks(position));
                             return Ok(());
                         }
-                        if let LinkId::Remote(remote) = linked {
-                            self.dist_link_exit(id, remote, state.connection, &reason)?;
-                        }
+                        self.dist_link_exit(id, remote, state.connection, &reason)?;
                         reds -= 1;
                     }
                     break;

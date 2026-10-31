@@ -10,7 +10,7 @@
 
 use std::cmp::Ordering;
 
-use super::LinkId;
+use super::{LinkId, RemotePid};
 use crate::term::{PortId, ProcessId, Reference};
 
 /// The key order of a [`MonitorLinkTree`], as ERTS `ml_cmp_keys`
@@ -68,14 +68,29 @@ impl TreeKey for LinkId {
         let word = |id| match id {
             LinkId::Process(ProcessId(number)) => (0, 0x3, number, [0; 8]),
             LinkId::Port(PortId(number)) => (0, 0x7, number, [0; 8]),
-            LinkId::Remote(pid) => {
-                let mut data = [0; 8];
-                data[..4].copy_from_slice(&pid.number.to_le_bytes());
-                data[4..].copy_from_slice(&pid.serial.to_le_bytes());
-                (1, u64::from(pid.node), u64::from(pid.creation), data)
-            }
+            LinkId::Remote(pid) => (1, u64::from(pid.node), u64::from(pid.creation), pid.data()),
         };
         word(self).cmp(&word(other))
+    }
+}
+
+impl TreeKey for RemotePid {
+    /// ERTS compares two pids of other nodes by the atom words of their
+    /// node names, then the creations, then the pid data with `sys_memcmp`
+    /// (`erl_monitor_link.c:216-230`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let pid = RemotePid { node: 1, creation: 2, number: 3, serial: 4 };
+    /// assert_eq!(pid.compare(pid), Ordering::Equal);
+    /// ```
+    fn compare(self, other: Self) -> Ordering {
+        (u64::from(self.node), u64::from(self.creation), self.data()).cmp(&(
+            u64::from(other.node),
+            u64::from(other.creation),
+            other.data(),
+        ))
     }
 }
 
