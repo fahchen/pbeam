@@ -400,14 +400,15 @@ impl DistTable {
         self.entries[&name.index()].input
     }
 
-    /// Return the flags and the controller of the entry of `name` when it
-    /// is connected (`ERTS_DSIG_PREP_CONNECTED`, `dist.c:3250-3251`).
-    pub(in crate::runtime) fn connected(&self, name: &Atom) -> Option<(u64, Controller)> {
+    /// Return the flags, the controller, and the connection id of the entry
+    /// of `name` when it is connected (`ERTS_DSIG_PREP_CONNECTED`,
+    /// `dist.c:3250-3251`).
+    pub(in crate::runtime) fn connected(&self, name: &Atom) -> Option<(u64, Controller, u32)> {
         let entry = self.entries.get(&name.index())?;
         if entry.state != State::Connected {
             return None;
         }
-        Some((entry.flags, entry.controller?))
+        Some((entry.flags, entry.controller?, entry.connection_id))
     }
 
     /// Put the packet `elements` at the end of the output queue of the

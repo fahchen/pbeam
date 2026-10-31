@@ -4,9 +4,9 @@
 -compile(nowarn_deprecated_catch).
 -export([main/0, net_kernel_exit/0, port_channel/0, no_mandatory/0, message/0,
          port_message/0, deliver_port/0, deliver_udp/0, input/0, reject/1,
-         trace_token/0, exit_trace_token/0, payload_exit_trace_token/0,
-         link_op/0, atom_cache/0, output/0, port_output/0,
-         alias_ext/0, dead_alias/1, exit_input/0]).
+         trace_token/1, monitor_op/0, atom_cache/0, output/0, port_output/0,
+         alias_ext/0, dead_alias/1, exit_input/0, link_input/0,
+         link_noconnection/0]).
 
 main() ->
     %% net_kernel reports the dist_ctrlr message of a connection that it
@@ -407,7 +407,19 @@ reject(N) ->
                  12 -> packet_only({8, self(), self(), x});
                  13 -> packet_only({8, remote_pid(yy@nohost), self(), x});
                  14 -> packet_only({8, From, foo, x});
-                 15 -> packet_only({26, From})
+                 15 -> packet_only({26, From});
+                 16 -> packet_only({1, remote_pid(yy@nohost), self()});
+                 17 -> packet_only({1, From});
+                 18 -> packet_only({1, From, remote_pid(yy@nohost)});
+                 19 -> packet_only({35, 0, From, self()});
+                 20 -> packet_only({35, 1, From, From});
+                 21 -> packet_only({36, -1, From, self()});
+                 22 -> packet_only({36, 1, foo, self()});
+                 23 -> packet_only({3, From, foo, x});
+                 24 -> packet_only({24, remote_pid(yy@nohost), self()});
+                 25 -> packet_only({4, From, self()});
+                 26 -> packet_only({3, From, self()});
+                 27 -> packet_only({1, remote_ref(zz@nohost), self()})
              end,
     erlang:dist_ctrl_put_data(DH, Packet).
 
@@ -471,33 +483,27 @@ atom_cache() ->
     {ok, DH} = erts_internal:create_dist_channel(zz@nohost, self(), {mandatory() bor 16#2000, 1}),
     erlang:dist_ctrl_put_data(DH, packet_only({2, '', self()})).
 
-%% A control message with a trace token.
-trace_token() ->
-    trace_token_packet({12, '', self(), []}, m).
-
-%% EXIT2_TT reads the token at tuple[4], before the reason (dist.c:2822-2828).
-exit_trace_token() ->
-    trace_token_packet({18, remote_pid(zz@nohost), self(), [], boom}, none).
-
-%% PAYLOAD_EXIT2_TT reads the token at tuple[4], after `from` and `to`
-%% (dist.c:2835-2840).
-payload_exit_trace_token() ->
-    trace_token_packet({27, remote_pid(zz@nohost), self(), []}, none).
-
-trace_token_packet(Control, Message) ->
+%% A control message with a trace token. `EXIT2_TT` (18) reads the token at
+%% tuple[4], before the reason, and `PAYLOAD_EXIT2_TT` (27) at tuple[4]
+%% (dist.c:2822-2840).
+trace_token(Op) ->
     erts_internal:new_connection(zz@nohost),
     {ok, DH} = erts_internal:create_dist_channel(zz@nohost, self(), {mandatory(), 1}),
-    Packet = case Message of
-                 none -> packet_only(Control);
-                 _ -> packet(Control, Message)
+    From = remote_pid(zz@nohost),
+    Packet = case Op of
+                 12 -> packet({12, '', self(), []}, m);
+                 13 -> packet_only({13, From, self(), [], x});
+                 18 -> packet_only({18, From, self(), [], boom});
+                 25 -> packet({25, From, self(), []}, x);
+                 27 -> packet_only({27, From, self(), []})
              end,
     erlang:dist_ctrl_put_data(DH, Packet).
 
-%% An operation of another task (LINK).
-link_op() ->
+%% An operation of another task (MONITOR_P).
+monitor_op() ->
     erts_internal:new_connection(zz@nohost),
     {ok, DH} = erts_internal:create_dist_channel(zz@nohost, self(), {mandatory(), 1}),
-    erlang:dist_ctrl_put_data(DH, packet_only({1, remote_pid(zz@nohost), self()})).
+    erlang:dist_ctrl_put_data(DH, packet_only({19, remote_pid(zz@nohost), self(), make_ref()})).
 
 %% A pid of the node Node.
 remote_pid(Node) ->
@@ -611,3 +617,216 @@ exit_input() ->
     Drops = [erlang:dist_ctrl_put_data(DH, packet_only({26, From, Dead})),
              erlang:dist_ctrl_put_data(DH, packet_only({8, From, Old, x}))],
     show(exit, [Results, Drops, flush(), erlang:dist_get_stat(DH)]).
+
+%% LINK, UNLINK_ID, UNLINK_ID_ACK, EXIT, and PAYLOAD_EXIT packets to local
+%% processes, and the link packets of local processes, on a connection
+%% without and with DFLAG_EXIT_PAYLOAD (bif.c:263-394, 1295-1348,
+%% dist.c:1608-1660, 1716-1785, 2224-2339, 2745-2805,
+%% erl_process.c:14101-14147, 13981-14040).
+link_input() ->
+    logger:set_primary_config(level, none),
+    M = mandatory(),
+    %% A process controls one connection, so each case runs in a process.
+    Run = fun(Node, Flags) ->
+                  Parent = self(),
+                  {Pid, Ref} = spawn_monitor(fun() -> Parent ! {self(), link_case(Node, Flags)} end),
+                  receive
+                      {Pid, Result} -> Result;
+                      {'DOWN', Ref, _, _, Why} -> {crash, Why}
+                  end
+          end,
+    show(link, [Run(zz@nohost, M), Run(yy@nohost, M bor 16#400000)]).
+
+link_case(Node, Flags) ->
+    erts_internal:new_connection(Node),
+    {ok, DH} = erts_internal:create_dist_channel(Node, self(), {Flags, 1}),
+    From = remote_pid(Node),
+    Self = self(),
+    Put = fun(Control) -> ok = erlang:dist_ctrl_put_data(DH, packet_only(Control)) end,
+    PutMsg = fun(Control, Msg) -> ok = erlang:dist_ctrl_put_data(DH, packet(Control, Msg)) end,
+    Out = fun O() -> case erlang:dist_ctrl_get_data(DH) of none -> []; D -> [pkt(D) | O()] end end,
+    %% Take N packets, which an exit can send after its DOWN messages
+    %% (erl_process.c:14545-14656).
+    Take = fun T(0) -> [];
+               T(N) -> case erlang:dist_ctrl_get_data(DH) of
+                           none ->
+                               erlang:dist_ctrl_get_data_notification(DH),
+                               receive dist_data -> T(N) after 5000 -> [timeout] end;
+                           D -> [pkt(D) | T(N - 1)]
+                       end
+           end,
+    %% A process that runs Body, reports, and then forwards its messages.
+    Spawn = fun(Trap, Body) ->
+                    V = spawn(fun() ->
+                                      process_flag(trap_exit, Trap),
+                                      Body(),
+                                      Self ! {ready, self()},
+                                      Loop = fun L() ->
+                                                     receive
+                                                         {exit, Why} -> exit(Why);
+                                                         relink -> true = link(From), Self ! relinked, L();
+                                                         Msg -> Self ! {got, self(), Msg}, L()
+                                                     end
+                                             end,
+                                      Loop()
+                              end),
+                    receive {ready, V} -> ok end,
+                    {V, monitor(process, V)}
+            end,
+    Victim = fun(Trap) -> Spawn(Trap, fun() -> ok end) end,
+    Events = fun({V, Ref}) ->
+                     V ! ping,
+                     E = fun E() ->
+                                 receive
+                                     {got, V, ping} -> [alive];
+                                     {got, V, Msg} -> [Msg | E()];
+                                     {'DOWN', Ref, _, _, Why} -> [{down, Why}]
+                                 end
+                         end,
+                     E()
+             end,
+    Links = fun({V, _}) -> element(2, process_info(V, links)) end,
+    Stop = fun({V, Ref}) -> exit(V, kill), receive {'DOWN', Ref, _, _, _} -> ok end end,
+    {Dead, DeadRef} = spawn_monitor(fun() -> ok end),
+    receive {'DOWN', DeadRef, _, _, _} -> ok end,
+    Name = atom_to_binary(node()),
+    Old = binary_to_term(<<131, 88, 119, (byte_size(Name)), Name/binary, 1:32, 0:32, 99:32>>),
+    %% Input: links of the other node to local processes.
+    A = Victim(true),
+    Put({1, From, element(1, A)}),
+    A1 = Links(A),
+    Put({3, From, element(1, A), boom}),
+    A2 = Events(A),
+    A3 = Links(A),
+    Stop(A),
+    B = Victim(false),
+    Put({1, From, element(1, B)}),
+    PutMsg({24, From, element(1, B)}, {boom}),
+    B1 = Events(B),
+    C = Victim(false),
+    Put({3, From, element(1, C), boom}),
+    C1 = Events(C),
+    Stop(C),
+    D = Victim(true),
+    Put({1, From, element(1, D)}),
+    Put({35, 7, From, element(1, D)}),
+    Put({3, From, element(1, D), x}),
+    D1 = Links(D),
+    D2 = Events(D),
+    D3 = Out(),
+    Put({35, 18446744073709551615, From, element(1, D)}),
+    Put({36, 5, From, element(1, D)}),
+    D4 = Events(D),
+    D5 = Out(),
+    Stop(D),
+    Put({1, From, Dead}),
+    Put({1, From, Old}),
+    Put({1, From, foo}),
+    Put({35, 8, From, Dead}),
+    Put({36, 8, From, Dead}),
+    Put({3, From, Dead, x}),
+    PutMsg({24, From, Dead}, x),
+    Dead1 = Out(),
+    %% Signals that wait in the queue of a process at its exit.
+    H = spawn(fun() ->
+                      receive go -> ok end,
+                      Put({1, From, self()}),
+                      Put({35, 9, From, self()}),
+                      exit(bye)
+              end),
+    ok = erlang:dist_ctrl_input_handler(DH, H),
+    H ! go,
+    H1 = Take(2),
+    ok = erlang:dist_ctrl_input_handler(DH, self()),
+    %% Output: links of local processes to the other node.
+    L = Spawn(false, fun() -> true = link(From) end),
+    L1 = Out(),
+    L2 = Links(L),
+    Put({3, From, element(1, L), boom}),
+    L3 = Events(L),
+    Imm = Spawn(true, fun() -> true = link(From) end),
+    Imm1 = Out(),
+    element(1, Imm) ! {exit, normal},
+    Imm2 = Events(Imm),
+    Imm3 = Take(1),
+    Def = Spawn(true, fun() -> true = link(From), true = link(From) end),
+    Def1 = Out(),
+    element(1, Def) ! {exit, {boom}},
+    Def2 = Events(Def),
+    Def3 = Take(1),
+    U = Spawn(true, fun() -> true = link(From), true = unlink(From), true = unlink(From) end),
+    U1 = ids(Out()),
+    U2 = Links(U),
+    element(1, U) ! {exit, normal},
+    U3 = Events(U),
+    U4 = Out(),
+    R = Spawn(true, fun() -> true = link(From), true = unlink(From) end),
+    [_, {_, {{35, RId, _, _}}}] = Out(),
+    Put({36, RId + 1, From, element(1, R)}),
+    Put({36, RId, From, element(1, R)}),
+    element(1, R) ! relink,
+    receive relinked -> ok end,
+    R1 = Links(R),
+    R2 = Out(),
+    element(1, R) ! {exit, normal},
+    R3 = Events(R),
+    R4 = Take(1),
+    %% Many links: the exit yields in its link phases, and sends the link
+    %% exit signals of a reason that is not immediate in the post-order of
+    %% the tree of these links (erl_process.c:14142-14145, 14640-14656).
+    Many = [binary_to_term(<<131, 88, 118, (byte_size(atom_to_binary(Node))):16,
+                             (atom_to_binary(Node))/binary, N:32, 0:32, 1:32>>)
+            || N <- lists:seq(1, 4500)],
+    M = Spawn(true, fun() -> [true = link(P) || P <- Many] end),
+    4500 = length(Out()),
+    element(1, M) ! {exit, {boom}},
+    M1 = Events(M),
+    TakeRaw = fun TR(0) -> [];
+                  TR(N) -> case erlang:dist_ctrl_get_data(DH) of
+                               none ->
+                                   erlang:dist_ctrl_get_data_notification(DH),
+                                   receive dist_data -> TR(N) after 5000 -> [timeout] end;
+                               Got -> [Got | TR(N - 1)]
+                           end
+              end,
+    Number = fun(Data) ->
+                     <<112, Rest/binary>> = iolist_to_binary(Data),
+                     {Control, _} = binary_to_term(Rest, [used]),
+                     [_, Num, _] = string:lexemes(pid_to_list(element(3, Control)), "<.>"),
+                     list_to_integer(Num)
+             end,
+    Numbers = [Number(Data) || Data <- TakeRaw(4500)],
+    M2 = {lists:sort(Numbers) =:= lists:seq(1, 4500), lists:sublist(Numbers, 8),
+          erlang:phash2(Numbers)},
+    Names = [{From, from}, {Dead, dead}, {Old, old}, {H, h}]
+        ++ [{element(1, P), N} || {P, N} <- [{A, a}, {B, b}, {C, c}, {D, d}, {L, l}, {Imm, imm},
+                                              {Def, def}, {U, u}, {R, r}, {M, m}]],
+    subst([[A1, A2, A3], B1, C1, [D1, D2, D3, D4, D5], Dead1, H1, [L1, L2, L3],
+           [Imm1, Imm2, Imm3], [Def1, Def2, Def3], [U1, U2, U3, U4], [R1, R2, R3, R4], [M1, M2],
+           flush()],
+          Names).
+
+%% Replace the unlink identifier of each UNLINK_ID packet, which differs
+%% between runs.
+ids(Packets) ->
+    [case P of {S, {{35, _, F, T}}} -> {S, {{35, id, F, T}}}; _ -> P end || P <- Packets].
+
+subst(Term, Names) ->
+    case lists:keyfind(Term, 1, Names) of
+        {_, Name} -> Name;
+        false when is_tuple(Term) -> list_to_tuple(subst(tuple_to_list(Term), Names));
+        false when is_list(Term) -> [subst(E, Names) || E <- Term];
+        false -> anon(Term)
+    end.
+
+%% A link to a pid of another node on a node that is not alive gives the
+%% exit signal noconnection (bif.c:323-340).
+link_noconnection() ->
+    P = remote_pid(zz@nohost),
+    process_flag(trap_exit, true),
+    true = link(P),
+    Trap = receive M -> M after 1000 -> timeout end,
+    process_flag(trap_exit, false),
+    {Pid, Ref} = spawn_monitor(fun() -> true = link(P), receive after infinity -> ok end end),
+    Down = receive {'DOWN', Ref, _, _, Why} -> Why after 1000 -> timeout end,
+    show(noconnection, [Trap =:= {'EXIT', P, noconnection}, Down, is_pid(Pid), process_info(self(), links)]).

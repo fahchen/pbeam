@@ -10,7 +10,7 @@ use super::{Scheduler, dist_table::Controller};
 use crate::{
     error::BeamError,
     runtime::interpreter::bif::encode_dist,
-    term::{Atom, Binary, PortId, Term, external_id::ExternalData},
+    term::{Atom, Binary, PortId, ProcessId, Term, external_id::ExternalData},
 };
 
 /// `PASS_THROUGH` (`external.h`): the first byte of a packet without a
@@ -39,7 +39,7 @@ const ALTACT_SIG_NAME: i64 = 1 << 3;
 const ALTACT_SIG_EXIT: i64 = 1 << 4;
 
 /// `DFLAG_EXIT_PAYLOAD` (`dist.h:52`).
-const EXIT_PAYLOAD: u64 = 0x40_0000;
+pub(super) const EXIT_PAYLOAD: u64 = 0x40_0000;
 
 /// Whether a send has the option `priority` of `erlang:send/3`
 /// (`bif.c:2718-2719`).
@@ -85,8 +85,9 @@ impl Scheduler {
         message: &Term,
         priority: SendPriority,
     ) -> Result<bool, BeamError> {
-        let from = Term::Pid(self.current_process().id);
-        self.dist_output(node, |flags| {
+        let caller = self.current_process().id;
+        let from = Term::Pid(caller);
+        self.dist_output(caller, node, |flags, _| {
             if is_remote_reference(to) && flags & ALIAS == 0 {
                 return None;
             }
@@ -123,10 +124,11 @@ impl Scheduler {
         reason: &Term,
         priority: SendPriority,
     ) -> Result<bool, BeamError> {
-        let from = Term::Pid(self.current_process().id);
+        let caller = self.current_process().id;
+        let from = Term::Pid(caller);
         let alias = is_remote_reference(to);
         let prio = priority == SendPriority::Priority;
-        self.dist_output(node, |flags| {
+        self.dist_output(caller, node, |flags, _| {
             if (prio || alias) && flags & ALTACT_SIG != 0 {
                 let mut fs = ALTACT_SIG_EXIT;
                 if alias {
@@ -152,29 +154,30 @@ impl Scheduler {
     }
 
     /// Put the packet of the control message and the message that `build`
-    /// gives for the flags of the connection of `node` in the output of the
-    /// connection, and return `true`; `build` gives `None` for a signal that
-    /// the connection drops. Return `false` when the node has no
-    /// connection. A process controller gets the packet in its output
-    /// queue, and a port controller writes it.
+    /// gives for the flags and the id of the connection of `node` in the
+    /// output of the connection, and return `true`; `build` gives `None`
+    /// for a signal that the connection drops. Return `false` when the node
+    /// has no connection. A process controller gets the packet in its
+    /// output queue, with the `dist_data` message from `sender` when it
+    /// asked for one, and a port controller writes it.
     ///
     /// # Errors
     ///
     /// The errors of [`Self::dist_send`].
-    fn dist_output(
+    pub(super) fn dist_output(
         &mut self,
+        sender: ProcessId,
         node: &Atom,
-        build: impl FnOnce(u64) -> Option<(Term, Option<Term>)>,
+        build: impl FnOnce(u64, u32) -> Option<(Term, Option<Term>)>,
     ) -> Result<bool, BeamError> {
         let node_ref = Arc::clone(&self.node);
         let mut dist = node_ref.dist();
-        let Some((flags, controller)) = dist.connected(node) else {
+        let Some((flags, controller, connection)) = dist.connected(node) else {
             return Ok(false);
         };
-        let Some((control, message)) = build(flags) else {
+        let Some((control, message)) = build(flags, connection) else {
             return Ok(true);
         };
-        let caller = self.current_process().id;
         let mut elements = vec![Binary::from(vec![PASS_THROUGH])];
         elements.extend(encode_dist(self, &control)?);
         if let Some(message) = message {
@@ -184,7 +187,7 @@ impl Scheduler {
             Controller::Process(process) => {
                 if dist.enqueue(node, elements) {
                     drop(dist);
-                    self.send_message(caller, process, Term::static_atom("dist_data"));
+                    self.send_message(sender, process, Term::static_atom("dist_data"));
                 }
             }
             Controller::Port(port) => {
