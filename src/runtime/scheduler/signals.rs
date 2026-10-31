@@ -318,6 +318,9 @@ impl Scheduler {
                 let _ = self.send_signal(None, from, exit);
             }
             Signal::DistLink { from, connection } => {
+                // The connection has the link already, so the answer of a
+                // dead target deletes it (`dist.c:2259-2264`).
+                self.node.dist().remove_link(target, from, connection);
                 self.dist_link_noproc(target, from, connection);
             }
             Signal::DistUnlink {
@@ -618,6 +621,33 @@ impl Scheduler {
                 };
                 return Ok(self.handle_exit_signal(id, walk, node, exit));
             }
+            Signal::ConnectionLost { from, connection } => {
+                // A signal of a lost connection leaves a link that the
+                // process made again on a newer connection, and a link that
+                // it no longer has (`erl_proc_sig_queue.c:4674-4706`). The
+                // link keeps the id of its own connection, not the id of the
+                // current connection of the entry.
+                let link = LinkId::Remote(from);
+                let lost = self
+                    .processes
+                    .get(id)
+                    .expect("the process is alive")
+                    .links
+                    .get(&link)
+                    .is_some_and(|state| state.is_active() && state.connection == connection);
+                if !lost {
+                    self.handled(id, node);
+                    return Ok(Handled::Continue(2));
+                }
+                let exit = ExitSignal {
+                    from: from.term(),
+                    link: Some(link),
+                    reason: Term::static_atom("noconnection"),
+                    normal_kills: false,
+                    alias: None,
+                };
+                return Ok(self.handle_exit_signal(id, walk, node, exit));
+            }
             Signal::DistExit { from, reason } => {
                 let exit = ExitSignal {
                     from,
@@ -708,11 +738,21 @@ impl Scheduler {
                 4 * i32::from(removed)
             }
             Signal::DistLink { from, connection } => {
-                let links = &mut self.handled(id, node).links;
-                let from = LinkId::Remote(from);
-                if links.get(&from).is_none() {
-                    links.insert(
-                        from,
+                // The dist entry has the link of the connection already,
+                // because `net_link` inserts it before it sends this signal
+                // (`dist.c:2246-2258`). A process that is linked already
+                // deletes the link of this connection
+                // (`erl_proc_sig_queue.c:6641-6658`).
+                let duplicate = self
+                    .handled(id, node)
+                    .links
+                    .get(&LinkId::Remote(from))
+                    .is_some();
+                if duplicate {
+                    self.node.dist().remove_link(id, from, connection);
+                } else {
+                    self.handled(id, node).links.insert(
+                        LinkId::Remote(from),
                         LinkState {
                             unlinking: 0,
                             connection,
@@ -726,20 +766,32 @@ impl Scheduler {
                 id: unlink,
                 connection,
             } => {
-                let links = &mut self.handled(id, node).links;
-                let link = LinkId::Remote(from);
-                let removed = links.get(&link).is_some_and(|state| state.is_active())
-                    && links.remove(&link).is_some();
+                let (removed, link_connection) = {
+                    let links = &mut self.handled(id, node).links;
+                    let link = LinkId::Remote(from);
+                    let state = links.get(&link).copied();
+                    let removed =
+                        state.is_some_and(LinkState::is_active) && links.remove(&link).is_some();
+                    (removed, state.map(|state| state.connection))
+                };
+                if let (true, Some(link_connection)) = (removed, link_connection) {
+                    self.node.dist().remove_link(id, from, link_connection);
+                }
                 self.dist_unlink_reply(id, from, unlink, connection);
                 8 * i32::from(removed) + 1
             }
             Signal::DistUnlinkAck { from, id: unlink } => {
-                let links = &mut self.handled(id, node).links;
-                let link = LinkId::Remote(from);
-                let removed = links
-                    .get(&link)
-                    .is_some_and(|state| state.unlinking == unlink)
-                    && links.remove(&link).is_some();
+                let (removed, connection) = {
+                    let links = &mut self.handled(id, node).links;
+                    let link = LinkId::Remote(from);
+                    let state = links.get(&link).copied();
+                    let removed = state.is_some_and(|state| state.unlinking == unlink)
+                        && links.remove(&link).is_some();
+                    (removed, state.map(|state| state.connection))
+                };
+                if let (true, Some(connection)) = (removed, connection) {
+                    self.node.dist().remove_link(id, from, connection);
+                }
                 8 * i32::from(removed)
             }
             Signal::Monitor { watcher, reference } => {
@@ -939,6 +991,21 @@ impl Scheduler {
             alias,
         } = exit;
         let linked = link.is_some();
+        if let Some(LinkId::Remote(remote)) = link {
+            // The link keeps the id of its own connection, and an exit
+            // signal ends it only on that connection
+            // (`erl_proc_sig_queue.c:4687-4706`).
+            let connection = self
+                .processes
+                .get(id)
+                .expect("the process is alive")
+                .links
+                .get(&LinkId::Remote(remote))
+                .map(|state| state.connection);
+            if let Some(connection) = connection {
+                self.node.dist().remove_link(id, remote, connection);
+            }
+        }
         let process = self.processes.get_mut(id).expect("the process is alive");
         let active = match alias {
             Some(alias) => process

@@ -662,7 +662,7 @@ pub(super) fn dist_ctrl_put_data(
     }
     let scheduler = &context.scheduler;
     let mut dist = scheduler.node().dist();
-    let Some((name, _)) = dist.lookup(handle) else {
+    let Some((name, connection)) = dist.lookup(handle) else {
         return Ok(BifResult::badarg());
     };
     if dist.input_handler(&name) != Some(scheduler.current_process().id) {
@@ -684,7 +684,9 @@ pub(super) fn dist_ctrl_put_data(
     // dist.c:4672-4680).
     if data.bit_size() != 0 {
         let bytes = data.to_bytes();
-        context.scheduler.net_message(&name, flags, &bytes)?;
+        context
+            .scheduler
+            .net_message(&name, connection, flags, &bytes)?;
     }
     Ok(BifResult::Value(Term::static_atom("ok")))
 }

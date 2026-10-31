@@ -7,7 +7,9 @@
 //! process sends to another node (`erl_process.c:14101-14147`,
 //! `13981-14040`). Each link keeps the id of the connection that it uses,
 //! as `ErtsELink.dist` does, and a link signal goes only on that
-//! connection.
+//! connection. The end of a connection gives each local process with a
+//! link of that connection the link exit signal `noconnection`
+//! (`dist.c:1021-1117`, `erl_proc_sig_queue.c:4693-4706`).
 
 use super::{Scheduler, dist_output::EXIT_PAYLOAD};
 use crate::{
@@ -61,15 +63,14 @@ impl Scheduler {
             used = Some(connection);
             Some((link_control(LINK, current, pid), None))
         })?;
-        let connection = used.unwrap_or_default();
-        self.current_process_mut().links.insert(
-            link,
-            LinkState {
-                unlinking: 0,
-                connection,
-            },
-        );
-        if used.is_none() {
+        let Some(connection) = used else {
+            self.current_process_mut().links.insert(
+                link,
+                LinkState {
+                    unlinking: 0,
+                    connection: 0,
+                },
+            );
             let exit = Signal::Exit {
                 from: link,
                 reason: Term::static_atom("noconnection"),
@@ -79,8 +80,77 @@ impl Scheduler {
             };
             self.send_signal(None, current, exit)
                 .expect("the current process gets the exit signal");
-        }
+            return Ok(());
+        };
+        self.link_on(current, link, remote, connection);
         Ok(())
+    }
+
+    /// Make the link `link` of `process` to `remote` active on the
+    /// connection `connection` of its dist entry, as `link_opt` does
+    /// (`bif.c:334-350`), and give `process` the link exit signal
+    /// `noconnection` when the entry does not have the connection.
+    ///
+    /// ERTS inserts the link into the dist entry before it sends `LINK`
+    /// (`dist.c:3100-3109`), while it holds the entry lock. `dist_output`
+    /// sends the packet and releases the lock, so the connection can end
+    /// before the insert. The link then leaves with `noconnection`, as a
+    /// link of the detached list of the connection does
+    /// (`dist.c:1021-1117`, `2250-2258`).
+    pub(super) fn link_on(
+        &mut self,
+        process: ProcessId,
+        link: LinkId,
+        remote: RemotePid,
+        connection: u32,
+    ) {
+        self.processes
+            .get_mut(process)
+            .expect("the process is alive")
+            .links
+            .insert(
+                link,
+                LinkState {
+                    unlinking: 0,
+                    connection,
+                },
+            );
+        if !self.node.dist().insert_link(process, remote, connection) {
+            let lost = Signal::ConnectionLost {
+                from: remote,
+                connection,
+            };
+            self.send_signal(None, process, lost)
+                .expect("the process is alive");
+        }
+    }
+
+    /// Give each local process of `ended`, from the newest link to the
+    /// oldest, the link exit signal `noconnection`, as `erts_do_net_exits`
+    /// does for the `mld` list of a controller (`dist.c:1021-1117`,
+    /// `380-384`, `erl_monitor_link.c:523-538`,
+    /// `erl_proc_sig_queue.c:2552-2576`). A signal of a connection that
+    /// ended leaves a link of a newer connection
+    /// (`erl_proc_sig_queue.c:4693-4706`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// if let Some(ended) = node.dist().controller_exits(controller) {
+    ///     scheduler.dist_connection_down(&ended);
+    /// }
+    /// ```
+    pub(in crate::runtime) fn dist_connection_down(
+        &mut self,
+        ended: &super::dist_table::EndedConnection,
+    ) {
+        for &(process, remote) in &ended.links {
+            let signal = Signal::ConnectionLost {
+                from: remote,
+                connection: ended.connection,
+            };
+            let _ = self.send_signal(None, process, signal);
+        }
     }
 
     /// Unlink the current process from the pid `pid` of another node, as
@@ -198,10 +268,13 @@ impl Scheduler {
 
     /// Give `LINK` from the pid `from` of the node `node` to `to`, as
     /// `erts_net_message` does (`dist.c:2224-2275`): a live local process
-    /// gets the link signal. A local pid of a process that is not alive, a
-    /// pid of an old incarnation of the local node, and each other term
-    /// that is not a pid answer with `EXIT` and the reason `noproc` from
-    /// `to`.
+    /// gets the link signal, and the connection `connection` that carried
+    /// the packet holds the link before the process gets the signal. A
+    /// connection that ended before the insert gives `noconnection` after
+    /// the signal (`dist.c:2251-2258`). A local pid of a process that is
+    /// not alive, a pid of an old incarnation of the local node, and each
+    /// other term that is not a pid answer with `EXIT` and the reason
+    /// `noproc` from `to`.
     ///
     /// # Errors
     ///
@@ -210,19 +283,26 @@ impl Scheduler {
     pub(super) fn net_link(
         &mut self,
         node: &Atom,
+        connection: u32,
         from: &Term,
         to: &Term,
     ) -> Result<(), BeamError> {
         let remote = remote_of(node, from)?;
-        let connection = self.input_connection(node);
         match to {
             Term::Pid(target) => {
+                let linked = self.node.dist().insert_link(*target, remote, connection);
                 let signal = Signal::DistLink {
                     from: remote,
                     connection,
                 };
                 if let Err(signal) = self.send_signal(None, *target, signal) {
                     self.dead_target_signal(*target, &signal);
+                } else if !linked {
+                    let lost = Signal::ConnectionLost {
+                        from: remote,
+                        connection,
+                    };
+                    let _ = self.send_signal(None, *target, lost);
                 }
                 return Ok(());
             }
@@ -241,9 +321,10 @@ impl Scheduler {
     }
 
     /// Give `UNLINK_ID` with the identifier `id` from the pid `from` of the
-    /// node `node` to the local pid `to`, as `erts_net_message` does
-    /// (`dist.c:2284-2313`). A process that is not alive answers with
-    /// `UNLINK_ID_ACK` (`erl_proc_sig_queue.c:2709-2728`).
+    /// node `node` to the local pid `to` on the connection `connection`, as
+    /// `erts_net_message` does (`dist.c:2284-2313`). A process that is not
+    /// alive answers with `UNLINK_ID_ACK`
+    /// (`erl_proc_sig_queue.c:2709-2728`).
     ///
     /// # Errors
     ///
@@ -253,6 +334,7 @@ impl Scheduler {
     pub(super) fn net_unlink(
         &mut self,
         node: &Atom,
+        connection: u32,
         id: &Term,
         from: &Term,
         to: &Term,
@@ -261,7 +343,6 @@ impl Scheduler {
         if id == 0 {
             return Err(error(super::dist_input::REJECTED));
         }
-        let connection = self.input_connection(node);
         let signal = Signal::DistUnlink {
             from,
             id,
@@ -327,15 +408,6 @@ impl Scheduler {
             let _ = self.send_signal(None, target, exit);
         }
         Ok(())
-    }
-
-    /// Return the id of the connection of `node`, on which a packet came.
-    fn input_connection(&self, node: &Atom) -> u32 {
-        self.node
-            .dist()
-            .connected(node)
-            .map(|(_, _, connection)| connection)
-            .expect("a packet comes on a connection")
     }
 }
 

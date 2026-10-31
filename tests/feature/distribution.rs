@@ -721,3 +721,50 @@ fn sends_exit_signals_between_erts_and_pbeam_nodes() {
         assert_eq!(stdout(&pbeam_erl(&epmd, &client(&pbeam))), expected);
     }
 }
+
+#[test]
+fn ends_the_links_of_a_lost_connection_as_pinned_erts() {
+    // The server node halts, and each process of the client node that has a
+    // link to its process takes the exit signal `noconnection`: the process
+    // that traps exits gets the message `{'EXIT', Pid, noconnection}`, and
+    // the process that does not trap exits ends with the reason
+    // `noconnection` (erts_do_net_exits, dist.c:1021-1117,
+    // erl_proc_sig_queue.c:4632-4815). Each pair of ERTS and PBeam nodes
+    // runs over the prim_socket carrier and over the tcp_inet port
+    // controller. A server node serves one client node, because the client
+    // stops it.
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let expected = "[{linked,noconnection,noconnection}]\n";
+    for (server_pbeam, socket) in [(false, true), (false, false), (true, true), (true, false)] {
+        for client_pbeam in [false, true] {
+            let name = format!("dlo{server_pbeam}{socket}{client_pbeam}{id}");
+            let mut arguments = vec!["-sname", &name, "-setcookie", "ck", "-pa", "fixtures/dist"];
+            if socket {
+                arguments.extend(SOCKET_CARRIER);
+            }
+            let server = "dist_lost_probe:server().";
+            let node = if server_pbeam {
+                pbeam_node(&epmd, &arguments, server)
+            } else {
+                ErtsNode::start(&epmd, &arguments, server)
+            };
+            let expression = format!("dist_lost_probe:client('{}'), halt().", node.line());
+            let client = |name: &str| {
+                let mut arguments = vec!["-sname", name, "-setcookie", "ck", "-hidden"];
+                if socket {
+                    arguments.extend(SOCKET_CARRIER);
+                }
+                arguments.extend(["-noshell", "-pa", "fixtures/dist", "-eval", &expression]);
+                arguments.into_iter().map(str::to_owned).collect::<Vec<_>>()
+            };
+            let client_name = format!("dlc{server_pbeam}{socket}{client_pbeam}{id}");
+            let output = if client_pbeam {
+                pbeam_erl(&epmd, &client(&client_name))
+            } else {
+                erts_erl(&epmd, &client(&client_name))
+            };
+            assert_eq!(stdout(&output), expected);
+        }
+    }
+}

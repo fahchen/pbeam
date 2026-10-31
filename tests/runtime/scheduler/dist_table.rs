@@ -1,5 +1,111 @@
 use super::{Controller, DistTable};
+use crate::runtime::process::RemotePid;
 use crate::term::{AtomTable, PortId, ProcessId, Reference, Term};
+
+#[test]
+fn returns_the_links_of_the_connection_that_ended() {
+    // erts_do_net_exits detaches the `links` list of a dist entry and sends
+    // the link exit signal `noconnection` to each local process of it
+    // (dist.c:1021-1117, 341-345).
+    let atoms = AtomTable::new();
+    let a = atoms.put("a@h").unwrap();
+    let remote = RemotePid {
+        node: a.index(),
+        creation: 1,
+        number: 2,
+        serial: 0,
+    };
+    let mut table = DistTable::default();
+    table.insert(&a, Reference(7), 0);
+    table.new_connection(&a);
+    let controller = Controller::Process(ProcessId(1));
+    assert!(table.connect(&a, controller, 0).is_some());
+    assert!(table.insert_link(ProcessId(1), remote, 1));
+    assert!(table.insert_link(ProcessId(2), remote, 1));
+    let ended = table
+        .controller_exits(controller)
+        .expect("the connection has links");
+    assert_eq!(ended.connection, 1);
+    assert_eq!(
+        ended.links,
+        vec![(ProcessId(2), remote), (ProcessId(1), remote)]
+    );
+    // A second exit has no controller, and the links are gone.
+    assert!(table.controller_exits(controller).is_none());
+}
+
+#[test]
+fn adds_a_link_only_to_its_own_connected_connection() {
+    // `erts_link_dist_insert` fails when the connection is down, and a
+    // duplicate LINK deletes its own dist link, so the connection keeps one
+    // link of a pair (dist.c:2246-2258, erl_proc_sig_queue.c:6635-6663).
+    let atoms = AtomTable::new();
+    let a = atoms.put("a@h").unwrap();
+    let remote = RemotePid {
+        node: a.index(),
+        creation: 1,
+        number: 2,
+        serial: 0,
+    };
+    let mut table = DistTable::default();
+    table.insert(&a, Reference(7), 0);
+    table.new_connection(&a);
+    // The entry is pending, so it has no connection yet.
+    assert!(!table.insert_link(ProcessId(1), remote, 1));
+    let controller = Controller::Process(ProcessId(1));
+    assert!(table.connect(&a, controller, 0).is_some());
+    assert!(table.insert_link(ProcessId(1), remote, 1));
+    // A link of another connection and another process do not belong here.
+    assert!(!table.insert_link(ProcessId(2), remote, 2));
+    assert!(!table.insert_link(ProcessId(1), remote, 2));
+    // The duplicate keeps the single link at its position.
+    assert!(table.insert_link(ProcessId(1), remote, 1));
+    let ended = table.controller_exits(controller).unwrap();
+    assert_eq!(ended.links, vec![(ProcessId(1), remote)]);
+    // The entry is idle now.
+    assert!(!table.insert_link(ProcessId(1), remote, 1));
+}
+
+#[test]
+fn returns_the_links_of_each_connection_at_the_exit_of_net_kernel() {
+    // The exit of `net_kernel` makes each pending entry idle and detaches
+    // the `links` list of each connected entry (dist.c:926-1001).
+    let atoms = AtomTable::new();
+    let [a, b] = ["a@h", "b@h"].map(|name| atoms.put(name).unwrap());
+    let mut table = DistTable::default();
+    for (index, name) in [&a, &b].into_iter().enumerate() {
+        table.insert(name, Reference(u64::try_from(index).unwrap()), 0);
+        table.new_connection(name);
+    }
+    assert!(
+        table
+            .connect(&a, Controller::Process(ProcessId(1)), 0)
+            .is_some()
+    );
+    assert!(
+        table
+            .connect(&b, Controller::Process(ProcessId(2)), 0)
+            .is_some()
+    );
+    let remote = |name: &crate::term::Atom, number| RemotePid {
+        node: name.index(),
+        creation: 1,
+        number,
+        serial: 0,
+    };
+    assert!(table.insert_link(ProcessId(3), remote(&a, 4), 1));
+    assert!(table.insert_link(ProcessId(5), remote(&b, 6), 1));
+    let (ended, controllers) = table.net_kernel_exits();
+    assert_eq!(controllers.len(), 2);
+    assert!(ended.iter().all(|connection| connection.connection == 1));
+    let links: Vec<_> = ended
+        .iter()
+        .map(|connection| connection.links.clone())
+        .collect();
+    assert_eq!(links.len(), 2);
+    assert!(links.contains(&vec![(ProcessId(3), remote(&a, 4))]));
+    assert!(links.contains(&vec![(ProcessId(5), remote(&b, 6))]));
+}
 
 #[test]
 fn wraps_the_connection_id_at_24_bits() {
@@ -83,7 +189,8 @@ fn orders_the_nodes_by_state_and_by_the_time_of_each_change() {
     assert_eq!(nodes[4].connection_id, Some(1));
     // The exit of net_kernel gives each controller and makes the pending
     // entry `a` idle (dist.c:926-1001).
-    let mut controllers = table.net_kernel_exits();
+    let (ended, mut controllers) = table.net_kernel_exits();
+    assert!(ended.is_empty());
     controllers.sort_by_key(|controller| match controller {
         Controller::Process(id) => id.0,
         Controller::Port(_) => u64::MAX,
