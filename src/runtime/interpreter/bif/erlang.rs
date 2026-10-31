@@ -1495,7 +1495,7 @@ pub(super) fn exit(
     id: &Term,
     reason: &Term,
 ) -> Result<BifResult, BeamError> {
-    send_exit(context, id, reason)
+    send_exit(context, id, reason, SendPriority::Normal)
 }
 
 /// Run `erlang:exit(Id, Reason, Options)` as ERTS `exit_3` (`bif.c:1877-1880`)
@@ -1536,38 +1536,45 @@ pub(super) fn exit_3(
     if !valid {
         return Ok(BifResult::badopt());
     }
-    send_exit(context, id, reason)
+    let priority = if *options == Term::Nil {
+        SendPriority::Normal
+    } else {
+        SendPriority::Priority
+    };
+    send_exit(context, id, reason, priority)
 }
 
 /// Send the exit signal of `erlang:exit/2,3`. A port closes with the
-/// reason (see [`erts_internal::port_exit`]).
+/// reason (see [`erts_internal::port_exit`]). A pid or an alias of another
+/// node takes the signal through its connection, and a node without a
+/// connection drops it (`bif.c:1804-1856`; see
+/// [`Scheduler::dist_exit`](crate::runtime::scheduler::Scheduler::dist_exit)).
 fn send_exit(
     context: &mut BifContext<'_>,
     id: &Term,
     reason: &Term,
+    priority: SendPriority,
 ) -> Result<BifResult, BeamError> {
     let scheduler = &mut *context.scheduler;
     let caller = scheduler.current_process_mut();
     let (caller_id, trap_exit) = (caller.id, caller.trap_exit);
     // A resource term is a magic reference (`erl_nif.c:3197-3204`).
-    let (target, alias) = match (id, id.reference()) {
-        (Term::Pid(target), _) => (Some(*target), None),
+    let (target, alias, remote) = match (id, id.reference()) {
+        (Term::Pid(target), _) => (Some(*target), None, None),
         (_, Some(reference)) => {
             let Some(owner) = scheduler.alias_owner(reference) else {
                 return Ok(Value(Term::static_atom("true")));
             };
-            (Some(owner), Some(reference))
+            (Some(owner), Some(reference), None)
         }
-        (Term::Port(_), _) => (None, None),
+        (Term::Port(_), _) => (None, None, None),
         // An old incarnation of the local node takes no signal
         // (`bif.c:1804-1808`, `bif.c:1857-1861`).
         (Term::External(_), _) if old_incarnation(id, &scheduler.atoms) => {
             return Ok(Value(Term::static_atom("true")));
         }
-        (Term::External(_), _) if port_number(id).is_none() => {
-            return Err(error(
-                "unsupported erlang:exit/2,3 with a pid or an alias of another node: see \"Distribution\" in docs/erts-differences.md",
-            ));
+        (Term::External(remote), _) if port_number(id).is_none() => {
+            (None, None, Some(remote.node.clone()))
         }
         _ => return Ok(BifResult::badarg()),
     };
@@ -1581,6 +1588,12 @@ fn send_exit(
         if let Some(denied) = check? {
             return Ok(denied);
         }
+    }
+    if let Some(node) = remote {
+        if !scheduler.dist_exit(&node, id, reason, priority)? {
+            scheduler.send_to_remote_node(&node);
+        }
+        return Ok(Value(Term::static_atom("true")));
     }
     let Some(target) = target else {
         return erts_internal::port_exit(scheduler, id, reason);

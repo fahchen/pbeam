@@ -600,11 +600,21 @@ impl Scheduler {
                 alias,
             } => {
                 let exit = ExitSignal {
-                    from,
+                    from: from.term(),
+                    link: linked.then_some(from),
                     reason,
-                    linked,
                     normal_kills,
                     alias,
+                };
+                return Ok(self.handle_exit_signal(id, walk, node, exit));
+            }
+            Signal::DistExit { from, reason } => {
+                let exit = ExitSignal {
+                    from,
+                    link: None,
+                    reason,
+                    normal_kills: false,
+                    alias: None,
                 };
                 return Ok(self.handle_exit_signal(id, walk, node, exit));
             }
@@ -873,22 +883,23 @@ impl Scheduler {
     ) -> Handled {
         let ExitSignal {
             from,
+            link,
             reason,
-            linked,
             normal_kills,
             alias,
         } = exit;
+        let linked = link.is_some();
         let process = self.processes.get_mut(id).expect("the process is alive");
         let active = match alias {
             Some(alias) => process
                 .monitors
                 .get(&alias)
                 .is_some_and(|origin| origin.alias.is_some()),
-            None => !linked || process.links.remove(&from) == Some(0),
+            None => link.is_none_or(|link| process.links.remove(&link) == Some(0)),
         };
         let kill = !linked && reason == Term::static_atom("kill");
         if active && !kill && process.trap_exit {
-            let message = Term::tuple(vec![Term::static_atom("EXIT"), from.term(), reason]);
+            let message = Term::tuple(vec![Term::static_atom("EXIT"), from, reason]);
             process.mailbox.convert(walk, node, message);
             self.activate(id);
             return Handled::Continue(1);
@@ -1255,14 +1266,14 @@ impl Scheduler {
     }
 }
 
-/// The fields of [`Signal::Exit`].
+/// The fields of an exit signal: [`Signal::Exit`] or [`Signal::DistExit`].
 struct ExitSignal {
-    /// The sender.
-    from: LinkId,
+    /// The sender: the second element of the `EXIT` message.
+    from: Term,
+    /// The link of a link exit signal, else `None`.
+    link: Option<LinkId>,
     /// The exit reason.
     reason: Term,
-    /// True for a link exit signal.
-    linked: bool,
     /// True when `normal` also ends the receiver.
     normal_kills: bool,
     /// The alias that the signal went through.

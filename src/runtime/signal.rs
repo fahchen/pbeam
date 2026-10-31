@@ -47,6 +47,17 @@ pub(super) enum Signal {
         /// (`erl_proc_sig_queue.c:4659-4672`).
         alias: Option<Reference>,
     },
+    /// `ERTS_SIG_Q_OP_EXIT` from a process of another node: the exit signal
+    /// of an `EXIT2` or a `PAYLOAD_EXIT2` packet (`dist.c:2806-2870`,
+    /// `erts_proc_sig_send_dist_exit`, `erl_proc_sig_queue.c:2541-2550`).
+    /// The receiver handles it as an `Exit` signal of `erlang:exit/2` from
+    /// the pid `from`. At exit it is dropped.
+    DistExit {
+        /// The pid of the sender, of another node.
+        from: Term,
+        /// The exit reason.
+        reason: Term,
+    },
     /// `ERTS_SIG_Q_OP_LINK`: the sender linked to the receiver. The receiver
     /// adds the link unless it has a link or an unlinking link to the
     /// sender; the cost is 0 (`erl_proc_sig_queue.c:6635-6663`). At exit it
@@ -305,7 +316,9 @@ impl Signal {
     /// ```
     pub(super) fn visit_terms(&self, visit: &mut impl FnMut(&Term)) {
         match self {
-            Signal::Exit { reason, .. } | Signal::MonitorDown { reason, .. } => visit(reason),
+            Signal::Exit { reason, .. }
+            | Signal::DistExit { reason, .. }
+            | Signal::MonitorDown { reason, .. } => visit(reason),
             Signal::ProcessInfo { item, .. } => visit(item),
             Signal::AliasMessage { message, .. } => visit(message),
             Signal::CheckProcessCode { tag, .. } => visit(tag),
@@ -339,6 +352,7 @@ impl Signal {
                 normal_kills: _,
                 alias: _,
             }
+            | Signal::DistExit { from: _, reason }
             | Signal::MonitorDown {
                 reference: _,
                 reason,

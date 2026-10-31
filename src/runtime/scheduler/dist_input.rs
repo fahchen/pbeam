@@ -8,7 +8,10 @@ use super::{Scheduler, node::Named};
 use crate::{
     error::{BeamError, error},
     runtime::{interpreter::bif::decode_dist, signal::Signal},
-    term::{Term, external_id},
+    term::{
+        Atom, Term,
+        external_id::{self, ExternalData},
+    },
 };
 
 /// `VERSION_MAGIC` (`external.h`).
@@ -40,6 +43,11 @@ impl Scheduler {
     /// alias goes to the owner of a local pid reference as a signal, and
     /// the owner checks the alias when it handles the signal; a reference
     /// without a local owner drops it (`erl_proc_sig_queue.c:2314-2331`).
+    /// `EXIT2` (8) and `PAYLOAD_EXIT2` (26), whose reason is the message,
+    /// give the exit signal of a pid of the node `node` of the connection
+    /// to a live local process; a process that is not alive and a pid of an
+    /// old incarnation of the local node drop it without a decode
+    /// (`dist.c:2806-2870`).
     ///
     /// # Examples
     ///
@@ -55,6 +63,7 @@ impl Scheduler {
     /// hold.
     pub(in crate::runtime) fn net_message(
         &mut self,
+        node: &Atom,
         flags: u64,
         packet: &[u8],
     ) -> Result<(), BeamError> {
@@ -111,16 +120,61 @@ impl Scheduler {
                 _ if external_id::is_reference(to) => Ok(()),
                 _ => Err(error(REJECTED)),
             },
-            (Some(12 | 16 | 23 | 34), _) => Err(error(
+            (Some(8), [_, from, to, reason]) => {
+                self.dist_exit_signal(node, from, to, |_| Ok(reason.clone()))
+            }
+            (Some(26), [_, from, to]) => {
+                self.dist_exit_signal(node, from, to, |scheduler| scheduler.dist_message(message))
+            }
+            (Some(12 | 16 | 18 | 23 | 27 | 34), _) => Err(error(
                 "unsupported distribution message with a trace token: see \"Distribution\" in docs/erts-differences.md",
             )),
             // ERTS reads the operation as unsigned (`unsigned_val`,
             // dist.c:2223), so a negative one is not valid (dist.c:3131-3132).
-            (Some(2 | 6 | 22 | 33) | None, _) => Err(error(REJECTED)),
+            (Some(2 | 6 | 8 | 22 | 26 | 33) | None, _) => Err(error(REJECTED)),
             (Some(operation), _) if operation < 0 => Err(error(REJECTED)),
             (Some(operation), _) => Err(error(format!(
                 "unsupported distribution operation {operation}: see \"Distribution\" in docs/erts-differences.md"
             ))),
+        }
+    }
+
+    /// Give the exit signal from `from` with the reason that `reason` gives
+    /// to the process `to`, as the `EXIT2` case of `erts_net_message` does
+    /// (`dist.c:2842-2869`): `from` must be a pid of the node `node` of the
+    /// connection, and `to` a local pid or a pid of an old incarnation of
+    /// the local node, which drops the signal. A process that is not alive
+    /// drops it before `reason` runs.
+    ///
+    /// # Errors
+    ///
+    /// Another `from` or `to` (see [`REJECTED`]), and the errors of
+    /// `reason`.
+    fn dist_exit_signal(
+        &mut self,
+        node: &Atom,
+        from: &Term,
+        to: &Term,
+        reason: impl FnOnce(&Self) -> Result<Term, BeamError>,
+    ) -> Result<(), BeamError> {
+        let remote_pid = |term: &Term| matches!(term, Term::External(id) if matches!(id.data, ExternalData::Pid { .. }));
+        if !(remote_pid(from) && matches!(from, Term::External(id) if id.node == *node)) {
+            return Err(error(REJECTED));
+        }
+        match to {
+            Term::Pid(target) => {
+                if self.node.live_owner(*target).is_some() {
+                    let reason = reason(self)?;
+                    let signal = Signal::DistExit {
+                        from: from.clone(),
+                        reason,
+                    };
+                    let _ = self.send_signal(None, *target, signal);
+                }
+                Ok(())
+            }
+            Term::External(id) if remote_pid(to) && id.node == self.atoms.this_node().0 => Ok(()),
+            _ => Err(error(REJECTED)),
         }
     }
 

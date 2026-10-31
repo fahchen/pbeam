@@ -1,6 +1,6 @@
 -module(remote_id_probe).
 -compile({nowarn_deprecated_function, [{erlang, phash, 2}]}).
--export([main/0, external/0, link/0, monitor/0, old_monitor/0, old_process_monitor/0, exit/0, exit_alias/0, group_leader/0,
+-export([main/0, external/0, link/0, monitor/0, old_monitor/0, old_process_monitor/0, group_leader/0,
          group_leader_leader/0, old_send/0, other_scheduler/0]).
 
 %% Decode the pids, ports, and references of another node with
@@ -48,7 +48,8 @@ main() ->
 
 %% The BIFs that take a port or a reference of another node, or an
 %% identifier of an old incarnation of the local node, which need no
-%% connection (bif.c:225-289, 811-825, 925-935, 1295-1356, 1798-1866,
+%% connection, and exit/2,3 with a pid or an alias of a node that is not
+%% connected on a node that is not alive (bif.c:225-289, 811-825, 925-935, 1295-1356, 1798-1866,
 %% 4914-4964, 5896-5906; erl_hl_timer.c:2245-2250; erl_bif_info.c:1364-1368,
 %% 4106-4109; erl_bif_port.c:517-522, 574-579). Each case runs in a new
 %% process with trap_exit as given, and gives its result and its messages.
@@ -87,7 +88,9 @@ signals() ->
         fun() -> monitor(process, OPort) end, fun() -> monitor(port, OPid) end,
         fun() -> monitor(process, ORef) end,
         fun() -> demonitor(ORef) end, fun() -> erlang:cancel_timer(ORef) end,
-        fun() -> unalias(ORef) end],
+        fun() -> unalias(ORef) end,
+        fun() -> exit(RPid, kill) end, fun() -> exit(RRef, x) end,
+        fun() -> erlang:exit(RPid, x, [priority]) end],
     [run(Trap, F) || F <- Cases, Trap <- [false, true]].
 
 run(Trap, F) ->
@@ -194,8 +197,6 @@ link() -> erlang:link(remote()).
 monitor() -> erlang:monitor(process, remote()).
 old_monitor() -> erlang:monitor(port, binary_to_term(<<131, 89, 100, 13:16, "nonode@nohost", 8:32, 7:32>>)).
 old_process_monitor() -> erlang:monitor(process, lists:last(ids())).
-exit() -> erlang:exit(remote(), kill).
-exit_alias() -> erlang:exit(lists:nth(7, ids()), x).
 group_leader() -> erlang:group_leader(self(), remote()).
 group_leader_leader() -> erlang:group_leader(remote(), self()).
 old_send() -> lists:last(ids()) ! x.
