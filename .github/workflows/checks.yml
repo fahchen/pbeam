@@ -19,7 +19,7 @@ env:
   # The cached target/ holds no incremental state, and with incremental compilation the tests of the `opt-level = 1` test profile ran slower in the measurement of #354. The value is explicit, because the profile default enables it.
   CARGO_INCREMENTAL: "0"
 
-# The lint and build jobs run in parallel. The `checks` job is the status that the ruleset of main requires. It passes only when the lint job and each test job pass, and when the coverage reports of all test jobs together cover each application line.
+# The lint job and the test jobs run in parallel. The `checks` job is the status that the ruleset of main requires. It passes only when the lint job and each test job pass, and when the coverage reports of all test jobs together cover each application line.
 jobs:
   lint:
     name: lint
@@ -48,10 +48,17 @@ jobs:
       - name: Run the lint checks
         run: mise run lint
 
-  build:
-    name: build tests
+  # Each test job builds the instrumented tests, runs one slice of them, and keeps its coverage report as an artifact.
+  test:
+    name: test (${{ matrix.partition }})
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    env:
+      CARGO_INCREMENTAL: "1"
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: [1, 2, 3, 4]
     outputs:
       task: ${{ steps.select.outputs.task }}
     steps:
@@ -91,81 +98,48 @@ jobs:
         if: steps.select.outputs.task == 'check'
         run: mise run setup
 
+      # The test jobs build the same files, so they share one cache, and only the first job saves it.
       - name: Cache cargo
         if: steps.select.outputs.task == 'check'
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: checks
+          save-if: ${{ matrix.partition == 1 }}
           cache-on-failure: true
 
-      - name: Build instrumented tests
+      - name: Restore incremental build
         if: steps.select.outputs.task == 'check'
-        shell: bash
-        run: |
-          export CARGO_LLVM_COV_TARGET_DIR="$PWD/target/llvm-cov-target"
-          export CARGO_TARGET_DIR="$CARGO_LLVM_COV_TARGET_DIR/target"
-          eval "$(cargo llvm-cov show-env --sh)"
-          cargo nextest archive --locked --workspace --all-features --archive-file target/tests.tar.zst
-
-      - name: Keep test binaries
-        if: steps.select.outputs.task == 'check'
-        uses: actions/upload-artifact@v7.0.2
+        id: incremental
+        uses: actions/cache/restore@v6.1.0
         with:
-          name: test-binaries
-          path: target/tests.tar.zst
-          compression-level: 0
-          if-no-files-found: error
-          overwrite: true
-          retention-days: 1
-
-  test:
-    name: test (${{ matrix.partition }})
-    needs: build
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    strategy:
-      fail-fast: false
-      matrix:
-        partition: [1, 2, 3, 4, 5, 6, 7, 8]
-    steps:
-      - name: Check out source
-        if: needs.build.outputs.task == 'check'
-        uses: actions/checkout@v7.0.1
-
-      - name: Set up mise
-        if: needs.build.outputs.task == 'check'
-        uses: jdx/mise-action@v5.1.1
-        with:
-          version: 2026.10.7
-          install: true
-
-      - name: Install Rust check components
-        if: needs.build.outputs.task == 'check'
-        run: mise run setup
-
-      - name: Cache cargo
-        if: needs.build.outputs.task == 'check'
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: checks
-          save-if: false
-
-      - name: Get test binaries
-        if: needs.build.outputs.task == 'check'
-        uses: actions/download-artifact@v8.0.2
-        with:
-          name: test-binaries
-          path: target
+          path: target/llvm-cov-target
+          key: incremental-${{ runner.os }}-${{ hashFiles('mise.toml', 'Cargo.lock') }}-${{ github.ref }}-${{ github.sha }}
+          restore-keys: |
+            incremental-${{ runner.os }}-${{ hashFiles('mise.toml', 'Cargo.lock') }}-${{ github.ref }}-
+            incremental-${{ runner.os }}-${{ hashFiles('mise.toml', 'Cargo.lock') }}-
 
       - name: Run the tests
-        if: needs.build.outputs.task == 'check'
+        if: steps.select.outputs.task == 'check'
         env:
           PBEAM_TEST_PARTITION: slice:${{ matrix.partition }}/${{ strategy.job-total }}
-          PBEAM_TEST_ARCHIVE: ${{ github.workspace }}/target/tests.tar.zst
         run: mise run test
 
+      - name: Prepare incremental build for cache
+        if: success() && steps.select.outputs.task == 'check' && matrix.partition == 1 && steps.incremental.outputs.cache-hit != 'true'
+        run: |
+          CARGO_LLVM_COV_TARGET_DIR=target/llvm-cov-target cargo llvm-cov clean --profraw-only
+          rm -f target/llvm-cov-target/*.profdata
+          find target/llvm-cov-target/debug/deps -maxdepth 1 -type f -perm -u+x ! -name '*.*' -delete
+
+      - name: Save incremental build
+        if: success() && steps.select.outputs.task == 'check' && matrix.partition == 1 && steps.incremental.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6.1.0
+        with:
+          path: target/llvm-cov-target
+          key: ${{ steps.incremental.outputs.cache-primary-key }}
+
       - name: Keep the coverage report
-        if: needs.build.outputs.task == 'check'
+        if: steps.select.outputs.task == 'check'
         uses: actions/upload-artifact@v7.0.2
         with:
           name: coverage-${{ matrix.partition }}
@@ -177,7 +151,7 @@ jobs:
 
   checks:
     name: checks
-    needs: [lint, build, test]
+    needs: [lint, test]
     # The job runs also when a needed job fails or is cancelled, so that the required status is always reported.
     if: always()
     runs-on: ubuntu-latest
@@ -187,29 +161,28 @@ jobs:
         env:
           LINT: ${{ needs.lint.result }}
           TEST: ${{ needs.test.result }}
-          BUILD: ${{ needs.build.result }}
         run: |
-          echo "lint: $LINT, build: $BUILD, test: $TEST"
-          [[ $LINT == success && $BUILD == success && $TEST == success ]]
+          echo "lint: $LINT, test: $TEST"
+          [[ $LINT == success && $TEST == success ]]
 
       - name: Check out source
-        if: needs.build.outputs.task == 'check'
+        if: needs.test.outputs.task == 'check'
         uses: actions/checkout@v7.0.1
 
       - name: Set up mise
-        if: needs.build.outputs.task == 'check'
+        if: needs.test.outputs.task == 'check'
         uses: jdx/mise-action@v5.1.1
         with:
           version: 2026.10.7
           install: true
 
       - name: Get the coverage reports
-        if: needs.build.outputs.task == 'check'
+        if: needs.test.outputs.task == 'check'
         uses: actions/download-artifact@v8.0.2
         with:
           pattern: coverage-*
           path: target/coverage
 
       - name: Check the line coverage of all test jobs
-        if: needs.build.outputs.task == 'check'
+        if: needs.test.outputs.task == 'check'
         run: mise exec -- elixir scripts/check_coverage.exs target/coverage/*/coverage.xml
