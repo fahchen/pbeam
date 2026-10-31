@@ -100,6 +100,19 @@ supports() ->
                     prim_socket:is_supported(other, local)}),
     init:stop().
 
+%% Wait until `Socket` leaves the registry that `socket:which_sockets/0`
+%% reads. The down callback of its monitor closes the socket and counts it
+%% out (`erts_fire_nif_monitor`, `erl_nif.c:3059-3119`, runs in the exit
+%% path of the owner, `erl_process.c:13797-13834`). The parent can run on
+%% another scheduler before that callback, so the probe waits for the
+%% registry, not for a fixed time.
+wait_closed(_Socket, 0) -> ok;
+wait_closed(Socket, N) ->
+    case lists:member(Socket, socket:which_sockets()) of
+        false -> ok;
+        true -> erlang:yield(), wait_closed(Socket, N - 1)
+    end.
+
 %% `erl -noshell -boot start_clean -pa fixtures/boot -s kernel_boot_probe
 %% socket -kernel logger_level warning` runs socket/0. It opens, binds,
 %% and closes sockets with socket:open/2,3,4, socket:bind/2,
@@ -179,12 +192,14 @@ socket() ->
     {Child, MRef} = spawn_monitor(fun() -> {ok, C} = socket:open(inet, stream, tcp), Parent ! {child, C} end),
     Down = receive {child, C} -> C end,
     receive {'DOWN', MRef, process, Child, normal} -> ok end,
+    wait_closed(Down, 1000),
     {Closer, CRef} = spawn_monitor(fun() -> {ok, U2} = socket:open(inet, dgram, udp), ok = socket:close(U2) end),
     receive {'DOWN', CRef, process, Closer, normal} -> ok end,
     {ok, K} = socket:open(inet, stream, tcp),
     {_, KRef} = K,
     {Killer, KMRef} = spawn_monitor(fun() -> ok = prim_socket:close(KRef) end),
     receive {'DOWN', KMRef, process, Killer, normal} -> ok end,
+    wait_closed(K, 1000),
     CloserDown = [maps:get(counters, socket:info()), lists:member(K, socket:which_sockets()),
                   maps:get(rstates, socket:info(K)), socket:close(K)],
     OwnerDown = [CloserDown, maps:get(counters, socket:info()),Owner(maps:remove(counters, socket:info(Down))),
