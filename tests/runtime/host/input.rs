@@ -32,16 +32,18 @@ fn waits_until_a_pipe_has_input_or_its_end_of_file() {
     assert_eq!(wait_ready(fd), Readiness::Ready(vec![fd]));
 }
 
-/// Wait until `fd` is ready.
+/// Wait until `fd` is ready, and stop after 10 seconds.
 ///
 /// A signal of another test stops the `select` with `EINTR`, which
 /// [`wait_readable`] reports as [`Readiness::Pending`], as the scheduler
 /// step does (`sys/unix/erl_poll.c`). Retry the wait, so the test checks the
-/// fd and not the arrival of a signal.
+/// fd and not the arrival of a signal. The deadline keeps a regression that
+/// never makes the fd ready a failed assertion, not a hang.
 fn wait_ready(fd: libc::c_int) -> Readiness {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
-        match wait_readable(&[fd], None) {
-            Readiness::Pending => {}
+        match wait_readable(&[fd], Some(Duration::from_millis(10))) {
+            Readiness::Pending if std::time::Instant::now() < deadline => {}
             readiness => return readiness,
         }
     }
