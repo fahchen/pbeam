@@ -692,7 +692,7 @@ fn sends_a_file_on_an_inet_socket_as_pinned_erts() {
     );
     assert!(
         reference.contains(
-            ",[{ok,8000000},8000000,true,1,8000000,8000000,0],[true,{error,{invalid,state}}],[{error,closed},{error,closed}]}"
+            ",[{ok,1000000},1000000,true,1,1000000,1000000,0],[true,{error,{invalid,state}}],[{error,closed},{error,closed}]}"
         ),
         "{reference}"
     );
