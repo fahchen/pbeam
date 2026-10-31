@@ -4049,7 +4049,11 @@ impl Scheduler {
         // `<0.0.0>` (`kill_dist_ctrl_proc`, `dist.c:896-903`), and each port
         // controller exits with `net_kernel_terminated` (`dist.c:930-932`,
         // `979-988`).
-        for controller in self.node.net_exits(id, &self.atoms) {
+        let (ended, controllers) = self.node.net_exits(id, &self.atoms);
+        for connection in &ended {
+            self.dist_connection_down(connection);
+        }
+        for controller in controllers {
             let controller = match controller {
                 dist_table::Controller::Process(controller) => controller,
                 dist_table::Controller::Port(port) => {
@@ -4181,15 +4185,18 @@ impl Scheduler {
                             // An immediate reason goes now, and another
                             // reason after the signals of the process
                             // (`erl_process.c:14115-14145`).
-                            LinkId::Remote(remote) if unlinking.is_active() => {
-                                if signals::is_immediate(&reason) {
-                                    let connection = unlinking.connection;
-                                    self.dist_link_exit(id, remote, connection, &reason)?;
-                                } else {
-                                    process.dist_links.insert(remote, unlinking);
+                            LinkId::Remote(remote) => {
+                                self.node.dist().remove_link(id, remote);
+                                if unlinking.is_active() {
+                                    if signals::is_immediate(&reason) {
+                                        let connection = unlinking.connection;
+                                        self.dist_link_exit(id, remote, connection, &reason)?;
+                                    } else {
+                                        process.dist_links.insert(remote, unlinking);
+                                    }
                                 }
                             }
-                            LinkId::Process(_) | LinkId::Remote(_) => {}
+                            LinkId::Process(_) => {}
                             LinkId::Port(port) => self.port_link_exit(port, id, &reason),
                         }
                         reds -= 1;

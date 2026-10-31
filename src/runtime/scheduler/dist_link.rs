@@ -7,7 +7,9 @@
 //! process sends to another node (`erl_process.c:14101-14147`,
 //! `13981-14040`). Each link keeps the id of the connection that it uses,
 //! as `ErtsELink.dist` does, and a link signal goes only on that
-//! connection.
+//! connection. The end of a connection gives each local process with a
+//! link of that connection the link exit signal `noconnection`
+//! (`dist.c:1021-1117`, `erl_proc_sig_queue.c:4693-4706`).
 
 use super::{Scheduler, dist_output::EXIT_PAYLOAD};
 use crate::{
@@ -69,6 +71,10 @@ impl Scheduler {
                 connection,
             },
         );
+        if let Some(used) = used {
+            debug_assert_eq!(used, self.node.dist().connection_id(&remote.node()));
+            self.node.dist().insert_link(current, remote);
+        }
         if used.is_none() {
             let exit = Signal::Exit {
                 from: link,
@@ -81,6 +87,34 @@ impl Scheduler {
                 .expect("the current process gets the exit signal");
         }
         Ok(())
+    }
+
+    /// Give each local process of `ended`, from the newest link to the
+    /// oldest, the link exit signal `noconnection`, as `erts_do_net_exits`
+    /// does for the `mld` list of a controller (`dist.c:1021-1117`,
+    /// `380-384`, `erl_monitor_link.c:523-538`,
+    /// `erl_proc_sig_queue.c:2552-2576`). A signal of a connection that
+    /// ended leaves a link of a newer connection
+    /// (`erl_proc_sig_queue.c:4693-4706`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// if let Some(ended) = node.dist().controller_exits(controller) {
+    ///     scheduler.dist_connection_down(&ended);
+    /// }
+    /// ```
+    pub(in crate::runtime) fn dist_connection_down(
+        &mut self,
+        ended: &super::dist_table::EndedConnection,
+    ) {
+        for &(process, remote) in &ended.links {
+            let signal = Signal::ConnectionLost {
+                from: remote,
+                connection: ended.connection,
+            };
+            let _ = self.send_signal(None, process, signal);
+        }
     }
 
     /// Unlink the current process from the pid `pid` of another node, as

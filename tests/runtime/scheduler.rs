@@ -2091,6 +2091,68 @@ fn drops_the_link_exit_signal_of_a_process_that_the_port_does_not_link() {
 }
 
 #[test]
+fn keeps_a_link_of_a_newer_connection_at_the_exit_signal_of_the_lost_one() {
+    use super::{dist_table::Controller, signals::HandlingPoint};
+    use crate::runtime::process::RemotePid;
+    // The link that triggered the exit signal of a lost connection went
+    // away, and the process made the link again on a newer connection. The
+    // signal drops, because its connection id is not that of the current
+    // link (erl_proc_sig_queue.c:4693-4706). A fixture cannot make that
+    // order of signals, because the connection loss and the new link of the
+    // same node arrive in the order of the node.
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let id = current(&mut scheduler);
+    let name = scheduler.atoms.put("other@host").unwrap();
+    let remote = RemotePid {
+        node: name.index(),
+        creation: 1,
+        number: 2,
+        serial: 0,
+    };
+    {
+        let mut dist = scheduler.node.dist();
+        dist.insert(&name, Reference(7), 1);
+        dist.new_connection(&name);
+        assert!(dist.connect(&name, Controller::Process(id), 0).is_some());
+        assert_eq!(dist.connection_id(&name), 2);
+    }
+    scheduler
+        .send_signal(
+            None,
+            id,
+            Signal::DistLink {
+                from: remote,
+                connection: 2,
+            },
+        )
+        .unwrap();
+    scheduler
+        .send_signal(
+            None,
+            id,
+            Signal::ConnectionLost {
+                from: remote,
+                connection: 1,
+            },
+        )
+        .unwrap();
+    scheduler
+        .handle_signals(id, 100, 100, HandlingPoint::ScheduleIn)
+        .unwrap();
+    let link = scheduler.processes[&id].links.get(&LinkId::Remote(remote));
+    assert_eq!(
+        link,
+        Some(&LinkState {
+            unlinking: 0,
+            connection: 2,
+        })
+    );
+    assert_eq!(messages(&scheduler, id.0), []);
+}
+
+#[test]
 fn stops_a_break_key_with_no_data_at_a_second_break() {
     // `sys_get_key` retries a read with no data, and a second break stops
     // the run while the read waits (`sys.c:1051-1071`, `611-624`).

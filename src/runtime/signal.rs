@@ -111,6 +111,20 @@ pub(super) enum Signal {
         /// The id of the connection that the packet came on.
         connection: u32,
     },
+    /// The end of the connection with a node: the link exit signal with the
+    /// reason `noconnection` to each local process that has a link to a pid
+    /// of the node, as `erts_do_net_exits` sends it (`dist.c:1021-1117`,
+    /// `erl_proc_sig_queue.c:2552-2576`). The receiver handles it only
+    /// through a link of the ended connection, and leaves a link that it
+    /// made again on a newer connection (`erl_proc_sig_queue.c:4693-4706`).
+    /// The cost is 1, 1 more when it ends the receiver, and 2 when it drops
+    /// the signal.
+    ConnectionLost {
+        /// The pid of the other node of the link.
+        from: RemotePid,
+        /// The id of the connection that ended.
+        connection: u32,
+    },
     /// `ERTS_SIG_Q_OP_UNLINK_ACK` from a pid of another node: the
     /// `UNLINK_ID_ACK` packet (`dist.c:2315-2339`). The receiver removes its
     /// unlinking link with the same identifier for 8
@@ -411,6 +425,10 @@ impl Signal {
                 connection: _,
             }
             | Signal::DistUnlinkAck { from: _, id: _ }
+            | Signal::ConnectionLost {
+                from: _,
+                connection: _,
+            }
             | Signal::Unlink { from: _, id: _ }
             | Signal::UnlinkAck { from: _, id: _ }
             | Signal::Monitor {

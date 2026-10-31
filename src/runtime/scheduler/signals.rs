@@ -618,6 +618,33 @@ impl Scheduler {
                 };
                 return Ok(self.handle_exit_signal(id, walk, node, exit));
             }
+            Signal::ConnectionLost { from, connection } => {
+                // A signal of a lost connection leaves a link that the
+                // process made again on a newer connection, and a link that
+                // it no longer has (`erl_proc_sig_queue.c:4674-4706`).
+                let link = LinkId::Remote(from);
+                let current = self.node.dist().current_connection(from.node);
+                let lost = current == Some(connection)
+                    && self
+                        .processes
+                        .get(id)
+                        .expect("the process is alive")
+                        .links
+                        .get(&link)
+                        .is_some_and(|state| state.is_active());
+                if !lost {
+                    self.handled(id, node);
+                    return Ok(Handled::Continue(2));
+                }
+                let exit = ExitSignal {
+                    from: from.term(),
+                    link: Some(link),
+                    reason: Term::static_atom("noconnection"),
+                    normal_kills: false,
+                    alias: None,
+                };
+                return Ok(self.handle_exit_signal(id, walk, node, exit));
+            }
             Signal::DistExit { from, reason } => {
                 let exit = ExitSignal {
                     from,
@@ -708,16 +735,24 @@ impl Scheduler {
                 4 * i32::from(removed)
             }
             Signal::DistLink { from, connection } => {
-                let links = &mut self.handled(id, node).links;
-                let from = LinkId::Remote(from);
-                if links.get(&from).is_none() {
-                    links.insert(
-                        from,
-                        LinkState {
-                            unlinking: 0,
-                            connection,
-                        },
-                    );
+                let added = {
+                    let links = &mut self.handled(id, node).links;
+                    let link = LinkId::Remote(from);
+                    if links.get(&link).is_none() {
+                        links.insert(
+                            link,
+                            LinkState {
+                                unlinking: 0,
+                                connection,
+                            },
+                        );
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if added {
+                    self.node.dist().insert_link(id, from);
                 }
                 0
             }
@@ -730,16 +765,24 @@ impl Scheduler {
                 let link = LinkId::Remote(from);
                 let removed = links.get(&link).is_some_and(|state| state.is_active())
                     && links.remove(&link).is_some();
+                if removed {
+                    self.node.dist().remove_link(id, from);
+                }
                 self.dist_unlink_reply(id, from, unlink, connection);
                 8 * i32::from(removed) + 1
             }
             Signal::DistUnlinkAck { from, id: unlink } => {
-                let links = &mut self.handled(id, node).links;
-                let link = LinkId::Remote(from);
-                let removed = links
-                    .get(&link)
-                    .is_some_and(|state| state.unlinking == unlink)
-                    && links.remove(&link).is_some();
+                let removed = {
+                    let links = &mut self.handled(id, node).links;
+                    let link = LinkId::Remote(from);
+                    links
+                        .get(&link)
+                        .is_some_and(|state| state.unlinking == unlink)
+                        && links.remove(&link).is_some()
+                };
+                if removed {
+                    self.node.dist().remove_link(id, from);
+                }
                 8 * i32::from(removed)
             }
             Signal::Monitor { watcher, reference } => {
@@ -939,6 +982,9 @@ impl Scheduler {
             alias,
         } = exit;
         let linked = link.is_some();
+        if let Some(LinkId::Remote(remote)) = link {
+            self.node.dist().remove_link(id, remote);
+        }
         let process = self.processes.get_mut(id).expect("the process is alive");
         let active = match alias {
             Some(alias) => process

@@ -17,7 +17,10 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use crate::term::{Atom, Binary, PortId, ProcessId, Reference, Term};
+use crate::{
+    runtime::process::RemotePid,
+    term::{Atom, Binary, PortId, ProcessId, Reference, Term},
+};
 
 /// The mask of a connection id (`ERTS_DIST_CON_ID_MASK`, `external.h:137`).
 const CONNECTION_ID_MASK: u32 = 0x00ff_ffff;
@@ -101,6 +104,22 @@ struct Entry {
     /// the list of the new state (`erl_node_tables.c:216-227`, `678-684`,
     /// `722-728`, `773-790`).
     order: u64,
+    /// The local process and the remote pid of each link of the connection,
+    /// from the newest link to the oldest, as the `links` list of
+    /// `ErtsMonLnkDist` (`dist.c:480-549`, `erl_monitor_link.h:651-668`).
+    links: Vec<(ProcessId, RemotePid)>,
+}
+
+/// The links of a connection that ended, as the detached `mld` list of ERTS
+/// (`dist.c:1065-1066`, `480-549`): the local process and the pid of the
+/// other node of each link, from the newest link to the oldest, as the head
+/// of the list (`erl_monitor_link.h:651-668`, `2438-2442`).
+#[derive(Debug)]
+pub(in crate::runtime) struct EndedConnection {
+    /// The id of the connection that ended.
+    pub(in crate::runtime) connection: u32,
+    /// The links of the connection.
+    pub(in crate::runtime) links: Vec<(ProcessId, RemotePid)>,
 }
 
 /// The node type and the connection id of a node that `erlang:nodes/1,2`
@@ -170,6 +189,7 @@ impl DistTable {
                 out: 0,
                 notify: false,
                 order,
+                links: Vec::new(),
             }
         });
     }
@@ -357,6 +377,20 @@ impl DistTable {
         self.entries[&name.index()].connection_id
     }
 
+    /// Return the connection id of the entry of the node with the index
+    /// `node`, or `None` when the table has no entry for the node. A link
+    /// that a lost connection left goes only when the entry still names
+    /// that connection (`erl_proc_sig_queue.c:4693-4706`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(table.current_connection(a.index()), None);
+    /// ```
+    pub(in crate::runtime) fn current_connection(&self, node: u32) -> Option<u32> {
+        self.entries.get(&node).map(|entry| entry.connection_id)
+    }
+
     /// Return the option `get_size` of the entry of `name`.
     pub(in crate::runtime) fn get_size(&self, name: &Atom) -> bool {
         self.entries[&name.index()].get_size
@@ -469,25 +503,65 @@ impl DistTable {
     /// Make the entry that `process` controls idle at the exit of
     /// `process` with the input count 0 and no input handler, as
     /// `erts_do_net_exits` does for a controller (`dist.c:1021-1117`).
-    pub(in crate::runtime) fn controller_exits(&mut self, controller: Controller) {
-        if let Some(entry) = self
+    /// Return the links of the connection that ended, as the detached `mld`
+    /// list of `dist.c:1065-1066`, or `None` without a link.
+    pub(in crate::runtime) fn controller_exits(
+        &mut self,
+        controller: Controller,
+    ) -> Option<EndedConnection> {
+        let entry = self
             .entries
             .values_mut()
-            .find(|entry| entry.controller == Some(controller))
-        {
-            entry.set_idle(self.next_order);
-            entry.input = 0;
-            // dist.c:1081.
-            entry.out = 0;
-            entry.input_handler = None;
-            self.next_order += 1;
+            .find(|entry| entry.controller == Some(controller))?;
+        let connection = entry.connection_id;
+        let links = std::mem::take(&mut entry.links);
+        entry.set_idle(self.next_order);
+        entry.input = 0;
+        // dist.c:1081.
+        entry.out = 0;
+        entry.input_handler = None;
+        self.next_order += 1;
+        (!links.is_empty()).then_some(EndedConnection { connection, links })
+    }
+
+    /// Add the link of `process` to `remote` to the current connection of
+    /// the entry of its node, at the head of the list, as
+    /// `erts_link_dist_insert` does (`erl_monitor_link.h:2523-2548`,
+    /// `651-668`, `dist.c:3085`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// table.insert_link(ProcessId(1), remote);
+    /// ```
+    pub(in crate::runtime) fn insert_link(&mut self, process: ProcessId, remote: RemotePid) {
+        // The signal of a `LINK` packet and `link/1` reach this method only
+        // on a connected entry, and a process has one link to a pid.
+        if let Some(entry) = self.entries.get_mut(&remote.node) {
+            entry.links.insert(0, (process, remote));
         }
     }
 
-    /// Make each pending entry idle and return the controller of each
-    /// connected entry, as `erts_do_net_exits` does at the exit of
-    /// `net_kernel` (`dist.c:926-1001`).
-    pub(in crate::runtime) fn net_kernel_exits(&mut self) -> Vec<Controller> {
+    /// Remove the link of `process` to `remote` from the entry of its node.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// table.remove_link(ProcessId(1), remote);
+    /// ```
+    pub(in crate::runtime) fn remove_link(&mut self, process: ProcessId, remote: RemotePid) {
+        if let Some(entry) = self.entries.get_mut(&remote.node) {
+            entry.links.retain(|&link| link != (process, remote));
+        }
+    }
+
+    /// Make each pending entry idle and return the links of each connection
+    /// that ended and the controller of each connected entry, as
+    /// `erts_do_net_exits` does at the exit of `net_kernel` (`dist.c:926-1001`).
+    pub(in crate::runtime) fn net_kernel_exits(
+        &mut self,
+    ) -> (Vec<EndedConnection>, Vec<Controller>) {
+        let mut ended = Vec::new();
         let mut controllers = Vec::new();
         for entry in self.entries.values_mut() {
             match entry.state {
@@ -495,11 +569,20 @@ impl DistTable {
                     entry.set_idle(self.next_order);
                     self.next_order += 1;
                 }
-                State::Connected => controllers.extend(entry.controller),
+                State::Connected => {
+                    let links = std::mem::take(&mut entry.links);
+                    if !links.is_empty() {
+                        ended.push(EndedConnection {
+                            connection: entry.connection_id,
+                            links,
+                        });
+                    }
+                    controllers.extend(entry.controller);
+                }
                 State::Idle => {}
             }
         }
-        controllers
+        (ended, controllers)
     }
 
     /// Return the node of each entry in the order of `erlang:nodes/1,2`
@@ -554,6 +637,7 @@ impl Entry {
         self.queue_size = 0;
         self.notify = false;
         self.controller = None;
+        self.links.clear();
         self.order = order;
     }
 }

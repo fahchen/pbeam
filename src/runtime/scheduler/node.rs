@@ -473,14 +473,17 @@ impl Node {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert!(node.net_exits(net_kernel, &atoms).is_empty());
+    /// assert!(node.net_exits(net_kernel, &atoms).1.is_empty());
     /// assert_eq!(atoms.this_node(), (Atom::from_static("nonode@nohost").unwrap(), 0));
     /// ```
     pub(in crate::runtime) fn net_exits(
         &self,
         id: ProcessId,
         atoms: &crate::term::AtomTable,
-    ) -> Vec<super::dist_table::Controller> {
+    ) -> (
+        Vec<super::dist_table::EndedConnection>,
+        Vec<super::dist_table::Controller>,
+    ) {
         // Each exit takes the lock: a `setnode/2` that found the process
         // live before it left the table publishes the owner first, as ERTS
         // sets `F_DISTRIBUTION` in one thread progress block with its check
@@ -497,8 +500,11 @@ impl Node {
             atoms.set_this_node(&nonode, 0);
             return dist.net_kernel_exits();
         }
-        dist.controller_exits(super::dist_table::Controller::Process(id));
-        Vec::new()
+        let ended = dist
+            .controller_exits(super::dist_table::Controller::Process(id))
+            .into_iter()
+            .collect();
+        (ended, Vec::new())
     }
 
     /// Return the process that `erlang:setnode/2` made the owner of the
