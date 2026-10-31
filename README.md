@@ -70,7 +70,7 @@ See the [evidence table](docs/hello-world-target.md).
 
 Run `mise run bench-compare` to compare the runtime with the pinned ERTS on the five scenarios of [benchmark](benchmark/README.md). That directory records the method, the scenarios, and the measured results.
 
-In CI, a pull request that changes only Markdown files runs `mise run lint` instead of `mise run check`. A Markdown file that a test or build step reads counts as code: `scripts/ci_task.sh` lists these files. A push to `main` always runs `mise run check`.
+In CI, the `lint` job runs `mise run lint`. In parallel, four `test` jobs run `mise run test`, and each job runs one slice of the Rust tests and keeps its coverage report. The required `checks` job passes when these jobs pass and when the four reports together give 100% application line coverage (`scripts/check_coverage.exs`). A pull request that changes only Markdown files runs the lint job only. A Markdown file that a test or build step reads counts as code: `scripts/ci_task.sh` lists these files. A push to `main` always runs all jobs.
 
 ## Delivery
 
