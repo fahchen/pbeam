@@ -14,7 +14,10 @@ use std::{
     process::{Command, ExitCode},
 };
 
-use crate::Bundle;
+use crate::{
+    Bundle,
+    runtime::{Disposition, set_disposition},
+};
 
 /// The magic of the trailer that follows the bundle at the end of the binary.
 const MAGIC: &[u8; 8] = b"PBEAMEMB";
@@ -232,8 +235,6 @@ fn boot(
     modules: &[String],
     directory: &Path,
 ) -> Result<std::io::Error, String> {
-    use std::os::unix::process::CommandExt;
-
     let mut beams = vec![
         directory
             .join("pbeam")
@@ -260,7 +261,24 @@ fn boot(
         "RELEASE_SYS_CONFIG",
         directory.join("releases").join(&version).join("sys"),
     );
-    Ok(command.exec())
+    Ok(exec(&mut command))
+}
+
+/// Replace the current process with `command`, and return the error of a
+/// command that the host does not start.
+///
+/// `Command::exec` sets `SIGPIPE` to `SIG_DFL` before the `exec`, as a child
+/// of `Command::spawn` gets it (`library/std/src/sys/process/unix/unix.rs`
+/// in Rust 1.99.0, `prepare_sigpipe`), and a failed `exec` keeps that
+/// disposition in this process. ERTS ignores `SIGPIPE`
+/// (`sys_drivers.c:175`), so restore the start disposition before the
+/// caller reports the error.
+fn exec(command: &mut Command) -> std::io::Error {
+    use std::os::unix::process::CommandExt;
+
+    let error = command.exec();
+    set_disposition(libc::SIGPIPE, Disposition::Ignore);
+    error
 }
 
 /// Return the `erts` version and the release version of the release in
@@ -296,8 +314,6 @@ fn boot_release(
     options: Option<&std::ffi::OsStr>,
     arguments: &[OsString],
 ) -> std::io::Error {
-    use std::os::unix::process::CommandExt;
-
     let erts = format!("erts-{erts}");
     let release = directory.join("releases").join(version);
     let mut command = Command::new(executable);
@@ -345,7 +361,7 @@ fn boot_release(
     command.envs(release_variables(directory, version, &program, |name| {
         env::var_os(name).filter(|value| !value.is_empty())
     }));
-    command.exec()
+    exec(&mut command)
 }
 
 /// Return the `RELEASE_*` variables that `bin/<name>` of a Mix release

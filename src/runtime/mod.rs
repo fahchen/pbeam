@@ -35,6 +35,7 @@ pub use extension::{
 };
 pub use host::environment::{add_erlexec_path, erlexec_command};
 pub use host::signal::install_start_dispositions;
+pub(crate) use host::signal::{Disposition, set_disposition};
 pub(crate) use interpreter::bif::{BifId, import_kind, resolve as resolve_bif};
 pub use interpreter::{BeamProgram, NifGap, RootAuthority, nif_manifest_gaps};
 pub(crate) use nif::abi::Resource;
