@@ -48,11 +48,13 @@ jobs:
       - name: Run the lint checks
         run: mise run lint
 
-  # Each test job builds the instrumented tests, runs one slice of them, and keeps its coverage report as an artifact. A build in each job takes less time than a transfer of the built tests between jobs.
+  # Each test job builds the instrumented tests, runs one slice of them, and keeps its coverage report as an artifact.
   test:
     name: test (${{ matrix.partition }})
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    env:
+      CARGO_INCREMENTAL: "1"
     strategy:
       fail-fast: false
       matrix:
@@ -105,11 +107,38 @@ jobs:
           save-if: ${{ matrix.partition == 1 }}
           cache-on-failure: true
 
+      - name: Restore incremental build
+        if: steps.select.outputs.task == 'check'
+        id: incremental
+        uses: actions/cache/restore@v6.1.0
+        with:
+          path: target/llvm-cov-target
+          key: incremental-${{ runner.os }}-${{ hashFiles('mise.toml', 'Cargo.lock') }}-${{ github.ref }}-${{ github.sha }}
+          restore-keys: |
+            incremental-${{ runner.os }}-${{ hashFiles('mise.toml', 'Cargo.lock') }}-${{ github.ref }}-
+            incremental-${{ runner.os }}-${{ hashFiles('mise.toml', 'Cargo.lock') }}-
+
       - name: Run the tests
         if: steps.select.outputs.task == 'check'
         env:
+          # rust-cache sets this to 0 for later steps.
+          CARGO_INCREMENTAL: "1"
           PBEAM_TEST_PARTITION: slice:${{ matrix.partition }}/${{ strategy.job-total }}
         run: mise run test
+
+      - name: Prepare incremental build for cache
+        if: success() && steps.select.outputs.task == 'check' && matrix.partition == 1 && steps.incremental.outputs.cache-hit != 'true'
+        run: |
+          CARGO_LLVM_COV_TARGET_DIR=target/llvm-cov-target cargo llvm-cov clean --profraw-only
+          rm -f target/llvm-cov-target/*.profdata
+          find target/llvm-cov-target/debug/deps -maxdepth 1 -type f -perm -u+x ! -name '*.*' -delete
+
+      - name: Save incremental build
+        if: success() && steps.select.outputs.task == 'check' && matrix.partition == 1 && steps.incremental.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6.1.0
+        with:
+          path: target/llvm-cov-target
+          key: ${{ steps.incremental.outputs.cache-primary-key }}
 
       - name: Keep the coverage report
         if: steps.select.outputs.task == 'check'
