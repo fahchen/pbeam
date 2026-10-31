@@ -4,14 +4,14 @@
 
 The full unit, integration, and feature test suite must pass under parallel load on macOS arm64 and Ubuntu. No test binary may crash. This is the follow-on milestone for the test failures found during the completed BeautifulRust work. GitHub already tracks it as [m25](https://github.com/fahchen/pbeam/milestone/25), with [tracker #1440](https://github.com/fahchen/pbeam/issues/1440) and [epic #1441](https://github.com/fahchen/pbeam/issues/1441). This repository document gives another agent the goal, accepted constraints, verified progress, and next steps.
 
-[#1442: stop the macOS SIGPIPE test crash](https://github.com/fahchen/pbeam/issues/1442) has a fix in draft [PR #1475](https://github.com/fahchen/pbeam/pull/1475). After that PR merges, select the next ready task from #1443, #1444, and #1473. Reproduce each failure and establish its cause before changing code. Split a task if its failures have independent causes. Keep one focused task per PR.
+[#1442: stop the macOS SIGPIPE test crash](https://github.com/fahchen/pbeam/issues/1442) has a fix in draft [PR #1475](https://github.com/fahchen/pbeam/pull/1475). After that PR merges, select the next ready task from #1443, #1444, #1473, and #1476. Reproduce each failure and establish its cause before changing code. Split a task if its failures have independent causes. Keep one focused task per PR.
 
 This milestone does not reopen the completed lint rollout, restore blaze, or take ownership of the m24 distribution and Redbug plan. The completed work below supplies evidence and context.
 
 ## Completion gate
 
 - #1442 passes on macOS arm64 and Ubuntu without a test binary crash.
-- #1443 identifies both causes and passes 20 full parallel unit test runs with no `SIGSEGV` stop of the test binary. #1473 identifies its cause and passes 20 full parallel unit test runs.
+- #1443 identifies both causes and passes 20 full parallel unit test runs with no `SIGSEGV` stop of the test binary. #1473 identifies its cause and passes 20 full parallel unit test runs. #1476 identifies its cause and passes 20 full parallel unit test runs.
 - #1444 identifies both causes and passes 20 parallel runs of each affected target.
 - Each runtime fix matches pinned ERTS behavior and cites the relevant OTP source. No new unsafe operation or shared test configuration mutation is introduced.
 - Each task has accepted verification and a merged PR. Formatting, Clippy, focused tests, and CI's full gate pass, with 100% application line coverage.
@@ -22,7 +22,7 @@ This milestone does not reopen the completed lint rollout, restore blaze, or tak
 | Area | Completed | Remaining |
 | --- | --- | --- |
 | Milestone planning | m25 tracker, epic, native task relationships, and project items exist. All four tasks have acceptance criteria. | Recheck scope and dependencies before selecting each task. |
-| Runtime and test fixes | #1442 has a fix in draft PR #1475. Its cause is the `SIG_DFL` reset of a failed `Command::exec` in the embedded unit tests, which leaves a port waiter write to kill the test binary with `SIGPIPE`. | #1442 awaits Ubuntu CI and review. #1443, #1444, and #1473 are Open / Todo. |
+| Runtime and test fixes | #1442 has a fix in draft PR #1475. Its cause is the `SIG_DFL` reset of a failed `Command::exec` in the embedded unit tests, which leaves a port waiter write to kill the test binary with `SIGPIPE`. | #1442 awaits Ubuntu CI and review. #1443, #1444, #1473, and #1476 are Open / Todo. |
 | Supporting work | m23 lint rollout, Linux Clippy helper, benchmark comparison, and requested blaze removal are delivered. | Optional old-branch cleanup is separate from milestone acceptance. |
 
 On 2026-10-31, the `gh` token of the working session had no `read:project` scope, so this session could not set the project Status of #1442 to `In Review`. A session with project scope must set it. GitHub issues and the [PBeam project board](https://github.com/users/fahchen/projects/2) remain the source of current scope and status. This document is a dated milestone specification and handoff, not a second task tracker. Update GitHub as work progresses. Update this document when the goal, decisions, acceptance criteria, or next step changes.
@@ -33,10 +33,11 @@ The [m25 tracker #1440](https://github.com/fahchen/pbeam/issues/1440), [epic #14
 
 | Task | Issue / project Status | Failure evidence | Required acceptance |
 | --- | --- | --- | --- |
-| [#1442](https://github.com/fahchen/pbeam/issues/1442) | Open, draft PR #1475, project Status not updated | On macOS arm64, `reads_an_empty_output_pipe_without_a_block` stopped the unit test binary with SIGPIPE, exit 141, including on unchanged main. The cause is the `SIG_DFL` reset of a failed `Command::exec` in the embedded unit tests (`library/std/src/sys/process/unix/unix.rs` in Rust 1.99.0, `prepare_sigpipe`). A port waiter write to a closed status pipe then stopped the binary. | Pass on macOS arm64 and Ubuntu without a binary crash. Determine whether the cause belongs to the runtime or test. Cite pinned OTP source if runtime behavior changes. Ubuntu CI and review are pending. |
-| [#1443](https://github.com/fahchen/pbeam/issues/1443) | Open / Todo | Environment and release-work unit tests failed in parallel, including on unchanged code, and passed alone or serially. The same runs also stop the binary with `SIGSEGV` in about 1 of 3 runs. Recorded hypothesis: `host::environment` reads `environ` without the std environment lock while an embedded unit test runs `Command::exec`, which replaces `environ` with a temporary array. | Find both causes and the `SIGSEGV` cause. Pass 20 full parallel unit test runs with no binary crash. Preserve test configuration isolation. Split into sub-issues if the causes differ. |
+| [#1442](https://github.com/fahchen/pbeam/issues/1442) | Open, draft PR #1475, project Status not updated | On macOS arm64, `reads_an_empty_output_pipe_without_a_block` stopped the unit test binary with SIGPIPE, exit 141, including on unchanged main. The cause is the `SIG_DFL` reset of a failed `Command::exec` in the embedded unit tests (`library/std/src/sys/process/unix/unix.rs` in Rust 1.99.0, `prepare_sigpipe`). A port waiter write to a closed status pipe then stopped the binary. Commit `af9568b7` of #1475 runs each failing embedded boot in a child process, so the shared binary never changes its `SIGPIPE` disposition. | Pass on macOS arm64 and Ubuntu without a binary crash. Determine whether the cause belongs to the runtime or test. Cite pinned OTP source if runtime behavior changes. Ubuntu CI and review are pending. |
+| [#1443](https://github.com/fahchen/pbeam/issues/1443) | Open / Todo | Environment and release-work unit tests failed in parallel, including on unchanged code, and passed alone or serially. The same runs also stop the binary with `SIGSEGV` in about 1 of 3 runs. Supported cause: `host::environment` reads `environ` without the std environment lock while an embedded unit test runs `Command::exec`, which replaces `environ` with a temporary array. The isolation of #1475 gave 0 such failures and 0 `SIGSEGV` stops in 10 parallel runs. | Find both causes and the `SIGSEGV` cause. Pass 20 full parallel unit test runs with no binary crash. Preserve test configuration isolation. Split into sub-issues if the causes differ. |
 | [#1444](https://github.com/fahchen/pbeam/issues/1444) | Open / Todo | `nif_resources` failed in 3 of 6 old-main runs: expected `[5,6,5]`, observed `[]`. An Ubuntu `init_boot` run observed `num_dinet => 1` where ERTS returned `0`. | Find both causes, with OTP evidence for runtime changes. Pass 20 parallel runs of each target. Split into sub-issues if the causes differ. |
 | [#1473](https://github.com/fahchen/pbeam/issues/1473) | Open / Todo | Added after the source session. Linux CI observed a late reply from a cancelled gethost request; the same-commit rerun and 15 isolated macOS runs passed. | Find the cause, with pinned OTP evidence if runtime behavior is the cause. Pass 20 full parallel unit test runs. |
+| [#1476](https://github.com/fahchen/pbeam/issues/1476) | Open / Todo | Found during #1442. `runtime::host::input::tests::finds_an_fd_that_is_not_open` failed in 1 of 10 full parallel lib runs: the dropped fd number was open again, so the wait reported `Pending` where the test expects `Invalid`. | Identify whether the cause is the test or the runtime. Pass 20 full parallel unit test runs. |
 
 The race and delayed-close explanations in these issues are hypotheses. Do not treat them as established causes. Shared acceptance includes focused checks, formatting, Clippy, and CI's full `mise run check` with 100% application line coverage. Do not replace the required parallel runs with isolated passes or lower the coverage threshold.
 
@@ -45,12 +46,13 @@ Current source entry points:
 - #1442: `tests/runtime/host/spawn.rs`, `reads_an_empty_output_pipe_without_a_block`; runtime code in `src/runtime/host/spawn.rs`.
 - #1443: `tests/runtime/host/environment.rs`, `changes_its_own_copy_and_not_the_environment_of_the_process`; `tests/runtime/interpreter.rs`, `drains_the_release_work_of_an_exited_process_while_the_root_waits`.
 - #1473: `tests/runtime/host/gethost.rs`, `cancels_a_request_of_the_global_queue_or_a_worker_queue`; runtime code in `src/runtime/host/gethost.rs`.
+- #1476: `tests/runtime/host/input.rs`, `finds_an_fd_that_is_not_open`; runtime code in `src/runtime/host/input.rs`.
 - #1444: Cargo targets `nif_resources` and `init_boot`; `tests/integration/nif_resources.rs` and `tests/integration/init_boot.rs`.
 
 ## Resume procedure
 
 1. Read `AGENTS.md`, `docs/agents/knowledge.md`, and `docs/agents/patterns.md`. Scan the relevant improvement entries. Read `README.md` and `docs/portable-beam-spec.md` before a runtime change.
-2. Refresh #1440, #1441, #1442–#1444, and #1473. List the native child issues to find later additions. Inspect native dependencies, linked PRs, and project Status. Review draft PR #1475 first. Then prefer #1443 unless it is already assigned, completed, or superseded.
+2. Refresh #1440, #1441, #1442–#1444, #1473, and #1476. List the native child issues to find later additions. Inspect native dependencies, linked PRs, and project Status. Review draft PR #1475 first. Then prefer #1443 unless it is already assigned, completed, or superseded.
 3. Set the selected task to `Designing` when drafting its solution. Reproduce the failure on the current revision and distinguish test behavior from runtime behavior. Record evidence in the issue.
 4. For runtime changes, read the pinned OTP source and run the pinned ERTS probe before selecting the fix. Current pins are Rust 1.99.0 and OTP 29.1.1; `mise.toml` is authoritative.
 5. Follow the task's acceptance criteria and the proposal confirmation flow. Set `Pending Review` for a proposal awaiting confirmation and `In Progress` when approved coding starts. Deliver one focused task PR. Keep shared runtime configuration keys unchanged.
