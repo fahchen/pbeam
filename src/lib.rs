@@ -4,6 +4,9 @@
 mod beam;
 mod bundle;
 mod error;
+#[cfg(test)]
+#[path = "../tests/common/isolated.rs"]
+pub(crate) mod isolated;
 mod runtime;
 mod term;
 

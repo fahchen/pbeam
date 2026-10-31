@@ -51,6 +51,13 @@ fn waits_until_the_timeout_ends() {
 
 #[test]
 fn finds_an_fd_that_is_not_open() {
+    crate::isolated::run("runtime::host::input::tests::isolated_finds_an_fd_that_is_not_open");
+}
+
+#[test]
+#[ignore = "finds_an_fd_that_is_not_open runs it in a child process"]
+fn isolated_finds_an_fd_that_is_not_open() {
+    crate::isolated::requires();
     let (reader, _writer) = std::io::pipe().unwrap();
     let fd = reader.as_raw_fd();
     drop(reader);
