@@ -41,7 +41,7 @@ fn waits_until_a_pipe_has_input_or_its_end_of_file() {
 fn wait_ready(fd: libc::c_int) -> Readiness {
     loop {
         match wait_readable(&[fd], None) {
-            Readiness::Pending => continue,
+            Readiness::Pending => {}
             readiness => return readiness,
         }
     }
