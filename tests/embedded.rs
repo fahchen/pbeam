@@ -41,40 +41,6 @@ fn image(bytes: &[u8]) -> Vec<u8> {
     image
 }
 
-/// The environment variable that marks the child process of [`run_isolated`].
-const ISOLATED: &str = "PBEAM_EMBEDDED_ISOLATED";
-
-/// Run the ignored test `name` of this test binary in a child process, and
-/// require that it passes. The embedded boot starts the release with
-/// `Command::exec`, which sets `SIGPIPE` to `SIG_DFL` for the whole process
-/// before the `exec` (`library/std/src/sys/process/unix/unix.rs` in Rust
-/// 1.99.0, `prepare_sigpipe`). A disposition is the same for all threads, so
-/// a failed `exec` in this process can stop the write of another test. The
-/// child inherits `LLVM_PROFILE_FILE`, so `cargo llvm-cov` measures it.
-fn run_isolated(name: &str) {
-    let child = Command::new(env::current_exe().unwrap())
-        .args(["--exact", name, "--include-ignored", "--quiet"])
-        .env(ISOLATED, "1")
-        .stdin(std::process::Stdio::null())
-        .output()
-        .unwrap();
-    assert!(
-        child.status.success(),
-        "{name} exited with {}\n{}",
-        child.status,
-        String::from_utf8_lossy(&child.stdout)
-    );
-}
-
-/// Require the child process of [`run_isolated`] for a test that lets the
-/// embedded boot fail.
-fn requires_isolated() {
-    assert!(
-        env::var_os(ISOLATED).is_some(),
-        "run_isolated runs this test in a child process"
-    );
-}
-
 #[test]
 fn finds_the_bundle_that_the_trailer_names() {
     let mut bytes = b"binary".to_vec();
@@ -157,13 +123,15 @@ fn a_run_bundle_reports_a_base_that_fails() {
 
 #[test]
 fn a_run_bundle_that_cannot_start_removes_its_directory() {
-    run_isolated("embedded::tests::isolated_a_run_bundle_that_cannot_start_removes_its_directory");
+    crate::isolated::run(
+        "embedded::tests::isolated_a_run_bundle_that_cannot_start_removes_its_directory",
+    );
 }
 
 #[test]
 #[ignore = "a_run_bundle_that_cannot_start_removes_its_directory runs it in a child process"]
 fn isolated_a_run_bundle_that_cannot_start_removes_its_directory() {
-    requires_isolated();
+    crate::isolated::requires();
     let base = directory("run-remove");
     assert_eq!(
         run_bundle(
@@ -340,13 +308,15 @@ fn a_boot_without_a_release_version_stops() {
 
 #[test]
 fn a_boot_that_the_host_cannot_start_returns_the_error() {
-    run_isolated("embedded::tests::isolated_a_boot_that_the_host_cannot_start_returns_the_error");
+    crate::isolated::run(
+        "embedded::tests::isolated_a_boot_that_the_host_cannot_start_returns_the_error",
+    );
 }
 
 #[test]
 #[ignore = "a_boot_that_the_host_cannot_start_returns_the_error runs it in a child process"]
 fn isolated_a_boot_that_the_host_cannot_start_returns_the_error() {
-    requires_isolated();
+    crate::isolated::requires();
     let directory = directory("no-executable");
     let releases = directory.join("releases");
     fs::create_dir_all(directory.join("lib")).unwrap();
@@ -409,13 +379,15 @@ fn a_temporary_directory_reports_a_base_that_fails() {
 
 #[test]
 fn a_release_with_a_boot_script_boots_with_pbeam_erl() {
-    run_isolated("embedded::tests::isolated_a_release_with_a_boot_script_boots_with_pbeam_erl");
+    crate::isolated::run(
+        "embedded::tests::isolated_a_release_with_a_boot_script_boots_with_pbeam_erl",
+    );
 }
 
 #[test]
 #[ignore = "a_release_with_a_boot_script_boots_with_pbeam_erl runs it in a child process"]
 fn isolated_a_release_with_a_boot_script_boots_with_pbeam_erl() {
-    requires_isolated();
+    crate::isolated::requires();
     let directory = directory("release-boot");
     let release = directory.join("releases/0.1.0");
     fs::create_dir_all(&release).unwrap();
@@ -447,7 +419,7 @@ fn isolated_a_release_with_a_boot_script_boots_with_pbeam_erl() {
 
 #[test]
 fn keeps_sigpipe_ignored_after_a_boot_that_the_host_cannot_start() {
-    run_isolated(
+    crate::isolated::run(
         "embedded::tests::isolated_keeps_sigpipe_ignored_after_a_boot_that_the_host_cannot_start",
     );
 }
@@ -455,7 +427,7 @@ fn keeps_sigpipe_ignored_after_a_boot_that_the_host_cannot_start() {
 #[test]
 #[ignore = "keeps_sigpipe_ignored_after_a_boot_that_the_host_cannot_start runs it in a child process"]
 fn isolated_keeps_sigpipe_ignored_after_a_boot_that_the_host_cannot_start() {
-    requires_isolated();
+    crate::isolated::requires();
 
     // `Command::exec` sets `SIGPIPE` to `SIG_DFL` before the `exec`
     // (`library/std/src/sys/process/unix/unix.rs` in Rust 1.99.0,
@@ -499,7 +471,7 @@ fn splits_the_erl_options_at_space_tab_and_newline_only() {
 
 #[test]
 fn a_start_of_a_release_that_fails_reports_it_and_removes_the_directory() {
-    run_isolated(
+    crate::isolated::run(
         "embedded::tests::isolated_a_start_of_a_release_that_fails_reports_it_and_removes_the_directory",
     );
 }
@@ -507,7 +479,7 @@ fn a_start_of_a_release_that_fails_reports_it_and_removes_the_directory() {
 #[test]
 #[ignore = "a_start_of_a_release_that_fails_reports_it_and_removes_the_directory runs it in a child process"]
 fn isolated_a_start_of_a_release_that_fails_reports_it_and_removes_the_directory() {
-    requires_isolated();
+    crate::isolated::requires();
     let directory = directory("release-start-error");
     let bytes = bundle(&[
         ("releases/start_erl.data", b"17.1 0.1.0"),
