@@ -318,6 +318,9 @@ impl Scheduler {
                 let _ = self.send_signal(None, from, exit);
             }
             Signal::DistLink { from, connection } => {
+                // The connection has the link already, so the answer of a
+                // dead target deletes it (`dist.c:2259-2264`).
+                self.node.dist().remove_link(target, from);
                 self.dist_link_noproc(target, from, connection);
             }
             Signal::DistUnlink {
@@ -621,17 +624,17 @@ impl Scheduler {
             Signal::ConnectionLost { from, connection } => {
                 // A signal of a lost connection leaves a link that the
                 // process made again on a newer connection, and a link that
-                // it no longer has (`erl_proc_sig_queue.c:4674-4706`).
+                // it no longer has (`erl_proc_sig_queue.c:4674-4706`). The
+                // link keeps the id of its own connection, not the id of the
+                // current connection of the entry.
                 let link = LinkId::Remote(from);
-                let current = self.node.dist().current_connection(from.node);
-                let lost = current == Some(connection)
-                    && self
-                        .processes
-                        .get(id)
-                        .expect("the process is alive")
-                        .links
-                        .get(&link)
-                        .is_some_and(|state| state.is_active());
+                let lost = self
+                    .processes
+                    .get(id)
+                    .expect("the process is alive")
+                    .links
+                    .get(&link)
+                    .is_some_and(|state| state.is_active() && state.connection == connection);
                 if !lost {
                     self.handled(id, node);
                     return Ok(Handled::Continue(2));
@@ -735,24 +738,19 @@ impl Scheduler {
                 4 * i32::from(removed)
             }
             Signal::DistLink { from, connection } => {
-                let added = {
-                    let links = &mut self.handled(id, node).links;
-                    let link = LinkId::Remote(from);
-                    if links.get(&link).is_none() {
-                        links.insert(
-                            link,
-                            LinkState {
-                                unlinking: 0,
-                                connection,
-                            },
-                        );
-                        true
-                    } else {
-                        false
-                    }
-                };
-                if added {
-                    self.node.dist().insert_link(id, from);
+                // The dist entry has the link of the connection already,
+                // because `net_link` inserts it before it sends this signal
+                // (`dist.c:2246-2258`).
+                let links = &mut self.handled(id, node).links;
+                let link = LinkId::Remote(from);
+                if links.get(&link).is_none() {
+                    links.insert(
+                        link,
+                        LinkState {
+                            unlinking: 0,
+                            connection,
+                        },
+                    );
                 }
                 0
             }

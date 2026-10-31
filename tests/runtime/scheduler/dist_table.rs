@@ -20,8 +20,8 @@ fn returns_the_links_of_the_connection_that_ended() {
     table.new_connection(&a);
     let controller = Controller::Process(ProcessId(1));
     assert!(table.connect(&a, controller, 0).is_some());
-    table.insert_link(ProcessId(1), remote);
-    table.insert_link(ProcessId(2), remote);
+    assert!(table.insert_link(ProcessId(1), remote, 1));
+    assert!(table.insert_link(ProcessId(2), remote, 1));
     let ended = table
         .controller_exits(controller)
         .expect("the connection has links");
@@ -32,7 +32,38 @@ fn returns_the_links_of_the_connection_that_ended() {
     );
     // A second exit has no controller, and the links are gone.
     assert!(table.controller_exits(controller).is_none());
-    assert_eq!(table.current_connection(a.index()), Some(1));
+}
+
+#[test]
+fn adds_a_link_only_to_its_own_connected_connection() {
+    // `erts_link_dist_insert` fails when the connection is down, and a
+    // duplicate LINK deletes its own dist link, so the connection keeps one
+    // link of a pair (dist.c:2246-2258, erl_proc_sig_queue.c:6635-6663).
+    let atoms = AtomTable::new();
+    let a = atoms.put("a@h").unwrap();
+    let remote = RemotePid {
+        node: a.index(),
+        creation: 1,
+        number: 2,
+        serial: 0,
+    };
+    let mut table = DistTable::default();
+    table.insert(&a, Reference(7), 0);
+    table.new_connection(&a);
+    // The entry is pending, so it has no connection yet.
+    assert!(!table.insert_link(ProcessId(1), remote, 1));
+    let controller = Controller::Process(ProcessId(1));
+    assert!(table.connect(&a, controller, 0).is_some());
+    assert!(table.insert_link(ProcessId(1), remote, 1));
+    // A link of another connection and another process do not belong here.
+    assert!(!table.insert_link(ProcessId(2), remote, 2));
+    assert!(!table.insert_link(ProcessId(1), remote, 2));
+    // The duplicate keeps the single link at its position.
+    assert!(table.insert_link(ProcessId(1), remote, 1));
+    let ended = table.controller_exits(controller).unwrap();
+    assert_eq!(ended.links, vec![(ProcessId(1), remote)]);
+    // The entry is idle now.
+    assert!(!table.insert_link(ProcessId(1), remote, 1));
 }
 
 #[test]
@@ -62,8 +93,8 @@ fn returns_the_links_of_each_connection_at_the_exit_of_net_kernel() {
         number,
         serial: 0,
     };
-    table.insert_link(ProcessId(3), remote(&a, 4));
-    table.insert_link(ProcessId(5), remote(&b, 6));
+    assert!(table.insert_link(ProcessId(3), remote(&a, 4), 1));
+    assert!(table.insert_link(ProcessId(5), remote(&b, 6), 1));
     let (ended, controllers) = table.net_kernel_exits();
     assert_eq!(controllers.len(), 2);
     assert!(ended.iter().all(|connection| connection.connection == 1));

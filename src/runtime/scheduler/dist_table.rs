@@ -377,20 +377,6 @@ impl DistTable {
         self.entries[&name.index()].connection_id
     }
 
-    /// Return the connection id of the entry of the node with the index
-    /// `node`, or `None` when the table has no entry for the node. A link
-    /// that a lost connection left goes only when the entry still names
-    /// that connection (`erl_proc_sig_queue.c:4693-4706`).
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert_eq!(table.current_connection(a.index()), None);
-    /// ```
-    pub(in crate::runtime) fn current_connection(&self, node: u32) -> Option<u32> {
-        self.entries.get(&node).map(|entry| entry.connection_id)
-    }
-
     /// Return the option `get_size` of the entry of `name`.
     pub(in crate::runtime) fn get_size(&self, name: &Atom) -> bool {
         self.entries[&name.index()].get_size
@@ -524,22 +510,38 @@ impl DistTable {
         (!links.is_empty()).then_some(EndedConnection { connection, links })
     }
 
-    /// Add the link of `process` to `remote` to the current connection of
-    /// the entry of its node, at the head of the list, as
+    /// Add the link of `process` to `remote` to the connection `connection`
+    /// of the entry of its node, at the head of the list, as
     /// `erts_link_dist_insert` does (`erl_monitor_link.h:2523-2548`,
-    /// `651-668`, `dist.c:3085`).
+    /// `651-668`, `dist.c:2246-2258`, `3085`), and return whether the
+    /// connection has the link. Return `false` when the entry is not
+    /// connected to `connection`, so that the caller gives the process
+    /// `noconnection` (`dist.c:2250-2258`). A connection that already has
+    /// the link keeps it, as a duplicate `LINK` deletes its own dist link
+    /// (`erl_proc_sig_queue.c:6635-6663`).
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// table.insert_link(ProcessId(1), remote);
+    /// assert!(table.insert_link(ProcessId(1), remote, 1));
     /// ```
-    pub(in crate::runtime) fn insert_link(&mut self, process: ProcessId, remote: RemotePid) {
-        // The signal of a `LINK` packet and `link/1` reach this method only
-        // on a connected entry, and a process has one link to a pid.
-        if let Some(entry) = self.entries.get_mut(&remote.node) {
+    pub(in crate::runtime) fn insert_link(
+        &mut self,
+        process: ProcessId,
+        remote: RemotePid,
+        connection: u32,
+    ) -> bool {
+        let entry = self
+            .entries
+            .get_mut(&remote.node)
+            .expect("the entry of the node stays in the table");
+        if entry.state != State::Connected || entry.connection_id != connection {
+            return false;
+        }
+        if !entry.links.contains(&(process, remote)) {
             entry.links.insert(0, (process, remote));
         }
+        true
     }
 
     /// Remove the link of `process` to `remote` from the entry of its node.

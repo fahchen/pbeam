@@ -51,6 +51,11 @@ impl Scheduler {
     /// `UNLINK_ID_ACK` (36), `EXIT` (3), and `PAYLOAD_EXIT` (24) go to the
     /// links of the node (see [`super::dist_link`]).
     ///
+    /// The id `connection` is the id of the connection that carried the
+    /// packet, which its controller took with the packet
+    /// (`dist.c:4672-4680`). A `LINK` goes to that connection, not to the
+    /// current connection of the entry (`dist.c:2246-2258`).
+    ///
     /// # Examples
     ///
     /// ```rust,ignore
@@ -66,6 +71,7 @@ impl Scheduler {
     pub(in crate::runtime) fn net_message(
         &mut self,
         node: &Atom,
+        connection: u32,
         flags: u64,
         packet: &[u8],
     ) -> Result<(), BeamError> {
@@ -128,8 +134,8 @@ impl Scheduler {
             (Some(26), [_, from, to]) => {
                 self.dist_exit_signal(node, from, to, |scheduler| scheduler.dist_message(message))
             }
-            (Some(1), [_, from, to]) => self.net_link(node, from, to),
-            (Some(35), [_, id, from, to]) => self.net_unlink(node, id, from, to),
+            (Some(1), [_, from, to]) => self.net_link(node, connection, from, to),
+            (Some(35), [_, id, from, to]) => self.net_unlink(node, connection, id, from, to),
             (Some(36), [_, id, from, to]) => self.net_unlink_ack(node, id, from, to),
             (Some(3), [_, from, to, reason]) => {
                 self.net_link_exit(node, from, to, |_| Ok(reason.clone()))
