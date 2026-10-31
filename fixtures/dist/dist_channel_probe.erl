@@ -153,14 +153,17 @@ net_kernel_exit() ->
     erts_internal:new_connection(qq@nohost),
     {ok, L} = gen_tcp:listen(0, []),
     {ok, _} = erts_internal:create_dist_channel(qq@nohost, L, {M, 1}),
-    show(before, [nodes(known)]),
+    show(before, [lists:sort(nodes(known))]),
     ok = net_kernel:stop(),
-    %% ERTS schedules the kill and the port exit (dist.c:975-990), so the
-    %% order of zz@nohost and qq@nohost in nodes(known) is not fixed.
+    %% ERTS schedules the kill of the controller, the exit of the port, and
+    %% the reset of the node name as auxiliary work (dist.c:846-865,
+    %% 975-990), so wait for the node to be not alive and sort the set.
+    Node = await_nonode(5000),
+    Known = lists:sort(nodes(known)),
     show(stopped, [receive {'DOWN', CtrlRef, _, _, Reason} -> Reason end,
                    receive {'EXIT', L, PortReason} -> PortReason end,
-                   node(), nodes(known) -- [qq@nohost],
-                   lists:member(qq@nohost, nodes(known)),
+                   Node, Known,
+                   lists:member(qq@nohost, Known),
                    erts_internal:create_dist_channel(zz@nohost, self(), {M, 1})]).
 
 %% A tcp_inet port controls a connection (dist.c:5269-5336), and the exit
@@ -514,6 +517,16 @@ flush() ->
 
 mandatory() ->
     element(3, erts_internal:get_dflags()).
+
+%% Return the node name once the node is not alive, polling at most Tries
+%% milliseconds.
+await_nonode(0) ->
+    node();
+await_nonode(Tries) ->
+    case node() of
+        nonode@nohost -> nonode@nohost;
+        _ -> receive after 1 -> await_nonode(Tries - 1) end
+    end.
 
 info(Nodes, Id) ->
     [{Node, maps:update_with(connection_id, fun(C) -> C - Id end, Info)} || {Node, Info} <- Nodes].
