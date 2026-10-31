@@ -59,6 +59,18 @@ else
   export CARGO_LLVM_COV_TARGET_DIR=$cov_dir
   cargo llvm-cov clean --profraw-only
   rm -f "$cov_dir"/*.profdata
+  if [[ -n "${PBEAM_TEST_ARCHIVE:-}" ]]; then
+    # The archive extracts to the build path embedded in the test binaries.
+    export CARGO_TARGET_DIR=$PWD/$cov_dir/target
+    eval "$(cargo llvm-cov show-env --sh)"
+    export CARGO_LLVM_COV_TARGET_DIR=$PWD/$cov_dir
+    cargo nextest run --archive-file "$PBEAM_TEST_ARCHIVE" --extract-to "$cov_dir" --extract-overwrite \
+      --status-level leak --final-status-level slow --no-fail-fast \
+      --partition "$PBEAM_TEST_PARTITION"
+    cargo llvm-cov report --nextest-archive-file "$PBEAM_TEST_ARCHIVE" \
+      --cobertura --output-path target/coverage.xml
+    exit
+  fi
   # A change of the profile or the features gives the test executables new file names, and the old executables stay.
   # cargo-llvm-cov reports each executable whose name matches a workspace target, so an old executable would add uncovered lines.
   # Each executable of the workspace has no extension; dependency files such as proc-macro libraries have one and stay.
