@@ -521,10 +521,13 @@ socket_sendfile() ->
     Big = Base ++ ".big",
     Data = list_to_binary([X rem 251 || X <- lists:seq(1, 100000)]),
     ok = file:write_file(Small, Data),
-    ok = file:write_file(Big, binary:copy(Data, 80)),
+    ok = file:write_file(Big, binary:copy(Data, 10)),
     {ok, F} = file:open(Small, [raw, read, binary]),
     {ok, G} = file:open(Big, [raw, read, binary]),
-    Pair = fun(Shrink) ->
+    %% Small buffers make the sendfile wait. A small receive buffer makes
+    %% Linux send about 50 KB/s on the loopback, so the pair that a reader
+    %% drains keeps the default receive buffer.
+    Pair = fun(Shrink, ShrinkRcv) ->
                    {ok, L} = socket:open(inet, stream, tcp),
                    ok = socket:bind(L, #{family => inet, addr => {127, 0, 0, 1}, port => 0}),
                    ok = socket:listen(L),
@@ -533,12 +536,12 @@ socket_sendfile() ->
                    [ok = socket:setopt(C, socket, sndbuf, 4096) || Shrink],
                    ok = socket:connect(C, Addr),
                    {ok, A} = socket:accept(L),
-                   [ok = socket:setopt(A, socket, rcvbuf, 4096) || Shrink],
+                   [ok = socket:setopt(A, socket, rcvbuf, 4096) || ShrinkRcv],
                    ok = socket:close(L),
                    {C, A}
            end,
     Parent = self(),
-    {C, A} = Pair(false),
+    {C, A} = Pair(false, false),
     {'$socket', Ref} = C,
     %% A second process reads while the sendfile runs.
     Sent = fun(Send, N) ->
@@ -576,9 +579,9 @@ socket_sendfile() ->
     %% The calls, the chunks, and the waits depend on the host buffers.
     Keys = [sendfile_byte, sendfile_fails, sendfile_max, sendfile_tries, write_byte, write_pkg],
     Counters = maps:with(Keys, maps:get(counters, socket:info(C))),
-    {C2, A2} = Pair(true),
+    {C2, A2} = Pair(true, true),
     {'$socket', Ref2} = C2,
-    Size = byte_size(Data) * 80,
+    Size = byte_size(Data) * 10,
     Positive = fun(N) -> is_integer(N) andalso N > 0 end,
     Waits = case socket:sendfile(C2, G, 0, 0, nowait) of
                 {select, {{select_info, sendfile, Handle} = Info, Bytes2}} ->
@@ -597,7 +600,7 @@ socket_sendfile() ->
             end,
     _ = socket:close(C2),
     _ = socket:close(A2),
-    {C3, A3} = Pair(true),
+    {C3, A3} = Pair(true, false),
     Reader = spawn(fun() -> Parent ! {read, read_all(A3, 0, Size)} end),
     Whole = socket:sendfile(C3, G),
     Read = receive {read, N} -> N after 10000 -> missing end,
@@ -605,7 +608,7 @@ socket_sendfile() ->
     Whole3 = [Whole, Read, Positive(maps:get(sendfile_waits, Info3)), maps:get(sendfile_tries, Info3),
               maps:get(sendfile_byte, Info3), maps:get(sendfile_max, Info3), maps:get(sendfile_fails, Info3)],
     exit(Reader, kill),
-    {C4, A4} = Pair(true),
+    {C4, A4} = Pair(true, true),
     Timeout = case socket:sendfile(C4, G, 0, 0, 200) of
                   {error, {timeout, Bytes}} -> [Positive(Bytes), socket:sendfile(C4, F, 0, 1, 0)];
                   Other4 -> Other4

@@ -43,18 +43,18 @@ impl TreeKey for ProcessId {
 }
 
 impl TreeKey for LinkId {
-    /// ERTS compares a local pid and a local port as their `Eterm` words
-    /// (`erl_monitor_link.c:157`): the pid data or port data above the
-    /// 4-bit tag, which is `0x3` for a pid and `0x7` for a port
-    /// (`erl_term.h:81-82`). Thus the number orders first, and a pid comes
-    /// before a port with the same number.
+    /// ERTS compares two immediate keys with different tags by the tag
+    /// (`erl_monitor_link.c:146-150`), which is `0x3` for a local pid and
+    /// `0x7` for a local port (`erl_term.h:81-82`), so each pid comes before
+    /// each port. Two keys with the same tag compare as their `Eterm` words
+    /// (`erl_monitor_link.c:157`), that is, by their numbers.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let pid = LinkId::Process(ProcessId(2));
-    /// assert_eq!(pid.compare(LinkId::Port(PortId(2))), Ordering::Less);
-    /// assert_eq!(pid.compare(LinkId::Port(PortId(1))), Ordering::Greater);
+    /// assert_eq!(pid.compare(LinkId::Port(PortId(1))), Ordering::Less);
+    /// assert_eq!(pid.compare(LinkId::Process(ProcessId(1))), Ordering::Greater);
     /// ```
     ///
     /// A pid of another node is a boxed term, which comes after each
@@ -66,13 +66,13 @@ impl TreeKey for LinkId {
     /// (`erl_term.h:1143-1147`).
     fn compare(self, other: Self) -> Ordering {
         let word = |id| match id {
-            LinkId::Process(ProcessId(number)) => (0, (number, 0x3), [0; 8]),
-            LinkId::Port(PortId(number)) => (0, (number, 0x7), [0; 8]),
+            LinkId::Process(ProcessId(number)) => (0, 0x3, number, [0; 8]),
+            LinkId::Port(PortId(number)) => (0, 0x7, number, [0; 8]),
             LinkId::Remote(pid) => {
                 let mut data = [0; 8];
                 data[..4].copy_from_slice(&pid.number.to_le_bytes());
                 data[4..].copy_from_slice(&pid.serial.to_le_bytes());
-                (1, (u64::from(pid.node), pid.creation), data)
+                (1, u64::from(pid.node), u64::from(pid.creation), data)
             }
         };
         word(self).cmp(&word(other))

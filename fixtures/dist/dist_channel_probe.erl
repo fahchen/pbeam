@@ -154,14 +154,17 @@ net_kernel_exit() ->
     erts_internal:new_connection(qq@nohost),
     {ok, L} = gen_tcp:listen(0, []),
     {ok, _} = erts_internal:create_dist_channel(qq@nohost, L, {M, 1}),
-    show(before, [nodes(known)]),
+    show(before, [lists:sort(nodes(known))]),
     ok = net_kernel:stop(),
-    %% ERTS schedules the kill and the port exit (dist.c:975-990), so the
-    %% order of zz@nohost and qq@nohost in nodes(known) is not fixed.
+    %% ERTS schedules the kill of the controller, the exit of the port, and
+    %% the reset of the node name as auxiliary work (dist.c:846-865,
+    %% 975-990), so wait for the node to be not alive and sort the set.
+    Node = await_nonode(5000),
+    Known = lists:sort(nodes(known)),
     show(stopped, [receive {'DOWN', CtrlRef, _, _, Reason} -> Reason end,
                    receive {'EXIT', L, PortReason} -> PortReason end,
-                   node(), nodes(known) -- [qq@nohost],
-                   lists:member(qq@nohost, nodes(known)),
+                   Node, Known,
+                   lists:member(qq@nohost, Known),
                    erts_internal:create_dist_channel(zz@nohost, self(), {M, 1})]).
 
 %% A tcp_inet port controls a connection (dist.c:5269-5336), and the exit
@@ -480,7 +483,9 @@ atom_cache() ->
     {ok, DH} = erts_internal:create_dist_channel(zz@nohost, self(), {mandatory() bor 16#2000, 1}),
     erlang:dist_ctrl_put_data(DH, packet_only({2, '', self()})).
 
-%% A control message with a trace token.
+%% A control message with a trace token. `EXIT2_TT` (18) reads the token at
+%% tuple[4], before the reason, and `PAYLOAD_EXIT2_TT` (27) at tuple[4]
+%% (dist.c:2822-2840).
 trace_token(Op) ->
     erts_internal:new_connection(zz@nohost),
     {ok, DH} = erts_internal:create_dist_channel(zz@nohost, self(), {mandatory(), 1}),
@@ -488,7 +493,9 @@ trace_token(Op) ->
     Packet = case Op of
                  12 -> packet({12, '', self(), []}, m);
                  13 -> packet_only({13, From, self(), [], x});
-                 25 -> packet({25, From, self(), []}, x)
+                 18 -> packet_only({18, From, self(), [], boom});
+                 25 -> packet({25, From, self(), []}, x);
+                 27 -> packet_only({27, From, self(), []})
              end,
     erlang:dist_ctrl_put_data(DH, Packet).
 
@@ -542,6 +549,16 @@ flush() ->
 
 mandatory() ->
     element(3, erts_internal:get_dflags()).
+
+%% Return the node name once the node is not alive, polling at most Tries
+%% milliseconds.
+await_nonode(0) ->
+    node();
+await_nonode(Tries) ->
+    case node() of
+        nonode@nohost -> nonode@nohost;
+        _ -> receive after 1 -> await_nonode(Tries - 1) end
+    end.
 
 info(Nodes, Id) ->
     [{Node, maps:update_with(connection_id, fun(C) -> C - Id end, Info)} || {Node, Info} <- Nodes].

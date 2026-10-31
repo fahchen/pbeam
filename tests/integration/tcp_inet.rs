@@ -998,6 +998,24 @@ fn links_and_connects_a_port_as_pinned_erts() {
 }
 
 #[test]
+fn orders_the_links_to_pids_before_the_links_to_ports_as_pinned_erts() {
+    // ERTS compares two immediate link keys with different tags by the tag
+    // (`ml_cmp_keys`, erl_monitor_link.c:146-150): a local pid (tag 0x3)
+    // comes before a local port (tag 0x7), whatever their numbers are
+    // (erl_term.h:81-82). The probe links a process to members and ports in
+    // turn, so the shape of the tree depends on that order. The first list
+    // is its links item, the second the order of the link exit signals that
+    // its members get. Each number is the position in the link order.
+    let expected = "[[3,2,6,8,4,5,7,1],[1,7,5,3]]";
+    assert_eq!(erts_text("tcp_active", "pid_port_links"), expected, "ERTS");
+    assert_eq!(
+        pbeam_text("tcp_active", "pid_port_links"),
+        expected,
+        "PBeam"
+    );
+}
+
+#[test]
 fn gives_the_links_of_a_port_in_the_order_of_the_pinned_erts_tree() {
     // ERTS keeps the links in its red-black tree (`ml_cmp_keys`,
     // erl_monitor_link.c:91-233), walks it in post-order

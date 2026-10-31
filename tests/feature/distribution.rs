@@ -278,7 +278,7 @@ fn stops_at_a_part_of_a_channel_that_pbeam_does_not_have() {
         ("deliver_port()".to_owned(), deliver),
         ("deliver_udp()".to_owned(), deliver),
     ];
-    cases.extend([12, 13, 25].map(|op| {
+    cases.extend([12, 13, 18, 25, 27].map(|op| {
         (
             format!("trace_token({op})"),
             "unsupported distribution message with a trace token",
