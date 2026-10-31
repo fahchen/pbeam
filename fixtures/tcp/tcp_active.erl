@@ -1,5 +1,5 @@
 -module(tcp_active).
--export([main/1, active/1, closed/1, passive_closed/1, links/0, link_orders/0, unsupported/2, unsupported_item/0]).
+-export([main/1, active/1, closed/1, passive_closed/1, links/0, link_orders/0, pid_port_links/0, unsupported/2, unsupported_item/0]).
 
 %% Delivers the data of an accepted socket in active mode, as
 %% inet:setopts/2 calls prim_inet:setopts/2, and gives the socket to a
@@ -173,6 +173,50 @@ link_orders() ->
                           {link, 6}, {unlink, 4}, {unlink, 5}, {link, 4}, {unlink, 2}]),
      whole_info_order(S1, Members),
      exit_order(S1, Members)].
+
+%% The links of a process to pids and ports in the order of the pinned ERTS
+%% tree. ERTS compares a local pid and a local port by their tags first
+%% (`ml_cmp_keys`, erl_monitor_link.c:146-150), so each pid comes before
+%% each port, whatever their numbers are. The process links members and
+%% ports in turn, gives its links item (erl_bif_info.c:1757-1775), and
+%% exits; each member reports its link exit signal, in the order of the
+%% walk of the tree (erl_process.c:14545-14551).
+pid_port_links() ->
+    process_flag(trap_exit, true),
+    Owner = self(),
+    Members = [spawn(fun() -> member(Owner) end) || _ <- lists:seq(1, 4)],
+    Ports = [element(2, prim_inet:open(tcp, inet, stream)) || _ <- lists:seq(1, 4)],
+    Linker = spawn(fun() -> linker(Owner) end),
+    Linked = lists:append([[M, P] || {M, P} <- lists:zip(Members, Ports)]),
+    [link_from(Linker, Member) || Member <- Linked],
+    Linker ! {links, self()},
+    Info = receive {Linker, Links} -> [position(Link, Linked) || Link <- Links] end,
+    Linker ! stop,
+    Exits = [receive {gone, Member} -> position(Member, Linked) end || _ <- Members],
+    [Info, Exits].
+
+%% Make `Linker` link `Member`: a member links `Linker` when the probe asks,
+%% and `Linker` links a port itself.
+link_from(Linker, Member) when is_pid(Member) ->
+    Member ! {link, Linker, self()},
+    receive {Member, ok} -> ok end;
+link_from(Linker, Port) ->
+    Linker ! {link, Port, self()},
+    receive {Linker, ok} -> ok end.
+
+linker(Owner) ->
+    receive
+        {link, Port, From} ->
+            link(Port),
+            From ! {self(), ok},
+            linker(Owner);
+        {links, From} ->
+            {links, Links} = process_info(self(), links),
+            From ! {self(), Links},
+            linker(Owner);
+        stop ->
+            exit(boom)
+    end.
 
 %% The order of the link exit signals of a port that closes
 %% (`erts_deliver_port_exit`, io.c:3869-3872, 3922-3925; `link_port_exit`,
