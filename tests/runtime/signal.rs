@@ -32,6 +32,11 @@ fn visits_the_terms_of_a_signal() {
         alias: None,
     };
     assert_eq!(terms(&exit), vec![Term::Integer(1)]);
+    let dist_exit = Signal::DistExit {
+        from: Term::Pid(ProcessId(1)),
+        reason: Term::Integer(6),
+    };
+    assert_eq!(terms(&dist_exit), vec![Term::Integer(6)]);
     let down = Signal::MonitorDown {
         reference: Reference(1),
         reason: Term::Integer(2),
@@ -73,6 +78,13 @@ fn takes_the_term_of_each_signal_that_holds_one() {
                 alias: None,
             },
             marker(1),
+        ),
+        (
+            Signal::DistExit {
+                from: Term::Pid(ProcessId(1)),
+                reason: marker(5),
+            },
+            marker(5),
         ),
         (
             Signal::MonitorDown {
