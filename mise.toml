@@ -1,17 +1,18 @@
 [tools]
 erlang = "29.1.1"
 elixir = "1.20.4-otp-29"
-rust = "1.99.0"
+rust = { version = "1.99.0", mr_boxington = true }
 rumdl = "0.2.78"
 taplo = "0.10.0"
 actionlint = "1.7.12"
 shellcheck = "0.11.0"
 "github:taiki-e/cargo-llvm-cov" = "0.9.1"
 "github:nextest-rs/nextest" = { version = "0.9.148", version_prefix = "cargo-nextest-" }
+mr-boxington = "1.29.1"
 
 [tasks.setup]
 description = "Install check components for the mise-pinned Rust toolchain"
-run = 'rustup component add rustfmt clippy llvm-tools-preview --toolchain "$(mise config get --file mise.toml tools.rust)"'
+run = 'rustup component add rustfmt clippy llvm-tools-preview --toolchain "$(mise config get --file mise.toml tools.rust.version)"'
 
 [tasks.lint]
 description = "Check documentation, configuration, workflows, and Rust"
