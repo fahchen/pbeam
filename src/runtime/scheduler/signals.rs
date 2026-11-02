@@ -18,7 +18,6 @@ use crate::{
         capability::Source,
         interpreter::bif,
         mailbox::{NodeId, Step, Walk},
-        process::RemotePid,
         scheduler::AliasMode,
         signal::Signal,
         sockets::Sockets,
@@ -1128,10 +1127,11 @@ impl Scheduler {
         // its connection too, as `erts_monitor_dist_delete` does when the
         // handler of the monitor down signal runs
         // (`erl_proc_sig_queue.c:6409-6412`).
-        if let Some(remote) = RemotePid::of(&monitor.item) {
+        if let Some(target) = &monitor.remote {
+            let node = target.node();
             self.node
                 .dist()
-                .remove_monitor(id, remote, reference, monitor.connection);
+                .remove_monitor(id, &node, reference, monitor.connection);
         }
         let extra = if is_immediate(&reason) { 8 } else { 1 };
         let down = Term::tuple(vec![

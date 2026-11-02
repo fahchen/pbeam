@@ -1,5 +1,5 @@
 -module(setnode_probe).
--export([main/0, stop/0, remote_monitor/0]).
+-export([main/0, stop/0]).
 
 %% Give the local node a name and a creation with erlang:setnode/2
 %% (dist.c:4978-5071) and write what reads them: node/0,1, is_alive/0,
@@ -74,12 +74,6 @@ stop() ->
     true = register(net_kernel, self()),
     Next = erlang:setnode(c@host, 4),
     io:format("~p~n", [[Alive, Down, Back, Next, node(), erts_internal:get_creation()]]).
-
-%% Monitor a name of another node on an alive node (bif.c:875-893).
-remote_monitor() ->
-    true = register(net_kernel, self()),
-    true = erlang:setnode(a@host, 4),
-    monitor(process, {nobody, b@host}).
 
 %% Wait until node/0 gives `Node`: ERTS gives the name back in the aux
 %% work of a scheduler after the exit (dist.c:880-883).

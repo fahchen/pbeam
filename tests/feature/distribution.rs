@@ -690,49 +690,50 @@ fn monitors_a_registered_name_of_another_node_as_pinned_erts() {
     // The removal of a monitor whose target already exited still gives
     // `true` and sends its `DEMONITOR_P` (`bif.c:525-570`), and the name
     // then names the target of no monitor of the connection, so the node
-    // removes nothing (`dist.c:2441-2457`). The local
-    // `erlang:monitor/2,3` of `{Name, Node}`
-    // stays out of scope (#1494), so only an ERTS client monitors a name
-    // here. Each PBeam server runs over the prim_socket carrier and over the
+    // removes nothing (`dist.c:2441-2457`). The end of the connection gives
+    // `noconnection` to the last name monitor (`dist.c:305-321`). Each pair
+    // of ERTS and PBeam nodes runs over the prim_socket carrier and over the
     // tcp_inet port controller. The client stops the server node at the end,
     // because a node that the test kills writes no profile of its own runs.
     let epmd = Epmd::start();
     let id = std::process::id();
-    let expected = "[{down,boom},{removed,none},{late,true},{noproc,noproc}]\n";
+    let expected = "[{down,boom},{removed,none},{late,true},{noproc,noproc},{lost,noconnection}]\n";
     for (server_pbeam, socket) in [(false, true), (false, false), (true, true), (true, false)] {
-        let name = format!("dnsrv{server_pbeam}{socket}{id}");
-        let mut arguments = vec!["-sname", &name, "-setcookie", "ck", "-pa", "fixtures/dist"];
-        if socket {
-            arguments.extend(SOCKET_CARRIER);
+        for client_pbeam in [false, true] {
+            // The `lost` case stops the server node, so each client needs a
+            // server of its own.
+            let name = format!("dnsrv{server_pbeam}{socket}{client_pbeam}{id}");
+            let mut arguments = vec!["-sname", &name, "-setcookie", "ck", "-pa", "fixtures/dist"];
+            if socket {
+                arguments.extend(SOCKET_CARRIER);
+            }
+            let server = "dist_name_probe:server().";
+            let node = if server_pbeam {
+                pbeam_node(&epmd, &arguments, server)
+            } else {
+                ErtsNode::start(&epmd, &arguments, server)
+            };
+            let expression = format!("dist_name_probe:client('{}'), halt().", node.line());
+            let client = |name: &str| {
+                let mut arguments = vec!["-sname", name, "-setcookie", "ck", "-hidden"];
+                if socket {
+                    arguments.extend(SOCKET_CARRIER);
+                }
+                arguments.extend(["-noshell", "-pa", "fixtures/dist", "-eval", &expression]);
+                arguments.into_iter().map(str::to_owned).collect::<Vec<_>>()
+            };
+            let client_name = format!("dncl{server_pbeam}{socket}{client_pbeam}{id}");
+            let output = if client_pbeam {
+                pbeam_erl(&epmd, &client(&client_name))
+            } else {
+                erts_erl(&epmd, &client(&client_name))
+            };
+            assert_eq!(
+                stdout(&output),
+                expected,
+                "server pbeam {server_pbeam}, socket {socket}, client pbeam {client_pbeam}"
+            );
         }
-        let server = "dist_name_probe:server().";
-        let node = if server_pbeam {
-            pbeam_node(&epmd, &arguments, server)
-        } else {
-            ErtsNode::start(&epmd, &arguments, server)
-        };
-        let expression = format!("dist_name_probe:client('{}'), halt().", node.line());
-        let client = format!("dncl{server_pbeam}{socket}{id}");
-        let arguments = vec![
-            "-sname",
-            &client,
-            "-setcookie",
-            "ck",
-            "-hidden",
-            "-noshell",
-            "-pa",
-            "fixtures/dist",
-            "-eval",
-            &expression,
-        ]
-        .into_iter()
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-        assert_eq!(
-            stdout(&erts_erl(&epmd, &arguments)),
-            expected,
-            "server pbeam {server_pbeam}, socket {socket}"
-        );
     }
 }
 

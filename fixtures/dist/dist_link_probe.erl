@@ -14,17 +14,20 @@ server() ->
 serve() ->
     receive
         {victim, Trap, Back, From} ->
-            V = spawn(fun() ->
-                              process_flag(trap_exit, Trap),
-                              case Back of
-                                  none -> ok;
-                                  _ -> true = link(Back)
-                              end,
-                              From ! {victim, self()},
-                              victim(From)
-                      end),
+            %% `spawn_monitor` makes the monitor with the process, so the
+            %% victim cannot exit before the monitor exists and give
+            %% `noproc` for its own link exit.
             spawn(fun() ->
-                          R = monitor(process, V),
+                          {V, R} = spawn_monitor(
+                                     fun() ->
+                                             process_flag(trap_exit, Trap),
+                                             case Back of
+                                                 none -> ok;
+                                                 _ -> true = link(Back)
+                                             end,
+                                             From ! {victim, self()},
+                                             victim(From)
+                                     end),
                           receive {'DOWN', R, _, _, W} -> From ! {down, V, W} end
                   end),
             serve()

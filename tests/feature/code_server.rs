@@ -1370,19 +1370,6 @@ fn sets_the_name_and_the_creation_of_the_local_node_as_pinned_erts() {
             "{function}"
         );
     }
-    // An alive node monitors a name of another node on that node
-    // (bif.c:875-893), which PBeam does not have yet.
-    let output = pbeam_probe(SETNODE_PROBE, "setnode_probe", "remote_monitor", &[])
-        .env("TERM", "dumb")
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(
-        !output.status.success()
-            && stderr.contains("unsupported erlang:monitor/2,3 of a name of another node"),
-        "{stderr}"
-    );
 }
 
 #[test]

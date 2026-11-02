@@ -27,8 +27,8 @@ use super::{
     pcre2::{self, Code, Deserialized},
     process::{
         DirtyCall, Flush, Frame, LinkId, LinkState, Monitor, MonitorKey, MonitorLinkTree, Origin,
-        OriginMonitor, Priority, ProcessState, ReceiveTimer, RemotePid, RemoteWatcher, StackSlot,
-        Start, StartFlags, TargetMonitor, WalkPosition,
+        OriginMonitor, Priority, ProcessState, ReceiveTimer, RemotePid, RemoteTarget,
+        RemoteWatcher, StackSlot, Start, StartFlags, TargetMonitor, WalkPosition,
     },
     regex_code::{RegexCodes, RegexSources},
     resources::lock,
@@ -258,6 +258,14 @@ pub(super) enum MonitorTarget {
     Process(ProcessId),
     /// The `process` type with a pid of another node.
     RemoteProcess(RemotePid),
+    /// The `process` type with a registered name and the atom of another
+    /// node (`bif.c:875-894`).
+    RemoteName {
+        /// The registered name.
+        name: Atom,
+        /// The node of the name.
+        node: Atom,
+    },
     /// The `process` type with a registered name, or with `{Name, Node}`
     /// and the local node.
     ProcessName(Atom),
@@ -3225,6 +3233,7 @@ impl Scheduler {
                     item: Term::Pid(child.id),
                     tag,
                     connection: 0,
+                    remote: None,
                 }),
                 alias: None,
                 watched_by: None,
@@ -3477,6 +3486,16 @@ impl Scheduler {
             },
             _ => None,
         };
+        // The pid or the name of another node that the monitor watches
+        // (`ERTS_MON_TYPE_DIST_PROC`, `bif.c:811-894`).
+        let remote = match target {
+            MonitorTarget::RemoteProcess(remote) => Some(RemoteTarget::Pid(*remote)),
+            MonitorTarget::RemoteName { name, node } => Some(RemoteTarget::Name {
+                name: name.clone(),
+                node: node.clone(),
+            }),
+            _ => None,
+        };
         let (kind, id, item) = match target {
             MonitorTarget::Process(id) => ("process", Some(*id), Term::Pid(*id)),
             MonitorTarget::ProcessName(name) => {
@@ -3485,7 +3504,14 @@ impl Scheduler {
             }
             MonitorTarget::PortName(name) => ("port", None, named_item(name, &self.atoms)),
             MonitorTarget::Port(port) => ("port", None, Term::Port(*port)),
-            MonitorTarget::RemoteProcess(remote) => ("process", None, remote.term()),
+            MonitorTarget::RemoteProcess(_) | MonitorTarget::RemoteName { .. } => (
+                "process",
+                None,
+                remote
+                    .as_ref()
+                    .expect("a remote target names a pid or a name")
+                    .item(),
+            ),
         };
         if id == Some(watcher) {
             return Ok(reference);
@@ -3501,6 +3527,7 @@ impl Scheduler {
                 item,
                 tag: options.tag,
                 connection: 0,
+                remote: remote.clone(),
             }),
             alias: options.alias,
             watched_by: None,
@@ -3518,12 +3545,13 @@ impl Scheduler {
                 );
             }
             (_, Some(port), _) if self.monitor_port(port, watcher, reference) => {}
-            // A pid of another node: `MONITOR_P` on the connection of its
-            // node (`bif.c:857`, `dist.c:1543-1547`).
-            (_, _, MonitorTarget::RemoteProcess(remote)) => {
-                self.dist_monitor(*remote, key, watcher)?;
-            }
-            _ => self.send_monitor_down(None, watcher, key, Term::static_atom("noproc")),
+            _ => match &remote {
+                // A pid or a name of another node: `MONITOR_P` on the
+                // connection of its node (`bif.c:857`, `dist.c:1543-1547`).
+                Some(remote) => self.dist_monitor(remote, key, watcher)?,
+                // A name that no process has.
+                None => self.send_monitor_down(None, watcher, key, Term::static_atom("noproc")),
+            },
         }
         Ok(reference)
     }
@@ -3626,8 +3654,8 @@ impl Scheduler {
             // A target that does not exist drops the signal.
             let _ = self.send_signal(Some(watcher), target, demonitor);
         }
-        if let Some(remote) = RemotePid::of(&monitor.item) {
-            self.dist_demonitor(watcher, remote, reference, monitor.connection)?;
+        if let Some(target) = &monitor.remote {
+            self.dist_demonitor(watcher, target, reference, monitor.connection)?;
         }
         if let Term::Port(port) = monitor.item {
             self.demonitor_port(port, reference);
@@ -4285,12 +4313,10 @@ impl Scheduler {
                             // reason and after the signal phase for another
                             // reason (`erl_process.c:14115-14145`,
                             // `13551-13650`).
-                            self.node.dist().remove_monitor(
-                                id,
-                                watcher.watcher,
-                                key,
-                                watcher.connection,
-                            );
+                            let node = watcher.watcher.node();
+                            self.node
+                                .dist()
+                                .remove_monitor(id, &node, key, watcher.connection);
                             if signals::is_immediate(&reason) {
                                 let connection = watcher.connection;
                                 let target = dist_monitor::monitored(id, watcher.name);
@@ -4325,9 +4351,9 @@ impl Scheduler {
                                 // signal.
                                 let _ = self.send_signal(Some(id), target, demonitor);
                             }
-                            if let Some(remote) = RemotePid::of(&monitor.item) {
+                            if let Some(target) = &monitor.remote {
                                 let connection = monitor.connection;
-                                self.dist_demonitor(id, remote, key, connection)?;
+                                self.dist_demonitor(id, target, key, connection)?;
                             }
                             if let Term::Port(port) = monitor.item {
                                 self.demonitor_port(port, key);

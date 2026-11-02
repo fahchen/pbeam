@@ -1774,16 +1774,18 @@ pub(super) fn monitor(
         ("process", Term::External(_)) if pid_parts(target).is_some() => Some(Ok(
             MonitorTarget::RemoteProcess(RemotePid::of(target).expect("the target is a pid")),
         )),
-        // An alive node monitors `{Name, Node}` with another node on that
-        // node (`bif.c:875-893`).
-        ("process", Term::Tuple(pair))
-            if !this.is_static("nonode@nohost")
-                && matches!(pair.as_ref(), [Term::Atom(_), Term::Atom(node)] if *node != this) =>
-        {
-            Some(Err(error(
-                "unsupported erlang:monitor/2,3 of a name of another node: see \"Distribution\" in docs/erts-differences.md",
-            )))
-        }
+        // A node monitors `{Name, Node}` with another node on that node
+        // (`bif.c:875-894`); `{Name, this}` is a local name (`bif.c:885-888`).
+        ("process", Term::Tuple(pair)) if !this.is_static("nonode@nohost") => match pair.as_ref() {
+            [Term::Atom(name), Term::Atom(node)] if *node != this => {
+                Some(Ok(MonitorTarget::RemoteName {
+                    name: name.clone(),
+                    node: node.clone(),
+                }))
+            }
+            _ => local_name(target, &context.scheduler.atoms)
+                .map(|name| Ok(MonitorTarget::ProcessName(name))),
+        },
         ("process", target) => local_name(target, &context.scheduler.atoms)
             .map(|name| Ok(MonitorTarget::ProcessName(name))),
         ("port", Term::Port(port)) => Some(Ok(MonitorTarget::Port(*port))),

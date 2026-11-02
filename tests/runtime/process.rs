@@ -158,6 +158,7 @@ fn walks_the_terms_of_the_monitors_the_pending_bif_and_the_length_trap() {
                 item: Term::tuple(vec![Term::Integer(1)]),
                 tag: Term::static_atom("DOWN"),
                 connection: 0,
+                remote: None,
             }),
             alias: None,
             watched_by: None,
