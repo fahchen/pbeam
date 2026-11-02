@@ -2846,6 +2846,77 @@ fn removes_a_monitor_of_another_node_at_the_end_of_the_connection() {
 }
 
 #[test]
+fn removes_a_monitor_of_another_node_at_the_exit_packet_of_its_target() {
+    use super::{dist_table::Controller, signals::HandlingPoint};
+    use crate::runtime::process::RemotePid;
+    // `MONITOR_P_EXIT` ends the origin monitor of the watcher, and the
+    // handler also deletes the monitor from the monitor list of the
+    // connection, as `erts_monitor_dist_delete` does
+    // (`erl_proc_sig_queue.c:6409-6412`). A fixture cannot read the
+    // distribution table, so the entry that stays has no observable effect
+    // until the connection ends.
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let id = current(&mut scheduler);
+    let name = scheduler.atoms.put("other@host").unwrap();
+    let remote = RemotePid {
+        node: name.index(),
+        creation: 1,
+        number: 2,
+        serial: 0,
+    };
+    {
+        let mut dist = scheduler.node.dist();
+        dist.insert(&name, Reference(7), 0);
+        dist.new_connection(&name);
+        assert!(
+            dist.connect(&name, Controller::Process(ProcessId(90)), 0)
+                .is_some()
+        );
+    }
+    let reference = scheduler
+        .monitor(&MonitorTarget::RemoteProcess(remote), no_options())
+        .unwrap();
+    let key = MonitorKey::Local(reference);
+    assert!(
+        scheduler.node.dist().watched_process(remote, key).is_some(),
+        "the connection holds the monitor of the packet"
+    );
+    scheduler
+        .net_monitor_exit(
+            &name,
+            &remote.term(),
+            &Term::Pid(id),
+            &Term::Reference(reference),
+            |_| Ok(atom("normal")),
+        )
+        .unwrap();
+    scheduler
+        .handle_signals(id, 100, 100, HandlingPoint::ScheduleIn)
+        .unwrap();
+    assert!(
+        scheduler.processes[&id].monitors.is_empty(),
+        "the exit packet removes the monitor of the watcher"
+    );
+    assert_eq!(
+        scheduler.node.dist().watched_process(remote, key),
+        None,
+        "the exit packet removes the monitor of the connection"
+    );
+    assert_eq!(
+        messages(&scheduler, id.0),
+        [Term::tuple(vec![
+            atom("DOWN"),
+            Term::Reference(reference),
+            atom("process"),
+            remote.term(),
+            atom("normal"),
+        ])]
+    );
+}
+
+#[test]
 fn rejects_a_monitor_packet_whose_reference_is_not_a_reference() {
     use super::dist_table::Controller;
     use crate::runtime::process::RemotePid;

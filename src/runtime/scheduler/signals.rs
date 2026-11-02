@@ -18,6 +18,7 @@ use crate::{
         capability::Source,
         interpreter::bif,
         mailbox::{NodeId, Step, Walk},
+        process::RemotePid,
         scheduler::AliasMode,
         signal::Signal,
         sockets::Sockets,
@@ -1099,6 +1100,8 @@ impl Scheduler {
     /// `{Tag, Reference, Type, Item, Reason}` takes the place of the
     /// signal, and the monitor leaves the monitor tree; an
     /// `explicit_unalias` alias stays (`erl_proc_sig_queue.c:6460-6500`).
+    /// A monitor of a process of another node also leaves the monitor list
+    /// of its connection (`erl_proc_sig_queue.c:6409-6412`).
     /// The message costs 8 for an immediate reason and 1 for another reason
     /// (see [`Signal::MonitorDown`]). Without such a monitor the signal is
     /// dropped for 0. Return the extra signal count.
@@ -1121,6 +1124,15 @@ impl Scheduler {
             process.mailbox.remove(node);
             return 0;
         };
+        // A monitor of a process of another node leaves the monitor list of
+        // its connection too, as `erts_monitor_dist_delete` does when the
+        // handler of the monitor down signal runs
+        // (`erl_proc_sig_queue.c:6409-6412`).
+        if let Some(remote) = RemotePid::of(&monitor.item) {
+            self.node
+                .dist()
+                .remove_monitor(id, remote, reference, monitor.connection);
+        }
         let extra = if is_immediate(&reason) { 8 } else { 1 };
         let down = Term::tuple(vec![
             monitor.tag,
