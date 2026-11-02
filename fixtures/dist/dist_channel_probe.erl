@@ -4,9 +4,10 @@
 -compile(nowarn_deprecated_catch).
 -export([main/0, net_kernel_exit/0, port_channel/0, no_mandatory/0, message/0,
          port_message/0, deliver_port/0, deliver_udp/0, input/0, reject/1,
-         trace_token/1, monitor_op/0, atom_cache/0, output/0, port_output/0,
+         trace_token/1, monitor_op/0, demonitor_name/0, demonitor_ref/0,
+         atom_cache/0, output/0, port_output/0,
          alias_ext/0, dead_alias/1, exit_input/0, link_input/0,
-         link_noconnection/0]).
+         link_noconnection/0, spawn_op/0]).
 
 main() ->
     %% net_kernel reports the dist_ctrlr message of a connection that it
@@ -499,16 +500,47 @@ trace_token(Op) ->
              end,
     erlang:dist_ctrl_put_data(DH, Packet).
 
-%% An operation of another task (MONITOR_P).
+%% MONITOR_P asks for a process of another node, and each target that is not
+%% a pid and not a name makes ERTS reject the packet (dist.c:2364-2379).
 monitor_op() ->
     erts_internal:new_connection(zz@nohost),
     {ok, DH} = erts_internal:create_dist_channel(zz@nohost, self(), {mandatory(), 1}),
-    erlang:dist_ctrl_put_data(DH, packet_only({19, remote_pid(zz@nohost), self(), make_ref()})).
+    erlang:dist_ctrl_put_data(DH, packet_only({19, remote_pid(zz@nohost), {pool, boy}, make_ref()})).
+
+%% A DEMONITOR_P for a name names the target of the monitor of the
+%% connection by its reference, and the connection holds no such monitor, so
+%% the node removes nothing and keeps the connection (dist.c:2441-2457).
+demonitor_name() ->
+    logger:set_primary_config(level, none),
+    erts_internal:new_connection(zz@nohost),
+    {ok, DH} = erts_internal:create_dist_channel(zz@nohost, self(), {mandatory(), 1}),
+    Put = erlang:dist_ctrl_put_data(
+            DH, packet_only({20, remote_pid(zz@nohost), name, remote_ref(zz@nohost)})),
+    show(demonitor_name, [Put, nodes(connected)]).
+
+%% A DEMONITOR_P whose target is neither a pid, a name, nor a pid of an old
+%% incarnation of this node makes ERTS reject the packet (dist.c:2434-2459).
+demonitor_ref() ->
+    erts_internal:new_connection(zz@nohost),
+    {ok, DH} = erts_internal:create_dist_channel(zz@nohost, self(), {mandatory(), 1}),
+    erlang:dist_ctrl_put_data(
+      DH, packet_only({20, remote_pid(zz@nohost), make_ref(), remote_ref(zz@nohost)})).
 
 %% A pid of the node Node.
 remote_pid(Node) ->
     Name = atom_to_binary(Node),
     binary_to_term(<<131, 88, 118, (byte_size(Name)):16, Name/binary, 1:32, 0:32, 1:32>>).
+
+%% A packet of an operation that ERTS defines and PBeam does not implement,
+%% `DOP_SPAWN_REQUEST` (dist.h:171): the node stops the run with a runtime
+%% error that names the operation. The control message has the six elements
+%% of ERTS (dist.c:2899-2902).
+spawn_op() ->
+    erts_internal:new_connection(zz@nohost),
+    {ok, DH} = erts_internal:create_dist_channel(zz@nohost, self(), {mandatory(), 1}),
+    erlang:dist_ctrl_put_data(
+      DH, packet_only({29, remote_ref(zz@nohost), remote_pid(zz@nohost), self(),
+                       {erlang, spawn_opt, []}, []})).
 
 %% The element sizes, the control message, and the message of a packet,
 %% with the pid of the caller as self, each local reference as ref, and

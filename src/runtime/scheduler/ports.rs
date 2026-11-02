@@ -14,7 +14,7 @@ use crate::{
     error::{BeamError, error},
     runtime::{
         port::{self, Driver, Port, PortEvent, inet::Inet},
-        process::MonitorLinkTree,
+        process::{MonitorKey, MonitorLinkTree},
         signal::Signal,
     },
     term::{PortId, ProcessId, Reference, Term},
@@ -453,6 +453,7 @@ impl Scheduler {
             .controller_exits(super::dist_table::Controller::Port(id));
         if let Some(ended) = ended {
             self.dist_connection_down(&ended);
+            self.dist_monitor_down(&ended);
         }
         port.closing |= queued;
         let serving = port.scheduler;
@@ -629,6 +630,7 @@ impl Scheduler {
     /// Reason}`.
     fn port_monitors_down(&mut self, monitors: &[(ProcessId, Reference)], reason: &Term) {
         for &(watcher, reference) in monitors {
+            let reference = MonitorKey::Local(reference);
             self.send_monitor_down(None, watcher, reference, reason.clone());
         }
     }
@@ -664,10 +666,11 @@ impl Scheduler {
     /// ```rust,ignore
     /// scheduler.demonitor_port(port, reference);
     /// ```
-    pub(super) fn demonitor_port(&mut self, id: PortId, reference: Reference) {
+    pub(super) fn demonitor_port(&mut self, id: PortId, reference: MonitorKey) {
         // A port that closed has no monitor to remove.
         self.node.with_port(id, |port| {
-            port.monitors.retain(|&(_, item)| item != reference);
+            port.monitors
+                .retain(|&(_, item)| MonitorKey::Local(item) != reference);
         });
     }
 

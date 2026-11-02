@@ -26,9 +26,9 @@ use super::{
     nif::abi,
     pcre2::{self, Code, Deserialized},
     process::{
-        DirtyCall, Flush, Frame, LinkId, LinkState, Monitor, MonitorLinkTree, Origin,
-        OriginMonitor, Priority, ProcessState, ReceiveTimer, StackSlot, Start, StartFlags,
-        TargetMonitor, WalkPosition,
+        DirtyCall, Flush, Frame, LinkId, LinkState, Monitor, MonitorKey, MonitorLinkTree, Origin,
+        OriginMonitor, Priority, ProcessState, ReceiveTimer, RemotePid, RemoteWatcher, StackSlot,
+        Start, StartFlags, TargetMonitor, WalkPosition,
     },
     regex_code::{RegexCodes, RegexSources},
     resources::lock,
@@ -40,7 +40,7 @@ use crate::{
     beam::ModuleId,
     error::{BeamError, error},
     term::{
-        Atom, AtomTable, Group, LiveBytes, MapDrain, PortId, ProcessId, Reference,
+        Atom, AtomTable, Binary, Group, LiveBytes, MapDrain, PortId, ProcessId, Reference,
         SMALL_INTEGER_MIN, Term, external::block_hash, print_term,
     },
 };
@@ -122,7 +122,10 @@ enum Release {
     /// The mailbox of a process that left the process table.
     Mailbox(Mailbox),
     /// The monitors of a process that left the process table.
-    Monitors(MonitorLinkTree<Reference, Origin>),
+    Monitors(MonitorLinkTree<MonitorKey, Origin>),
+    /// The monitors of another node that wait for the end of the signal
+    /// phase of the exit of a process that left the process table.
+    DistMonitors(MonitorLinkTree<MonitorKey, RemoteWatcher>),
 }
 
 /// The number of slots of one chunk of the release work list. The stack
@@ -271,6 +274,8 @@ impl ReleaseStack {
 pub(super) enum MonitorTarget {
     /// The `process` type with a pid.
     Process(ProcessId),
+    /// The `process` type with a pid of another node.
+    RemoteProcess(RemotePid),
     /// The `process` type with a registered name, or with `{Name, Node}`
     /// and the local node.
     ProcessName(Atom),
@@ -344,6 +349,10 @@ enum ExitPhase {
     /// is not immediate, in post-order (`ERTS_CONTINUE_EXIT_DIST_LINKS`,
     /// `erl_process.c:14640-14656`).
     DistLinks(Option<WalkPosition>),
+    /// The monitors of other nodes whose monitor exit packet has a reason
+    /// that is not immediate, in post-order
+    /// (`ERTS_CONTINUE_EXIT_DIST_MONITORS`, `erl_process.c:14662-14671`).
+    DistMonitors(Option<WalkPosition>),
 }
 
 /// A scheduler on one OS thread. A process runs until it waits, exits, or
@@ -486,6 +495,16 @@ pub(super) struct Scheduler {
     index: usize,
     /// The read end of the wake socket of this scheduler.
     wake: Option<UnixStream>,
+    /// The port whose lock the scheduler holds in a step of its driver, as
+    /// [`Self::tcp_step`] holds it: the write of a distribution packet of
+    /// the port takes that lock, which the step holds already, so the
+    /// packet waits in [`Self::deferred_dist`] for the end of the step
+    /// (`Scheduler::dist_port_send`).
+    locked_port: Option<PortId>,
+    /// The distribution packets that wait for the end of the step of
+    /// [`Self::locked_port`], each as the binaries of its iovec, in the
+    /// order of `Scheduler::dist_port_send`.
+    deferred_dist: Vec<Vec<Binary>>,
 }
 
 /// Whether a spawn links the child to its parent.
@@ -568,6 +587,8 @@ impl Scheduler {
             multi: false,
             index: 0,
             wake: Some(wake),
+            locked_port: None,
+            deferred_dist: Vec::new(),
         }
     }
 
@@ -1061,6 +1082,9 @@ impl Scheduler {
                     }
                     self.release.extend(terms.drain(..).map(Release::Term));
                 }
+                // A monitor of another node holds no term: the watcher, the
+                // reference, and the connection are all `Copy` data.
+                Release::DistMonitors(_) => {}
             }
         }
     }
@@ -1108,6 +1132,9 @@ impl Scheduler {
             .push(Release::Dictionary(process.dictionary.take_entries()));
         self.release
             .push(Release::Monitors(std::mem::take(&mut process.monitors)));
+        self.release.push(Release::DistMonitors(std::mem::take(
+            &mut process.dist_monitors,
+        )));
     }
 
     /// Return the number of items of the release work list. The list is
@@ -2882,6 +2909,7 @@ impl Scheduler {
                         }
                     }
                 }
+                Release::DistMonitors(monitors) => live.add(monitors.allocated_bytes()),
             }
         }
         // Every item of the list flushes its own walk, and this closes the
@@ -3206,7 +3234,7 @@ impl Scheduler {
             let reference = self.make_ref()?;
             child.monitored_by.push(TargetMonitor::Process(Monitor {
                 watcher: parent,
-                reference,
+                reference: MonitorKey::Local(reference),
             }));
             let origin = Origin {
                 monitor: Some(OriginMonitor {
@@ -3214,12 +3242,14 @@ impl Scheduler {
                     target: Some(child.id),
                     item: Term::Pid(child.id),
                     tag,
+                    connection: 0,
                 }),
                 alias: None,
+                watched_by: None,
             };
             self.current_process_mut()
                 .monitors
-                .insert(reference, origin);
+                .insert(MonitorKey::Local(reference), origin);
             Some(reference)
         } else {
             None
@@ -3423,6 +3453,12 @@ impl Scheduler {
     /// always fails (`bif.c:907-914`). The `DOWN` message gives the pid as
     /// its item, or `{Name, Node}` with the local node for a name.
     ///
+    /// A pid of another node goes through the distribution layer (see
+    /// [`Self::dist_monitor`]). A monitor of a process of another node keeps
+    /// the id of the connection that it uses, and the end of that connection
+    /// gives the `DOWN` message with the reason `noconnection`
+    /// (`dist.c:2387-2391`, `305-310`).
+    ///
     /// With an alias option, the reference is also an alias of the current
     /// process, and the alias mode goes into the monitor tree.
     ///
@@ -3436,10 +3472,10 @@ impl Scheduler {
     /// # Errors
     ///
     /// The `priority` option of a monitor that is not of the current process
-    /// is not supported.
+    /// is not supported, and the errors of the distribution layer.
     pub(super) fn monitor(
         &mut self,
-        target: MonitorTarget,
+        target: &MonitorTarget,
         options: MonitorOptions,
     ) -> Result<Reference, BeamError> {
         let mut reference = self.make_ref()?;
@@ -3451,7 +3487,7 @@ impl Scheduler {
         }
         // A name of a port monitors the port (`erts_whereis_name_to_id`,
         // bif.c:898-922).
-        let target_port = match &target {
+        let target_port = match target {
             MonitorTarget::Port(port) => Some(*port),
             MonitorTarget::PortName(name) => match self.name_owner(self.atoms.name_of(name)) {
                 Some(Named::Port(port)) => Some(port),
@@ -3460,13 +3496,14 @@ impl Scheduler {
             _ => None,
         };
         let (kind, id, item) = match target {
-            MonitorTarget::Process(id) => ("process", Some(id), Term::Pid(id)),
+            MonitorTarget::Process(id) => ("process", Some(*id), Term::Pid(*id)),
             MonitorTarget::ProcessName(name) => {
-                let id = self.whereis(self.atoms.name_of(&name));
-                ("process", id, named_item(&name, &self.atoms))
+                let id = self.whereis(self.atoms.name_of(name));
+                ("process", id, named_item(name, &self.atoms))
             }
-            MonitorTarget::PortName(name) => ("port", None, named_item(&name, &self.atoms)),
-            MonitorTarget::Port(port) => ("port", None, Term::Port(port)),
+            MonitorTarget::PortName(name) => ("port", None, named_item(name, &self.atoms)),
+            MonitorTarget::Port(port) => ("port", None, Term::Port(*port)),
+            MonitorTarget::RemoteProcess(remote) => ("process", None, remote.term()),
         };
         if id == Some(watcher) {
             return Ok(reference);
@@ -3481,18 +3518,30 @@ impl Scheduler {
                 target: id,
                 item,
                 tag: options.tag,
+                connection: 0,
             }),
             alias: options.alias,
+            watched_by: None,
         };
-        self.current_process_mut()
-            .monitors
-            .insert(reference, origin);
-        match (id, target_port) {
-            (Some(id), _) if kind == "process" => {
-                self.send_monitor(id, Monitor { watcher, reference });
+        let key = MonitorKey::Local(reference);
+        self.current_process_mut().monitors.insert(key, origin);
+        match (id, target_port, target) {
+            (Some(id), _, _) if kind == "process" => {
+                self.send_monitor(
+                    id,
+                    Monitor {
+                        watcher,
+                        reference: key,
+                    },
+                );
             }
-            (_, Some(port)) if self.monitor_port(port, watcher, reference) => {}
-            _ => self.send_monitor_down(None, watcher, reference, Term::static_atom("noproc")),
+            (_, Some(port), _) if self.monitor_port(port, watcher, reference) => {}
+            // A pid of another node: `MONITOR_P` on the connection of its
+            // node (`bif.c:857`, `dist.c:1543-1547`).
+            (_, _, MonitorTarget::RemoteProcess(remote)) => {
+                self.dist_monitor(*remote, key, watcher)?;
+            }
+            _ => self.send_monitor_down(None, watcher, key, Term::static_atom("noproc")),
         }
         Ok(reference)
     }
@@ -3534,8 +3583,10 @@ impl Scheduler {
     /// monitor of the current process, also an alias without a monitor. An
     /// `explicit_unalias` alias stays without its monitor; another alias
     /// ends with its monitor (`bif.c:470-492`). A monitor of a process sends
-    /// a demonitor signal to it (`bif.c:512-514`). A `DOWN` signal of the
-    /// monitor that comes later finds no monitor and is dropped.
+    /// a demonitor signal to it (`bif.c:512-514`). A monitor of a process of
+    /// another node sends `DEMONITOR_P` on the connection of the monitor
+    /// (`erl_process.c:14115-14145`). A `DOWN` signal of the monitor that
+    /// comes later finds no monitor and is dropped.
     ///
     /// # Examples
     ///
@@ -3546,17 +3597,35 @@ impl Scheduler {
     /// ```
     pub(super) fn demonitor(&mut self, reference: Reference) -> bool {
         let watcher = self.current_process_mut().id;
+        self.demonitor_key(watcher, MonitorKey::Local(reference))
+    }
+
+    /// Remove the monitor `reference` of `watcher`, as
+    /// [`Self::demonitor`] does. The reference is of another node for a
+    /// monitor that a process of another node holds on `watcher`, which
+    /// then sends no `DEMONITOR_P` packet.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(scheduler.demonitor_key(watcher, MonitorKey::Local(reference)));
+    /// ```
+    pub(super) fn demonitor_key(&mut self, watcher: ProcessId, reference: MonitorKey) -> bool {
         let Some(monitor) = self.remove_origin_monitor(watcher, reference) else {
             return false;
         };
-        self.end_monitor(watcher, reference, &monitor);
+        self.end_monitor(watcher, reference, &monitor)
+            .expect("a control message of pids and references encodes");
         true
     }
 
     /// Remove the monitor `reference` of `watcher`, which left the monitor
-    /// tree of `watcher`, from its target. A monitor of a process sends a
-    /// demonitor signal to it (`bif.c:512-514`). A monitor of a port leaves
-    /// the port, as `erts_port_demonitor` does (io.c:2839-2870).
+    /// tree of `watcher`, from its target. A monitor of a local process
+    /// sends a demonitor signal to it (`bif.c:512-514`), and a monitor of a
+    /// process of another node sends `DEMONITOR_P` on the connection of
+    /// the monitor (`erl_process.c:14115-14145`, `13776-13790`). A monitor of
+    /// a port leaves the port, as `erts_port_demonitor` does
+    /// (io.c:2839-2870).
     ///
     /// # Examples
     ///
@@ -3567,23 +3636,28 @@ impl Scheduler {
     pub(super) fn end_monitor(
         &mut self,
         watcher: ProcessId,
-        reference: Reference,
+        reference: MonitorKey,
         monitor: &OriginMonitor,
-    ) {
+    ) -> Result<(), BeamError> {
         if let (Some(target), "process") = (monitor.target, monitor.kind) {
             let demonitor = Signal::Demonitor { watcher, reference };
             // A target that does not exist drops the signal.
             let _ = self.send_signal(Some(watcher), target, demonitor);
         }
+        if let Some(remote) = RemotePid::of(&monitor.item) {
+            self.dist_demonitor(watcher, remote, reference, monitor.connection)?;
+        }
         if let Term::Port(port) = monitor.item {
             self.demonitor_port(port, reference);
         }
+        Ok(())
     }
 
     /// Remove the monitor `reference` from the monitor tree of the process
     /// `id` and return it. An `explicit_unalias` alias stays as an alias
     /// without a monitor (`ERTS_ML_STATE_ALIAS_UNALIAS`); another alias ends
-    /// with the monitor. Return `None` when the tree has no such monitor.
+    /// with the monitor. Return `None` when the tree has no such monitor,
+    /// also when `id` is not alive.
     ///
     /// # Examples
     ///
@@ -3594,7 +3668,7 @@ impl Scheduler {
     fn remove_origin_monitor(
         &mut self,
         id: ProcessId,
-        reference: Reference,
+        reference: MonitorKey,
     ) -> Option<OriginMonitor> {
         let monitors = &mut self.processes.get_mut(id)?.monitors;
         let origin = monitors.get_mut(&reference)?;
@@ -4052,6 +4126,7 @@ impl Scheduler {
         let (ended, controllers) = self.node.net_exits(id, &self.atoms);
         for connection in &ended {
             self.dist_connection_down(connection);
+            self.dist_monitor_down(connection);
         }
         for controller in controllers {
             let controller = match controller {
@@ -4212,32 +4287,69 @@ impl Scheduler {
                     };
                     loop {
                         let position = walk.position();
-                        let Some((&reference, origin)) = walk.next() else {
+                        let Some((&key, origin)) = walk.next() else {
                             break;
                         };
                         if reds <= 0 {
                             self.switch_out_freed(process, ExitPhase::Monitors(position));
                             return Ok(());
                         }
-                        if let Some(OriginMonitor {
-                            kind: "process",
-                            target: Some(target),
-                            ..
-                        }) = &origin.monitor
-                        {
-                            let demonitor = Signal::Demonitor {
-                                watcher: id,
-                                reference,
-                            };
-                            // A target that does not exist drops the signal.
-                            let _ = self.send_signal(Some(id), *target, demonitor);
+                        if let Some(watcher) = origin.watched_by {
+                            // The exit of a local process reports to its
+                            // watcher of another node: `MONITOR_P_EXIT`, or
+                            // `PAYLOAD_MONITOR_P_EXIT` with the reason as the
+                            // message on a connection with
+                            // `DFLAG_EXIT_PAYLOAD`, at once for an immediate
+                            // reason and after the signal phase for another
+                            // reason (`erl_process.c:14115-14145`,
+                            // `13551-13650`).
+                            self.node.dist().remove_monitor(
+                                id,
+                                watcher.watcher,
+                                key,
+                                watcher.connection,
+                            );
+                            if signals::is_immediate(&reason) {
+                                let connection = watcher.connection;
+                                let target = dist_monitor::monitored(id, watcher.name);
+                                // The reason, the pid or the name of the
+                                // target, and the reference of another node
+                                // encode, so only the write of the packet
+                                // could fail, and ERTS asserts the result of
+                                // its send here (ASSERT(code ==
+                                // ERTS_DSIG_SEND_OK), `erl_process.c:14136`).
+                                self.dist_monitor_exit(
+                                    id,
+                                    watcher.watcher,
+                                    &target,
+                                    key,
+                                    connection,
+                                    &reason,
+                                )
+                                .expect("an immediate monitor exit packet encodes and writes");
+                            } else {
+                                process.dist_monitors.insert(key, watcher);
+                            }
                         }
-                        if let Some(OriginMonitor {
-                            item: Term::Port(port),
-                            ..
-                        }) = &origin.monitor
-                        {
-                            self.demonitor_port(*port, reference);
+                        if let Some(monitor) = &origin.monitor {
+                            if let Some(target) = monitor.target
+                                && monitor.kind == "process"
+                            {
+                                let demonitor = Signal::Demonitor {
+                                    watcher: id,
+                                    reference: key,
+                                };
+                                // A target that does not exist drops the
+                                // signal.
+                                let _ = self.send_signal(Some(id), target, demonitor);
+                            }
+                            if let Some(remote) = RemotePid::of(&monitor.item) {
+                                let connection = monitor.connection;
+                                self.dist_demonitor(id, remote, key, connection)?;
+                            }
+                            if let Term::Port(port) = monitor.item {
+                                self.demonitor_port(port, key);
+                            }
                         }
                         reds -= 1;
                     }
@@ -4301,6 +4413,34 @@ impl Scheduler {
                         self.dist_link_exit(id, remote, state.connection, &reason)?;
                         reds -= 1;
                     }
+                    ExitPhase::DistMonitors(None)
+                }
+                ExitPhase::DistMonitors(position) => {
+                    let mut walk = match position {
+                        Some(position) => process.dist_monitors.post_order_from(position),
+                        None => process.dist_monitors.post_order(),
+                    };
+                    loop {
+                        let position = walk.position();
+                        let Some((&key, &watcher)) = walk.next() else {
+                            break;
+                        };
+                        if reds <= 0 {
+                            self.switch_out_freed(process, ExitPhase::DistMonitors(position));
+                            return Ok(());
+                        }
+                        let connection = watcher.connection;
+                        let target = dist_monitor::monitored(id, watcher.name);
+                        self.dist_monitor_exit(
+                            id,
+                            watcher.watcher,
+                            &target,
+                            key,
+                            connection,
+                            &reason,
+                        )?;
+                        reds -= 1;
+                    }
                     break;
                 }
             };
@@ -4337,6 +4477,7 @@ fn named_item(name: &Atom, atoms: &AtomTable) -> Term {
 mod code;
 mod dist_input;
 mod dist_link;
+mod dist_monitor;
 pub(super) mod dist_output;
 pub(super) mod dist_table;
 mod known_nodes;

@@ -204,3 +204,55 @@ fn orders_the_nodes_by_state_and_by_the_time_of_each_change() {
     );
     assert_eq!(table.nodes()[0].kind, "known");
 }
+
+#[test]
+fn removes_the_monitor_of_its_own_connection_only() {
+    // `erts_monitor_dist_insert` adds the monitor to the entry of the
+    // connection, and `DEMONITOR_P` asks for the target of the monitor of
+    // its key and its watcher (`dist.c:2431-2457`), which the lookup of
+    // [`DistTable::watched_process`] gives from that list. A removal of a
+    // node without an entry, or of another connection, changes nothing
+    // (`dist.c:2441-2457`).
+    use super::MonitorSide;
+    use crate::runtime::process::{MonitorKey, RemotePid, RemoteReference};
+    let atoms = AtomTable::new();
+    let [a, b] = ["a@h", "b@h"].map(|name| atoms.put(name).unwrap());
+    let remote = |name: &crate::term::Atom| RemotePid {
+        node: name.index(),
+        creation: 1,
+        number: 2,
+        serial: 0,
+    };
+    let key = MonitorKey::Remote(RemoteReference {
+        node: a.index(),
+        creation: 1,
+        numbers: [3, 0, 0, 0, 0],
+        count: 1,
+    });
+    let mut table = DistTable::default();
+    table.insert(&a, Reference(7), 0);
+    table.new_connection(&a);
+    assert!(
+        table
+            .connect(&a, Controller::Process(ProcessId(1)), 0)
+            .is_some()
+    );
+    assert!(
+        table.insert_monitor(ProcessId(2), remote(&a), key, 1, MonitorSide::Watched),
+        "the monitor joins the entry of the connection"
+    );
+    assert_eq!(table.watched_process(remote(&a), key), Some(ProcessId(2)));
+    // A monitor of another pid, another watcher, and another node has no
+    // target here.
+    let other_key = MonitorKey::Local(Reference(9));
+    assert_eq!(table.watched_process(remote(&a), other_key), None);
+    // The node `b` has no entry, and the connection 2 is not the connection
+    // of the monitor, so both removals keep it.
+    let mut other = remote(&b);
+    other.number = 3;
+    table.remove_monitor(ProcessId(2), other, key, 1);
+    table.remove_monitor(ProcessId(2), remote(&a), key, 2);
+    assert_eq!(table.watched_process(remote(&a), key), Some(ProcessId(2)));
+    table.remove_monitor(ProcessId(2), remote(&a), key, 1);
+    assert_eq!(table.watched_process(remote(&a), key), None);
+}

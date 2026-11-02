@@ -68,6 +68,9 @@ impl Scheduler {
     /// a packet that ERTS rejects (see [`REJECTED`]), a control message
     /// with a trace token, another operation, and a term that PBeam cannot
     /// hold.
+    // `watched` and `watcher` are the names of the ERTS control message of a
+    // monitor exit packet (`dist.c:2690`).
+    #[expect(clippy::similar_names, reason = "the names are those of ERTS")]
     pub(in crate::runtime) fn net_message(
         &mut self,
         node: &Atom,
@@ -142,6 +145,20 @@ impl Scheduler {
             }
             (Some(24), [_, from, to]) => {
                 self.net_link_exit(node, from, to, |scheduler| scheduler.dist_message(message))
+            }
+            (Some(19), [_, from, to, reference]) => {
+                self.net_monitor(node, connection, from, to, reference)
+            }
+            (Some(20), [_, from, to, reference]) => {
+                self.net_demonitor(node, connection, from, to, reference)
+            }
+            (Some(21), [_, watched, watcher, reference, reason]) => {
+                self.net_monitor_exit(node, watched, watcher, reference, |_| Ok(reason.clone()))
+            }
+            (Some(28), [_, watched, watcher, reference]) => {
+                self.net_monitor_exit(node, watched, watcher, reference, |scheduler| {
+                    scheduler.dist_message(message)
+                })
             }
             (Some(12 | 13 | 16 | 18 | 23 | 25 | 27 | 34), _) => Err(error(
                 "unsupported distribution message with a trace token: see \"Distribution\" in docs/erts-differences.md",

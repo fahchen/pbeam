@@ -1,8 +1,40 @@
 //! The unit tests of the control signals of `src/runtime/signal.rs`.
 
 use super::Signal;
-use crate::runtime::process::LinkId;
+use crate::runtime::process::{LinkId, MonitorKey, RemotePid, RemoteReference};
 use crate::term::{Atom, PortId, ProcessId, Reference, Term};
+
+/// Return a reference of another node with the number `number`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(remote_reference(1).numbers(), &[1]);
+/// ```
+fn remote_reference(number: u32) -> RemoteReference {
+    RemoteReference {
+        node: 1,
+        creation: 1,
+        numbers: [number, 0, 0, 0, 0],
+        count: 1,
+    }
+}
+
+/// Return a pid of another node with the number `number`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(remote_pid(2).number(), 2);
+/// ```
+fn remote_pid(number: u32) -> RemotePid {
+    RemotePid {
+        node: 1,
+        creation: 1,
+        number,
+        serial: 0,
+    }
+}
 
 /// Return a term of one integer, for a test that tells terms apart.
 ///
@@ -38,7 +70,7 @@ fn visits_the_terms_of_a_signal() {
     };
     assert_eq!(terms(&dist_exit), vec![Term::Integer(6)]);
     let down = Signal::MonitorDown {
-        reference: Reference(1),
+        reference: MonitorKey::Local(Reference(1)),
         reason: Term::Integer(2),
     };
     assert_eq!(terms(&down), vec![Term::Integer(2)]);
@@ -88,7 +120,7 @@ fn takes_the_term_of_each_signal_that_holds_one() {
         ),
         (
             Signal::MonitorDown {
-                reference: Reference(1),
+                reference: MonitorKey::Local(Reference(1)),
                 reason: marker(2),
             },
             marker(2),
@@ -129,7 +161,7 @@ fn takes_no_term_of_a_signal_that_holds_none() {
         },
         Signal::Monitor {
             watcher: ProcessId(1),
-            reference: Reference(1),
+            reference: MonitorKey::Local(Reference(1)),
         },
         Signal::TtyMonitor { tty: Reference(1) },
         Signal::FileMonitor { file: Reference(1) },
@@ -143,7 +175,17 @@ fn takes_no_term_of_a_signal_that_holds_none() {
         },
         Signal::Demonitor {
             watcher: ProcessId(1),
-            reference: Reference(1),
+            reference: MonitorKey::Remote(remote_reference(1)),
+        },
+        Signal::DistMonitor {
+            watcher: remote_pid(2),
+            reference: MonitorKey::Remote(remote_reference(1)),
+            name: None,
+            connection: 1,
+        },
+        Signal::DistDemonitor {
+            watcher: remote_pid(2),
+            reference: MonitorKey::Remote(remote_reference(1)),
         },
         Signal::GroupLeader {
             leader: ProcessId(1),

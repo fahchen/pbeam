@@ -287,6 +287,14 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 - **Trigger:** a long run or a run that hashes large data.
 - **Source:** Fable review of PR #1117.
 
+### Give the link signals of an ended connection in the order of their links
+
+- **Now:** an ended connection gives its link exit signals `noconnection` from the newest link to the oldest, because `DistTable::insert_link` of `src/runtime/scheduler/dist_table.rs` puts each link at the front of the list, and ERTS gives them from the oldest link to the newest. `erts_link_list_insert` calls `erts_ml_dl_list_insert__` (`erl_monitor_link.h:1444-1447`), which puts each new element before the head and leaves the head pointer at the element that entered first, and `ml_dl_list_foreach_delete_yielding` walks from the head (`erl_monitor_link.c:517-548`).
+- **Evidence:** one pinned ERTS node links one local process to three of its processes in this order and halts it; ERTS gives `{'EXIT', P1, noconnection}`, then `P2`, then `P3`, the order of the three links, and PBeam gives the reverse. The dist monitors of the same two nodes keep the creation order (`DistTable::insert_monitor` puts each monitor at the end), so only the links are reversed.
+- **Option:** put each link at the end, as `insert_monitor` does, and correct the order claim of `dist_link.rs` and of the row "Distribution" of `docs/erts-differences.md`. The mon link list and the mon tree of ERTS also share the order of these two lists.
+- **Trigger:** one local process with several links to processes of a node whose connection ends, where the order of the exit signals is observable.
+- **Source:** work on #1493, which found the order while it verified the `DOWN` messages of an ended connection.
+
 ## Exceptions
 
 ### Check the ordered map iterator crash of ERTS at each OTP pin change
