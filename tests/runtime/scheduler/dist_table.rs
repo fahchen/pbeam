@@ -238,7 +238,14 @@ fn removes_the_monitor_of_its_own_connection_only() {
             .is_some()
     );
     assert!(
-        table.insert_monitor(ProcessId(2), remote(&a), key, 1, MonitorSide::Watched),
+        table.insert_monitor(
+            ProcessId(2),
+            &a,
+            Some(remote(&a)),
+            key,
+            1,
+            MonitorSide::Watched
+        ),
         "the monitor joins the entry of the connection"
     );
     assert_eq!(table.watched_process(remote(&a), key), Some(ProcessId(2)));
@@ -248,11 +255,9 @@ fn removes_the_monitor_of_its_own_connection_only() {
     assert_eq!(table.watched_process(remote(&a), other_key), None);
     // The node `b` has no entry, and the connection 2 is not the connection
     // of the monitor, so both removals keep it.
-    let mut other = remote(&b);
-    other.number = 3;
-    table.remove_monitor(ProcessId(2), other, key, 1);
-    table.remove_monitor(ProcessId(2), remote(&a), key, 2);
+    table.remove_monitor(ProcessId(2), &b, key, 1);
+    table.remove_monitor(ProcessId(2), &a, key, 2);
     assert_eq!(table.watched_process(remote(&a), key), Some(ProcessId(2)));
-    table.remove_monitor(ProcessId(2), remote(&a), key, 1);
+    table.remove_monitor(ProcessId(2), &a, key, 1);
     assert_eq!(table.watched_process(remote(&a), key), None);
 }

@@ -437,6 +437,76 @@ pub(super) struct OriginMonitor {
     /// (`erl_process.c:14126-14141`). A monitor of a local process or of a
     /// port has the connection 0.
     pub(super) connection: u32,
+    /// The pid or the name of another node that the monitor watches, or
+    /// `None` for a monitor of a process or a port of this node
+    /// (`ERTS_MON_TYPE_DIST_PROC`, `bif.c:811-894`).
+    pub(super) remote: Option<RemoteTarget>,
+}
+
+/// The target of a monitor of a process of another node: the pid of the
+/// process, or a registered name of its node (`bif.c:811-894`,
+/// `dist.c:2364-2380`). The packets name the pid or the atom, and the
+/// `DOWN` message of a name names `{Name, Node}`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum RemoteTarget {
+    /// A pid of the node.
+    Pid(RemotePid),
+    /// A registered name of the node.
+    Name {
+        /// The registered name.
+        name: Atom,
+        /// The node of the name.
+        node: Atom,
+    },
+}
+
+impl RemoteTarget {
+    /// Return the node that the monitor uses.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(target.node(), name_of_the_node);
+    /// ```
+    pub(super) fn node(&self) -> Atom {
+        match self {
+            RemoteTarget::Pid(remote) => remote.node(),
+            RemoteTarget::Name { node, .. } => node.clone(),
+        }
+    }
+
+    /// Return the term that `MONITOR_P` and `DEMONITOR_P` name as the
+    /// target: the pid, or the atom of the name (`dist.c:1543-1547`,
+    /// `1554-1570`, `2364-2380`, `2441-2457`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(target.term(), remote.term());
+    /// ```
+    pub(super) fn term(&self) -> Term {
+        match self {
+            RemoteTarget::Pid(remote) => remote.term(),
+            RemoteTarget::Name { name, .. } => Term::Atom(name.clone()),
+        }
+    }
+
+    /// Return the fourth element of the `DOWN` message: the pid, or
+    /// `{Name, Node}` (`erl_proc_sig_queue.c:4942-4955`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(target.item(), remote.term());
+    /// ```
+    pub(super) fn item(&self) -> Term {
+        match self {
+            RemoteTarget::Pid(remote) => remote.term(),
+            RemoteTarget::Name { name, node } => {
+                Term::tuple(vec![Term::Atom(name.clone()), Term::Atom(node.clone())])
+            }
+        }
+    }
 }
 
 /// The state of a BIF that handles the signals of its caller up to a flush

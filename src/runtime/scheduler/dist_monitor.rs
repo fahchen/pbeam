@@ -33,7 +33,7 @@ use super::{Scheduler, dist_output::EXIT_PAYLOAD, dist_table::MonitorSide};
 use crate::{
     error::{BeamError, error},
     runtime::{
-        process::{MonitorKey, RemotePid, RemoteReference},
+        process::{MonitorKey, RemotePid, RemoteReference, RemoteTarget},
         signal::Signal,
     },
     term::{Atom, ProcessId, Term, external_id},
@@ -61,12 +61,13 @@ const DIST_MONITOR_NAME: u64 = 0x20;
 const MONITOR_FLAGS: u64 = DIST_MONITOR | DIST_MONITOR_NAME;
 
 impl Scheduler {
-    /// Monitor the process `remote` of another node for the local process
-    /// `watcher` with the reference `key`, as `monitor` does
-    /// (`bif.c:830-935`): the monitor becomes active on the connection of
-    /// the node, and the node gets `MONITOR_P` (`dist.c:1543-1547`). Without
-    /// a connection `watcher` gets the monitor down signal `noconnection`
-    /// (`bif.c:842-849`), which removes the monitor.
+    /// Monitor the process `remote` of another node, or a registered name
+    /// of that node, for the local process `watcher` with the reference
+    /// `key`, as `monitor` does (`bif.c:830-935`): the monitor becomes
+    /// active on the connection of the node, and the node gets `MONITOR_P`
+    /// (`dist.c:1543-1547`). Without a connection `watcher` gets the
+    /// monitor down signal `noconnection` (`bif.c:842-849`), which removes
+    /// the monitor.
     ///
     /// A node without the monitor flags gets no packet, so the monitor only
     /// watches the connection (`dist.c:1533-1541`).
@@ -74,7 +75,7 @@ impl Scheduler {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.dist_monitor(remote, key, watcher)?;
+    /// scheduler.dist_monitor(&target, key, watcher)?;
     /// ```
     ///
     /// # Errors
@@ -82,14 +83,15 @@ impl Scheduler {
     /// The errors of the encode of the control message.
     pub(super) fn dist_monitor(
         &mut self,
-        remote: RemotePid,
+        target: &RemoteTarget,
         key: MonitorKey,
         watcher: ProcessId,
     ) -> Result<(), BeamError> {
         let mut used = None;
-        let to = remote.term();
+        let to = target.term();
+        let node = target.node();
         let from = Term::Pid(watcher);
-        self.dist_output(watcher, &remote.node(), |flags, connection| {
+        self.dist_output(watcher, &node, |flags, connection| {
             used = Some(connection);
             (flags & MONITOR_FLAGS == MONITOR_FLAGS).then(|| {
                 let control = monitor_control(MONITOR_P, &from, &to, key, None);
@@ -102,13 +104,13 @@ impl Scheduler {
             self.monitor_down_noconnection(watcher, key);
             return Ok(());
         };
-        self.monitor_on(watcher, remote, key, connection);
+        self.monitor_on(watcher, target, key, connection);
         Ok(())
     }
 
     /// Make the monitor `key` that the local process `watcher` holds of
-    /// `remote` active on the connection `connection`, as `monitor` does
-    /// for a pid of another node (`bif.c:830-863`).
+    /// `target`, a pid or a name of another node, active on the connection
+    /// `connection`, as `monitor` does (`bif.c:830-863`).
     ///
     /// `dist_output` releases the lock of the dist entry when it writes the
     /// packet, so the connection can end before the insert. The monitor
@@ -118,12 +120,12 @@ impl Scheduler {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.monitor_on(watcher, remote, key, connection);
+    /// scheduler.monitor_on(watcher, &target, key, connection);
     /// ```
     pub(super) fn monitor_on(
         &mut self,
         watcher: ProcessId,
-        remote: RemotePid,
+        target: &RemoteTarget,
         key: MonitorKey,
         connection: u32,
     ) {
@@ -135,11 +137,19 @@ impl Scheduler {
         if let Some(monitor) = monitor {
             monitor.connection = connection;
         }
-        if !self
-            .node
-            .dist()
-            .insert_monitor(watcher, remote, key, connection, MonitorSide::Watcher)
-        {
+        let remote = match target {
+            RemoteTarget::Pid(remote) => Some(*remote),
+            RemoteTarget::Name { .. } => None,
+        };
+        let node = target.node();
+        if !self.node.dist().insert_monitor(
+            watcher,
+            &node,
+            remote,
+            key,
+            connection,
+            MonitorSide::Watcher,
+        ) {
             self.monitor_down_noconnection(watcher, key);
         }
     }
@@ -193,7 +203,9 @@ impl Scheduler {
                 // of the connection removes it with no `DOWN` message
                 // (`dist.c:315-320`).
                 Signal::DistDemonitor {
-                    watcher: monitor.remote,
+                    watcher: monitor
+                        .remote
+                        .expect("a monitor of the other node names its watcher"),
                     reference: monitor.key,
                 }
             };
@@ -202,15 +214,15 @@ impl Scheduler {
     }
 
     /// Send `DEMONITOR_P` for the monitor `key` that the local process
-    /// `process` holds of `remote`, on the connection `connection` that the
-    /// monitor uses, as `erts_dsig_send_demonitor` does
-    /// (`dist.c:1554-1570`). A connection with another id, or no connection,
-    /// drops the packet.
+    /// `process` holds of `target`, a pid or a name of another node, on the
+    /// connection `connection` that the monitor uses, as
+    /// `erts_dsig_send_demonitor` does (`dist.c:1554-1570`). A connection
+    /// with another id, or no connection, drops the packet.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.dist_demonitor(process, remote, key, connection)?;
+    /// scheduler.dist_demonitor(process, &target, key, connection)?;
     /// ```
     ///
     /// # Errors
@@ -219,15 +231,16 @@ impl Scheduler {
     pub(super) fn dist_demonitor(
         &mut self,
         process: ProcessId,
-        remote: RemotePid,
+        target: &RemoteTarget,
         key: MonitorKey,
         connection: u32,
     ) -> Result<(), BeamError> {
+        let node = target.node();
         self.node
             .dist()
-            .remove_monitor(process, remote, key, connection);
-        let to = remote.term();
-        self.dist_output(process, &remote.node(), |flags, current| {
+            .remove_monitor(process, &node, key, connection);
+        let to = target.term();
+        self.dist_output(process, &node, |flags, current| {
             (flags & MONITOR_FLAGS == MONITOR_FLAGS && current == connection).then(|| {
                 let control = monitor_control(DEMONITOR_P, &Term::Pid(process), &to, key, None);
                 (control, None)
@@ -334,11 +347,14 @@ impl Scheduler {
         // when the signal waits in the queue. An insert that fails answers
         // nothing, because the connection of the packet ended
         // (`dist.c:2387-2391`).
-        if !self
-            .node
-            .dist()
-            .insert_monitor(target, remote, key, connection, MonitorSide::Watched)
-        {
+        if !self.node.dist().insert_monitor(
+            target,
+            node,
+            Some(remote),
+            key,
+            connection,
+            MonitorSide::Watched,
+        ) {
             return Ok(());
         }
         let signal = Signal::DistMonitor {
@@ -352,7 +368,7 @@ impl Scheduler {
             // `MONITOR_P_EXIT` with `noproc` (`dist.c:2400-2410`).
             self.node
                 .dist()
-                .remove_monitor(target, remote, key, connection);
+                .remove_monitor(target, node, key, connection);
             self.dead_target_signal(target, &signal);
         }
         Ok(())
@@ -429,7 +445,7 @@ impl Scheduler {
         };
         self.node
             .dist()
-            .remove_monitor(target, remote, key, connection);
+            .remove_monitor(target, node, key, connection);
         let _ = self.send_signal(
             None,
             target,
@@ -442,15 +458,19 @@ impl Scheduler {
     }
 
     /// Give the `MONITOR_P_EXIT` or `PAYLOAD_MONITOR_P_EXIT` with the reason
-    /// that `reason` gives from the pid `watched` of the node `node` to the
-    /// local pid `watcher`, as `erts_net_message` does
-    /// (`dist.c:2688-2746`): a live process gets the monitor down signal,
-    /// and a process that is not alive drops it before `reason` runs.
+    /// that `reason` gives from the pid or the registered name `watched` of
+    /// the node `node` to the local pid `watcher`, as `erts_net_message`
+    /// does (`dist.c:2688-2746`): a live process gets the monitor down
+    /// signal, and a process that is not alive drops it before `reason`
+    /// runs. The `DOWN` message names the monitored target from the origin
+    /// monitor of `watcher`, so the atom of the packet only has to be a name
+    /// (`dist.c:2732-2736`).
     ///
     /// # Errors
     ///
-    /// A `watched` that is not a pid of `node` and a `watcher` that is not
-    /// a local pid (see [`super::dist_input`]), and the errors of `reason`.
+    /// A `watched` that is not a pid of `node` and not an atom, and a
+    /// `watcher` that is not a local pid (see [`super::dist_input`]), and
+    /// the errors of `reason`.
     /// ERTS drops the packet for a `watcher` of an old incarnation of the
     /// local node (`dist.c:2717-2723`); PBeam rejects it, as
     /// [`super::dist_link::Scheduler::net_link_exit`] rejects such a target
@@ -464,9 +484,13 @@ impl Scheduler {
         reference: &Term,
         reason: impl FnOnce(&Self) -> Result<Term, BeamError>,
     ) -> Result<(), BeamError> {
-        let Ok(_) = remote_of(node, watched) else {
-            return Err(error(super::dist_input::REJECTED));
-        };
+        // The watched term is a pid of the node or the atom of a name
+        // (`dist.c:2732-2736`); each other term rejects the packet.
+        match watched {
+            Term::Atom(_) => {}
+            _ if remote_of(node, watched).is_ok() => {}
+            _ => return Err(error(super::dist_input::REJECTED)),
+        }
         let Some(key) = monitor_key(reference) else {
             return Err(error(super::dist_input::REJECTED));
         };

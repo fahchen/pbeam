@@ -1,10 +1,9 @@
-%% The monitor of a registered name of a process of another node, which the
-%% MONITOR_P packet asks for: the node looks the name up when it gets the
+%% The monitor of a registered name of a process of another node: the
+%% MONITOR_P packet asks for the name, the node looks it up when it gets the
 %% packet, gives the monitor to the process that the name has then, and
 %% answers MONITOR_P_EXIT with noproc for a name that no process has
 %% (dist.c:2364-2379, 2398-2410, 2431-2459; erl_process.c:13844-13847). The
-%% local erlang:monitor/2,3 of {Name, Node} stays out of scope (#1494), so
-%% the client always runs on ERTS here and only the server changes.
+%% DOWN item of a name is {Name, Node} (bif.c:875-894).
 -module(dist_name_probe).
 -export([server/0, client/1]).
 
@@ -34,7 +33,8 @@ serve() ->
 
 %% Monitor the name of the server node, keep one monitor to the end, remove
 %% one before the exit, then remove a monitor that ended, and ask for a name
-%% that no process has. The client stops the server node after its result, so
+%% that no process has. The last monitor ends with the connection, which
+%% gives noconnection. The client stops the server node after its result, so
 %% the test records the coverage of the runs of the server: a node that the
 %% test kills writes no profile.
 client(Server) ->
@@ -46,7 +46,7 @@ client(Server) ->
     true = demonitor(Removed, [flush]),
     Kept = monitor(process, {dmname, Server}),
     Victim ! {exit, boom},
-    Down = down(Kept),
+    Down = down(Kept, {dmname, Server}),
     %% The removal of a monitor whose target exited still sends its
     %% DEMONITOR_P (bif.c:525-570), and the name then names the target of no
     %% monitor of the connection, so the node removes nothing
@@ -54,24 +54,31 @@ client(Server) ->
     Late = demonitor(Kept, [flush]),
     Kept2 = receive {'DOWN', Removed, _, _, _} -> down after 1000 -> none end,
     Missing = monitor(process, {'no such name', Server}),
-    Noproc = down(Missing),
-    io:format("~p~n", [[{down, Down}, {removed, Kept2}, {late, Late}, {noproc, Noproc}]]),
-    stopped(Server).
+    Noproc = down(Missing, {'no such name', Server}),
+    Lost = stopped(Server),
+    io:format("~p~n", [[{down, Down}, {removed, Kept2}, {late, Late},
+                        {noproc, Noproc}, {lost, Lost}]]),
+    ok.
 
-%% Stop the node `Server` and wait until the connection to it ends, as the
-%% end of the node closes it. The run of a PBeam node writes its own
-%% profile when it ends on its own; a run that the test kills writes none.
+%% Monitor the name of the server process, stop the node, and return the
+%% reason of the DOWN message, which the end of the connection gives. The run
+%% of a PBeam node writes its own profile when it ends on its own; a run that
+%% the test kills writes none.
 stopped(Server) ->
     Watched = monitor(process, {dmon, Server}),
     {dmon, Server} ! stop,
-    receive {'DOWN', Watched, _, _, _} -> ok after 10000 -> timeout end,
-    ok.
+    down(Watched, {dmon, Server}).
 
 victim(Server) ->
     {dmon, Server} ! {victim, self()},
     receive {victim, Victim} -> Victim after 10000 -> undefined end.
 
-%% Wait for the DOWN message of `Ref` and return its reason, or `timeout`
-%% after ten seconds.
-down(Ref) ->
-    receive {'DOWN', Ref, process, _, Why} -> Why after 10000 -> timeout end.
+%% Wait for the DOWN message of `Ref` and return its reason when its item is
+%% `Item`, or `{wrong_item, Other}` for another item, or `timeout` after ten
+%% seconds.
+down(Ref, Item) ->
+    receive
+        {'DOWN', Ref, process, Item, Why} -> Why;
+        {'DOWN', Ref, process, Other, _} -> {wrong_item, Other}
+    after 10000 -> timeout
+    end.

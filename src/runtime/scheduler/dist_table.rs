@@ -117,21 +117,25 @@ struct Entry {
     monitors: Vec<DistMonitor>,
 }
 
-/// One monitor of a connection: the local process, the pid of the other
-/// node, the reference of the monitor, and the side of the local process
-/// (`ERTS_MON_TYPE_DIST_PROC`, `dist.c:2387-2400`, `bif.c:853`).
+/// One monitor of a connection: the local process, the pid or the name of
+/// the other node, the reference of the monitor, and the side of the local
+/// process (`ERTS_MON_TYPE_DIST_PROC`, `dist.c:2387-2400`, `bif.c:853`,
+/// `875-894`).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// let monitor = DistMonitor { process, remote, key, side: MonitorSide::Watcher };
+/// let monitor = DistMonitor { process, remote: Some(remote), key, side: MonitorSide::Watcher };
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::runtime) struct DistMonitor {
     /// The local process of the monitor.
     pub(in crate::runtime) process: ProcessId,
-    /// The pid of the other node.
-    pub(in crate::runtime) remote: RemotePid,
+    /// The pid of the other node: the watched process of a monitor that the
+    /// local process holds, or the watcher of a monitor that the other node
+    /// holds on the local process. `None` for a monitor of a registered
+    /// name, where the packets name the atom (`bif.c:875-894`).
+    pub(in crate::runtime) remote: Option<RemotePid>,
     /// The reference of the monitor, which its watcher made.
     pub(in crate::runtime) key: MonitorKey,
     /// The side of the local process in the monitor.
@@ -624,10 +628,12 @@ impl DistTable {
         entry.links.retain(|&link| link != (process, remote));
     }
 
-    /// Add the monitor `key` of `process` of `remote` to the connection
-    /// `connection` of the entry of its node, at the end of the list, as
-    /// `erts_monitor_dist_insert` does (`erl_monitor_link.h:1534-1566`,
-    /// `651-668`), and return whether the connection has the monitor.
+    /// Add the monitor `key` of `process` on the pid `remote` of the node
+    /// `node`, or on a name of `node` when `remote` is `None`, to the
+    /// connection `connection` of the entry of that node, at the end of the
+    /// list, as `erts_monitor_dist_insert` does
+    /// (`erl_monitor_link.h:1534-1566`, `651-668`), and return whether the
+    /// connection has the monitor.
     /// The end of a connection then reports the oldest monitor first
     /// (`dist.c:1075-1079`).
     /// Return `false` when the entry is not connected to `connection`, so
@@ -637,19 +643,20 @@ impl DistTable {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert!(table.insert_monitor(ProcessId(1), remote, key, 1, MonitorSide::Watcher));
+    /// assert!(table.insert_monitor(ProcessId(1), &node, Some(remote), key, 1, MonitorSide::Watcher));
     /// ```
     pub(in crate::runtime) fn insert_monitor(
         &mut self,
         process: ProcessId,
-        remote: RemotePid,
+        node: &Atom,
+        remote: Option<RemotePid>,
         key: MonitorKey,
         connection: u32,
         side: MonitorSide,
     ) -> bool {
         let entry = self
             .entries
-            .get_mut(&remote.node)
+            .get_mut(&node.index())
             .expect("the entry of the node stays in the table");
         if entry.state != State::Connected || entry.connection_id != connection {
             return false;
@@ -664,6 +671,19 @@ impl DistTable {
             entry.monitors.push(monitor);
         }
         true
+    }
+
+    /// Return the monitors of the connection of `node`, from the oldest to
+    /// the newest, for a test.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(table.monitors(&node).is_empty());
+    /// ```
+    #[cfg(test)]
+    pub(in crate::runtime) fn monitors(&self, node: &Atom) -> &[DistMonitor] {
+        &self.entries[&node.index()].monitors
     }
 
     /// Return the local process that the monitor `key` of the pid `remote`
@@ -685,37 +705,41 @@ impl DistTable {
             .get(&remote.node)?
             .monitors
             .iter()
-            .find(|monitor| monitor.remote == remote && monitor.key == key)
+            .find(|monitor| {
+                monitor.side == MonitorSide::Watched
+                    && monitor.remote == Some(remote)
+                    && monitor.key == key
+            })
             .map(|monitor| monitor.process)
     }
 
-    /// Remove the monitor `key` of `process` of `remote` from the connection
-    /// `connection` of the entry of its node. The entry holds the monitors
-    /// of its current connection only, because the end of a connection
-    /// detaches its list (`dist.c:1065-1066`), so a signal of an older
-    /// connection removes nothing here.
+    /// Remove the monitor `key` of `process` on the node `node` from the
+    /// connection `connection` of the entry of that node. The entry holds
+    /// the monitors of its current connection only, because the end of a
+    /// connection detaches its list (`dist.c:1065-1066`), so a signal of an
+    /// older connection removes nothing here.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// table.remove_monitor(ProcessId(1), remote, key, 1);
+    /// table.remove_monitor(ProcessId(1), &node, key, 1);
     /// ```
     pub(in crate::runtime) fn remove_monitor(
         &mut self,
         process: ProcessId,
-        remote: RemotePid,
+        node: &Atom,
         key: MonitorKey,
         connection: u32,
     ) {
-        let Some(entry) = self.entries.get_mut(&remote.node) else {
+        let Some(entry) = self.entries.get_mut(&node.index()) else {
             return;
         };
         if entry.connection_id != connection {
             return;
         }
-        entry.monitors.retain(|monitor| {
-            monitor.process != process || monitor.remote != remote || monitor.key != key
-        });
+        entry
+            .monitors
+            .retain(|monitor| monitor.process != process || monitor.key != key);
     }
 
     /// Make each pending entry idle and return the links of each connection

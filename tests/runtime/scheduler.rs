@@ -1187,6 +1187,7 @@ fn moves_the_containers_of_an_exiting_process_to_the_release_work_list() {
                     item: marker(8),
                     tag: marker(9),
                     connection: 0,
+                    remote: None,
                 }),
                 alias: None,
                 watched_by: None,
@@ -1255,6 +1256,7 @@ fn releases_the_terms_of_every_container_of_an_exiting_process() {
                     item: item.clone(),
                     tag: tag.clone(),
                     connection: 0,
+                    remote: None,
                 }),
                 alias: None,
                 watched_by: None,
@@ -1531,6 +1533,7 @@ fn moves_the_monitors_of_an_exiting_process_in_batches() {
                         item: marker(i64::try_from(reference).unwrap()),
                         tag: marker(i64::try_from(reference).unwrap()),
                         connection: 0,
+                        remote: None,
                     }),
                     alias: None,
                     watched_by: None,
@@ -1718,6 +1721,7 @@ fn counts_the_bytes_of_the_release_work_list() {
                     item: marker(6),
                     tag: marker(7),
                     connection: 0,
+                    remote: None,
                 }),
                 alias: None,
                 watched_by: None,
@@ -2626,9 +2630,188 @@ fn gives_noconnection_to_a_monitor_without_a_connection() {
 }
 
 #[test]
+fn gives_noconnection_to_a_monitor_of_a_name_of_another_node() {
+    use super::signals::HandlingPoint;
+    // A node without a connection to the node of a name gives the watcher
+    // `noconnection` at once, and the `DOWN` item is `{Name, Node}`
+    // (`bif.c:842-849`, `875-894`).
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let id = current(&mut scheduler);
+    let node = scheduler.atoms.put("other@host").unwrap();
+    let registered = scheduler.atoms.put("dmname").unwrap();
+    let reference = scheduler
+        .monitor(
+            &MonitorTarget::RemoteName {
+                name: registered.clone(),
+                node: node.clone(),
+            },
+            no_options(),
+        )
+        .unwrap();
+    scheduler
+        .handle_signals(id, 100, 100, HandlingPoint::ScheduleIn)
+        .unwrap();
+    assert!(scheduler.processes[&id].monitors.is_empty());
+    assert_eq!(
+        messages(&scheduler, id.0),
+        [Term::tuple(vec![
+            atom("DOWN"),
+            Term::Reference(reference),
+            atom("process"),
+            Term::tuple(vec![Term::Atom(registered), Term::Atom(node)]),
+            atom("noconnection"),
+        ])]
+    );
+}
+
+#[test]
+fn removes_a_name_monitor_of_another_node_at_its_exit_packet() {
+    use super::{dist_table::Controller, signals::HandlingPoint};
+    // A `demonitor` of the watcher sends `DEMONITOR_P` with the atom of the
+    // name and removes the monitor from the connection (`bif.c:525-576`,
+    // `dist.c:2441-2457`). A `MONITOR_P_EXIT` names the atom, and the
+    // handler ends the monitor with the item `{Name, Node}` of the origin
+    // monitor and removes it from the connection
+    // (`dist.c:2688-2746`, `erl_proc_sig_queue.c:6409-6412`). A fixture
+    // cannot read the distribution table.
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let id = current(&mut scheduler);
+    let node = scheduler.atoms.put("other@host").unwrap();
+    let registered = scheduler.atoms.put("dmname").unwrap();
+    {
+        let mut dist = scheduler.node.dist();
+        dist.insert(&node, Reference(7), 0);
+        dist.new_connection(&node);
+        assert!(
+            dist.connect(&node, Controller::Process(ProcessId(90)), 0)
+                .is_some()
+        );
+    }
+    let target = MonitorTarget::RemoteName {
+        name: registered.clone(),
+        node: node.clone(),
+    };
+    let reference = scheduler.monitor(&target, no_options()).unwrap();
+    let key = MonitorKey::Local(reference);
+    assert_eq!(scheduler.node.dist().monitors(&node).len(), 1);
+    let monitor = scheduler
+        .remove_origin_monitor(id, key)
+        .expect("the watcher holds the monitor");
+    scheduler.end_monitor(id, key, &monitor).unwrap();
+    assert!(
+        scheduler.node.dist().monitors(&node).is_empty(),
+        "the demonitor removes the monitor of the connection"
+    );
+    let reference = scheduler.monitor(&target, no_options()).unwrap();
+    assert_eq!(scheduler.node.dist().monitors(&node).len(), 1);
+    scheduler
+        .net_monitor_exit(
+            &node,
+            &Term::Atom(registered.clone()),
+            &Term::Pid(id),
+            &Term::Reference(reference),
+            |_| Ok(atom("boom")),
+        )
+        .unwrap();
+    scheduler
+        .handle_signals(id, 100, 100, HandlingPoint::ScheduleIn)
+        .unwrap();
+    assert!(
+        scheduler.node.dist().monitors(&node).is_empty(),
+        "the exit packet removes the monitor of the connection"
+    );
+    assert_eq!(
+        messages(&scheduler, id.0),
+        [Term::tuple(vec![
+            atom("DOWN"),
+            Term::Reference(reference),
+            atom("process"),
+            Term::tuple(vec![Term::Atom(registered), Term::Atom(node)]),
+            atom("boom"),
+        ])]
+    );
+}
+
+#[test]
+fn resolves_the_name_of_a_monitor_packet_when_the_node_gets_it() {
+    use super::dist_table::Controller;
+    use crate::runtime::process::{RemotePid, RemoteReference};
+    // A `MONITOR_P` whose target is an atom looks the name up when the node
+    // gets the packet: the process that the name has then gets the monitor,
+    // and a name that no process has answers `MONITOR_P_EXIT` with `noproc`
+    // (`dist.c:2364-2379`, `2398-2410`).
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let id = current(&mut scheduler);
+    let node = scheduler.atoms.put("other@host").unwrap();
+    let registered = scheduler.atoms.put("dmtarget").unwrap();
+    let missing = scheduler.atoms.put("no such name").unwrap();
+    let watcher = RemotePid {
+        node: node.index(),
+        creation: 1,
+        number: 2,
+        serial: 0,
+    };
+    let reference = RemoteReference {
+        node: node.index(),
+        creation: 1,
+        numbers: [3, 0, 0, 0, 0],
+        count: 1,
+    };
+    {
+        let mut dist = scheduler.node.dist();
+        dist.insert(&node, Reference(7), 0);
+        dist.new_connection(&node);
+        assert!(
+            dist.connect(&node, Controller::Process(ProcessId(90)), 0)
+                .is_some()
+        );
+    }
+    scheduler
+        .register(&Term::Atom(registered.clone()), &Term::Pid(id))
+        .unwrap();
+    scheduler
+        .net_monitor(
+            &node,
+            1,
+            &watcher.term(),
+            &Term::Atom(registered),
+            &reference.term(),
+        )
+        .unwrap();
+    assert_eq!(
+        scheduler
+            .node
+            .dist()
+            .watched_process(watcher, MonitorKey::Remote(reference)),
+        Some(id),
+        "the name gives the monitor to the process that it has now"
+    );
+    let before = scheduler.node.dist().output(&node).1;
+    scheduler
+        .net_monitor(
+            &node,
+            1,
+            &watcher.term(),
+            &Term::Atom(missing),
+            &reference.term(),
+        )
+        .unwrap();
+    assert!(
+        scheduler.node.dist().output(&node).1 > before,
+        "the node answers a name that no process has with noproc"
+    );
+}
+
+#[test]
 fn gives_noconnection_to_a_monitor_of_a_connection_that_ended_before_the_insert() {
     use super::{dist_table::Controller, signals::HandlingPoint};
-    use crate::runtime::process::RemotePid;
+    use crate::runtime::process::{RemotePid, RemoteTarget};
     // `dist_output` writes `MONITOR_P` and releases the lock of the dist
     // entry, so the connection can end before the insert into the entry
     // (`dist.c:2387-2391`). The watcher then gets `noconnection`, as the end
@@ -2664,7 +2847,12 @@ fn gives_noconnection_to_a_monitor_of_a_connection_that_ended_before_the_insert(
         assert_eq!(dist.connection_id(&name), 2);
     }
     // The insert of the monitor of the connection that carried the packet.
-    scheduler.monitor_on(id, remote, MonitorKey::Local(reference), 1);
+    scheduler.monitor_on(
+        id,
+        &RemoteTarget::Pid(remote),
+        MonitorKey::Local(reference),
+        1,
+    );
     scheduler
         .handle_signals(id, 100, 100, HandlingPoint::ScheduleIn)
         .unwrap();
@@ -2878,9 +3066,9 @@ fn removes_a_monitor_of_another_node_at_the_exit_packet_of_its_target() {
     let reference = scheduler
         .monitor(&MonitorTarget::RemoteProcess(remote), no_options())
         .unwrap();
-    let key = MonitorKey::Local(reference);
-    assert!(
-        scheduler.node.dist().watched_process(remote, key).is_some(),
+    assert_eq!(
+        scheduler.node.dist().monitors(&name).len(),
+        1,
         "the connection holds the monitor of the packet"
     );
     scheduler
@@ -2899,9 +3087,8 @@ fn removes_a_monitor_of_another_node_at_the_exit_packet_of_its_target() {
         scheduler.processes[&id].monitors.is_empty(),
         "the exit packet removes the monitor of the watcher"
     );
-    assert_eq!(
-        scheduler.node.dist().watched_process(remote, key),
-        None,
+    assert!(
+        scheduler.node.dist().monitors(&name).is_empty(),
         "the exit packet removes the monitor of the connection"
     );
     assert_eq!(
