@@ -1,8 +1,8 @@
 use std::{collections::HashMap, sync::Arc};
 
 use super::{
-    CallKind, Frame, LinkId, LinkState, Origin, OriginMonitor, PendingBif, ProcessState,
-    ReceiveTimer, StackSlot, Start,
+    CallKind, Frame, LinkId, LinkState, MonitorKey, Origin, OriginMonitor, PendingBif,
+    ProcessState, ReceiveTimer, StackSlot, Start,
 };
 use crate::{
     BeamModule,
@@ -150,15 +150,17 @@ fn reports_the_bytes_of_the_process_containers_and_its_terms() {
 fn walks_the_terms_of_the_monitors_the_pending_bif_and_the_length_trap() {
     let mut process = ProcessState::new(ProcessId(0), Start::Entry(frame()), vec![]);
     process.monitors.insert(
-        Reference(1),
+        MonitorKey::Local(Reference(1)),
         Origin {
             monitor: Some(OriginMonitor {
                 kind: "process",
                 target: Some(ProcessId(1)),
                 item: Term::tuple(vec![Term::Integer(1)]),
                 tag: Term::static_atom("DOWN"),
+                connection: 0,
             }),
             alias: None,
+            watched_by: None,
         },
     );
     process.pending_bif = Some(PendingBif {
@@ -367,6 +369,42 @@ fn reads_the_current_function_and_the_error_handler_of_another_process() {
     );
     process.frames.push(frame());
     assert!(item(&process, "status").is_err());
+}
+
+#[test]
+fn reads_only_a_reference_of_another_node_as_a_monitor_key() {
+    use super::RemoteReference;
+    use crate::term::external_id::{ExternalData, ExternalId};
+    // Each monitor packet names its monitor with a reference
+    // (`dist.c:2360-2362`, `2702-2704`), and the reference of a monitor that
+    // a process of another node holds on a local process comes back from
+    // this node as a reference of this node (see `monitor_key`). An
+    // external reference of another node gives the `Copy` key of the
+    // monitor tree, and each other term has no key, so the node rejects the
+    // packet. A compiled fixture cannot send such a packet, because ERTS
+    // encodes a reference here and nothing else.
+    let atoms = crate::term::test_atom_table();
+    let external = |data| {
+        Term::External(Arc::new(ExternalId {
+            node: atoms.put("other@host").unwrap(),
+            creation: 1,
+            data,
+        }))
+    };
+    let reference = external(ExternalData::Reference(vec![3].into()));
+    assert!(RemoteReference::of(&reference).is_some());
+    assert!(
+        RemoteReference::of(&Term::Reference(Reference(1))).is_none(),
+        "a reference of this node is not an external term"
+    );
+    assert!(
+        RemoteReference::of(&external(ExternalData::Pid {
+            number: 2,
+            serial: 0,
+        }))
+        .is_none(),
+        "an external pid is not a reference"
+    );
 }
 
 /// An undefined start, whose frames need no code table.

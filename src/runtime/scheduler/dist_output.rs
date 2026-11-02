@@ -205,10 +205,21 @@ impl Scheduler {
     /// the lookup of the connection drops the packet, as ERTS drops it for
     /// an exiting connection.
     ///
+    /// A packet that the step of the input of the port itself causes waits
+    /// for the end of that step: the step holds the lock of the port, which
+    /// is not reentrant, so the write cannot take it again. ERTS needs no
+    /// such step, because a driver callback queues the bytes of
+    /// `driver_outputv` in the port and the write of the queue runs after
+    /// the callback returns (`inet_drv.c:12600-12610`).
+    ///
     /// # Errors
     ///
     /// The errors of [`Self::send_events`].
     fn dist_port_send(&mut self, port: PortId, elements: &[Binary]) -> Result<(), BeamError> {
+        if self.locked_port == Some(port) {
+            self.deferred_dist.push(elements.to_vec());
+            return Ok(());
+        }
         let bytes: Vec<u8> = elements.iter().flat_map(Binary::to_bytes).collect();
         let node = Arc::clone(&self.node);
         let exit = node.with_port(port, |item| {
@@ -222,6 +233,20 @@ impl Scheduler {
         });
         if let Some(exit) = exit.transpose()? {
             self.end_step(port, exit);
+        }
+        Ok(())
+    }
+
+    /// Write the packets that [`Self::dist_port_send`] held back for the end
+    /// of the step of the port `port`, as the controller of a connection
+    /// takes each packet of the output queue of its entry.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`Self::dist_port_send`].
+    pub(super) fn dist_port_flush(&mut self, port: PortId) -> Result<(), BeamError> {
+        for elements in std::mem::take(&mut self.deferred_dist) {
+            self.dist_port_send(port, &elements)?;
         }
         Ok(())
     }

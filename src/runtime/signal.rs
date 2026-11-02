@@ -17,7 +17,7 @@
 
 use super::{
     capability::{Capability, CapabilityId},
-    process::{LinkId, RemotePid},
+    process::{LinkId, MonitorKey, RemotePid},
 };
 use crate::term::{Atom, PortId, ProcessId, Reference, Term};
 
@@ -142,8 +142,8 @@ pub(super) enum Signal {
     Monitor {
         /// The process that gets the `DOWN` message.
         watcher: ProcessId,
-        /// The reference of the monitor.
-        reference: Reference,
+        /// The reference of the monitor, which its watcher made.
+        reference: MonitorKey,
     },
     /// `ERTS_SIG_Q_OP_MONITOR` of a resource monitor: `enif_monitor_process`
     /// (`erl_nif.c:3957-3989`) in `prim_tty:tty_init/2` or
@@ -230,7 +230,36 @@ pub(super) enum Signal {
         /// The process that removed the monitor.
         watcher: ProcessId,
         /// The reference of the monitor.
-        reference: Reference,
+        reference: MonitorKey,
+    },
+    /// `ERTS_SIG_Q_OP_MONITOR` from a pid of another node: the `MONITOR_P`
+    /// packet (`dist.c:2341-2412`). The receiver adds the target monitor
+    /// for 2 (`erl_proc_sig_queue.c:6544-6562`). At exit it answers with
+    /// `MONITOR_P_EXIT` and the reason `noproc` on the connection of the
+    /// monitor (`erl_process.c:13551-13650`).
+    DistMonitor {
+        /// The pid of the other node that monitors.
+        watcher: RemotePid,
+        /// The reference of the monitor, which the other node made.
+        reference: MonitorKey,
+        /// The atom-table index of the registered name that the
+        /// `MONITOR_P` packet asked for, or `None` when it asked for the pid
+        /// of the target. The monitor exit packet names the target as the
+        /// packet did (`ERTS_ML_FLG_NAME`, `dist.c:2368-2372`,
+        /// `erl_process.c:13844-13847`).
+        name: Option<u32>,
+        /// The id of the connection that the packet came on.
+        connection: u32,
+    },
+    /// `ERTS_SIG_Q_OP_DEMONITOR` from a pid of another node: the
+    /// `DEMONITOR_P` packet (`dist.c:2414-2470`). The receiver removes the
+    /// target monitor for 1, and 1 more when the monitor was there
+    /// (`erl_proc_sig_queue.c:6564-6633`). At exit it is dropped.
+    DistDemonitor {
+        /// The pid of the other node that removed the monitor.
+        watcher: RemotePid,
+        /// The reference of the monitor.
+        reference: MonitorKey,
     },
     /// `ERTS_SIG_Q_OP_MONITOR_DOWN`: the monitored target exited, or it did
     /// not exist. The receiver, which is the watcher, makes the `DOWN`
@@ -239,11 +268,12 @@ pub(super) enum Signal {
     /// `erl_proc_sig_queue.c:4837-5060`) and 1 for another reason
     /// (`convert_prepared_down_message`, `erl_proc_sig_queue.c:4817-4835`).
     /// The receiver drops the signal for 0 when it has no such origin
-    /// monitor (`erl_proc_sig_queue.c:6370-6381`, `6449-6457`). At exit it is
-    /// dropped.
+    /// monitor (`erl_proc_sig_queue.c:6370-6381`, `6449-6457`). The reference is
+    /// of another node when the node of the watcher made it
+    /// (`dist.c:2387-2400`). At exit it is dropped.
     MonitorDown {
         /// The reference of the monitor.
-        reference: Reference,
+        reference: MonitorKey,
         /// The exit reason of the target, or `noproc`.
         reason: Term,
     },
@@ -450,6 +480,16 @@ impl Signal {
                 reference: _,
             }
             | Signal::Demonitor {
+                watcher: _,
+                reference: _,
+            }
+            | Signal::DistMonitor {
+                watcher: _,
+                reference: _,
+                name: _,
+                connection: _,
+            }
+            | Signal::DistDemonitor {
                 watcher: _,
                 reference: _,
             }

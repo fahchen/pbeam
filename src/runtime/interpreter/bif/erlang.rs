@@ -24,7 +24,7 @@ use crate::runtime::host;
 use crate::runtime::interpreter::DEFAULT_ERROR_HANDLER;
 use crate::runtime::interpreter::code_table::{AfterOnLoad, CodeTable, Finish};
 use crate::runtime::local_node;
-use crate::runtime::process::{Flush, Origin, Priority};
+use crate::runtime::process::{Flush, MonitorKey, Origin, Priority};
 use crate::runtime::process::{InitialCall, OTHER_PROCESS_INFO_ITEMS};
 use crate::runtime::process::{LinkId, ProcessState, RemotePid};
 use crate::runtime::scheduler::PTAB_SIZE;
@@ -1769,9 +1769,11 @@ pub(super) fn monitor(
         {
             Some(Err(old_monitor_unsupported()))
         }
-        ("process", Term::External(_)) if pid_parts(target).is_some() => {
-            Some(Err(remote_unsupported("erlang:monitor/2,3")))
-        }
+        // ERTS monitors a pid of another node over the connection of that
+        // node (`bif.c:830-863`, `857`, `dist.c:1543-1547`).
+        ("process", Term::External(_)) if pid_parts(target).is_some() => Some(Ok(
+            MonitorTarget::RemoteProcess(RemotePid::of(target).expect("the target is a pid")),
+        )),
         // An alive node monitors `{Name, Node}` with another node on that
         // node (`bif.c:875-893`).
         ("process", Term::Tuple(pair))
@@ -1800,7 +1802,8 @@ pub(super) fn monitor(
     if let Some(denied) = denial(scheduler, CapabilityKind::Process, Operation::Monitor, None)? {
         return Ok(denied);
     }
-    let reference = scheduler.monitor(target?, options)?;
+    let target = target?;
+    let reference = scheduler.monitor(&target, options)?;
     Ok(Value(Term::Reference(reference)))
 }
 
@@ -6881,12 +6884,13 @@ pub(super) fn alias(context: &mut BifContext<'_>, options: &Term) -> Result<BifR
         tag: Term::nil(),
         priority: false,
     };
-    let reference = scheduler.monitor(MonitorTarget::Process(caller), options)?;
+    let reference = scheduler.monitor(&MonitorTarget::Process(caller), options)?;
     scheduler.current_process_mut().monitors.insert(
-        reference,
+        MonitorKey::Local(reference),
         Origin {
             monitor: None,
             alias: Some(mode),
+            watched_by: None,
         },
     );
     Ok(Value(Term::Reference(reference)))
@@ -6929,7 +6933,8 @@ pub(super) fn unalias(
         return Ok(Value(Term::static_atom("false")));
     }
     let process = scheduler.current_process_mut();
-    let Some(origin) = process.monitors.get_mut(&reference) else {
+    let key = MonitorKey::Local(reference);
+    let Some(origin) = process.monitors.get_mut(&key) else {
         return Ok(Value(Term::static_atom("false")));
     };
     if origin.alias.is_none() {
@@ -6940,7 +6945,7 @@ pub(super) fn unalias(
     if origin.monitor.is_some() {
         origin.alias = None;
     } else {
-        process.monitors.remove(&reference);
+        process.monitors.remove(&key);
     }
     Ok(Value(Term::static_atom("true")))
 }

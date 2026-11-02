@@ -19,7 +19,7 @@ use crate::{
     error::{BeamError, error},
     term::{
         Atom, LiveBytes, PortId, ProcessId, Reference, Term,
-        external_id::{ExternalData, ExternalId},
+        external_id::{self, ExternalData, ExternalId},
     },
 };
 
@@ -102,6 +102,103 @@ impl RemotePid {
         data[..4].copy_from_slice(&self.number.to_le_bytes());
         data[4..].copy_from_slice(&self.serial.to_le_bytes());
         data
+    }
+}
+
+/// A reference of another node as `Copy` data, so that a monitor tree key
+/// stays `Copy`: the atom-table index of the node name, the creation, and the
+/// 0 to 5 reference numbers, the low number first
+/// (`external_thing_ref_numbers`, `erl_term.h:930-935`). Each number above
+/// the count is 0, so the key has one form for each reference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct RemoteReference {
+    /// The atom-table index of the node name.
+    pub(super) node: u32,
+    /// The creation of the node incarnation.
+    pub(super) creation: u32,
+    /// The reference numbers, the low number first.
+    pub(super) numbers: [u32; 5],
+    /// The count of the reference numbers.
+    pub(super) count: u8,
+}
+
+impl RemoteReference {
+    /// Return the reference `reference` of another node, or `None` for
+    /// another term. The high numbers that are 0 leave the count, as
+    /// [`super::external_id::significant`] reads it.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let remote = RemoteReference::of(&reference).unwrap();
+    /// assert_eq!(remote.term(), reference);
+    /// ```
+    pub(super) fn of(reference: &Term) -> Option<RemoteReference> {
+        let Term::External(id) = reference else {
+            return None;
+        };
+        let ExternalData::Reference(numbers) = &id.data else {
+            return None;
+        };
+        let numbers = external_id::significant(numbers);
+        let count = u8::try_from(numbers.len()).ok()?;
+        let mut copy = [0; 5];
+        copy[..numbers.len()].copy_from_slice(numbers);
+        Some(RemoteReference {
+            node: id.node.index(),
+            creation: id.creation,
+            numbers: copy,
+            count,
+        })
+    }
+
+    /// Return the name of the node of the reference.
+    pub(super) fn node(self) -> Atom {
+        Atom::from_index(self.node)
+    }
+
+    /// Return the reference numbers, the low number first.
+    pub(super) fn numbers(&self) -> &[u32] {
+        &self.numbers[..usize::from(self.count)]
+    }
+
+    /// Return the reference term.
+    pub(super) fn term(self) -> Term {
+        Term::External(Arc::new(ExternalId {
+            node: self.node(),
+            creation: self.creation,
+            data: ExternalData::Reference(self.numbers().into()),
+        }))
+    }
+}
+
+/// The key of an entry of the monitor tree of a process: the reference of
+/// the monitor, which the watcher of the monitor makes
+/// (`bif.c:765-767`). Thus a monitor that this process holds has a
+/// reference of this node, and a monitor that a process of another node
+/// holds on this process has a reference of that node
+/// (`dist.c:2387-2400`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MonitorKey {
+    /// A reference of this node.
+    Local(Reference),
+    /// A reference of another node.
+    Remote(RemoteReference),
+}
+
+impl MonitorKey {
+    /// Return the reference term of the key.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(MonitorKey::Local(Reference(1)).term(), Term::Reference(Reference(1)));
+    /// ```
+    pub(super) fn term(self) -> Term {
+        match self {
+            MonitorKey::Local(reference) => Term::Reference(reference),
+            MonitorKey::Remote(reference) => reference.term(),
+        }
     }
 }
 
@@ -245,8 +342,8 @@ pub(super) enum ReceiveTimer {
 pub(super) struct Monitor {
     /// The process that gets the monitor down signal.
     pub(super) watcher: ProcessId,
-    /// The reference of the monitor.
-    pub(super) reference: Reference,
+    /// The reference of the monitor, which its watcher made.
+    pub(super) reference: MonitorKey,
 }
 
 /// An entry of the target monitor list of a process (`ERTS_P_LT_MONITORS`,
@@ -279,16 +376,44 @@ pub(super) enum TargetMonitor {
 }
 
 /// An entry of the monitor tree of a process (`ERTS_P_MONITORS`): the
-/// origin part of a monitor that this process holds, an alias, or both.
+/// origin part of a monitor that this process holds, an alias, the target
+/// part of a monitor that a process of another node holds on this process,
+/// or an alias with its monitor.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct Origin {
     /// The monitor, or `None` for an alias without a monitor
     /// (`ERTS_MON_TYPE_ALIAS`): an `explicit_unalias` alias after its
-    /// monitor ended (`bif.c:470-482`, `erl_proc_sig_queue.c:6463-6480`).
+    /// monitor ended (`bif.c:470-482`, `erl_proc_sig_queue.c:6463-6480`),
+    /// and for the target part of a monitor of another node.
     pub(super) monitor: Option<OriginMonitor>,
     /// The mode of the alias of the reference, or `None` when the
     /// reference is not an active alias (`ERTS_ML_STATE_ALIAS_MASK`).
     pub(super) alias: Option<AliasMode>,
+    /// The process of another node that holds this monitor on this
+    /// process, or `None` for a monitor that this process holds
+    /// (`ERTS_MON_TYPE_DIST_PROC`, `dist.c:2387-2400`). ERTS keeps the target
+    /// part of such a monitor in this tree, not in the list of target
+    /// monitors (`erl_proc_sig_queue.c:6544-6562`).
+    pub(super) watched_by: Option<RemoteWatcher>,
+}
+
+/// The process of another node that holds a monitor on a local process
+/// (`ERTS_MON_TYPE_DIST_PROC`, `dist.c:2387-2400`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct RemoteWatcher {
+    /// The process of another node that gets the monitor exit packet at the
+    /// exit of the local process.
+    pub(super) watcher: RemotePid,
+    /// The atom-table index of the registered name that the `MONITOR_P`
+    /// packet asked for, or `None` when it asked for the pid of the local
+    /// process. The monitor exit packet names the target as the packet did
+    /// (`ERTS_ML_FLG_NAME`, `dist.c:2368-2372`,
+    /// `erl_process.c:13844-13847`).
+    pub(super) name: Option<u32>,
+    /// The id of the connection that carried the monitor packet, as
+    /// `ErtsMonLnkDist.connection_id` does
+    /// (`erl_process.c:14126-14141`, `13551-13650`).
+    pub(super) connection: u32,
 }
 
 /// The monitor of an [`Origin`]: what the watcher needs to make the
@@ -307,6 +432,11 @@ pub(super) struct OriginMonitor {
     /// The first element of the `DOWN` message: `'DOWN'`, or the `tag`
     /// option of `erlang:monitor/3` (`erl_proc_sig_queue.c:6417-6429`).
     pub(super) tag: Term,
+    /// The id of the connection of a monitor of a process of another node,
+    /// as `ErtsELink.dist->connection_id` does
+    /// (`erl_process.c:14126-14141`). A monitor of a local process or of a
+    /// port has the connection 0.
+    pub(super) connection: u32,
 }
 
 /// The state of a BIF that handles the signals of its caller up to a flush
@@ -512,8 +642,17 @@ pub(super) struct ProcessState {
     /// tree gives the ERTS order. Empty before the exit.
     pub(super) dist_links: MonitorLinkTree<RemotePid, LinkState>,
     /// The monitor tree: the monitors that this process holds and its
-    /// aliases, by reference (`ERTS_P_MONITORS`).
-    pub(super) monitors: MonitorLinkTree<Reference, Origin>,
+    /// aliases, by reference (`ERTS_P_MONITORS`), and the monitors that
+    /// processes of other nodes hold on this process, by the reference of
+    /// the other node (`dist.c:2387-2400`).
+    pub(super) monitors: MonitorLinkTree<MonitorKey, Origin>,
+    /// The monitors of another node that the exit of this process must
+    /// report with `MONITOR_P_EXIT` after its signal phase, because the
+    /// exit reason is not immediate (`ctxt->dist_monitors`,
+    /// `erl_process.c:14115-14145`, `14664-14671`). The tree keeps the
+    /// monitors in the walk order of [`Self::monitors`], so its walk gives
+    /// the ERTS order. Empty before the exit.
+    pub(super) dist_monitors: MonitorLinkTree<MonitorKey, RemoteWatcher>,
     /// The monitors on this process, in the order that the process handled
     /// their monitor signals (`ERTS_P_LT_MONITORS`,
     /// `erl_proc_sig_queue.c:6544-6562`). The exit of the process sends a
@@ -836,6 +975,7 @@ impl ProcessState {
             links: MonitorLinkTree::default(),
             dist_links: MonitorLinkTree::default(),
             monitors: MonitorLinkTree::default(),
+            dist_monitors: MonitorLinkTree::default(),
             monitored_by: Vec::new(),
             group_leader: id,
             dictionary: Dictionary::default(),
@@ -1088,6 +1228,7 @@ impl ProcessState {
             + self.links.allocated_bytes()
             + self.dist_links.allocated_bytes()
             + self.monitors.allocated_bytes()
+            + self.dist_monitors.allocated_bytes()
             + self.bif_timers.allocated_bytes();
         for frame in &self.frames {
             bytes += frame.allocated_bytes();

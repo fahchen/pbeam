@@ -8,8 +8,9 @@
 //! the one place that applies a signal to its receiver.
 
 use super::{
-    Files, Flush, LinkId, LinkState, Monitor, ProcessState, RECEIVE_FETCH_REDUCTIONS, Release,
-    SIGNAL_HANDLING_REDUCTIONS, Scheduler, TargetMonitor, check_process_code_reply, lock,
+    Files, Flush, LinkId, LinkState, Monitor, MonitorKey, Origin, ProcessState,
+    RECEIVE_FETCH_REDUCTIONS, Release, RemoteWatcher, SIGNAL_HANDLING_REDUCTIONS, Scheduler,
+    TargetMonitor, check_process_code_reply, dist_monitor::monitored, lock,
 };
 use crate::{
     error::BeamError,
@@ -17,6 +18,7 @@ use crate::{
         capability::Source,
         interpreter::bif,
         mailbox::{NodeId, Step, Walk},
+        process::RemotePid,
         scheduler::AliasMode,
         signal::Signal,
         sockets::Sockets,
@@ -307,6 +309,25 @@ impl Scheduler {
             Signal::Monitor { watcher, reference } => {
                 self.send_monitor_down(None, watcher, reference, Term::static_atom("noproc"));
             }
+            Signal::DistMonitor {
+                watcher,
+                reference,
+                name,
+                connection,
+            } => {
+                let to = monitored(target, name);
+                let result = self.net_monitor_noproc(
+                    &watcher.node(),
+                    &to,
+                    &watcher.term(),
+                    reference,
+                    connection,
+                );
+                debug_assert!(
+                    result.is_ok(),
+                    "a control message of pids and references encodes"
+                );
+            }
             Signal::Link { from } => {
                 let exit = Signal::Exit {
                     from: LinkId::Process(target),
@@ -477,7 +498,7 @@ impl Scheduler {
         &mut self,
         sender: Option<ProcessId>,
         watcher: ProcessId,
-        reference: Reference,
+        reference: MonitorKey,
         reason: Term,
     ) {
         let down = Signal::MonitorDown { reference, reason };
@@ -869,6 +890,40 @@ impl Scheduler {
                 monitors.retain(|target| *target != monitor);
                 1 + i32::from(monitors.len() < before)
             }
+            Signal::DistMonitor {
+                watcher,
+                reference,
+                name,
+                connection,
+            } => {
+                // The dist entry has the monitor of the connection already,
+                // because `net_monitor` inserts it before it sends this signal
+                // (`dist.c:2387-2391`).
+                let watched_by = RemoteWatcher {
+                    watcher,
+                    name,
+                    connection,
+                };
+                self.handled(id, node).monitors.insert(
+                    reference,
+                    Origin {
+                        monitor: None,
+                        alias: None,
+                        watched_by: Some(watched_by),
+                    },
+                );
+                2
+            }
+            Signal::DistDemonitor { watcher, reference } => {
+                let monitors = &mut self.handled(id, node).monitors;
+                let removed = monitors
+                    .get(&reference)
+                    .is_some_and(|origin| origin.watched_by.is_some_and(|w| w.watcher == watcher));
+                if removed {
+                    monitors.remove(&reference);
+                }
+                1 + i32::from(removed)
+            }
             Signal::GroupLeader {
                 leader,
                 requester,
@@ -1010,7 +1065,7 @@ impl Scheduler {
         let active = match alias {
             Some(alias) => process
                 .monitors
-                .get(&alias)
+                .get(&MonitorKey::Local(alias))
                 .is_some_and(|origin| origin.alias.is_some()),
             None => link.is_none_or(|link| {
                 process
@@ -1045,6 +1100,8 @@ impl Scheduler {
     /// `{Tag, Reference, Type, Item, Reason}` takes the place of the
     /// signal, and the monitor leaves the monitor tree; an
     /// `explicit_unalias` alias stays (`erl_proc_sig_queue.c:6460-6500`).
+    /// A monitor of a process of another node also leaves the monitor list
+    /// of its connection (`erl_proc_sig_queue.c:6409-6412`).
     /// The message costs 8 for an immediate reason and 1 for another reason
     /// (see [`Signal::MonitorDown`]). Without such a monitor the signal is
     /// dropped for 0. Return the extra signal count.
@@ -1059,7 +1116,7 @@ impl Scheduler {
         id: ProcessId,
         walk: &mut Walk,
         node: NodeId,
-        reference: Reference,
+        reference: MonitorKey,
         reason: Term,
     ) -> i32 {
         let Some(monitor) = self.remove_origin_monitor(id, reference) else {
@@ -1067,10 +1124,19 @@ impl Scheduler {
             process.mailbox.remove(node);
             return 0;
         };
+        // A monitor of a process of another node leaves the monitor list of
+        // its connection too, as `erts_monitor_dist_delete` does when the
+        // handler of the monitor down signal runs
+        // (`erl_proc_sig_queue.c:6409-6412`).
+        if let Some(remote) = RemotePid::of(&monitor.item) {
+            self.node
+                .dist()
+                .remove_monitor(id, remote, reference, monitor.connection);
+        }
         let extra = if is_immediate(&reason) { 8 } else { 1 };
         let down = Term::tuple(vec![
             monitor.tag,
-            Term::Reference(reference),
+            reference.term(),
             Term::static_atom(monitor.kind),
             monitor.item,
             reason,
@@ -1104,17 +1170,21 @@ impl Scheduler {
         message: Term,
     ) -> i32 {
         let process = self.processes.get_mut(id).expect("the process is alive");
-        let Some(mode) = process.monitors.get(&alias).and_then(|origin| origin.alias) else {
+        let key = MonitorKey::Local(alias);
+        let Some(mode) = process.monitors.get(&key).and_then(|origin| origin.alias) else {
             process.mailbox.remove(node);
             return 2;
         };
         if mode == AliasMode::ReplyDemonitor
-            && let Some(origin) = process.monitors.remove(&alias)
+            && let Some(origin) = process.monitors.remove(&key)
             && let Some(monitor) = origin.monitor
         {
             // The target of a process or a port monitor also loses it
-            // (`erl_proc_sig_queue.c:6064-6107`).
-            self.end_monitor(id, alias, &monitor);
+            // (`erl_proc_sig_queue.c:6064-6107`). An alias monitor watches a
+            // local process or a port, so the removal sends no packet, and
+            // the only error source of the removal cannot fail.
+            self.end_monitor(id, key, &monitor)
+                .expect("the removal of a local monitor does not fail");
         }
         let process = self.processes.get_mut(id).expect("the process is alive");
         process.mailbox.convert(walk, node, message);

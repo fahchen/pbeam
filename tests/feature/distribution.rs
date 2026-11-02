@@ -164,6 +164,15 @@ fn runs_the_bifs_of_a_process_controller_as_pinned_erts() {
     let erts = stdout(&erts_erl(&epmd, &exit_input));
     assert!(erts.contains("[ok,{down,killed}]"), "{erts}");
     assert_eq!(stdout(&pbeam_erl(&epmd, &exit_input)), erts);
+    // A DEMONITOR_P for a name finds no monitor of the connection and
+    // removes nothing (dist.c:2441-2457).
+    let demonitor = probe(
+        &["-sname", &name],
+        "dist_channel_probe:demonitor_name(), halt().",
+    );
+    let erts = stdout(&erts_erl(&epmd, &demonitor));
+    assert_eq!(erts, "demonitor_name: [ok,[zz@nohost]]\n");
+    assert_eq!(stdout(&pbeam_erl(&epmd, &demonitor)), erts);
     // LINK, UNLINK_ID, UNLINK_ID_ACK, EXIT, and PAYLOAD_EXIT packets link
     // local processes to a pid of the node, and local processes send them
     // (bif.c:263-394, 1295-1348, dist.c:2224-2339, 2745-2805).
@@ -213,10 +222,11 @@ fn queues_and_writes_the_messages_to_a_connection_as_pinned_erts() {
 }
 
 #[test]
-fn offers_the_mandatory_distribution_flags_exit_payload_and_alias() {
-    // PBeam offers DFLAG_DIST_MANDATORY (dist.h:80-98), DFLAG_EXIT_PAYLOAD,
-    // and DFLAG_ALIAS (dist.h:52, 67, 113-123), with the rejectable and the
-    // strict order flags of ERTS (dist.h:129-135).
+fn offers_the_mandatory_distribution_flags_the_monitor_flags_exit_payload_and_alias() {
+    // PBeam offers DFLAG_DIST_MANDATORY (dist.h:80-98), DFLAG_DIST_MONITOR,
+    // DFLAG_DIST_MONITOR_NAME, DFLAG_EXIT_PAYLOAD, and DFLAG_ALIAS
+    // (dist.h:33, 34, 52, 67, 113-123), with the rejectable and the strict
+    // order flags of ERTS (dist.h:129-135).
     let epmd = Epmd::start();
     let output = pbeam_erl(
         &epmd,
@@ -228,7 +238,7 @@ fn offers_the_mandatory_distribution_flags_exit_payload_and_alias() {
     );
     assert_eq!(
         stdout(&output),
-        "{erts_dflags,51594596244,17230663572,51594596244,8396866,8192}\n"
+        "{erts_dflags,51594596284,17230663572,51594596284,8396866,8192}\n"
     );
 }
 
@@ -271,10 +281,12 @@ fn stops_at_a_part_of_a_channel_that_pbeam_does_not_have() {
         ),
         ("message()".to_owned(), rejected),
         ("port_message()".to_owned(), rejected),
+        ("monitor_op()".to_owned(), rejected),
         (
-            "monitor_op()".to_owned(),
-            "unsupported distribution operation 19",
+            "spawn_op()".to_owned(),
+            "unsupported distribution operation 29",
         ),
+        ("demonitor_ref()".to_owned(), rejected),
         ("deliver_port()".to_owned(), deliver),
         ("deliver_udp()".to_owned(), deliver),
     ];
@@ -664,6 +676,119 @@ fn links_processes_between_erts_and_pbeam_nodes() {
         assert_eq!(stdout(&erts_erl(&epmd, &client(&erts))), expected);
         let pbeam = format!("dlpb{server_pbeam}{socket}{id}");
         assert_eq!(stdout(&pbeam_erl(&epmd, &client(&pbeam))), expected);
+    }
+}
+
+#[test]
+fn monitors_a_registered_name_of_another_node_as_pinned_erts() {
+    // A `MONITOR_P` packet can ask for a registered name, and the node looks
+    // the name up when it gets the packet: the process that the name has
+    // then gets the monitor, and a name that no process has answers
+    // `MONITOR_P_EXIT` with `noproc` (`dist.c:2364-2379`, `2398-2410`,
+    // `erl_process.c:13844-13847`). The monitor exit packet names the name
+    // of the packet, so the `DOWN` item of the watcher is `{Name, Node}`.
+    // The removal of a monitor whose target already exited still gives
+    // `true` and sends its `DEMONITOR_P` (`bif.c:525-570`), and the name
+    // then names the target of no monitor of the connection, so the node
+    // removes nothing (`dist.c:2441-2457`). The local
+    // `erlang:monitor/2,3` of `{Name, Node}`
+    // stays out of scope (#1494), so only an ERTS client monitors a name
+    // here. Each PBeam server runs over the prim_socket carrier and over the
+    // tcp_inet port controller. The client stops the server node at the end,
+    // because a node that the test kills writes no profile of its own runs.
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let expected = "[{down,boom},{removed,none},{late,true},{noproc,noproc}]\n";
+    for (server_pbeam, socket) in [(false, true), (false, false), (true, true), (true, false)] {
+        let name = format!("dnsrv{server_pbeam}{socket}{id}");
+        let mut arguments = vec!["-sname", &name, "-setcookie", "ck", "-pa", "fixtures/dist"];
+        if socket {
+            arguments.extend(SOCKET_CARRIER);
+        }
+        let server = "dist_name_probe:server().";
+        let node = if server_pbeam {
+            pbeam_node(&epmd, &arguments, server)
+        } else {
+            ErtsNode::start(&epmd, &arguments, server)
+        };
+        let expression = format!("dist_name_probe:client('{}'), halt().", node.line());
+        let client = format!("dncl{server_pbeam}{socket}{id}");
+        let arguments = vec![
+            "-sname",
+            &client,
+            "-setcookie",
+            "ck",
+            "-hidden",
+            "-noshell",
+            "-pa",
+            "fixtures/dist",
+            "-eval",
+            &expression,
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+        assert_eq!(
+            stdout(&erts_erl(&epmd, &arguments)),
+            expected,
+            "server pbeam {server_pbeam}, socket {socket}"
+        );
+    }
+}
+
+#[test]
+fn monitors_processes_between_erts_and_pbeam_nodes() {
+    // A client process monitors a process of a server node and a process of
+    // the server node monitors a client process, and the watched process
+    // exits with normal, kill, or a reason that is not immediate; the
+    // removal of a monitor gives no DOWN message, a pid that is not alive
+    // gives noproc, and the end of the connection gives noconnection from
+    // the oldest monitor to the newest (bif.c:758-981, 436-541;
+    // dist.c:1496-1600, 2341-2470, 2688-2746, 1021-1117, 305-321;
+    // erl_process.c:14101-14147). Each pair of ERTS and PBeam nodes runs
+    // over the prim_socket carrier and over the tcp_inet port controller.
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let expected = "[{to,normal,normal},\n {to,kill,kill},\n {to,{boom},{boom}},\n \
+                    {from,normal,normal},\n {from,kill,kill},\n {from,{boom},{boom}},\n \
+                    {demonitor,none},\n {noproc,noproc},\n \
+                    {lost,[{oldest,noconnection},{newest,noconnection}]}]\n";
+    for (server_pbeam, socket) in [(false, true), (false, false), (true, true), (true, false)] {
+        for client_pbeam in [false, true] {
+            // The `lost` case stops the server node, so each client needs a
+            // server of its own.
+            let name = format!("dmsrv{server_pbeam}{socket}{client_pbeam}{id}");
+            let mut arguments = vec!["-sname", &name, "-setcookie", "ck", "-pa", "fixtures/dist"];
+            if socket {
+                arguments.extend(SOCKET_CARRIER);
+            }
+            let server = "dist_monitor_probe:server().";
+            let node = if server_pbeam {
+                pbeam_node(&epmd, &arguments, server)
+            } else {
+                ErtsNode::start(&epmd, &arguments, server)
+            };
+            let expression = format!("dist_monitor_probe:client('{}'), halt().", node.line());
+            let client = |name: &str| {
+                let mut arguments = vec!["-sname", name, "-setcookie", "ck", "-hidden"];
+                if socket {
+                    arguments.extend(SOCKET_CARRIER);
+                }
+                arguments.extend(["-noshell", "-pa", "fixtures/dist", "-eval", &expression]);
+                arguments.into_iter().map(str::to_owned).collect::<Vec<_>>()
+            };
+            let client_name = format!("dmcl{server_pbeam}{socket}{client_pbeam}{id}");
+            let output = if client_pbeam {
+                pbeam_erl(&epmd, &client(&client_name))
+            } else {
+                erts_erl(&epmd, &client(&client_name))
+            };
+            let text = stdout(&output);
+            assert_eq!(
+                text, expected,
+                "server pbeam {server_pbeam}, socket {socket}, client pbeam {client_pbeam}"
+            );
+        }
     }
 }
 

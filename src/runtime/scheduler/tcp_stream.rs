@@ -262,10 +262,18 @@ impl Scheduler {
         if let Some(tcp) = item.inet_mut() {
             self.tcp_send_timer(port, tcp);
         }
-        let exit = self.send_events(port, item, events)?;
+        // The step holds the lock of the port, so a distribution packet
+        // that its events cause waits for the end of the step
+        // (`Scheduler::dist_port_send`). The events of a port that ends
+        // hold no input, so only a step of a driver can cause one.
+        self.locked_port = Some(port);
+        let result = self.send_events(port, item, events);
         drop(slot);
+        self.locked_port = None;
+        let written = self.dist_port_flush(port);
+        let exit = result?;
         self.end_step(port, exit);
-        Ok(())
+        written
     }
 
     /// Send the messages `events` of a step of the port `port` with its

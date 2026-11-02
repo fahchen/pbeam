@@ -18,7 +18,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use crate::{
-    runtime::process::RemotePid,
+    runtime::process::{MonitorKey, RemotePid},
     term::{Atom, Binary, PortId, ProcessId, Reference, Term},
 };
 
@@ -108,18 +108,65 @@ struct Entry {
     /// from the newest link to the oldest, as the `links` list of
     /// `ErtsMonLnkDist` (`dist.c:480-549`, `erl_monitor_link.h:651-668`).
     links: Vec<(ProcessId, RemotePid)>,
+    /// Each monitor of a process of another node that the connection
+    /// carries, from the oldest monitor to the newest, as the `monitors`
+    /// list of `ErtsMonLnkDist` (`dist.c:392-397`,
+    /// `erl_monitor_link.h:651-668`, `1534-1565`). A local process holds
+    /// the monitor or a process of the other node holds it on the local
+    /// process (`dist.c:2387-2400`, `bif.c:853`).
+    monitors: Vec<DistMonitor>,
 }
 
-/// The links of a connection that ended, as the detached `mld` list of ERTS
-/// (`dist.c:1065-1066`, `480-549`): the local process and the pid of the
-/// other node of each link, from the newest link to the oldest, as the head
-/// of the list (`erl_monitor_link.h:651-668`, `2438-2442`).
+/// One monitor of a connection: the local process, the pid of the other
+/// node, the reference of the monitor, and the side of the local process
+/// (`ERTS_MON_TYPE_DIST_PROC`, `dist.c:2387-2400`, `bif.c:853`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let monitor = DistMonitor { process, remote, key, side: MonitorSide::Watcher };
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::runtime) struct DistMonitor {
+    /// The local process of the monitor.
+    pub(in crate::runtime) process: ProcessId,
+    /// The pid of the other node.
+    pub(in crate::runtime) remote: RemotePid,
+    /// The reference of the monitor, which its watcher made.
+    pub(in crate::runtime) key: MonitorKey,
+    /// The side of the local process in the monitor.
+    pub(in crate::runtime) side: MonitorSide,
+}
+
+/// The side of the local process in a monitor of a process of another node
+/// (`dist.c:2387-2400`, `bif.c:853`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(MonitorSide::Watcher.is_watcher(), true);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::runtime) enum MonitorSide {
+    /// The local process holds the monitor.
+    Watcher,
+    /// A process of the other node holds the monitor on the local process.
+    Watched,
+}
+
+/// The links and the monitors of a connection that ended, as the detached
+/// `mld` list of ERTS (`dist.c:1065-1066`, `480-549`): the local process and
+/// the pid of the other node of each link, from the newest link to the
+/// oldest, as the head of the list (`erl_monitor_link.h:651-668`,
+/// `2438-2442`), and then the monitors in the same order.
 #[derive(Debug)]
 pub(in crate::runtime) struct EndedConnection {
     /// The id of the connection that ended.
     pub(in crate::runtime) connection: u32,
     /// The links of the connection.
     pub(in crate::runtime) links: Vec<(ProcessId, RemotePid)>,
+    /// The monitors of the connection.
+    pub(in crate::runtime) monitors: Vec<DistMonitor>,
 }
 
 /// The node type and the connection id of a node that `erlang:nodes/1,2`
@@ -190,6 +237,7 @@ impl DistTable {
                 notify: false,
                 order,
                 links: Vec::new(),
+                monitors: Vec::new(),
             }
         });
     }
@@ -489,8 +537,9 @@ impl DistTable {
     /// Make the entry that `process` controls idle at the exit of
     /// `process` with the input count 0 and no input handler, as
     /// `erts_do_net_exits` does for a controller (`dist.c:1021-1117`).
-    /// Return the links of the connection that ended, as the detached `mld`
-    /// list of `dist.c:1065-1066`, or `None` without a link.
+    /// Return the links and the monitors of the connection that ended, as
+    /// the detached `mld` list of `dist.c:1065-1066`, or `None` with no link
+    /// and no monitor.
     pub(in crate::runtime) fn controller_exits(
         &mut self,
         controller: Controller,
@@ -501,13 +550,18 @@ impl DistTable {
             .find(|entry| entry.controller == Some(controller))?;
         let connection = entry.connection_id;
         let links = std::mem::take(&mut entry.links);
+        let monitors = std::mem::take(&mut entry.monitors);
         entry.set_idle(self.next_order);
         entry.input = 0;
         // dist.c:1081.
         entry.out = 0;
         entry.input_handler = None;
         self.next_order += 1;
-        (!links.is_empty()).then_some(EndedConnection { connection, links })
+        (!links.is_empty() || !monitors.is_empty()).then_some(EndedConnection {
+            connection,
+            links,
+            monitors,
+        })
     }
 
     /// Add the link of `process` to `remote` to the connection `connection`
@@ -570,6 +624,100 @@ impl DistTable {
         entry.links.retain(|&link| link != (process, remote));
     }
 
+    /// Add the monitor `key` of `process` of `remote` to the connection
+    /// `connection` of the entry of its node, at the end of the list, as
+    /// `erts_monitor_dist_insert` does (`erl_monitor_link.h:1534-1566`,
+    /// `651-668`), and return whether the connection has the monitor.
+    /// The end of a connection then reports the oldest monitor first
+    /// (`dist.c:1075-1079`).
+    /// Return `false` when the entry is not connected to `connection`, so
+    /// that the caller gives the watcher of the monitor `noconnection`
+    /// (`dist.c:2387-2391`, `erl_monitor_link.h:1533-1566`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(table.insert_monitor(ProcessId(1), remote, key, 1, MonitorSide::Watcher));
+    /// ```
+    pub(in crate::runtime) fn insert_monitor(
+        &mut self,
+        process: ProcessId,
+        remote: RemotePid,
+        key: MonitorKey,
+        connection: u32,
+        side: MonitorSide,
+    ) -> bool {
+        let entry = self
+            .entries
+            .get_mut(&remote.node)
+            .expect("the entry of the node stays in the table");
+        if entry.state != State::Connected || entry.connection_id != connection {
+            return false;
+        }
+        let monitor = DistMonitor {
+            process,
+            remote,
+            key,
+            side,
+        };
+        if !entry.monitors.contains(&monitor) {
+            entry.monitors.push(monitor);
+        }
+        true
+    }
+
+    /// Return the local process that the monitor `key` of the pid `remote`
+    /// of the node `node` watches, as the monitors of the connection name
+    /// each target that a `DEMONITOR_P` packet can ask for by name
+    /// (`dist.c:2441-2457`), or `None` without such a monitor.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(table.watched_process(remote, key), Some(target));
+    /// ```
+    pub(in crate::runtime) fn watched_process(
+        &self,
+        remote: RemotePid,
+        key: MonitorKey,
+    ) -> Option<ProcessId> {
+        self.entries
+            .get(&remote.node)?
+            .monitors
+            .iter()
+            .find(|monitor| monitor.remote == remote && monitor.key == key)
+            .map(|monitor| monitor.process)
+    }
+
+    /// Remove the monitor `key` of `process` of `remote` from the connection
+    /// `connection` of the entry of its node. The entry holds the monitors
+    /// of its current connection only, because the end of a connection
+    /// detaches its list (`dist.c:1065-1066`), so a signal of an older
+    /// connection removes nothing here.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// table.remove_monitor(ProcessId(1), remote, key, 1);
+    /// ```
+    pub(in crate::runtime) fn remove_monitor(
+        &mut self,
+        process: ProcessId,
+        remote: RemotePid,
+        key: MonitorKey,
+        connection: u32,
+    ) {
+        let Some(entry) = self.entries.get_mut(&remote.node) else {
+            return;
+        };
+        if entry.connection_id != connection {
+            return;
+        }
+        entry.monitors.retain(|monitor| {
+            monitor.process != process || monitor.remote != remote || monitor.key != key
+        });
+    }
+
     /// Make each pending entry idle and return the links of each connection
     /// that ended and the controller of each connected entry, as
     /// `erts_do_net_exits` does at the exit of `net_kernel` (`dist.c:926-1001`).
@@ -586,10 +734,12 @@ impl DistTable {
                 }
                 State::Connected => {
                     let links = std::mem::take(&mut entry.links);
-                    if !links.is_empty() {
+                    let monitors = std::mem::take(&mut entry.monitors);
+                    if !links.is_empty() || !monitors.is_empty() {
                         ended.push(EndedConnection {
                             connection: entry.connection_id,
                             links,
+                            monitors,
                         });
                     }
                     controllers.extend(entry.controller);
@@ -653,6 +803,7 @@ impl Entry {
         self.notify = false;
         self.controller = None;
         self.links.clear();
+        self.monitors.clear();
         self.order = order;
     }
 }

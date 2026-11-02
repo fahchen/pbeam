@@ -10,7 +10,7 @@
 
 use std::cmp::Ordering;
 
-use super::{LinkId, RemotePid};
+use super::{LinkId, MonitorKey, RemotePid};
 use crate::term::{PortId, ProcessId, Reference};
 
 /// The key order of a [`MonitorLinkTree`], as ERTS `ml_cmp_keys`
@@ -111,6 +111,57 @@ impl TreeKey for Reference {
     }
 }
 
+impl TreeKey for MonitorKey {
+    /// ERTS keys the monitor tree by the reference of the monitor, which is
+    /// an internal reference for a monitor that this process holds and an
+    /// external reference for a monitor that a process of another node holds
+    /// on this process (`dist.c:2387-2400`). An internal reference is an
+    /// immediate term and an external reference is a boxed term, so each
+    /// internal reference comes before each external one
+    /// (`erl_monitor_link.c:138-139`, `186-187`). Two external references
+    /// compare as [`RemotePid`] does, then their reference numbers from the
+    /// low number to the high one.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let key = MonitorKey::Local(Reference(1));
+    /// assert_eq!(key.compare(key), Ordering::Equal);
+    /// ```
+    fn compare(self, other: Self) -> Ordering {
+        key_bytes(self).cmp(&key_bytes(other))
+    }
+}
+
+/// Return the bytes of the ERTS comparison key of `key`: the rank of the
+/// reference form, then the node index, then the reference numbers. Arrays
+/// compare element by element, so these bytes compare as the ERTS tree key
+/// does.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let key = MonitorKey::Local(Reference(1));
+/// assert_eq!(key_bytes(key)[0], 0);
+/// ```
+fn key_bytes(key: MonitorKey) -> [u8; 25] {
+    let mut bytes = [0; 25];
+    match key {
+        MonitorKey::Local(reference) => {
+            for (index, number) in memory_bytes(reference).iter().enumerate() {
+                let start = 5 + index * 4;
+                bytes[start..start + 4].copy_from_slice(number);
+            }
+        }
+        MonitorKey::Remote(reference) => {
+            bytes[0] = 1;
+            bytes[1..5].copy_from_slice(&reference.node().index().to_le_bytes());
+            bytes[5..].copy_from_slice(&number_bytes(reference.numbers()));
+        }
+    }
+    bytes
+}
+
 /// The reference of a BIF timer, as the key of the ERTS `proc_btm` tree of
 /// the BIF timers to a process (`erl_hl_timer.c:579-617`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,6 +204,23 @@ fn memory_bytes(reference: Reference) -> [[u8; 4]; 3] {
         n2 &= !(1 << 31);
     }
     [n0, n1, n2].map(u32::to_le_bytes)
+}
+
+/// Return the bytes of the reference numbers `numbers` in the order that
+/// the ERTS key order reads them: the low number first, each in
+/// little-endian memory order, and 0 above the count.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(number_bytes(&[1])[..4], [1, 0, 0, 0]);
+/// ```
+fn number_bytes(numbers: &[u32]) -> [u8; 20] {
+    let mut bytes = [0; 20];
+    for (index, number) in numbers.iter().enumerate() {
+        bytes[index * 4..][..4].copy_from_slice(&number.to_le_bytes());
+    }
+    bytes
 }
 
 /// A child side of a node.

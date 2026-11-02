@@ -593,6 +593,7 @@ fn items_of(item: &Release) -> usize {
         Release::Dictionary(dictionary) => 2 * dictionary.len(),
         Release::Mailbox(mailbox) => usize::from(!mailbox.is_empty()),
         Release::Monitors(monitors) => usize::from(!monitors.is_empty()),
+        Release::DistMonitors(monitors) => usize::from(!monitors.is_empty()),
     }
 }
 
@@ -629,6 +630,7 @@ fn held_bytes(item: &Release) -> usize {
         }
         Release::Mailbox(mailbox) => mailbox.allocated_bytes(),
         Release::Monitors(monitors) => monitors.allocated_bytes(),
+        Release::DistMonitors(monitors) => monitors.allocated_bytes(),
     }
 }
 

@@ -16,8 +16,8 @@ use crate::term::{AtomTable, test_atom};
 use crate::{
     runtime::ets::{Access, Table, TableType},
     runtime::process::{
-        BifCall, CallKind, Monitor, Origin, OriginMonitor, PendingBif, ProcessState, ReceiveTimer,
-        StackSlot, Start, TimerReference,
+        BifCall, CallKind, Monitor, MonitorKey, Origin, OriginMonitor, PendingBif, ProcessState,
+        ReceiveTimer, StackSlot, Start, TimerReference,
         tests::{frame, test_scheduler, test_scheduler_without_checks},
     },
     runtime::signal::Signal,
@@ -438,7 +438,7 @@ fn sends_the_pending_monitor_signal_before_a_demonitor_signal() {
         .unwrap()
         .unwrap();
     let reference = scheduler
-        .monitor(MonitorTarget::Process(child), no_options())
+        .monitor(&MonitorTarget::Process(child), no_options())
         .unwrap();
     assert!(!scheduler.processes[&child].mailbox.has_incoming());
     assert!(scheduler.demonitor(reference));
@@ -462,16 +462,16 @@ fn creates_no_monitor_of_the_caller_and_sends_noproc_for_a_missing_target() {
     scheduler.start(frame(), vec![], allow_all());
     scheduler.schedule_next().unwrap();
     let own = scheduler
-        .monitor(MonitorTarget::Process(ProcessId(0)), no_options())
+        .monitor(&MonitorTarget::Process(ProcessId(0)), no_options())
         .unwrap();
     assert!(scheduler.processes[&ProcessId(0)].monitors.is_empty());
     assert!(!scheduler.demonitor(own));
     let gone = scheduler
-        .monitor(MonitorTarget::Process(ProcessId(9)), no_options())
+        .monitor(&MonitorTarget::Process(ProcessId(9)), no_options())
         .unwrap();
     let name = Atom::from_static("undefined").unwrap();
     let port = scheduler
-        .monitor(MonitorTarget::PortName(name), no_options())
+        .monitor(&MonitorTarget::PortName(name), no_options())
         .unwrap();
     scheduler.park_current();
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
@@ -1179,22 +1179,24 @@ fn moves_the_containers_of_an_exiting_process_to_the_release_work_list() {
         });
         process.length_trap = Some(vec![marker(7)]);
         process.monitors.insert(
-            Reference(1),
+            MonitorKey::Local(Reference(1)),
             Origin {
                 monitor: Some(OriginMonitor {
                     kind: "process",
                     target: None,
                     item: marker(8),
                     tag: marker(9),
+                    connection: 0,
                 }),
                 alias: None,
+                watched_by: None,
             },
         );
     }
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Run);
     scheduler.finish_current(atom("normal"), None).unwrap();
     let items: Vec<&Release> = scheduler.release.iter().collect();
-    assert_eq!(items.len(), 9, "the exit moves nine containers");
+    assert_eq!(items.len(), 10, "the exit moves ten containers");
     assert!(matches!(items[0], Release::Terms(_)));
     assert!(matches!(items[1], Release::Terms(_)));
     assert!(matches!(items[2], Release::Terms(_)));
@@ -1204,6 +1206,7 @@ fn moves_the_containers_of_an_exiting_process_to_the_release_work_list() {
     assert!(matches!(items[6], Release::Mailbox(_)));
     assert!(matches!(items[7], Release::Dictionary(_)));
     assert!(matches!(items[8], Release::Monitors(_)));
+    assert!(matches!(items[9], Release::DistMonitors(_)));
     release_all(&mut scheduler);
     assert!(scheduler.release.is_empty());
 }
@@ -1244,23 +1247,26 @@ fn releases_the_terms_of_every_container_of_an_exiting_process() {
         });
         process.length_trap = Some(vec![length_trap.clone()]);
         process.monitors.insert(
-            Reference(1),
+            MonitorKey::Local(Reference(1)),
             Origin {
                 monitor: Some(OriginMonitor {
                     kind: "process",
                     target: None,
                     item: item.clone(),
                     tag: tag.clone(),
+                    connection: 0,
                 }),
                 alias: None,
+                watched_by: None,
             },
         );
         // An alias without a monitor holds no term, so the reader skips it.
         process.monitors.insert(
-            Reference(2),
+            MonitorKey::Local(Reference(2)),
             Origin {
                 monitor: None,
                 alias: None,
+                watched_by: None,
             },
         );
     }
@@ -1300,7 +1306,7 @@ fn releases_the_terms_of_an_exiting_process_at_each_later_step() {
     scheduler.finish_current(atom("normal"), None).unwrap();
     assert!(matches!(
         scheduler.release.iter().last(),
-        Some(Release::Monitors(_))
+        Some(Release::DistMonitors(_))
     ));
     assert_eq!(scheduler.schedule_next().unwrap(), Turn::Done);
     assert!(
@@ -1472,7 +1478,7 @@ fn releases_the_empty_containers_of_a_process_that_has_no_frame() {
     scheduler.finish_current(atom("normal"), None).unwrap();
     assert!(matches!(
         scheduler.release.iter().last(),
-        Some(Release::Monitors(_))
+        Some(Release::DistMonitors(_))
     ));
     release_all(&mut scheduler);
     assert!(scheduler.release.is_empty());
@@ -1517,15 +1523,17 @@ fn moves_the_monitors_of_an_exiting_process_in_batches() {
         let process = scheduler.processes.get_mut(id).unwrap();
         for reference in 1..=2 {
             process.monitors.insert(
-                Reference(reference),
+                MonitorKey::Local(Reference(reference)),
                 Origin {
                     monitor: Some(OriginMonitor {
                         kind: "process",
                         target: None,
                         item: marker(i64::try_from(reference).unwrap()),
                         tag: marker(i64::try_from(reference).unwrap()),
+                        connection: 0,
                     }),
                     alias: None,
+                    watched_by: None,
                 },
             );
         }
@@ -1702,15 +1710,17 @@ fn counts_the_bytes_of_the_release_work_list() {
         });
         process.length_trap = Some(vec![marker(9)]);
         process.monitors.insert(
-            Reference(1),
+            MonitorKey::Local(Reference(1)),
             Origin {
                 monitor: Some(OriginMonitor {
                     kind: "process",
                     target: None,
                     item: marker(6),
                     tag: marker(7),
+                    connection: 0,
                 }),
                 alias: None,
+                watched_by: None,
             },
         );
     }
@@ -1949,7 +1959,7 @@ fn removes_a_reply_demonitor_port_monitor_from_the_port_at_the_alias_message() {
         ..no_options()
     };
     let alias = scheduler
-        .monitor(MonitorTarget::Port(port), options)
+        .monitor(&MonitorTarget::Port(port), options)
         .unwrap();
     let signal = Signal::AliasMessage {
         alias,
@@ -1959,7 +1969,12 @@ fn removes_a_reply_demonitor_port_monitor_from_the_port_at_the_alias_message() {
     scheduler
         .handle_signals(id, 100, 100, HandlingPoint::ScheduleIn)
         .unwrap();
-    assert!(scheduler.processes[&id].monitors.get(&alias).is_none());
+    assert!(
+        scheduler.processes[&id]
+            .monitors
+            .get(&MonitorKey::Local(alias))
+            .is_none()
+    );
     let monitors = scheduler.node.with_port(port, |port| port.monitors.len());
     assert_eq!(monitors, Some(0));
 }
@@ -2572,6 +2587,720 @@ fn reads_a_break_key_after_a_read_with_no_data() {
 }
 
 #[test]
+fn gives_noconnection_to_a_monitor_without_a_connection() {
+    use super::signals::HandlingPoint;
+    use crate::runtime::process::RemotePid;
+    // `erts_internal:dist_ctrl_put_data/2` wrote no packet for a node
+    // without a connection, so the watcher gets the `DOWN` message with the
+    // reason `noconnection` at once, as `erts_schedule_dist_proc_down` does
+    // for the end of a connection (`dist.c:305-310`,
+    // `erl_proc_sig_queue.c:4837-5060`). The monitor does not stay.
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let id = current(&mut scheduler);
+    let name = scheduler.atoms.put("other@host").unwrap();
+    let remote = RemotePid {
+        node: name.index(),
+        creation: 1,
+        number: 2,
+        serial: 0,
+    };
+    let reference = scheduler
+        .monitor(&MonitorTarget::RemoteProcess(remote), no_options())
+        .unwrap();
+    scheduler
+        .handle_signals(id, 100, 100, HandlingPoint::ScheduleIn)
+        .unwrap();
+    assert!(scheduler.processes[&id].monitors.is_empty());
+    assert_eq!(
+        messages(&scheduler, id.0),
+        [Term::tuple(vec![
+            atom("DOWN"),
+            Term::Reference(reference),
+            atom("process"),
+            remote.term(),
+            atom("noconnection"),
+        ])]
+    );
+}
+
+#[test]
+fn gives_noconnection_to_a_monitor_of_a_connection_that_ended_before_the_insert() {
+    use super::{dist_table::Controller, signals::HandlingPoint};
+    use crate::runtime::process::RemotePid;
+    // `dist_output` writes `MONITOR_P` and releases the lock of the dist
+    // entry, so the connection can end before the insert into the entry
+    // (`dist.c:2387-2391`). The watcher then gets `noconnection`, as the end
+    // of the connection gives it. A fixture cannot order the exit of the
+    // controller between the two steps.
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let id = current(&mut scheduler);
+    let name = scheduler.atoms.put("other@host").unwrap();
+    let remote = RemotePid {
+        node: name.index(),
+        creation: 1,
+        number: 2,
+        serial: 0,
+    };
+    let first = Controller::Process(ProcessId(90));
+    let second = Controller::Process(ProcessId(91));
+    {
+        let mut dist = scheduler.node.dist();
+        dist.insert(&name, Reference(7), 0);
+        dist.new_connection(&name);
+        assert!(dist.connect(&name, first, 0).is_some());
+    }
+    let reference = scheduler
+        .monitor(&MonitorTarget::RemoteProcess(remote), no_options())
+        .unwrap();
+    {
+        let mut dist = scheduler.node.dist();
+        let _ = dist.controller_exits(first);
+        dist.new_connection(&name);
+        assert!(dist.connect(&name, second, 0).is_some());
+        assert_eq!(dist.connection_id(&name), 2);
+    }
+    // The insert of the monitor of the connection that carried the packet.
+    scheduler.monitor_on(id, remote, MonitorKey::Local(reference), 1);
+    scheduler
+        .handle_signals(id, 100, 100, HandlingPoint::ScheduleIn)
+        .unwrap();
+    assert!(scheduler.processes[&id].monitors.is_empty());
+    assert_eq!(
+        messages(&scheduler, id.0),
+        [Term::tuple(vec![
+            atom("DOWN"),
+            Term::Reference(reference),
+            atom("process"),
+            remote.term(),
+            atom("noconnection"),
+        ])]
+    );
+}
+
+#[test]
+fn drops_a_monitor_packet_of_a_connection_that_ended_before_the_insert() {
+    use super::dist_table::Controller;
+    use crate::runtime::process::{RemotePid, RemoteReference};
+    // `erts_net_message` inserts the monitor of a `MONITOR_P` packet into
+    // the entry of the connection before the target gets the signal, and it
+    // answers nothing when that connection ended (`dist.c:2387-2391`). The
+    // local process gets no monitor. A fixture cannot order a reconnect
+    // between the packet and its decode.
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let id = current(&mut scheduler);
+    let name = scheduler.atoms.put("other@host").unwrap();
+    let remote = RemotePid {
+        node: name.index(),
+        creation: 1,
+        number: 2,
+        serial: 0,
+    };
+    let reference = RemoteReference {
+        node: name.index(),
+        creation: 1,
+        numbers: [3, 0, 0, 0, 0],
+        count: 1,
+    };
+    let first = Controller::Process(ProcessId(90));
+    let second = Controller::Process(ProcessId(91));
+    {
+        let mut dist = scheduler.node.dist();
+        dist.insert(&name, Reference(7), 0);
+        dist.new_connection(&name);
+        assert!(dist.connect(&name, first, 0).is_some());
+        let _ = dist.controller_exits(first);
+        dist.new_connection(&name);
+        assert!(dist.connect(&name, second, 0).is_some());
+        assert_eq!(dist.connection_id(&name), 2);
+    }
+    scheduler
+        .net_monitor(&name, 1, &remote.term(), &Term::Pid(id), &reference.term())
+        .unwrap();
+    assert!(scheduler.processes[&id].monitors.is_empty());
+}
+
+#[test]
+fn keeps_a_monitor_of_another_node_of_the_target_of_a_packet() {
+    use super::{dist_table::Controller, signals::HandlingPoint};
+    use crate::runtime::process::{RemotePid, RemoteReference};
+    // A `MONITOR_P` packet gives its monitor to the local target, which
+    // keeps it in its monitor tree with the pid and the reference of the
+    // watcher of the other node and with the id of the connection
+    // (`dist.c:2387-2400`, `erl_proc_sig_queue.c:6544-6562`). A `DEMONITOR_P`
+    // packet of the same watcher removes it again
+    // (`dist.c:2431-2435`).
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let id = current(&mut scheduler);
+    let name = scheduler.atoms.put("other@host").unwrap();
+    let remote = RemotePid {
+        node: name.index(),
+        creation: 1,
+        number: 2,
+        serial: 0,
+    };
+    let reference = RemoteReference {
+        node: name.index(),
+        creation: 1,
+        numbers: [3, 0, 0, 0, 0],
+        count: 1,
+    };
+    {
+        let mut dist = scheduler.node.dist();
+        dist.insert(&name, Reference(7), 0);
+        dist.new_connection(&name);
+        assert!(
+            dist.connect(&name, Controller::Process(ProcessId(90)), 0)
+                .is_some()
+        );
+    }
+    scheduler
+        .net_monitor(&name, 1, &remote.term(), &Term::Pid(id), &reference.term())
+        .unwrap();
+    scheduler
+        .handle_signals(id, 100, 100, HandlingPoint::ScheduleIn)
+        .unwrap();
+    let watches = scheduler.processes[&id]
+        .monitors
+        .get(&MonitorKey::Remote(reference))
+        .expect("the target keeps the monitor of the other node");
+    assert_eq!(
+        watches.watched_by.map(|watch| watch.watcher),
+        Some(remote),
+        "the target records the pid of the watcher"
+    );
+    scheduler
+        .send_signal(
+            None,
+            id,
+            Signal::DistDemonitor {
+                watcher: remote,
+                reference: MonitorKey::Remote(reference),
+            },
+        )
+        .unwrap();
+    let watches = scheduler.processes[&id]
+        .monitors
+        .get(&MonitorKey::Remote(reference))
+        .expect("the signal waits in the queue of the target");
+    assert_eq!(watches.watched_by.map(|watch| watch.watcher), Some(remote));
+}
+
+#[test]
+fn removes_a_monitor_of_another_node_at_the_end_of_the_connection() {
+    use super::{dist_table::Controller, signals::HandlingPoint};
+    use crate::runtime::process::{RemotePid, RemoteReference};
+    // The end of a connection removes each monitor that a process of the
+    // other node holds on a local process, with no `DOWN` message
+    // (`dist.c:305-321`). The local process gets the demonitor signal of the
+    // detached monitor list of the connection.
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let id = current(&mut scheduler);
+    let name = scheduler.atoms.put("other@host").unwrap();
+    let remote = RemotePid {
+        node: name.index(),
+        creation: 1,
+        number: 2,
+        serial: 0,
+    };
+    let reference = RemoteReference {
+        node: name.index(),
+        creation: 1,
+        numbers: [3, 0, 0, 0, 0],
+        count: 1,
+    };
+    let controller = Controller::Process(ProcessId(90));
+    {
+        let mut dist = scheduler.node.dist();
+        dist.insert(&name, Reference(7), 0);
+        dist.new_connection(&name);
+        assert!(dist.connect(&name, controller, 0).is_some());
+    }
+    scheduler
+        .net_monitor(&name, 1, &remote.term(), &Term::Pid(id), &reference.term())
+        .unwrap();
+    let ended = {
+        let mut dist = scheduler.node.dist();
+        dist.controller_exits(controller)
+            .expect("the connection has the monitor of the packet")
+    };
+    assert_eq!(ended.connection, 1);
+    assert_eq!(ended.monitors.len(), 1, "the entry keeps one monitor");
+    scheduler.dist_monitor_down(&ended);
+    scheduler
+        .handle_signals(id, 100, 100, HandlingPoint::ScheduleIn)
+        .unwrap();
+    assert!(
+        scheduler.processes[&id].monitors.is_empty(),
+        "the end of the connection removes the monitor"
+    );
+}
+
+#[test]
+fn removes_a_monitor_of_another_node_at_the_exit_packet_of_its_target() {
+    use super::{dist_table::Controller, signals::HandlingPoint};
+    use crate::runtime::process::RemotePid;
+    // `MONITOR_P_EXIT` ends the origin monitor of the watcher, and the
+    // handler also deletes the monitor from the monitor list of the
+    // connection, as `erts_monitor_dist_delete` does
+    // (`erl_proc_sig_queue.c:6409-6412`). A fixture cannot read the
+    // distribution table, so the entry that stays has no observable effect
+    // until the connection ends.
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let id = current(&mut scheduler);
+    let name = scheduler.atoms.put("other@host").unwrap();
+    let remote = RemotePid {
+        node: name.index(),
+        creation: 1,
+        number: 2,
+        serial: 0,
+    };
+    {
+        let mut dist = scheduler.node.dist();
+        dist.insert(&name, Reference(7), 0);
+        dist.new_connection(&name);
+        assert!(
+            dist.connect(&name, Controller::Process(ProcessId(90)), 0)
+                .is_some()
+        );
+    }
+    let reference = scheduler
+        .monitor(&MonitorTarget::RemoteProcess(remote), no_options())
+        .unwrap();
+    let key = MonitorKey::Local(reference);
+    assert!(
+        scheduler.node.dist().watched_process(remote, key).is_some(),
+        "the connection holds the monitor of the packet"
+    );
+    scheduler
+        .net_monitor_exit(
+            &name,
+            &remote.term(),
+            &Term::Pid(id),
+            &Term::Reference(reference),
+            |_| Ok(atom("normal")),
+        )
+        .unwrap();
+    scheduler
+        .handle_signals(id, 100, 100, HandlingPoint::ScheduleIn)
+        .unwrap();
+    assert!(
+        scheduler.processes[&id].monitors.is_empty(),
+        "the exit packet removes the monitor of the watcher"
+    );
+    assert_eq!(
+        scheduler.node.dist().watched_process(remote, key),
+        None,
+        "the exit packet removes the monitor of the connection"
+    );
+    assert_eq!(
+        messages(&scheduler, id.0),
+        [Term::tuple(vec![
+            atom("DOWN"),
+            Term::Reference(reference),
+            atom("process"),
+            remote.term(),
+            atom("normal"),
+        ])]
+    );
+}
+
+#[test]
+fn rejects_a_monitor_packet_whose_reference_is_not_a_reference() {
+    use super::dist_table::Controller;
+    use crate::runtime::process::RemotePid;
+    // `erts_net_message` reads the reference of a `MONITOR_P` packet as an
+    // external atom or reference (`dist.c:2360-2362`), so another term ends
+    // the connection (`dist.c:3131-3132`). A compiled fixture cannot build
+    // this packet, because ERTS encodes a reference here.
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let id = current(&mut scheduler);
+    let name = scheduler.atoms.put("other@host").unwrap();
+    let remote = RemotePid {
+        node: name.index(),
+        creation: 1,
+        number: 2,
+        serial: 0,
+    };
+    {
+        let mut dist = scheduler.node.dist();
+        dist.insert(&name, Reference(7), 0);
+        dist.new_connection(&name);
+        assert!(
+            dist.connect(&name, Controller::Process(ProcessId(90)), 0)
+                .is_some()
+        );
+    }
+    assert!(
+        scheduler
+            .net_monitor(&name, 1, &remote.term(), &Term::Pid(id), &atom("no_ref"))
+            .is_err()
+    );
+    assert!(
+        scheduler
+            .net_demonitor(&name, 1, &remote.term(), &Term::Pid(id), &atom("no_ref"))
+            .is_err()
+    );
+    assert!(
+        scheduler
+            .net_monitor_exit(
+                &name,
+                &remote.term(),
+                &Term::Pid(id),
+                &atom("no_ref"),
+                |_| Ok(atom("noproc"))
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn rejects_a_monitor_packet_from_a_pid_of_another_node() {
+    use super::dist_table::Controller;
+    use crate::runtime::process::{RemotePid, RemoteReference};
+    // Each monitor packet names the pid of the node of the connection that
+    // carried it (`dist.c:2346-2354`), so a pid of another node ends the
+    // connection (`dist.c:3131-3132`). A compiled fixture cannot build this
+    // packet, because ERTS encodes the pid of its own node.
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let id = current(&mut scheduler);
+    let name = scheduler.atoms.put("other@host").unwrap();
+    let third = scheduler.atoms.put("third@host").unwrap();
+    let reference = RemoteReference {
+        node: name.index(),
+        creation: 1,
+        numbers: [3, 0, 0, 0, 0],
+        count: 1,
+    };
+    {
+        let mut dist = scheduler.node.dist();
+        dist.insert(&name, Reference(7), 0);
+        dist.new_connection(&name);
+        assert!(
+            dist.connect(&name, Controller::Process(ProcessId(90)), 0)
+                .is_some()
+        );
+    }
+    let watcher = RemotePid {
+        node: third.index(),
+        creation: 1,
+        number: 2,
+        serial: 0,
+    };
+    assert!(
+        scheduler
+            .net_monitor(&name, 1, &watcher.term(), &Term::Pid(id), &reference.term())
+            .is_err()
+    );
+    assert!(
+        scheduler
+            .net_demonitor(&name, 1, &watcher.term(), &Term::Pid(id), &reference.term())
+            .is_err()
+    );
+    assert!(
+        scheduler
+            .net_monitor_exit(
+                &name,
+                &watcher.term(),
+                &Term::Pid(id),
+                &reference.term(),
+                |_| Ok(atom("noproc"))
+            )
+            .is_err()
+    );
+    assert!(
+        scheduler
+            .net_monitor_exit(
+                &name,
+                &RemotePid {
+                    node: name.index(),
+                    creation: 1,
+                    number: 5,
+                    serial: 0,
+                }
+                .term(),
+                &Term::Integer(1),
+                &reference.term(),
+                |_| Ok(atom("noproc"))
+            )
+            .is_err(),
+        "the watcher of a monitor exit packet is a local pid"
+    );
+    // A watcher that is not alive drops the packet.
+    scheduler
+        .net_monitor_exit(
+            &name,
+            &RemotePid {
+                node: name.index(),
+                creation: 1,
+                number: 5,
+                serial: 0,
+            }
+            .term(),
+            &Term::Pid(ProcessId(99)),
+            &reference.term(),
+            |_| Ok(atom("noproc")),
+        )
+        .unwrap();
+}
+
+#[test]
+fn answers_noproc_for_a_monitor_of_a_pid_of_an_old_incarnation_of_this_node() {
+    use super::dist_table::Controller;
+    use crate::runtime::process::{RemotePid, RemoteReference};
+    // A `MONITOR_P` packet can name a pid of an old incarnation of the local
+    // node, which answers `MONITOR_P_EXIT` with `noproc`
+    // (`dist.c:2373-2377`, `2398-2410`), and its `DEMONITOR_P` packet drops
+    // (`dist.c:2436-2440`). Only a fixture could send such a pid, and ERTS
+    // makes no pid of another incarnation of itself.
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let id = current(&mut scheduler);
+    let (this_node, creation) = scheduler.atoms.this_node();
+    let remote = RemotePid {
+        node: this_node.index(),
+        // The local node has the creation of another incarnation.
+        creation: creation.wrapping_add(1),
+        number: u32::try_from(id.0).unwrap(),
+        serial: 0,
+    };
+    let name = scheduler.atoms.put("other@host").unwrap();
+    let watcher = RemotePid {
+        node: name.index(),
+        creation: 1,
+        number: 2,
+        serial: 0,
+    };
+    let reference = RemoteReference {
+        node: name.index(),
+        creation: 1,
+        numbers: [3, 0, 0, 0, 0],
+        count: 1,
+    };
+    {
+        let mut dist = scheduler.node.dist();
+        dist.insert(&name, Reference(7), 0);
+        dist.new_connection(&name);
+        assert!(
+            dist.connect(&name, Controller::Process(ProcessId(90)), 0)
+                .is_some()
+        );
+    }
+    scheduler
+        .net_monitor(&name, 1, &watcher.term(), &remote.term(), &reference.term())
+        .unwrap();
+    scheduler
+        .net_demonitor(&name, 1, &watcher.term(), &remote.term(), &reference.term())
+        .unwrap();
+    assert!(scheduler.processes[&id].monitors.is_empty());
+    let packet = scheduler
+        .node
+        .dist()
+        .dequeue(&name)
+        .expect("the noproc answer waits in the output queue");
+    assert!(packet.len() > 1, "the answer is a whole packet: {packet:?}");
+}
+
+#[test]
+fn sends_a_demonitor_packet_at_the_exit_of_the_watcher_of_a_remote_process() {
+    use super::dist_table::Controller;
+    use crate::runtime::process::RemotePid;
+    use crate::term::Binary;
+    /// `DFLAG_DIST_MONITOR | DFLAG_DIST_MONITOR_NAME` (`dist.h:33-34`), which
+    /// a connection needs for a monitor packet (`dist.c:1507`, `1545`, `1558`).
+    const MONITOR_FLAGS: u64 = 0x08 | 0x20;
+    // The exit of a process sends `DEMONITOR_P` for each monitor that it
+    // holds of a process of another node (`dist.c:1554-1570`,
+    // erl_process.c:13891-13977). A connection with another id than the
+    // monitor keeps the packet back, so the monitor of an old connection
+    // ends with the connection.
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let name = scheduler.atoms.put("other@host").unwrap();
+    let remote = RemotePid {
+        node: name.index(),
+        creation: 1,
+        number: 2,
+        serial: 0,
+    };
+    {
+        let mut dist = scheduler.node.dist();
+        dist.insert(&name, Reference(7), 0);
+        dist.new_connection(&name);
+        assert!(
+            dist.connect(&name, Controller::Process(ProcessId(90)), MONITOR_FLAGS)
+                .is_some()
+        );
+    }
+    // The monitor belongs to the connection, and a monitor of another
+    // connection keeps the packet back.
+    scheduler
+        .monitor(&MonitorTarget::RemoteProcess(remote), no_options())
+        .unwrap();
+    scheduler.finish_current(atom("normal"), None).unwrap();
+    let mut dist = scheduler.node.dist();
+    assert!(
+        dist.dequeue(&name).is_some(),
+        "the monitor wrote its own `MONITOR_P` first"
+    );
+    let packet = dist
+        .dequeue(&name)
+        .expect("the exit wrote the demonitor packet");
+    let control = packet[1..]
+        .iter()
+        .flat_map(Binary::to_bytes)
+        .collect::<Vec<u8>>();
+    assert_eq!(
+        &control[..5],
+        &[131, 104, 4, 97, 20],
+        "the packet is the control message of `DEMONITOR_P`"
+    );
+    assert!(dist.dequeue(&name).is_none(), "the exit wrote one packet");
+}
+
+#[test]
+fn sends_the_monitor_exit_packets_of_an_exiting_process_in_batches() {
+    use super::dist_table::Controller;
+    use crate::runtime::process::{RemotePid, RemoteReference, RemoteWatcher};
+    // The exit phase `ERTS_CONTINUE_EXIT_DIST_MONITORS` sends the monitor
+    // exit packet of each monitor that a process of another node holds on
+    // the exiting process, in post-order, and it continues at the next
+    // monitor when no reduction is left (`erl_process.c:14662-14671`,
+    // `erl_monitor_link.c:517-548`). Only a run can order the reduction
+    // count of the phase.
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let id = current(&mut scheduler);
+    let name = scheduler.atoms.put("other@host").unwrap();
+    let watchers = (1..=2u32)
+        .map(|number| RemotePid {
+            node: name.index(),
+            creation: 1,
+            number,
+            serial: 0,
+        })
+        .collect::<Vec<_>>();
+    {
+        let mut dist = scheduler.node.dist();
+        dist.insert(&name, Reference(7), 0);
+        dist.new_connection(&name);
+        assert!(
+            dist.connect(&name, Controller::Process(ProcessId(90)), 0)
+                .is_some()
+        );
+    }
+    scheduler.schedule_out();
+    let mut process = scheduler.processes.remove(id).expect("the root process");
+    for (index, remote) in watchers.iter().enumerate() {
+        let key = MonitorKey::Remote(RemoteReference {
+            node: remote.node,
+            creation: remote.creation,
+            numbers: [u32::try_from(index + 1).unwrap(), 0, 0, 0, 0],
+            count: 1,
+        });
+        process.dist_monitors.insert(
+            key,
+            RemoteWatcher {
+                watcher: *remote,
+                name: None,
+                connection: 1,
+            },
+        );
+    }
+    process.exiting = Some(Term::tuple(vec![atom("boom")]));
+    scheduler
+        .exit_links(process, ExitPhase::DistMonitors(None), 0)
+        .unwrap();
+    let (process, phase) = scheduler.freed.remove(&id).expect("the exit continues");
+    let position = match phase {
+        ExitPhase::DistMonitors(position) => position.expect("the phase keeps its monitor"),
+        _ => panic!("the phase is the phase of the monitors of other nodes"),
+    };
+    scheduler
+        .exit_links(process, ExitPhase::DistMonitors(Some(position)), 100)
+        .unwrap();
+    let mut dist = scheduler.node.dist();
+    assert!(dist.dequeue(&name).is_some(), "the first packet went out");
+    assert!(dist.dequeue(&name).is_some(), "the second packet went out");
+    assert!(
+        dist.dequeue(&name).is_none(),
+        "no packet stays in the queue"
+    );
+}
+
+#[test]
+fn stops_the_exit_of_a_process_at_a_reason_that_no_connection_can_carry() {
+    use super::dist_table::Controller;
+    use crate::runtime::process::{RemotePid, RemoteReference, RemoteWatcher};
+    // A monitor exit packet carries the exit reason, so a reason that holds
+    // a pid reference whose owner exited gives the runtime error of the
+    // encode (`erl_process.c:14662-14671`, `bif.rs`). ERTS writes the pid of
+    // the owner in the reference, which PBeam does not keep (row "External
+    // term format" of `docs/erts-differences.md`).
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let id = current(&mut scheduler);
+    let name = scheduler.atoms.put("other@host").unwrap();
+    let remote = RemotePid {
+        node: name.index(),
+        creation: 1,
+        number: 2,
+        serial: 0,
+    };
+    {
+        let mut dist = scheduler.node.dist();
+        dist.insert(&name, Reference(7), 0);
+        dist.new_connection(&name);
+        assert!(
+            dist.connect(&name, Controller::Process(ProcessId(90)), 0)
+                .is_some()
+        );
+    }
+    scheduler.schedule_out();
+    let mut process = scheduler.processes.remove(id).expect("the root process");
+    process.dist_monitors.insert(
+        MonitorKey::Remote(RemoteReference {
+            node: remote.node,
+            creation: remote.creation,
+            numbers: [3, 0, 0, 0, 0],
+            count: 1,
+        }),
+        RemoteWatcher {
+            watcher: remote,
+            name: None,
+            connection: 1,
+        },
+    );
+    process.exiting = Some(Term::tuple(vec![Term::Reference(
+        Reference::ordinary(9).unwrap().pid_reference(),
+    )]));
+    assert!(
+        scheduler
+            .exit_links(process, ExitPhase::DistMonitors(None), 100)
+            .is_err()
+    );
+}
+
+#[test]
 fn a_signal_to_a_dead_process_answers_a_monitor() {
     let mut scheduler = test_scheduler();
     scheduler.start(frame(), vec![], allow_all());
@@ -2581,7 +3310,7 @@ fn a_signal_to_a_dead_process_answers_a_monitor() {
         ProcessId(99),
         &Signal::Monitor {
             watcher: root,
-            reference,
+            reference: MonitorKey::Local(reference),
         },
     );
     assert!(
@@ -2651,7 +3380,7 @@ fn a_remote_signal_flushes_the_pending_monitor_first() {
         target,
         Monitor {
             watcher: root,
-            reference,
+            reference: MonitorKey::Local(reference),
         },
     ));
     scheduler.send_signal_to_owner(
@@ -2709,7 +3438,7 @@ fn a_remote_target_adds_and_removes_the_monitor_of_a_watcher() {
     scheduler.start_with_id(watcher, 0, frame().into(), vec![], allow_all());
     scheduler.schedule_next().unwrap();
     let reference = scheduler
-        .monitor(MonitorTarget::Process(target), no_options())
+        .monitor(&MonitorTarget::Process(target), no_options())
         .unwrap();
     scheduler.send_pending_monitor();
     assert!(owner.drain_inbox());

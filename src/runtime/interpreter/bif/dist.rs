@@ -145,9 +145,20 @@ const MANDATORY_FLAGS: u64 = 0x0004 // DFLAG_EXTENDED_REFERENCES
     | 0x0200_0000; // DFLAG_UNLINK_ID
 
 /// The default distribution flags of PBeam: the mandatory flags,
-/// `DFLAG_EXIT_PAYLOAD` (`dist.h:52`), and `DFLAG_ALIAS` (`dist.h:67`),
-/// which ERTS offers in `DFLAG_DIST_DEFAULT` (`dist.h:113-123`).
-const DEFAULT_FLAGS: u64 = MANDATORY_FLAGS | 0x40_0000 | (0x8 << 32);
+/// `DFLAG_DIST_MONITOR` (`dist.h:33`), `DFLAG_DIST_MONITOR_NAME`
+/// (`dist.h:34`), `DFLAG_EXIT_PAYLOAD` (`dist.h:52`), and `DFLAG_ALIAS`
+/// (`dist.h:67`), which ERTS offers in `DFLAG_DIST_DEFAULT`
+/// (`dist.h:113-123`).
+///
+/// ERTS sends a monitor packet only to a connection that offered both
+/// monitor flags: `erts_dsig_send_monitor`, `erts_dsig_send_demonitor`, and
+/// `erts_dsig_send_m_exit` each skip the packet when
+/// `~dflags & (DFLAG_DIST_MONITOR | DFLAG_DIST_MONITOR_NAME)` (`dist.c:1507`,
+/// `1545`, `1558`). Thus a node that offers `DFLAG_DIST_MONITOR` alone
+/// gets no monitor packet at all, and PBeam offers both. A monitor of a name
+/// stays out of scope (see row "Distribution" of
+/// `docs/erts-differences.md`).
+const DEFAULT_FLAGS: u64 = MANDATORY_FLAGS | 0x08 | 0x20 | 0x40_0000 | (0x8 << 32);
 
 /// The flags that a local distribution module can reject
 /// (`DFLAG_DIST_REJECTABLE`, `dist.h:129-132`): `DFLAG_DIST_HDR_ATOM_CACHE`,
@@ -172,17 +183,18 @@ fn node_name_atom<'a>(context: &BifContext<'_>, name: &'a Term) -> Option<&'a At
 /// Run `erts_internal:get_dflags/0` (`dist.c:5543-5569`): return
 /// `{erts_dflags, Default, Mandatory, Addable, Rejectable, StrictOrder}`.
 ///
-/// PBeam offers the mandatory flags, `DFLAG_EXIT_PAYLOAD`, and
-/// `DFLAG_ALIAS` as its default flags, and a distribution module can add only those
-/// (`DFLAG_DIST_ADDABLE` is the default, `dist.h:126`); ERTS also offers
-/// the other flags of `dist.h:105-123`.
+/// PBeam offers the mandatory flags, `DFLAG_DIST_MONITOR`,
+/// `DFLAG_DIST_MONITOR_NAME`, `DFLAG_EXIT_PAYLOAD`, and `DFLAG_ALIAS` as its
+/// default flags, and a distribution module can add only those
+/// (`DFLAG_DIST_ADDABLE` is the default, `dist.h:126`); ERTS also offers the
+/// other flags of `dist.h:105-123`.
 /// The rejectable and the strict order flags are those of ERTS. See row
 /// "Distribution" of `docs/erts-differences.md`.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// // {erts_dflags,51594596244,17230663572,51594596244,8396866,8192}
+/// // {erts_dflags,51594596284,17230663572,51594596284,8396866,8192}
 /// let Term::Tuple(record) = get_dflags() else { unreachable!() };
 /// assert_eq!(record.len(), 6);
 /// ```
