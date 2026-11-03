@@ -19,7 +19,7 @@ use crate::{
     error::{BeamError, error},
     term::{
         Atom, LiveBytes, PortId, ProcessId, Reference, Term,
-        external_id::{self, ExternalData, ExternalId},
+        external_id::{ExternalData, ExternalId},
     },
 };
 
@@ -124,8 +124,10 @@ pub(super) struct RemoteReference {
 
 impl RemoteReference {
     /// Return the reference `reference` of another node, or `None` for
-    /// another term. The high numbers that are 0 leave the count, as
-    /// [`super::external_id::significant`] reads it.
+    /// another term. The count stays as the other node wrote it: a pid
+    /// reference of five numbers ends with the pid word of its owner, which
+    /// can be 0, and ERTS finds the monitor of the watcher by these numbers
+    /// (`erts_pid_ref_lookup`, `erl_bif_unique.h:259-277`).
     ///
     /// # Examples
     ///
@@ -140,7 +142,6 @@ impl RemoteReference {
         let ExternalData::Reference(numbers) = &id.data else {
             return None;
         };
-        let numbers = external_id::significant(numbers);
         let count = u8::try_from(numbers.len()).ok()?;
         let mut copy = [0; 5];
         copy[..numbers.len()].copy_from_slice(numbers);
