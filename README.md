@@ -30,6 +30,8 @@ acceptance criteria, and unresolved decisions.
 
 The [M25 stable test suite milestone](docs/m25-stable-test-suite.md) records its goal, acceptance criteria, completed foundations, open GitHub tasks, and steps for another agent to continue.
 
+The [M24 Redbug CLI handoff](docs/m24-redbug-cli-handoff.md) records the goal, the delivered Terra TUI, the distribution dependencies, the owner decisions, and the next steps of the Redbug CLI work.
+
 The [capability security design](docs/capability-security-design.md) records the proposed authority, provider, and native trust contracts. The separate [migration and implementation guide](docs/capability-security-migration.md) starts with the delivered M2 terminal IO path after M2 acceptance. These documents do not claim an implemented sandbox. Milestone M6 ([tracker #304](https://github.com/fahchen/pbeam/issues/304)) implements them.
 
 Development toolchains are pinned in [mise.toml](mise.toml). Use `mise install`
