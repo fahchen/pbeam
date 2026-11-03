@@ -738,6 +738,103 @@ fn monitors_a_registered_name_of_another_node_as_pinned_erts() {
 }
 
 #[test]
+fn calls_a_server_of_another_node_by_name_as_pinned_erts() {
+    // `gen_server:call/2` to `{Name, Node}` monitors the name with the
+    // `demonitor` alias option and waits for the reply through the alias
+    // (`gen.erl`, `gen_server.erl`), and `net_adm:ping/1` makes a `gen:call`
+    // to `{net_kernel, Node}` and answers `pong` or `pang`
+    // (`net_adm.erl:101-110`). The client stops the server node at the end,
+    // because a node that the test kills writes no profile of its own runs.
+    // Each pair of ERTS and PBeam nodes runs over the prim_socket carrier and
+    // over the tcp_inet port controller.
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let expected = "[{ping,pong},{pang,pang},{reply,42},{noproc,noproc},{lost,noconnection}]\n";
+    for (server_pbeam, socket) in [(false, true), (false, false), (true, true), (true, false)] {
+        for client_pbeam in [false, true] {
+            // The client stops the server node, so each client needs a server
+            // of its own.
+            let name = format!("dcsrv{server_pbeam}{socket}{client_pbeam}{id}");
+            let mut arguments = vec!["-sname", &name, "-setcookie", "ck", "-pa", "fixtures/dist"];
+            if socket {
+                arguments.extend(SOCKET_CARRIER);
+            }
+            let server = "dist_call_probe:server().";
+            let node = if server_pbeam {
+                pbeam_node(&epmd, &arguments, server)
+            } else {
+                ErtsNode::start(&epmd, &arguments, server)
+            };
+            let expression = format!("dist_call_probe:client('{}'), halt().", node.line());
+            let client = |name: &str| {
+                let mut arguments = vec!["-sname", name, "-setcookie", "ck", "-hidden"];
+                if socket {
+                    arguments.extend(SOCKET_CARRIER);
+                }
+                arguments.extend(["-noshell", "-pa", "fixtures/dist", "-eval", &expression]);
+                arguments.into_iter().map(str::to_owned).collect::<Vec<_>>()
+            };
+            let client_name = format!("dccl{server_pbeam}{socket}{client_pbeam}{id}");
+            let output = if client_pbeam {
+                pbeam_erl(&epmd, &client(&client_name))
+            } else {
+                erts_erl(&epmd, &client(&client_name))
+            };
+            assert_eq!(
+                stdout(&output),
+                expected,
+                "server pbeam {server_pbeam}, socket {socket}, client pbeam {client_pbeam}"
+            );
+        }
+    }
+}
+
+#[test]
+fn pings_a_live_node_with_no_connection_as_pinned_erts() {
+    // `net_adm:ping/1` makes a `gen:call` to `{net_kernel, Node}`, so it
+    // monitors the name and sends to it. ERTS starts a connection on that
+    // call and answers `pong`. PBeam ends the monitor of a node with no
+    // connection at once with `noconnection`, so it answers `pang`; #1412
+    // adds the connection on the first signal (row "Distribution").
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    for (server_pbeam, socket) in [(false, true), (false, false), (true, true), (true, false)] {
+        let name = format!("dpsrv{server_pbeam}{socket}{id}");
+        let mut arguments = vec!["-sname", &name, "-setcookie", "ck", "-pa", "fixtures/dist"];
+        if socket {
+            arguments.extend(SOCKET_CARRIER);
+        }
+        let server = "dist_call_probe:server().";
+        let node = if server_pbeam {
+            pbeam_node(&epmd, &arguments, server)
+        } else {
+            ErtsNode::start(&epmd, &arguments, server)
+        };
+        let expression = format!("dist_call_probe:unconnected('{}'), halt().", node.line());
+        let client = |name: &str| {
+            let mut arguments = vec!["-sname", name, "-setcookie", "ck", "-hidden"];
+            if socket {
+                arguments.extend(SOCKET_CARRIER);
+            }
+            arguments.extend(["-noshell", "-pa", "fixtures/dist", "-eval", &expression]);
+            arguments.into_iter().map(str::to_owned).collect::<Vec<_>>()
+        };
+        let erts = format!("dperts{server_pbeam}{socket}{id}");
+        assert_eq!(
+            stdout(&erts_erl(&epmd, &client(&erts))),
+            "[{unconnected,pong}]\n",
+            "server pbeam {server_pbeam}, socket {socket}"
+        );
+        let pbeam = format!("dppb{server_pbeam}{socket}{id}");
+        assert_eq!(
+            stdout(&pbeam_erl(&epmd, &client(&pbeam))),
+            "[{unconnected,pang}]\n",
+            "server pbeam {server_pbeam}, socket {socket}"
+        );
+    }
+}
+
+#[test]
 fn monitors_processes_between_erts_and_pbeam_nodes() {
     // A client process monitors a process of a server node and a process of
     // the server node monitors a client process, and the watched process
