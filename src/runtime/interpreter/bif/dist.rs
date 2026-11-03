@@ -158,7 +158,7 @@ const MANDATORY_FLAGS: u64 = 0x0004 // DFLAG_EXTENDED_REFERENCES
 /// gets no monitor packet at all, and PBeam offers both. A monitor of a name
 /// stays out of scope (see row "Distribution" of
 /// `docs/erts-differences.md`).
-const DEFAULT_FLAGS: u64 = MANDATORY_FLAGS | 0x08 | 0x20 | 0x40_0000 | (0x8 << 32);
+const DEFAULT_FLAGS: u64 = MANDATORY_FLAGS | 0x08 | 0x20 | 0x40_0000 | (0x8 << 32) | (1 << 32);
 
 /// The flags that a local distribution module can reject
 /// (`DFLAG_DIST_REJECTABLE`, `dist.h:129-132`): `DFLAG_DIST_HDR_ATOM_CACHE`,
@@ -194,7 +194,7 @@ fn node_name_atom<'a>(context: &BifContext<'_>, name: &'a Term) -> Option<&'a At
 /// # Examples
 ///
 /// ```rust,ignore
-/// // {erts_dflags,51594596284,17230663572,51594596284,8396866,8192}
+/// // {erts_dflags,55889563580,17230663572,55889563580,8396866,8192}
 /// let Term::Tuple(record) = get_dflags() else { unreachable!() };
 /// assert_eq!(record.len(), 6);
 /// ```
@@ -731,4 +731,117 @@ pub(super) fn dist_get_stat(context: &mut BifContext<'_>, handle: &Term) -> BifR
         }
         _ => BifResult::badarg(),
     }
+}
+
+/// Run `erts_internal:dist_spawn_request(Node, MFA, Options, Wait)` as
+/// `erts_internal_dist_spawn_request_4` does (`dist.c:5850-6120`): send a
+/// spawn request to `Node` and return `{Ref, MonOpt}` for
+/// `erlang:spawn_opt/5`, or `Ref` for `erlang:spawn_request/5`.
+///
+/// # Errors
+///
+/// The errors of the encode of the request.
+pub(super) fn dist_spawn_request(
+    context: &mut BifContext<'_>,
+    node: &Term,
+    mfa: &Term,
+    options: &Term,
+    wait: &Term,
+) -> Result<BifResult, BeamError> {
+    let Term::Atom(node) = node else {
+        return Ok(BifResult::badarg());
+    };
+    let spawn_opt = match wait {
+        Term::Atom(wait) if wait.is_static("spawn_opt") => true,
+        Term::Atom(wait) if wait.is_static("spawn_request") => false,
+        _ => return Ok(BifResult::badarg()),
+    };
+    let Some(options) = options.proper_list() else {
+        return Ok(BifResult::badarg());
+    };
+    let Term::Tuple(pair) = mfa else {
+        return Ok(BifResult::badarg());
+    };
+    let [Term::Atom(module), Term::Atom(function), arguments] = pair.as_ref() else {
+        return Ok(BifResult::badarg());
+    };
+    let Some(arguments_list) = arguments.proper_list() else {
+        return Ok(BifResult::badarg());
+    };
+    let arguments_len = i64::try_from(arguments_list.count()).unwrap_or(i64::MAX);
+    let arguments_list = arguments.clone();
+    let mut link = false;
+    let mut monitor = None;
+    let mut reply_tag = Term::static_atom("spawn_reply");
+    let mut kept = Vec::new();
+    for option in options {
+        match option {
+            Term::Atom(name) if name.is_static("link") => link = true,
+            Term::Atom(name) if name.is_static("monitor") => {
+                monitor = Some(Term::static_atom("DOWN"));
+            }
+            Term::Tuple(fields) => match fields.as_ref() {
+                [Term::Atom(name), Term::Atom(mode)] if name.is_static("reply_tag") => {
+                    reply_tag = Term::Atom(mode.clone());
+                }
+                [Term::Atom(name), _] if name.is_static("reply") => {}
+                [Term::Atom(name), value] if name.is_static("monitor") => {
+                    let Some(tag) = monitor_tag(value) else {
+                        return Ok(BifResult::badarg());
+                    };
+                    monitor = Some(tag);
+                }
+                _ => kept.push(option.clone()),
+            },
+            _ => kept.push(option.clone()),
+        }
+    }
+    // The request names `link` and `monitor` so that the receiver sets the
+    // flags of the reply (`dist.c:6054-6110`); a `{monitor, Opts}` becomes a
+    // bare `monitor` because only the local monitor keeps the tag.
+    let mut sent = Vec::new();
+    if link {
+        sent.push(Term::static_atom("link"));
+    }
+    if monitor.is_some() {
+        sent.push(Term::static_atom("monitor"));
+    }
+    sent.extend(kept);
+    let scheduler = &mut *context.scheduler;
+    let (reference, monitored) = scheduler.dist_spawn_request(
+        node,
+        module,
+        function,
+        arguments_len,
+        &arguments_list,
+        Term::list_from(sent),
+        link,
+        monitor.as_ref(),
+        &reply_tag,
+    )?;
+    let value = if spawn_opt {
+        Term::tuple(vec![
+            Term::Reference(reference),
+            Term::static_atom(if monitored { "true" } else { "false" }),
+        ])
+    } else {
+        Term::Reference(reference)
+    };
+    Ok(BifResult::Value(value))
+}
+
+/// Return the tag of a `{monitor, Options}` spawn option, or `None` when the
+/// options are not a proper list of `{tag, Tag}`.
+fn monitor_tag(options: &Term) -> Option<Term> {
+    let mut tag = Term::static_atom("DOWN");
+    for option in options.proper_list()? {
+        match option {
+            Term::Tuple(fields) => match fields.as_ref() {
+                [Term::Atom(name), value] if name.is_static("tag") => tag = value.clone(),
+                _ => return None,
+            },
+            _ => return None,
+        }
+    }
+    Some(tag)
 }

@@ -716,7 +716,8 @@ ambient() ->
         attempt(fun() -> erlang:dist_ctrl_set_opt(foo, get_size, true) end),
         attempt(fun() -> erlang:dist_ctrl_input_handler(foo, self()) end),
         attempt(fun() -> erlang:dist_ctrl_put_data(foo, <<>>) end),
-        attempt(fun() -> erlang:dist_get_stat(foo) end)
+        attempt(fun() -> erlang:dist_get_stat(foo) end),
+        attempt(fun() -> erts_internal:dist_spawn_request(effect@nohost, {}, [], spawn_opt) end)
     ].
 
 %% Each metadata probe makes a temporary file, so `write_file_info/3`

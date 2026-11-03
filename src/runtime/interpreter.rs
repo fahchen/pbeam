@@ -4329,7 +4329,7 @@ fn create_process(
 /// # Errors
 ///
 /// The errors of `CodeTable::export_frame`.
-fn initial_start(
+pub(crate) fn initial_start(
     scheduler: &mut Scheduler,
     module: &Atom,
     function: &Atom,

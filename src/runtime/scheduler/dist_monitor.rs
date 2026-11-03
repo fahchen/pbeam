@@ -531,7 +531,7 @@ pub(in crate::runtime) fn monitored(target: ProcessId, name: Option<u32>) -> Ter
 /// # Errors
 ///
 /// Another term (see [`super::dist_input`]).
-fn remote_of(node: &Atom, from: &Term) -> Result<RemotePid, BeamError> {
+pub(super) fn remote_of(node: &Atom, from: &Term) -> Result<RemotePid, BeamError> {
     match RemotePid::of(from) {
         Some(remote) if remote.node == node.index() => Ok(remote),
         _ => Err(error(super::dist_input::REJECTED)),
@@ -544,7 +544,7 @@ fn remote_of(node: &Atom, from: &Term) -> Result<RemotePid, BeamError> {
 /// that a local process holds comes back from the other node as an internal
 /// reference, because it names the local node (`dec_is_this_node`,
 /// `external.c:3123-3129`).
-fn monitor_key(reference: &Term) -> Option<MonitorKey> {
+pub(super) fn monitor_key(reference: &Term) -> Option<MonitorKey> {
     match reference {
         Term::Reference(reference) => Some(MonitorKey::Local(*reference)),
         external @ Term::External(_) => Some(MonitorKey::Remote(RemoteReference::of(external)?)),

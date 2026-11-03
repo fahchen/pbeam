@@ -18,11 +18,12 @@ use crate::{
         capability::Source,
         interpreter::bif,
         mailbox::{NodeId, Step, Walk},
+        process::RemotePid,
         scheduler::AliasMode,
         signal::Signal,
         sockets::Sockets,
     },
-    term::{ProcessId, Reference, Term},
+    term::{Atom, ProcessId, Reference, Term},
 };
 
 /// A delivery of the current process to a process of another scheduler.
@@ -932,6 +933,26 @@ impl Scheduler {
                 self.send_message(id, requester, reply(reference, Term::static_atom("true")));
                 0
             }
+            Signal::SpawnReply {
+                node: remote_node,
+                reference,
+                flags,
+                result,
+                connection,
+            } => self.handle_spawn_reply(
+                id,
+                walk,
+                node,
+                &remote_node,
+                reference,
+                flags,
+                &result,
+                connection,
+            ),
+            Signal::DistGroupLeader { leader } => {
+                self.handled(id, node).group_leader = leader;
+                1
+            }
             Signal::IsAlive {
                 requester,
                 reference,
@@ -1145,6 +1166,91 @@ impl Scheduler {
         process.mailbox.convert(walk, node, down);
         self.activate(id);
         extra
+    }
+
+    /// Handle the reply of a spawn request of `id` (`dist.c:3033-3130`):
+    /// give the caller its `{Tag, Ref, ok, Pid}` or `{Tag, Ref, error,
+    /// Reason}` message, and keep the monitor and the link that `flags`
+    /// names.
+    #[expect(clippy::too_many_arguments, reason = "the fields of the packet")]
+    fn handle_spawn_reply(
+        &mut self,
+        id: ProcessId,
+        walk: &mut Walk,
+        node_id: NodeId,
+        node: &Atom,
+        reference: MonitorKey,
+        flags: i64,
+        result: &Term,
+        connection: u32,
+    ) -> i32 {
+        let Some(reply_tag) = self
+            .processes
+            .get_mut(id)
+            .and_then(|process| process.monitors.get(&reference))
+            .and_then(|origin| origin.monitor.as_ref())
+            .map(|monitor| monitor.item.clone())
+        else {
+            return 0;
+        };
+        if let Term::Atom(reason) = result {
+            let _ = self
+                .processes
+                .get_mut(id)
+                .map(|p| p.monitors.remove(&reference));
+            let message = Term::tuple(vec![
+                reply_tag,
+                reference.term(),
+                Term::static_atom("error"),
+                Term::Atom(reason.clone()),
+            ]);
+            let process = self.processes.get_mut(id).expect("the process is alive");
+            process.mailbox.convert(walk, node_id, message);
+            self.activate(id);
+        } else {
+            let Some(remote) = RemotePid::of(result) else {
+                return 0;
+            };
+            let pid = result.clone();
+            let message = Term::tuple(vec![
+                reply_tag,
+                reference.term(),
+                Term::static_atom("ok"),
+                pid.clone(),
+            ]);
+            let process = self.processes.get_mut(id).expect("the process is alive");
+            process.mailbox.convert(walk, node_id, message);
+            self.activate(id);
+            if flags & super::dist_spawn::SPAWN_MONITOR != 0 {
+                if let Some(monitor) = self
+                    .processes
+                    .get_mut(id)
+                    .and_then(|process| process.monitors.get_mut(&reference))
+                    .and_then(|origin| origin.monitor.as_mut())
+                {
+                    monitor.target = None;
+                    monitor.item = pid;
+                    monitor.connection = connection;
+                }
+                self.node.dist().insert_monitor(
+                    id,
+                    node,
+                    Some(remote),
+                    reference,
+                    connection,
+                    super::dist_table::MonitorSide::Watcher,
+                );
+            } else {
+                let _ = self
+                    .processes
+                    .get_mut(id)
+                    .map(|p| p.monitors.remove(&reference));
+            }
+            if flags & super::dist_spawn::SPAWN_LINK != 0 {
+                self.link_on(id, LinkId::Remote(remote), remote, connection);
+            }
+        }
+        1
     }
 
     /// Handle a message through the alias `alias` of the process `id`, as

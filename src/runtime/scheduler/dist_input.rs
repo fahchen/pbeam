@@ -70,7 +70,11 @@ impl Scheduler {
     /// hold.
     // `watched` and `watcher` are the names of the ERTS control message of a
     // monitor exit packet (`dist.c:2690`).
-    #[expect(clippy::similar_names, reason = "the names are those of ERTS")]
+    #[expect(
+        clippy::similar_names,
+        clippy::too_many_lines,
+        reason = "the names are those of ERTS, and the arms are those of erts_net_message"
+    )]
     pub(in crate::runtime) fn net_message(
         &mut self,
         node: &Atom,
@@ -160,6 +164,23 @@ impl Scheduler {
                     scheduler.dist_message(message)
                 })
             }
+            (Some(29), [_, reference, from, group_leader, mfa, options]) => {
+                let arguments = self.dist_message(message)?;
+                self.net_spawn_request(
+                    node,
+                    connection,
+                    reference,
+                    from,
+                    group_leader,
+                    mfa,
+                    options,
+                    &arguments,
+                )
+            }
+            (Some(31), [_, reference, to, flags, result]) => {
+                self.net_spawn_reply(node, connection, reference, to, flags, result)
+            }
+            (Some(7), [_, leader, to]) => self.net_group_leader(leader, to),
             (Some(12 | 13 | 16 | 18 | 23 | 25 | 27 | 34), _) => Err(error(
                 "unsupported distribution message with a trace token: see \"Distribution\" in docs/erts-differences.md",
             )),

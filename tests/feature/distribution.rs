@@ -238,7 +238,7 @@ fn offers_the_mandatory_distribution_flags_the_monitor_flags_exit_payload_and_al
     );
     assert_eq!(
         stdout(&output),
-        "{erts_dflags,51594596284,17230663572,51594596284,8396866,8192}\n"
+        "{erts_dflags,55889563580,17230663572,55889563580,8396866,8192}\n"
     );
 }
 
@@ -283,8 +283,8 @@ fn stops_at_a_part_of_a_channel_that_pbeam_does_not_have() {
         ("port_message()".to_owned(), rejected),
         ("monitor_op()".to_owned(), rejected),
         (
-            "spawn_op()".to_owned(),
-            "unsupported distribution operation 29",
+            "altact_op()".to_owned(),
+            "unsupported distribution operation 37",
         ),
         ("demonitor_ref()".to_owned(), rejected),
         ("deliver_port()".to_owned(), deliver),
@@ -723,6 +723,60 @@ fn monitors_a_registered_name_of_another_node_as_pinned_erts() {
                 arguments.into_iter().map(str::to_owned).collect::<Vec<_>>()
             };
             let client_name = format!("dncl{server_pbeam}{socket}{client_pbeam}{id}");
+            let output = if client_pbeam {
+                pbeam_erl(&epmd, &client(&client_name))
+            } else {
+                erts_erl(&epmd, &client(&client_name))
+            };
+            assert_eq!(
+                stdout(&output),
+                expected,
+                "server pbeam {server_pbeam}, socket {socket}, client pbeam {client_pbeam}"
+            );
+        }
+    }
+}
+
+#[test]
+fn spawns_processes_on_another_node_as_pinned_erts() {
+    // `spawn/4`, `spawn_link/4`, `spawn_monitor/4`, `spawn_opt/5`, and
+    // `spawn_request/5` start a process on another node; a link and a monitor
+    // join it, a spawn request answers `{spawn_reply, ReqId, ok, Pid}` and a
+    // `DOWN` at the exit, a node with no connection answers `noconnection`,
+    // and `io:format/2` of the remote process writes to the group leader of
+    // the caller (bif.c:1027-1075, erl_process.c:12440-12530,
+    // dist.c:5850-6260). Each pair of ERTS and PBeam nodes runs over the
+    // prim_socket carrier and over the tcp_inet port controller. The client
+    // stops the server node at the end, because a node that the test kills
+    // writes no profile of its own runs.
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let expected = "[{spawn,true},{monitor,normal},{link,boom},{request,ok},\
+                    {request_down,boom},{noconnection,noconnection},\
+                    {lost,noconnection}]\n";
+    for (server_pbeam, socket) in [(false, true), (false, false), (true, true), (true, false)] {
+        for client_pbeam in [false, true] {
+            let name = format!("dssrv{server_pbeam}{socket}{client_pbeam}{id}");
+            let mut arguments = vec!["-sname", &name, "-setcookie", "ck", "-pa", "fixtures/dist"];
+            if socket {
+                arguments.extend(SOCKET_CARRIER);
+            }
+            let server = "dist_spawn_probe:server().";
+            let node = if server_pbeam {
+                pbeam_node(&epmd, &arguments, server)
+            } else {
+                ErtsNode::start(&epmd, &arguments, server)
+            };
+            let expression = format!("dist_spawn_probe:client('{}'), halt().", node.line());
+            let client = |name: &str| {
+                let mut arguments = vec!["-sname", name, "-setcookie", "ck", "-hidden"];
+                if socket {
+                    arguments.extend(SOCKET_CARRIER);
+                }
+                arguments.extend(["-noshell", "-pa", "fixtures/dist", "-eval", &expression]);
+                arguments.into_iter().map(str::to_owned).collect::<Vec<_>>()
+            };
+            let client_name = format!("dscl{server_pbeam}{socket}{client_pbeam}{id}");
             let output = if client_pbeam {
                 pbeam_erl(&epmd, &client(&client_name))
             } else {

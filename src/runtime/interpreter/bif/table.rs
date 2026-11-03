@@ -384,7 +384,7 @@ bifs! {
     erts_internal:counters_put/3 as ErtsInternalCountersPut3 => |cx, [reference, index, value]| atomics::counters_put(cx.scheduler, reference, index, value),
     erts_internal:create_dist_channel/3 as ErtsInternalCreateDistChannel3 => |cx, [node, controller, options]| dist::create_dist_channel(cx, node, controller, options),
     erts_internal:dirty_process_handle_signals/1 => unsupported,
-    erts_internal:dist_spawn_request/4 => unsupported,
+    erts_internal:dist_spawn_request/4 as ErtsInternalDistSpawnRequest4 => |cx, [node, mfa, options, wait]| dist::dist_spawn_request(cx, node, mfa, options, wait),
     erts_internal:erase_persistent_terms/0 => unsupported,
     erts_internal:ets_lookup_binary_info/2 => unsupported,
     erts_internal:ets_raw_first/1 => unsupported,

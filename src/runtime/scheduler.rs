@@ -4487,6 +4487,7 @@ mod dist_input;
 mod dist_link;
 mod dist_monitor;
 pub(super) mod dist_output;
+mod dist_spawn;
 pub(super) mod dist_table;
 mod known_nodes;
 pub(super) mod node;
