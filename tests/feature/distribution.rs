@@ -290,6 +290,24 @@ fn stops_at_a_part_of_a_channel_that_pbeam_does_not_have() {
         ("deliver_port()".to_owned(), deliver),
         ("deliver_udp()".to_owned(), deliver),
     ];
+    // Each part of a spawn request, a spawn reply, and a group leader
+    // message that ERTS rejects ends the connection (dist.c:2889-3130).
+    cases.extend(
+        [
+            "spawn_bad_ref()",
+            "spawn_bad_from()",
+            "spawn_bad_leader()",
+            "spawn_bad_mfa()",
+            "spawn_bad_arity()",
+            "spawn_bad_arguments()",
+            "reply_bad_to()",
+            "reply_bad_ref()",
+            "reply_bad_flags()",
+            "reply_bad_result()",
+            "group_leader_bad()",
+        ]
+        .map(|call| (call.to_owned(), rejected)),
+    );
     cases.extend([12, 13, 18, 25, 27].map(|op| {
         (
             format!("trace_token({op})"),
@@ -753,7 +771,7 @@ fn spawns_processes_on_another_node_as_pinned_erts() {
     let id = std::process::id();
     let expected = "[{spawn,true},{monitor,normal},{link,boom},{request,ok},\
                     {request_down,boom},{noconnection,noconnection},\
-                    {lost,noconnection}]\n";
+                    {lost,noconnection},{badopt,{badopt,badopt,badarg}}]\n";
     for (server_pbeam, socket) in [(false, true), (false, false), (true, true), (true, false)] {
         for client_pbeam in [false, true] {
             let name = format!("dssrv{server_pbeam}{socket}{client_pbeam}{id}");

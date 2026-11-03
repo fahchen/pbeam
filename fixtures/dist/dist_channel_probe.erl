@@ -7,7 +7,10 @@
          trace_token/1, monitor_op/0, demonitor_name/0, demonitor_ref/0,
          atom_cache/0, output/0, port_output/0,
          alias_ext/0, dead_alias/1, exit_input/0, link_input/0,
-         link_noconnection/0, altact_op/0]).
+         link_noconnection/0, altact_op/0, spawn_bad_ref/0, spawn_bad_from/0,
+         spawn_bad_leader/0, spawn_bad_mfa/0, spawn_bad_arity/0,
+         spawn_bad_arguments/0, reply_bad_to/0, reply_bad_ref/0,
+         reply_bad_flags/0, reply_bad_result/0, group_leader_bad/0]).
 
 main() ->
     %% net_kernel reports the dist_ctrlr message of a connection that it
@@ -525,6 +528,48 @@ demonitor_ref() ->
     {ok, DH} = erts_internal:create_dist_channel(zz@nohost, self(), {mandatory(), 1}),
     erlang:dist_ctrl_put_data(
       DH, packet_only({20, remote_pid(zz@nohost), make_ref(), remote_ref(zz@nohost)})).
+
+%% A packet on a channel of `zz@nohost` with the process of the caller as
+%% the controller.
+channel(Control, Message) ->
+    erts_internal:new_connection(zz@nohost),
+    {ok, DH} = erts_internal:create_dist_channel(zz@nohost, self(), {mandatory(), 1}),
+    erlang:dist_ctrl_put_data(DH, packet(Control, Message)).
+
+%% Each spawn request or reply below has a part that ERTS rejects and ends
+%% the connection for (dist.c:2889-3130).
+spawn_bad_ref() ->
+    channel({29, 1, self(), self(), {erlang, node, []}, []}, []).
+
+spawn_bad_from() ->
+    channel({29, make_ref(), make_ref(), self(), {erlang, node, []}, []}, []).
+
+spawn_bad_leader() ->
+    channel({29, make_ref(), self(), make_ref(), {erlang, node, []}, []}, []).
+
+spawn_bad_mfa() ->
+    channel({29, make_ref(), self(), self(), {erlang, node}, []}, []).
+
+spawn_bad_arity() ->
+    channel({29, make_ref(), self(), self(), {erlang, node, foo}, []}, []).
+
+spawn_bad_arguments() ->
+    channel({29, make_ref(), self(), self(), {erlang, node, []}, []}, not_a_list).
+
+reply_bad_to() ->
+    channel({31, make_ref(), make_ref(), 0, self()}, []).
+
+reply_bad_ref() ->
+    channel({31, 1, self(), 0, self()}, []).
+
+reply_bad_flags() ->
+    channel({31, make_ref(), self(), foo, self()}, []).
+
+reply_bad_result() ->
+    channel({31, make_ref(), self(), 0, 42}, []).
+
+group_leader_bad() ->
+    channel({7, make_ref(), self()}, []).
 
 %% A pid of the node Node.
 remote_pid(Node) ->

@@ -31,9 +31,23 @@ client(Server) ->
                    after 5000 -> timeout
                    end,
     Lost = stopped(Server),
+    BadMonitor = spawn_request(Server, erlang, node, [], [{monitor, [foo]}]),
+    BadMonitorReply = receive {spawn_reply, BadMonitor, error, Why4} -> Why4
+                      after 5000 -> timeout
+                      end,
+    BadLink = spawn_request(Server, erlang, node, [], [{link, [foo]}]),
+    BadLinkReply = receive {spawn_reply, BadLink, error, Why5} -> Why5
+                   after 5000 -> timeout
+                   end,
+    BadOption = try spawn_opt(Server, erlang, node, [], [{monitor, [foo]}]) of
+                    _ -> value
+                catch
+                    error:badarg -> badarg
+                end,
     io:format("~0p~n", [[{spawn, node(P) =:= Server}, {monitor, Monitor},
                          {link, Link}, {request, Request}, {request_down, RequestDown},
-                         {noconnection, NoConnection}, {lost, Lost}]]),
+                         {noconnection, NoConnection}, {lost, Lost},
+                         {badopt, {BadMonitorReply, BadLinkReply, BadOption}}]]),
     ok.
 
 stopped(Server) ->

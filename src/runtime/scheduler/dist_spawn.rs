@@ -16,7 +16,6 @@ const SPAWN_REQUEST: i64 = 29;
 const SPAWN_REPLY: i64 = 31;
 /// `DFLAG_SPAWN` (`dist.h:64`).
 const DIST_SPAWN: u64 = 1 << 32;
-/// `ERTS_DIST_SPAWN_FLAG_MONITOR` (`dist.h:187`).
 /// `ERTS_DIST_SPAWN_FLAG_LINK` (`dist.h:186`).
 pub(in crate::runtime) const SPAWN_LINK: i64 = 1;
 /// `ERTS_DIST_SPAWN_FLAG_MONITOR` (`dist.h:187`).
@@ -32,11 +31,7 @@ impl Scheduler {
     /// # Errors
     ///
     /// The errors of the encode of the control message.
-    #[expect(
-        clippy::too_many_arguments,
-        clippy::fn_params_excessive_bools,
-        reason = "the fields of the request, and `link` is a flag of the request"
-    )]
+    #[expect(clippy::too_many_arguments, reason = "the fields of the request")]
     pub(in crate::runtime) fn dist_spawn_request(
         &mut self,
         node: &Atom,
@@ -45,7 +40,6 @@ impl Scheduler {
         arity: i64,
         arguments: &Term,
         options: Term,
-        link: bool,
         monitor: Option<&Term>,
         reply_tag: &Term,
     ) -> Result<(Reference, bool), BeamError> {
@@ -86,10 +80,31 @@ impl Scheduler {
         let sent = self.dist_spawn_output(watcher, node, &control, arguments)?;
         if !sent {
             self.spawn_reply_error(watcher, key, reply_tag, Term::static_atom("noconnection"));
-        } else if link {
-            // The link joins the reply. PBeam records it when the pid comes.
         }
         Ok((reference, monitor.is_some()))
+    }
+
+    /// Give the caller of a spawn request that names a bad option the reply
+    /// `{Tag, Ref, error, badopt}` and return the reference
+    /// (`dist.c:5955-5975`).
+    ///
+    /// # Errors
+    ///
+    /// The errors of the reference allocation.
+    pub(in crate::runtime) fn dist_spawn_badopt(
+        &mut self,
+        reply_tag: &Term,
+    ) -> Result<Reference, BeamError> {
+        let caller = self.current_process().id;
+        let reference = self.make_ref()?;
+        let message = Term::tuple(vec![
+            reply_tag.clone(),
+            Term::Reference(reference),
+            Term::static_atom("error"),
+            Term::static_atom("badopt"),
+        ]);
+        self.send_message(caller, caller, message);
+        Ok(reference)
     }
 
     /// Send the spawn request `control` with the message `arguments` on the
@@ -329,9 +344,8 @@ impl Scheduler {
         Ok(())
     }
 
-    /// Receive a `DOP_GROUP_LEADER` packet (`dist.c:2889-2901`): make `to`
-    /// the group leader of `from`? No: make `leader` the group leader of the
-    /// local process `to`.
+    /// Receive a `DOP_GROUP_LEADER` packet (`dist.c:2889-2901`): make
+    /// `leader` the group leader of the local process `to`.
     ///
     /// # Errors
     ///

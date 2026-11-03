@@ -734,9 +734,15 @@ pub(super) fn dist_get_stat(context: &mut BifContext<'_>, handle: &Term) -> BifR
 }
 
 /// Run `erts_internal:dist_spawn_request(Node, MFA, Options, Wait)` as
-/// `erts_internal_dist_spawn_request_4` does (`dist.c:5850-6120`): send a
+/// `erts_internal_dist_spawn_request_4` does (`dist.c:5850-6235`): send a
 /// spawn request to `Node` and return `{Ref, MonOpt}` for
 /// `erlang:spawn_opt/5`, or `Ref` for `erlang:spawn_request/5`.
+///
+/// A request that ERTS rejects answers the atom `badarg` and raises nothing;
+/// the `erlang` wrapper raises `badarg` (`dist.c:6213-6215`,
+/// `erlang.erl:11133-11167`). A `spawn_request` with an option that ERTS
+/// rejects returns the reference and sends `{Tag, Ref, error, badopt}`
+/// (`dist.c:5955-5975`).
 ///
 /// # Errors
 ///
@@ -748,31 +754,38 @@ pub(super) fn dist_spawn_request(
     options: &Term,
     wait: &Term,
 ) -> Result<BifResult, BeamError> {
+    let badarg = || Ok(BifResult::Value(Term::static_atom("badarg")));
     let Term::Atom(node) = node else {
-        return Ok(BifResult::badarg());
+        return badarg();
     };
     let spawn_opt = match wait {
         Term::Atom(wait) if wait.is_static("spawn_opt") => true,
         Term::Atom(wait) if wait.is_static("spawn_request") => false,
-        _ => return Ok(BifResult::badarg()),
+        _ => return badarg(),
     };
+    // The request cannot go to the node that the caller runs on
+    // (`dist.c:5875-5878`).
+    if *node == context.scheduler.atoms.this_node().0 {
+        return badarg();
+    }
     let Some(options) = options.proper_list() else {
-        return Ok(BifResult::badarg());
+        return badarg();
     };
     let Term::Tuple(pair) = mfa else {
-        return Ok(BifResult::badarg());
+        return badarg();
     };
     let [Term::Atom(module), Term::Atom(function), arguments] = pair.as_ref() else {
-        return Ok(BifResult::badarg());
+        return badarg();
     };
     let Some(arguments_list) = arguments.proper_list() else {
-        return Ok(BifResult::badarg());
+        return badarg();
     };
     let arguments_len = i64::try_from(arguments_list.count()).unwrap_or(i64::MAX);
     let arguments_list = arguments.clone();
     let mut link = false;
     let mut monitor = None;
     let mut reply_tag = Term::static_atom("spawn_reply");
+    let mut badopt = false;
     let mut kept = Vec::new();
     for option in options {
         match option {
@@ -781,23 +794,40 @@ pub(super) fn dist_spawn_request(
                 monitor = Some(Term::static_atom("DOWN"));
             }
             Term::Tuple(fields) => match fields.as_ref() {
-                [Term::Atom(name), Term::Atom(mode)] if name.is_static("reply_tag") => {
-                    reply_tag = Term::Atom(mode.clone());
+                [Term::Atom(name), value] if name.is_static("reply_tag") => {
+                    reply_tag = value.clone();
                 }
                 [Term::Atom(name), _] if name.is_static("reply") => {}
                 [Term::Atom(name), value] if name.is_static("monitor") => {
-                    let Some(tag) = monitor_tag(value) else {
-                        return Ok(BifResult::badarg());
-                    };
-                    monitor = Some(tag);
+                    match monitor_tag(value) {
+                        Some(tag) => monitor = Some(tag),
+                        // A bad `monitor` option is `badarg` for a spawn
+                        // and a `badopt` reply for a spawn request.
+                        None if spawn_opt => return badarg(),
+                        None => badopt = true,
+                    }
+                }
+                [Term::Atom(name), value] if name.is_static("link") => {
+                    if link_tag(value) {
+                        link = true;
+                    } else if spawn_opt {
+                        return badarg();
+                    } else {
+                        badopt = true;
+                    }
                 }
                 _ => kept.push(option.clone()),
             },
             _ => kept.push(option.clone()),
         }
     }
+    let scheduler = &mut *context.scheduler;
+    if badopt {
+        let reference = scheduler.dist_spawn_badopt(&reply_tag)?;
+        return Ok(BifResult::Value(Term::Reference(reference)));
+    }
     // The request names `link` and `monitor` so that the receiver sets the
-    // flags of the reply (`dist.c:6054-6110`); a `{monitor, Opts}` becomes a
+    // flags of the reply (`dist.c:6034-6051`); a `{monitor, Opts}` becomes a
     // bare `monitor` because only the local monitor keeps the tag.
     let mut sent = Vec::new();
     if link {
@@ -807,7 +837,6 @@ pub(super) fn dist_spawn_request(
         sent.push(Term::static_atom("monitor"));
     }
     sent.extend(kept);
-    let scheduler = &mut *context.scheduler;
     let (reference, monitored) = scheduler.dist_spawn_request(
         node,
         module,
@@ -815,7 +844,6 @@ pub(super) fn dist_spawn_request(
         arguments_len,
         &arguments_list,
         Term::list_from(sent),
-        link,
         monitor.as_ref(),
         &reply_tag,
     )?;
@@ -828,6 +856,17 @@ pub(super) fn dist_spawn_request(
         Term::Reference(reference)
     };
     Ok(BifResult::Value(value))
+}
+
+/// Return whether the `{link, Options}` spawn option is valid: a proper list
+/// of `priority` (`erts_link_opts`, `bif.c:675-699`).
+fn link_tag(options: &Term) -> bool {
+    let Some(options) = options.proper_list() else {
+        return false;
+    };
+    options
+        .into_iter()
+        .all(|option| matches!(option, Term::Atom(name) if name.is_static("priority")))
 }
 
 /// Return the tag of a `{monitor, Options}` spawn option, or `None` when the
