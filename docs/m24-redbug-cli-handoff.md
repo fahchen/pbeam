@@ -24,9 +24,9 @@ This document gives another agent the goal, the accepted decisions, the verified
 | e6 CLI and TUI | redbug-cli PRs #3 through #10 and #12 are merged into `pbeam`. The Bun TUI and the Phoenix layers are removed. The Terra TUI covers the node screen, sessions, events, console, snippets, presets, and settings. `docs/terra-gaps.md` records 38 cut or simplified features: 9 cut, 28 simplified, 1 restored. | #1427 builds the executable. The owner tests the branch before the merge to `main`. |
 | e7 run on PBeam | The checks job is faster (#1465, #1466). The sendfile test no longer hangs (#1464, #1468). | #1428 discovery run, #1467 Linux test hangs, #1480 CI build reuse (PR #1481 open), #1484 benchmark workloads. |
 | e8 performance | #1430 compares PBeam with the pinned ERTS (PR #1431). | #1429 reduces a Terra 200x50 frame from the 172 ms baseline to at most 86 ms. It is the last task. |
-| Distribution foundation | e1 and e2 are complete. On e3, messages (#1407), `exit/2` (#1458 through PR #1461), links (#1462 through PR #1470), and the link order (#1469 through PR #1471) are merged. | #1459 and #1463 (end the links with `noconnection`), #1409 monitors, #1410 remote spawn and rpc, #1411 nodeup and nodedown, #1412 auto-connect, e4 #1413 through #1417, e5 #1419 ssh tunnel. |
+| Distribution foundation | e1 and e2 are complete. On e3, messages (#1407), `exit/2` (#1458 through PR #1461), links (#1462 through PR #1470), the link order (#1469 through PR #1471), the links of a lost connection (#1459 and #1463 through PR #1492), and monitors (#1409 through #1493, #1494, and #1495) are merged. | #1410 remote spawn and rpc, split into #1508 and #1509, #1411 nodeup and nodedown, #1412 auto-connect, e4 #1413 through #1417, e5 #1419 ssh tunnel. |
 
-The milestone had 24 closed and 36 open issues on 2026-10-31. The redbug-cli tasks #1420 through #1426, #1433, and #1446 have project Status `In Review` until the owner test. #1427 and #1428 are `Todo`.
+The milestone had 32 closed and 32 open issues on 2026-11-03. The redbug-cli tasks #1420 through #1426, #1433, and #1446 have project Status `In Review` until the owner test. #1427 and #1428 are `Todo`.
 
 ## Tasks and current progress
 
@@ -67,16 +67,14 @@ The run of #1428 uses `net_kernel:start/2` with a hidden node, a custom `-epmd_m
 
 | Task | Need |
 | --- | --- |
-| [#1459](https://github.com/fahchen/pbeam/issues/1459), [#1463](https://github.com/fahchen/pbeam/issues/1463) | End the links of a lost connection with `noconnection`. #1462 is closed through PR #1470. |
-| [#1409](https://github.com/fahchen/pbeam/issues/1409) | Monitors across nodes, `net_adm:ping/1`, and `gen_server:call/2` to a remote name. |
-| [#1410](https://github.com/fahchen/pbeam/issues/1410) | Remote spawn, `erpc`, and `rpc`. |
+| [#1508](https://github.com/fahchen/pbeam/issues/1508), [#1509](https://github.com/fahchen/pbeam/issues/1509) | Remote spawn (#1508), then `erpc`, `rpc`, `Node.spawn/4`, and remote `code:load_binary/3` (#1509). Both are sub-issues of #1410. |
 | [#1411](https://github.com/fahchen/pbeam/issues/1411) | `nodeup` and `nodedown`, and cleanup after a lost connection. |
 | [#1412](https://github.com/fahchen/pbeam/issues/1412) | Connect to a node on the first signal. |
 | [#1416](https://github.com/fahchen/pbeam/issues/1416) | Decide how the one-file executable finds an epmd. |
 | [#1419](https://github.com/fahchen/pbeam/issues/1419) | OTP `ssh` and the TCP/IP tunnel. |
 | [#1413](https://github.com/fahchen/pbeam/issues/1413), [#1414](https://github.com/fahchen/pbeam/issues/1414), [#1415](https://github.com/fahchen/pbeam/issues/1415), [#1417](https://github.com/fahchen/pbeam/issues/1417) | Inbound connections, visible nodes and `global` and `pg`, the atom cache and fragments, and TLS distribution. These tasks are not the minimum for #1428, but the owner asked for more distribution support. |
 
-Row "Distribution" of `docs/erts-differences.md` records the current gaps: no atom cache and fragments (#1415), no `nodeup` and `nodedown` (#1411), no busy output, and entries kept until the run end. A link to a node without a connection gives `noconnection` at once (#1412). The alias owner exit encode error is recorded there.
+Row "Distribution" of `docs/erts-differences.md` records the current gaps: no atom cache and fragments (#1415), no `nodeup` and `nodedown` (#1411), no busy output, and entries kept until the run end. A link, a monitor, or a send to a node without a connection gives `noconnection`, `noconnection`, or a dropped message at once, and `net_adm:ping/1` to a live node with no connection gives `pang` (#1412). The alias owner exit encode error is recorded there.
 
 ## Inherited owner decisions
 
@@ -130,7 +128,7 @@ CI runs the full PBeam gate on each pull request. These focused commands are sta
 
 ## Sources and verification boundary
 
-- Status checked on 2026-10-31 through the GitHub API: issue states, native sub-issue membership, milestone counts, and project Status. The PBeam main branch was at `930743b9`.
+- Status checked on 2026-11-03 through the GitHub API: issue states, native sub-issue membership, milestone counts, and project Status. The PBeam main branch was at `02dd800c`.
 - The redbug-cli branch `origin/pbeam` was at `8de5c1b2ebc7bd733f29a87994f2fd1602dcd9e1` (2026-10-30). The branch `pbeam` holds redbug-cli pull requests #3 through #12, all merged into `pbeam`.
 - [PR #11](https://github.com/fahchen/redbug-cli/pull/11) records the verification of 2026-10-30: `mix compile --warnings-as-errors` and `mix test` pass with 115 tests and a live target node. PTY runs of the release on ERTS 29.1.1 exit 0. On PBeam with `REDBUG_DIST=off`, each step passes, and quitting exits 0.
 - No test, benchmark, or PTY run was repeated for this document. The values above describe their recorded revisions.
