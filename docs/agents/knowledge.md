@@ -152,3 +152,7 @@ Make structural tests fail to compile when the represented enum gains a variant.
 When cleanup removes items in bounded steps, account and drain the authoritative
 storage that owns their terms. Do not walk stale indexes or links after a step
 can remove their entries.
+
+## Values from another node lose their written form
+
+Keep each value that arrives from another node in the form that the peer wrote it. Do not shorten, normalize, or re-encode it, because the peer matches it by that form.
