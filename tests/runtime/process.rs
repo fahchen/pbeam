@@ -394,6 +394,14 @@ fn reads_only_a_reference_of_another_node_as_a_monitor_key() {
     };
     let reference = external(ExternalData::Reference(vec![3].into()));
     assert!(RemoteReference::of(&reference).is_some());
+    // A pid reference of another node has five numbers, and the pid word
+    // ends with 0 for a small pid (`erts_pid_ref_lookup`,
+    // `erl_bif_unique.h:259-277`). The count stays, because the monitor of
+    // the watcher is found by these numbers.
+    let pid_reference = external(ExternalData::Reference(vec![4, 5, 6, 7, 0].into()));
+    let remote = RemoteReference::of(&pid_reference).expect("the pid reference");
+    assert_eq!(remote.count, 5);
+    assert_eq!(remote.term(), pid_reference);
     assert!(
         RemoteReference::of(&Term::Reference(Reference(1))).is_none(),
         "a reference of this node is not an external term"
