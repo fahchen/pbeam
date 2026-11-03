@@ -20,6 +20,19 @@ Detailed incident writeups with full context live in `postmortems/`.
 
 **Reference:** `path/to/file` or `postmortems/YYYY-MM-DD-slug.md`
 -->
+
+## 20261103: Make a probe's subject and its monitor one operation
+
+**Problem:** `links_processes_between_erts_and_pbeam_nodes` failed on CI with `{down,noproc}` where it expected the exit reason of the victim.
+
+**Root Cause:** The probe made the victim in one process and its monitor in a second process, so under load the victim exited before the monitor existed.
+
+**Fix:** The monitor process makes the victim with `spawn_monitor`, so the monitor exists with the process.
+
+**Guardrail:** When a probe observes the exit of a process that it starts, start it with `spawn_monitor`.
+
+**Reference:** <https://github.com/fahchen/pbeam/pull/1505>
+
 ## 20261018: Catch each ERTS probe call on its own
 
 **Problem:** A list of `decode_packet` probes stopped at the first `badarg`, so the later cases gave no result.
