@@ -58,6 +58,28 @@ pub(super) enum Signal {
         /// The exit reason.
         reason: Term,
     },
+    /// `DOP_SPAWN_REPLY`: the reply of a spawn request, which the owner of
+    /// the caller gives it as `{Tag, Ref, ok | error, Result}` and keeps the
+    /// monitor and the link that the flags name (`dist.c:3033-3130`).
+    SpawnReply {
+        /// The node of the request.
+        node: Atom,
+        /// The reference of the request.
+        reference: MonitorKey,
+        /// `ERTS_DIST_SPAWN_FLAG_LINK` and `_MONITOR`.
+        flags: i64,
+        /// The pid of the new process, or the atom of the error.
+        result: Term,
+        /// The connection of the request.
+        connection: u32,
+    },
+    /// `DOP_GROUP_LEADER`: a process of another node made `leader` the
+    /// group leader of the local process (`dist.c:2889-2901`). The receiver
+    /// sets the group leader and answers nothing.
+    DistGroupLeader {
+        /// The new group leader: a pid of this node or of another node.
+        leader: Term,
+    },
     /// `ERTS_SIG_Q_OP_LINK`: the sender linked to the receiver. The receiver
     /// adds the link unless it has a link or an unlinking link to the
     /// sender; the cost is 0 (`erl_proc_sig_queue.c:6635-6663`). At exit it
@@ -282,8 +304,8 @@ pub(super) enum Signal {
     /// 0 (`handle_group_leader`, `erl_proc_sig_queue.c:5295-5310`). At exit
     /// it replies `{Ref, badarg}` (`erl_proc_sig_queue.c:7394-7399`).
     GroupLeader {
-        /// The new group leader.
-        leader: ProcessId,
+        /// The new group leader: a pid of this node or of another node.
+        leader: Term,
         /// The process that gets the reply.
         requester: ProcessId,
         /// The reference of the reply.
@@ -424,6 +446,10 @@ impl Signal {
     /// ```
     pub(super) fn take_terms(&mut self, pending: &mut Vec<Term>) {
         match self {
+            Signal::SpawnReply { node, result, .. } => {
+                pending.push(Term::Atom(node.clone()));
+                pending.push(result.clone());
+            }
             Signal::Exit {
                 from: _,
                 reason,
@@ -445,6 +471,7 @@ impl Signal {
                 pending.push(std::mem::replace(message, Term::Nil));
             }
             Signal::Link { from: _ }
+            | Signal::DistGroupLeader { .. }
             | Signal::DistLink {
                 from: _,
                 connection: _,

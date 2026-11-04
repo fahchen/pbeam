@@ -387,7 +387,7 @@ fn info_values(current_function: Option<MfaNames>) -> ProcessInfoValues {
         trap_exit: false,
         error_handler: None,
         priority: "normal",
-        group_leader: ProcessId(0),
+        group_leader: Term::Pid(ProcessId(0)),
         total_heap_size: 0,
         heap_size: 0,
         stack_size: 0,

@@ -18,11 +18,12 @@ use crate::{
         capability::Source,
         interpreter::bif,
         mailbox::{NodeId, Step, Walk},
+        process::RemotePid,
         scheduler::AliasMode,
         signal::Signal,
         sockets::Sockets,
     },
-    term::{ProcessId, Reference, Term},
+    term::{Atom, ProcessId, Reference, Term},
 };
 
 /// A delivery of the current process to a process of another scheduler.
@@ -932,6 +933,26 @@ impl Scheduler {
                 self.send_message(id, requester, reply(reference, Term::static_atom("true")));
                 0
             }
+            Signal::SpawnReply {
+                node: remote_node,
+                reference,
+                flags,
+                result,
+                connection,
+            } => self.handle_spawn_reply(
+                id,
+                walk,
+                node,
+                &remote_node,
+                reference,
+                flags,
+                &result,
+                connection,
+            ),
+            Signal::DistGroupLeader { leader } => {
+                self.handled(id, node).group_leader = leader;
+                1
+            }
             Signal::IsAlive {
                 requester,
                 reference,
@@ -1134,6 +1155,25 @@ impl Scheduler {
                 .remove_monitor(id, &node, reference, monitor.connection);
         }
         let extra = if is_immediate(&reason) { 8 } else { 1 };
+        // A spawn request that waits for its reply gives the caller the
+        // message `{Tag, Ref, error, noconnection}` when its connection ends,
+        // and no `DOWN` message (`erl_proc_sig_queue.c:4864-4900`).
+        if let Some(reply) = monitor.spawn {
+            let process = self.processes.get_mut(id).expect("the process is alive");
+            if reply.no_emsg {
+                process.mailbox.remove(node);
+            } else {
+                let error = Term::tuple(vec![
+                    monitor.item,
+                    reference.term(),
+                    Term::static_atom("error"),
+                    reason,
+                ]);
+                process.mailbox.convert(walk, node, error);
+                self.activate(id);
+            }
+            return extra;
+        }
         let down = Term::tuple(vec![
             monitor.tag,
             reference.term(),
@@ -1145,6 +1185,118 @@ impl Scheduler {
         process.mailbox.convert(walk, node, down);
         self.activate(id);
         extra
+    }
+
+    /// Handle the reply of a spawn request of `id` (`dist.c:3033-3130`):
+    /// give the caller its `{Tag, Ref, ok, Pid}` or `{Tag, Ref, error,
+    /// Reason}` message, and keep the monitor and the link that `flags`
+    /// names.
+    #[expect(clippy::too_many_arguments, reason = "the fields of the packet")]
+    fn handle_spawn_reply(
+        &mut self,
+        id: ProcessId,
+        walk: &mut Walk,
+        node_id: NodeId,
+        node: &Atom,
+        reference: MonitorKey,
+        flags: i64,
+        result: &Term,
+        connection: u32,
+    ) -> i32 {
+        let Some(monitor) = self
+            .processes
+            .get(id)
+            .and_then(|process| process.monitors.get(&reference))
+            .and_then(|origin| origin.monitor.as_ref())
+        else {
+            let process = self.processes.get_mut(id).expect("the process is alive");
+            process.mailbox.remove(node_id);
+            return 0;
+        };
+        // A reply for a reference that is not a pending spawn request, for
+        // example the reference of an ordinary monitor, is ignored
+        // (`dist.c:3033-3086`).
+        let Some(reply) = monitor.spawn else {
+            let process = self.processes.get_mut(id).expect("the process is alive");
+            process.mailbox.remove(node_id);
+            return 0;
+        };
+        let reply_tag = monitor.item.clone();
+        if let Term::Atom(reason) = result {
+            // The pending request leaves the monitor list of its connection
+            // (`erl_proc_sig_queue.c:6408-6412`).
+            self.node
+                .dist()
+                .remove_monitor(id, node, reference, connection);
+            let _ = self
+                .processes
+                .get_mut(id)
+                .map(|p| p.monitors.remove(&reference));
+            let process = self.processes.get_mut(id).expect("the process is alive");
+            if reply.no_emsg {
+                process.mailbox.remove(node_id);
+            } else {
+                let message = Term::tuple(vec![
+                    reply_tag,
+                    reference.term(),
+                    Term::static_atom("error"),
+                    Term::Atom(reason.clone()),
+                ]);
+                process.mailbox.convert(walk, node_id, message);
+                self.activate(id);
+            }
+        } else {
+            // `net_spawn_reply` accepts a pid or an error atom, so a result
+            // that is not an atom here is a pid.
+            let remote = RemotePid::of(result).expect("the reply names a pid or an atom");
+            let process = self.processes.get_mut(id).expect("the process is alive");
+            if reply.no_smsg {
+                process.mailbox.remove(node_id);
+            } else {
+                let message = Term::tuple(vec![
+                    reply_tag,
+                    reference.term(),
+                    Term::static_atom("ok"),
+                    result.clone(),
+                ]);
+                process.mailbox.convert(walk, node_id, message);
+                self.activate(id);
+            }
+            if flags & super::dist_spawn::SPAWN_MONITOR != 0 {
+                if let Some(monitor) = self
+                    .processes
+                    .get_mut(id)
+                    .and_then(|process| process.monitors.get_mut(&reference))
+                    .and_then(|origin| origin.monitor.as_mut())
+                {
+                    monitor.target = None;
+                    monitor.item = result.clone();
+                    // A later `demonitor/1` and the exit of the caller find
+                    // the pid of the process and its connection to send
+                    // `DEMONITOR_P` and to remove the monitor of the
+                    // connection (`bif.c:436-541`, `dist.c:2434-2459`).
+                    monitor.remote = Some(crate::runtime::process::RemoteTarget::Pid(remote));
+                    monitor.connection = connection;
+                    monitor.spawn = None;
+                }
+                // The pending monitor becomes a monitor of the pid of the
+                // new process in the list of its connection, so the end of
+                // the connection still sees it (`dist.c:3033-3130`).
+                self.node.dist().update_monitor(id, node, reference, remote);
+            } else {
+                self.node
+                    .dist()
+                    .remove_monitor(id, node, reference, connection);
+                let _ = self
+                    .processes
+                    .get_mut(id)
+                    .map(|p| p.monitors.remove(&reference));
+            }
+            if flags & super::dist_spawn::SPAWN_LINK != 0 {
+                self.link_on(id, LinkId::Remote(remote), remote, connection);
+            }
+        }
+        1
     }
 
     /// Handle a message through the alias `alias` of the process `id`, as

@@ -170,6 +170,25 @@ impl Scheduler {
         node: &Atom,
         build: impl FnOnce(u64, u32) -> Option<(Term, Option<Term>)>,
     ) -> Result<bool, BeamError> {
+        self.dist_output_monitor(sender, node, None, build)
+    }
+
+    /// Send the packet that `build` makes as [`Self::dist_output`] does, and
+    /// put `monitor` in the monitor list of the connection before the send,
+    /// as `erts_internal_dist_spawn_request_4` creates the pending monitor
+    /// before `erts_dsig_send_spawn_request` (`dist.c:6111-6120`). Return
+    /// whether the node has a connection.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`Self::dist_send`].
+    pub(super) fn dist_output_monitor(
+        &mut self,
+        sender: ProcessId,
+        node: &Atom,
+        monitor: Option<super::dist_table::DistMonitor>,
+        build: impl FnOnce(u64, u32) -> Option<(Term, Option<Term>)>,
+    ) -> Result<bool, BeamError> {
         let node_ref = Arc::clone(&self.node);
         let mut dist = node_ref.dist();
         let Some((flags, controller, connection)) = dist.connected(node) else {
@@ -178,6 +197,11 @@ impl Scheduler {
         let Some((control, message)) = build(flags, connection) else {
             return Ok(true);
         };
+        // The monitor joins the connection before the packet leaves, so the
+        // end of the connection sees it (`dist.c:6111-6120`).
+        if let Some(monitor) = monitor {
+            dist.insert_monitor_now(node, monitor);
+        }
         let mut elements = vec![Binary::from(vec![PASS_THROUGH])];
         elements.extend(encode_dist(self, &control)?);
         if let Some(message) = message {

@@ -7,7 +7,22 @@
          trace_token/1, monitor_op/0, demonitor_name/0, demonitor_ref/0,
          atom_cache/0, output/0, port_output/0,
          alias_ext/0, dead_alias/1, exit_input/0, link_input/0,
-         link_noconnection/0, spawn_op/0]).
+         link_noconnection/0, altact_op/0, spawn_bad_ref/0, spawn_bad_from/0,
+         spawn_bad_from_local/0,
+         spawn_bad_leader/0, spawn_bad_mfa/0, spawn_bad_arity/0,
+         spawn_bad_arguments/0, reply_bad_to/0, reply_bad_ref/0,
+         reply_bad_flags/0, reply_bad_result/0, group_leader_bad/0,
+         group_leader_bad_to/0, group_leader_external_to/0,
+         spawn_notsup/0, spawn_lost/0, spawn_options/0,
+         spawn_reply_unknown/0, spawn_reply_ordinary_monitor/0,
+         spawn_lost_suppressed/0, spawn_local_leader/0,
+         group_leader_packet/0,
+         monitor_down_unknown/0, spawn_local_ref/0, spawn_bad_local_leader/0,
+         spawn_bad_mfa_not_tuple/0, spawn_bad_mfa_tuple/0,
+         spawn_bad_mfa_fields/0,
+         spawn_bad_arguments_list/0, spawn_monitor_priority/0,
+         spawn_monitor_alias/0, spawn_link_priority/0, spawn_scheduler/0,
+         dflag_unicode_io/0]).
 
 main() ->
     %% net_kernel reports the dist_ctrlr message of a connection that it
@@ -526,21 +541,491 @@ demonitor_ref() ->
     erlang:dist_ctrl_put_data(
       DH, packet_only({20, remote_pid(zz@nohost), make_ref(), remote_ref(zz@nohost)})).
 
+%% A packet on a channel of `zz@nohost` with the process of the caller as
+%% the controller. The call waits until the node ends the connection, so the
+%% rejection is not a race with the `halt/0` of the caller.
+channel(Control, Message) ->
+    erts_internal:new_connection(zz@nohost),
+    {ok, DH} = erts_internal:create_dist_channel(zz@nohost, self(), {mandatory(), 1}),
+    erlang:dist_ctrl_put_data(DH, packet(Control, Message)),
+    await_disconnected(zz@nohost, 100).
+
+await_disconnected(_Node, 0) ->
+    ok;
+await_disconnected(Node, N) ->
+    case lists:member(Node, nodes(connected)) of
+        true ->
+            receive after 20 -> ok end,
+            await_disconnected(Node, N - 1);
+        false ->
+            ok
+    end.
+
+%% Each spawn request or reply below has a part that ERTS rejects and ends
+%% the connection for (dist.c:2889-3130).
+spawn_bad_ref() ->
+    channel({29, 1, self(), self(), {erlang, node, []}, []}, []).
+
+spawn_bad_from() ->
+    channel({29, make_ref(), make_ref(), self(), {erlang, node, []}, []}, []).
+
+%% A `from` that is a local pid, not a pid of another node, is rejected
+%% (dist.c:2935).
+spawn_bad_from_local() ->
+    channel({29, remote_ref(zz@nohost), self(), remote_pid(zz@nohost),
+             {erlang, node, []}, []}, []).
+
+spawn_bad_leader() ->
+    channel({29, make_ref(), self(), make_ref(), {erlang, node, []}, []}, []).
+
+spawn_bad_mfa() ->
+    channel({29, make_ref(), self(), self(), {erlang, node}, []}, []).
+
+spawn_bad_arity() ->
+    channel({29, make_ref(), self(), self(), {erlang, node, foo}, []}, []).
+
+spawn_bad_arguments() ->
+    channel({29, make_ref(), self(), self(), {erlang, node, []}, []}, not_a_list).
+
+reply_bad_to() ->
+    channel({31, make_ref(), make_ref(), 0, self()}, []).
+
+reply_bad_ref() ->
+    channel({31, 1, self(), 0, self()}, []).
+
+reply_bad_flags() ->
+    channel({31, make_ref(), self(), foo, self()}, []).
+
+reply_bad_result() ->
+    channel({31, make_ref(), self(), 0, 42}, []).
+
+group_leader_bad() ->
+    channel({7, make_ref(), self()}, []).
+
+%% A `DOP_GROUP_LEADER` packet whose target is not a pid is rejected
+%% (dist.c:2895-2897). A target that is an external pid has no local
+%% process, so the signal is dropped.
+group_leader_bad_to() ->
+    channel({7, remote_pid(zz@nohost), foo}, []).
+
+%% A `DOP_GROUP_LEADER` packet whose target is a pid of another node is
+%% accepted and dropped, because no local process has that pid
+%% (`erl_proc_sig_queue.c:1170-1174`).
+group_leader_external_to() ->
+    logger:set_primary_config(level, none),
+    Node = zz@nohost,
+    Parent = self(),
+    Ctrl = spawn(fun() ->
+                         erts_internal:new_connection(Node),
+                         {ok, DH} =
+                             erts_internal:create_dist_channel(Node, self(),
+                                                               {mandatory(), 1}),
+                         erlang:dist_ctrl_put_data(
+                           DH, packet_only({7, remote_pid(Node),
+                                            remote_pid(yy@nohost)})),
+                         receive after 200 -> ok end,
+                         Parent ! {self(), lists:member(Node, nodes(connected))},
+                         receive stop -> ok end
+                 end),
+    Connected = receive {Ctrl, C} -> C after 5000 -> timeout end,
+    io:format("group_leader_external_to: ~p~n", [Connected]),
+    Ctrl ! stop.
+
+%% A connection whose flags have no `DFLAG_SPAWN` answers a spawn request
+%% with `notsup` (`dist.c:6089-6093`, `6197-6202`).
+spawn_notsup() ->
+    logger:set_primary_config(level, none),
+    M = mandatory(),
+    erts_internal:new_connection(zz@nohost),
+    Ctrl = spawn(fun() -> receive stop -> ok end end),
+    {message, Reply} = erts_internal:create_dist_channel(zz@nohost, Ctrl, {M, 0}),
+    receive {Reply, _} -> ok end,
+    Ref = erts_internal:dist_spawn_request(zz@nohost, {erlang, node, []}, [monitor],
+                                           spawn_request),
+    Reply2 = receive {spawn_reply, Ref, error, Why} -> Why after 5000 -> timeout end,
+    Ctrl ! stop,
+    io:format("spawn_notsup: ~p~n", [Reply2]).
+
+%% A spawn request that waits for its reply gives `noconnection` when its
+%% connection ends (`dist.c:6081-6087`, `erl_proc_sig_queue.c:4864-4900`).
+spawn_lost() ->
+    logger:set_primary_config(level, none),
+    M = mandatory(),
+    erts_internal:new_connection(yy@nohost),
+    Ctrl = spawn(fun() -> receive stop -> ok end end),
+    {message, Reply} = erts_internal:create_dist_channel(yy@nohost, Ctrl,
+                                                        {M bor (1 bsl 32), 1}),
+    receive {Reply, _} -> ok end,
+    Ref = erts_internal:dist_spawn_request(yy@nohost, {erlang, node, []}, [monitor],
+                                           spawn_request),
+    Ctrl ! stop,
+    Lost = receive {spawn_reply, Ref, error, Why} -> Why after 5000 -> timeout end,
+    io:format("spawn_lost: ~p~n", [Lost]).
+
+%% A spawn request that this node receives reads its option list as
+%% `erts_parse_spawn_opts` does (`erl_process.c:12222-12428`,
+%% `dist.c:2931-2980`): a valid option spawns the process, an option that
+%% ERTS rejects answers `badopt` with no process, and a list that is not a
+%% proper list ends the connection. The reply is the first packet of the
+%% connection and the last element tells whether the node is still
+%% connected.
+spawn_options() ->
+    logger:set_primary_config(level, none),
+    Cases =
+        [{link, [link]},
+         {monitor, [monitor]},
+         {link_monitor, [link, monitor]},
+         {atom, [foo]},
+         {tuple_arity, [{priority, high, low}]},
+         {tuple_name, [{1, 2}]},
+         {priority, [{priority, high}]},
+         {priority_bad, [{priority, foo}]},
+         {async_dist_true, [{async_dist, true}]},
+         {async_dist_false, [{async_dist, false}]},
+         {async_dist_bad, [{async_dist, yes}]},
+         {message_queue_data_on_heap, [{message_queue_data, on_heap}]},
+         {message_queue_data_off_heap, [{message_queue_data, off_heap}]},
+         {message_queue_data_bad, [{message_queue_data, heap}]},
+         {min_heap_size_small, [{min_heap_size, 100}]},
+         {min_heap_size_large, [{min_heap_size, 1000}]},
+         {min_heap_size_negative, [{min_heap_size, -1}]},
+         {min_heap_size_atom, [{min_heap_size, foo}]},
+         {min_heap_size_bignum, [{min_heap_size, 1 bsl 64}]},
+         {min_bin_vheap_size, [{min_bin_vheap_size, 1000}]},
+         {min_bin_vheap_size_bad, [{min_bin_vheap_size, -1}]},
+         {fullsweep_after, [{fullsweep_after, 5}]},
+         {fullsweep_after_bad, [{fullsweep_after, -1}]},
+         {max_heap_size, [{max_heap_size, 1000}]},
+         {max_heap_size_zero, [{max_heap_size, 0}]},
+         {max_heap_size_negative, [{max_heap_size, -1}]},
+         {max_heap_size_map, [{max_heap_size, #{size => 1000}}]},
+         {max_heap_size_map_flags,
+          [{max_heap_size, #{size => 1000, kill => true, error_logger => false,
+                             include_shared_binaries => true}}]},
+         {max_heap_size_map_no_size, [{max_heap_size, #{kill => true}}]},
+         {max_heap_size_map_bad_flag, [{max_heap_size, #{size => 1000, kill => yes}}]},
+         {max_heap_size_map_bad_size, [{max_heap_size, #{size => foo}}]},
+         {max_heap_size_map_bignum, [{max_heap_size, #{size => 1 bsl 64}}]},
+         {max_heap_size_less_than_min,
+          [{min_heap_size, 1000}, {max_heap_size, 500}]},
+         {scheduler, [{scheduler, 0}]},
+         {scheduler_negative, [{scheduler, -1}]},
+         {link_options, [{link, []}]},
+         {link_priority, [{link, [priority]}]},
+         {link_bad_options, [{link, [foo]}]},
+         {link_not_a_list, [{link, foo}]},
+         {monitor_options, [{monitor, []}]},
+         {monitor_priority, [{monitor, [priority]}]},
+         {monitor_tag, [{monitor, [{tag, mine}]}]},
+         {monitor_alias, [{monitor, [{alias, demonitor}]}]},
+         {monitor_alias_bad, [{monitor, [{alias, foo}]}]},
+         {monitor_bad_options, [{monitor, [foo]}]},
+         {monitor_tuple_arity, [{monitor, [{tag, mine, other}]}]},
+         {monitor_not_a_list, [{monitor, foo}]},
+         {reply, [{reply, yes}]},
+         {reply_tag, [{reply_tag, mine}]},
+         {unknown_tuple, [{foo, bar}]},
+         {improper_list, [link | foo]},
+         {monitor_name_not_atom, [{monitor, [{1, 2}]}]},
+         {priority_max, [{priority, max}]},
+         {priority_normal, [{priority, normal}]},
+         {priority_low, [{priority, low}]}],
+    [show(Tag, [request(list_to_atom("so" ++ integer_to_list(N) ++ "@nohost"),
+                        Options)])
+     || {N, {Tag, Options}} <- lists:zip(lists:seq(1, length(Cases)), Cases)],
+    ok.
+
+%% Put a spawn request of the local node on a connection of `Node` and
+%% return its first packet, with whether the connection is still open. One
+%% controller process owns one connection, and ERTS kills the controller
+%% when the connection ends, so each request runs in its own process.
+request(Node, Options) ->
+    Parent = self(),
+    Ctrl = spawn(fun() ->
+                         erts_internal:new_connection(Node),
+                         {ok, DH} =
+                             erts_internal:create_dist_channel(Node, self(),
+                                                               {mandatory(), 1}),
+                         Control = {29, remote_ref(Node), remote_pid(Node),
+                                    remote_pid(Node), {erlang, node, 0},
+                                    Options},
+                         erlang:dist_ctrl_put_data(DH, packet(Control, [])),
+                         Parent ! {self(), await(DH, 100),
+                                   lists:member(Node, nodes(connected))}
+                 end),
+    receive
+        {Ctrl, Packet, Connected} -> {Packet, Connected}
+    after 5000 -> timeout
+    end.
+
+await(_DH, 0) ->
+    none;
+await(DH, N) ->
+    case erlang:dist_ctrl_get_data(DH) of
+        none ->
+            receive after 20 -> ok end,
+            await(DH, N - 1);
+        Data ->
+            first(Data)
+    end.
+
+%% The first control message of a packet, with the pids and references of
+%% this node named.
+first({ok, Packet}) ->
+    first(Packet);
+first({Size, Data}) ->
+    {Size, first(Data)};
+first(Data) when is_list(Data) ->
+    first(iolist_to_binary(Data));
+first(<<112, Rest/binary>>) ->
+    {Control, _Used} = binary_to_term(Rest, [used]),
+    anon(Control).
+
+%% A spawn reply that names the reference of an ordinary monitor is ignored,
+%% and the monitor stays (`dist.c:3033-3086`).
+spawn_reply_ordinary_monitor() ->
+    logger:set_primary_config(level, none),
+    Node = zz@nohost,
+    Parent = self(),
+    Target = spawn(fun() -> receive stop -> ok end end),
+    Ref = monitor(process, Target),
+    Ctrl = spawn(fun() ->
+                         erts_internal:new_connection(Node),
+                         {ok, DH} =
+                             erts_internal:create_dist_channel(Node, self(),
+                                                               {mandatory(), 1}),
+                         erlang:dist_ctrl_put_data(
+                           DH, packet_only({31, Ref, Parent, 2,
+                                            remote_pid(Node)})),
+                         receive after 200 -> ok end,
+                         Parent ! {self(), lists:member(Node, nodes(connected))},
+                         receive stop -> ok end
+                 end),
+    Connected = receive {Ctrl, C} -> C after 5000 -> timeout end,
+    Target ! stop,
+    Down = receive {'DOWN', Ref, process, Target, Why} -> Why
+           after 5000 -> timeout
+           end,
+    io:format("spawn_reply_ordinary_monitor: ~p~n", [[{Down, Connected}]]),
+    Ctrl ! stop.
+
+%% A spawn request whose error message is suppressed gives no message when
+%% its connection ends (`erl_proc_sig_queue.c:4877-4900`).
+spawn_lost_suppressed() ->
+    logger:set_primary_config(level, none),
+    M = mandatory(),
+    erts_internal:new_connection(xx@nohost),
+    Ctrl = spawn(fun() -> receive stop -> ok end end),
+    {message, Reply} = erts_internal:create_dist_channel(xx@nohost, Ctrl,
+                                                        {M bor (1 bsl 32), 1}),
+    receive {Reply, _} -> ok end,
+    Ref = erts_internal:dist_spawn_request(xx@nohost, {erlang, node, []},
+                                           [{reply, no}, monitor], spawn_request),
+    Ctrl ! stop,
+    Lost = receive {spawn_reply, Ref, _, _} -> message
+           after 1000 -> none
+           end,
+    io:format("spawn_lost_suppressed: ~p~n", [Lost]).
+
+%% A request that names a local pid as the group leader uses it, and a
+%% request that names a term that is not a pid is rejected
+%% (`dist.c:2907-2918`, `2914-2918`).
+spawn_local_leader() ->
+    logger:set_primary_config(level, none),
+    Node = zz@nohost,
+    Parent = self(),
+    Ctrl = spawn(fun() ->
+                         erts_internal:new_connection(Node),
+                         {ok, DH} =
+                             erts_internal:create_dist_channel(Node, self(),
+                                                               {mandatory(), 1}),
+                         erlang:dist_ctrl_put_data(
+                           DH, packet({29, remote_ref(Node), remote_pid(Node),
+                                       Parent, {erlang, node, 0}, []}, [])),
+                         Parent ! {self(), await(DH, 100),
+                                   lists:member(Node, nodes(connected))},
+                         receive stop -> ok end
+                 end),
+    Result = receive {Ctrl, Packet, Connected} -> {Packet, Connected}
+             after 5000 -> timeout
+             end,
+    io:format("spawn_local_leader: ~p~n", [Result]),
+    Ctrl ! stop.
+
+%% ERTS requires an external reference in a spawn request
+%% (`dist.c:2913-2914`), so a reference of this node ends the connection.
+spawn_local_ref() ->
+    channel({29, make_ref(), remote_pid(zz@nohost), remote_pid(zz@nohost),
+             {erlang, node, 0}, [monitor]}, []).
+
+spawn_bad_local_leader() ->
+    channel({29, remote_ref(zz@nohost), remote_pid(zz@nohost), make_ref(),
+             {erlang, node, 0}, []}, []).
+
+spawn_bad_mfa_not_tuple() ->
+    channel({29, remote_ref(zz@nohost), remote_pid(zz@nohost),
+             remote_pid(zz@nohost), foo, []}, []).
+
+spawn_bad_mfa_tuple() ->
+    channel({29, remote_ref(zz@nohost), remote_pid(zz@nohost),
+             remote_pid(zz@nohost), {erlang, node}, []}, []).
+
+spawn_bad_mfa_fields() ->
+    channel({29, remote_ref(zz@nohost), remote_pid(zz@nohost),
+             remote_pid(zz@nohost), {1, node, 0}, []}, []).
+
+spawn_bad_arguments_list() ->
+    channel({29, remote_ref(zz@nohost), remote_pid(zz@nohost),
+             remote_pid(zz@nohost), {erlang, node, 0}, []}, not_a_list).
+
+%% PBeam does not implement the priority option of a monitor or a link and
+%% the alias option of a monitor (`bif.c:675-780`), so the request stops the
+%% run with a runtime error (row "Distribution").
+spawn_monitor_priority() ->
+    erts_internal:dist_spawn_request(zz@nohost, {erlang, node, []},
+                                     [{monitor, [priority]}], spawn_request).
+
+spawn_monitor_alias() ->
+    erts_internal:dist_spawn_request(zz@nohost, {erlang, node, []},
+                                     [{monitor, [{alias, demonitor}]}],
+                                     spawn_request).
+
+spawn_link_priority() ->
+    erts_internal:dist_spawn_request(zz@nohost, {erlang, node, []},
+                                     [{link, [priority]}], spawn_request).
+
+%% PBeam does not bind a process to a scheduler, as its local spawn does
+%% (`erl_process.c:12500-12507`), so the request stops the run.
+spawn_scheduler() ->
+    channel({29, remote_ref(zz@nohost), remote_pid(zz@nohost),
+             remote_pid(zz@nohost), {erlang, node, 0}, [{scheduler, 1}]}, []).
+
+%% A `DOP_GROUP_LEADER` packet makes the leader of a local process
+%% (`dist.c:2889-2901`).
+group_leader_packet() ->
+    logger:set_primary_config(level, none),
+    Node = zz@nohost,
+    Parent = self(),
+    Target = spawn(fun() ->
+                           receive {leader, P} -> P ! {leader, group_leader()} end
+                   end),
+    Ctrl = spawn(fun() ->
+                         erts_internal:new_connection(Node),
+                         {ok, DH} =
+                             erts_internal:create_dist_channel(Node, self(),
+                                                               {mandatory(), 1}),
+                         erlang:dist_ctrl_put_data(DH,
+                                                   packet_only({7, Parent, Target})),
+                         receive after 200 -> ok end,
+                         Parent ! {self(), lists:member(Node, nodes(connected))},
+                         receive stop -> ok end
+                 end),
+    Connected = receive {Ctrl, C} -> C after 5000 -> timeout end,
+    Target ! {leader, Parent},
+    Leader = receive {leader, L} -> L after 5000 -> timeout end,
+    io:format("group_leader: ~p~n", [[{Leader =:= Parent, Connected}]]),
+    Ctrl ! stop.
+
+%% A monitor down for a reference that no monitor of the process holds is
+%% ignored, and the connection stays open (`dist.c:3086-3130`).
+monitor_down_unknown() ->
+    logger:set_primary_config(level, none),
+    Node = zz@nohost,
+    Parent = self(),
+    Ctrl = spawn(fun() ->
+                         erts_internal:new_connection(Node),
+                         {ok, DH} =
+                             erts_internal:create_dist_channel(Node, self(),
+                                                               {mandatory(), 1}),
+                         erlang:dist_ctrl_put_data(
+                           DH, packet_only({21, remote_pid(Node), Parent,
+                                            make_ref(), normal})),
+                         receive after 200 -> ok end,
+                         Parent ! {self(), lists:member(Node, nodes(connected))},
+                         receive stop -> ok end
+                 end),
+    Connected = receive {Ctrl, C} -> C after 5000 -> timeout end,
+    io:format("monitor_down_unknown: ~p~n", [Connected]),
+    Ctrl ! stop.
+
+%% A spawn reply for a reference that no monitor of the process holds is
+%% ignored, and the connection stays open (`dist.c:3086-3130`).
+spawn_reply_unknown() ->
+    logger:set_primary_config(level, none),
+    Node = zz@nohost,
+    Parent = self(),
+    Ctrl = spawn(fun() ->
+                         erts_internal:new_connection(Node),
+                         {ok, DH} =
+                             erts_internal:create_dist_channel(Node, self(),
+                                                               {mandatory(), 1}),
+                         erlang:dist_ctrl_put_data(
+                           DH, packet_only({31, make_ref(), Parent, 0,
+                                            remote_pid(Node)})),
+                         receive after 200 -> ok end,
+                         Parent ! {self(), lists:member(Node, nodes(connected))},
+                         receive stop -> ok end
+                 end),
+    Connected = receive {Ctrl, C} -> C after 5000 -> timeout end,
+    io:format("spawn_reply_unknown: ~p~n", [Connected]),
+    Ctrl ! stop.
+
+%% `net_kernel:dflag_unicode_io/1` gives whether the connection of a pid of
+%% another node has `DFLAG_UNICODE_IO`, `true` for a pid of this node also of
+%% an old incarnation, and `false` for a node with no connection
+%% (`dist.c:6693-6711`).
+dflag_unicode_io() ->
+    logger:set_primary_config(level, none),
+    NotUnicode = unicode_flag(zz@nohost, mandatory() band bnot 16#1000),
+    Unicode = unicode_flag(ww@nohost, mandatory() bor 16#1000),
+    Missing = net_kernel:dflag_unicode_io(remote_pid(yy@nohost)),
+    Local = net_kernel:dflag_unicode_io(self()),
+    Old = net_kernel:dflag_unicode_io(old_pid()),
+    Ref = try net_kernel:dflag_unicode_io(make_ref()) catch error:badarg -> badarg end,
+    ExternalRef = try net_kernel:dflag_unicode_io(remote_ref(yy@nohost))
+                  catch error:badarg -> badarg end,
+    Atom = try net_kernel:dflag_unicode_io(foo) catch error:badarg -> badarg end,
+    io:format("dflag_unicode_io: ~p~n",
+              [[{not_unicode, NotUnicode}, {unicode, Unicode}, {missing, Missing},
+                {local, Local}, {old, Old}, {ref, Ref}, {external_ref, ExternalRef},
+                {atom, Atom}]]),
+    ok.
+
+%% Return `net_kernel:dflag_unicode_io/1` of a pid of `Node` on a connection
+%% with the flags `Flags`.
+unicode_flag(Node, Flags) ->
+    Parent = self(),
+    Ctrl = spawn(fun() ->
+                         erts_internal:new_connection(Node),
+                         {ok, _DH} =
+                             erts_internal:create_dist_channel(Node, self(),
+                                                               {Flags, 1}),
+                         Parent ! {self(), go},
+                         receive stop -> ok end
+                 end),
+    receive {Ctrl, go} -> ok end,
+    Flag = net_kernel:dflag_unicode_io(remote_pid(Node)),
+    Ctrl ! stop,
+    Flag.
+
+%% A pid of this node with the creation 0, which is an old incarnation.
+old_pid() ->
+    Name = atom_to_binary(node()),
+    binary_to_term(<<131, 88, 118, (byte_size(Name)):16, Name/binary,
+                     0:32, 0:32, 0:32>>).
+
 %% A pid of the node Node.
 remote_pid(Node) ->
     Name = atom_to_binary(Node),
     binary_to_term(<<131, 88, 118, (byte_size(Name)):16, Name/binary, 1:32, 0:32, 1:32>>).
 
 %% A packet of an operation that ERTS defines and PBeam does not implement,
-%% `DOP_SPAWN_REQUEST` (dist.h:171): the node stops the run with a runtime
-%% error that names the operation. The control message has the six elements
-%% of ERTS (dist.c:2899-2902).
-spawn_op() ->
+%% `DOP_ALTACT_SIG_SEND` (dist.h:182): the node stops the run with a runtime
+%% error that names the operation.
+altact_op() ->
     erts_internal:new_connection(zz@nohost),
     {ok, DH} = erts_internal:create_dist_channel(zz@nohost, self(), {mandatory(), 1}),
-    erlang:dist_ctrl_put_data(
-      DH, packet_only({29, remote_ref(zz@nohost), remote_pid(zz@nohost), self(),
-                       {erlang, spawn_opt, []}, []})).
+    erlang:dist_ctrl_put_data(DH, packet_only({37, 0, self()})).
 
 %% The element sizes, the control message, and the message of a packet,
 %% with the pid of the caller as self, each local reference as ref, and

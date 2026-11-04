@@ -673,6 +673,43 @@ impl DistTable {
         true
     }
 
+    /// Make the monitor `key` of the process `process` of the entry of `node`
+    /// a monitor of the pid `remote`, as the reply of a spawn request turns
+    /// the pending monitor into a process monitor (`dist.c:3033-3130`).
+    pub(in crate::runtime) fn update_monitor(
+        &mut self,
+        process: ProcessId,
+        node: &Atom,
+        key: MonitorKey,
+        remote: RemotePid,
+    ) {
+        let entry = self
+            .entries
+            .get_mut(&node.index())
+            .expect("the entry of the node stays in the table");
+        if let Some(monitor) = entry
+            .monitors
+            .iter_mut()
+            .find(|monitor| monitor.process == process && monitor.key == key)
+        {
+            monitor.remote = Some(remote);
+        }
+    }
+
+    /// Put `monitor` in the monitor list of the connected entry of `node`,
+    /// as the caller of [`Self::insert_monitor`] does after its checks. The
+    /// entry is connected: the caller holds the lock of the table and found
+    /// the connection.
+    pub(in crate::runtime) fn insert_monitor_now(&mut self, node: &Atom, monitor: DistMonitor) {
+        let entry = self
+            .entries
+            .get_mut(&node.index())
+            .expect("the entry of the node stays in the table");
+        if !entry.monitors.contains(&monitor) {
+            entry.monitors.push(monitor);
+        }
+    }
+
     /// Return the monitors of the connection of `node`, from the oldest to
     /// the newest, for a test.
     ///
