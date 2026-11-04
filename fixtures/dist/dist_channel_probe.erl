@@ -907,10 +907,13 @@ dflag_unicode_io() ->
     Local = net_kernel:dflag_unicode_io(self()),
     Old = net_kernel:dflag_unicode_io(old_pid()),
     Ref = try net_kernel:dflag_unicode_io(make_ref()) catch error:badarg -> badarg end,
+    ExternalRef = try net_kernel:dflag_unicode_io(remote_ref(yy@nohost))
+                  catch error:badarg -> badarg end,
     Atom = try net_kernel:dflag_unicode_io(foo) catch error:badarg -> badarg end,
     io:format("dflag_unicode_io: ~p~n",
               [[{not_unicode, NotUnicode}, {unicode, Unicode}, {missing, Missing},
-                {local, Local}, {old, Old}, {ref, Ref}, {atom, Atom}]]),
+                {local, Local}, {old, Old}, {ref, Ref}, {external_ref, ExternalRef},
+                {atom, Atom}]]),
     ok.
 
 %% Return `net_kernel:dflag_unicode_io/1` of a pid of `Node` on a connection
