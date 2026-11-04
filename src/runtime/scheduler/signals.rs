@@ -1155,6 +1155,25 @@ impl Scheduler {
                 .remove_monitor(id, &node, reference, monitor.connection);
         }
         let extra = if is_immediate(&reason) { 8 } else { 1 };
+        // A spawn request that waits for its reply gives the caller the
+        // message `{Tag, Ref, error, noconnection}` when its connection ends,
+        // and no `DOWN` message (`erl_proc_sig_queue.c:4864-4900`).
+        if let Some(reply) = monitor.spawn {
+            let process = self.processes.get_mut(id).expect("the process is alive");
+            if reply.no_emsg {
+                process.mailbox.remove(node);
+            } else {
+                let error = Term::tuple(vec![
+                    monitor.item,
+                    reference.term(),
+                    Term::static_atom("error"),
+                    reason,
+                ]);
+                process.mailbox.convert(walk, node, error);
+                self.activate(id);
+            }
+            return extra;
+        }
         let down = Term::tuple(vec![
             monitor.tag,
             reference.term(),
@@ -1184,43 +1203,66 @@ impl Scheduler {
         result: &Term,
         connection: u32,
     ) -> i32 {
-        let Some(reply_tag) = self
+        let Some(monitor) = self
             .processes
-            .get_mut(id)
+            .get(id)
             .and_then(|process| process.monitors.get(&reference))
             .and_then(|origin| origin.monitor.as_ref())
-            .map(|monitor| monitor.item.clone())
         else {
+            let process = self.processes.get_mut(id).expect("the process is alive");
+            process.mailbox.remove(node_id);
             return 0;
         };
+        let reply_tag = monitor.item.clone();
+        // A request that names no `{reply, ...}` option keeps both messages
+        // (`dist.c:5901-5918`).
+        let reply = monitor
+            .spawn
+            .unwrap_or(crate::runtime::process::SpawnReply {
+                no_smsg: false,
+                no_emsg: false,
+            });
+        // The pending request leaves the monitor list of its connection, and
+        // the monitor of a successful spawn joins it again with the pid of
+        // the new process (`erl_proc_sig_queue.c:6408-6412`).
+        self.node
+            .dist()
+            .remove_monitor(id, node, reference, connection);
         if let Term::Atom(reason) = result {
             let _ = self
                 .processes
                 .get_mut(id)
                 .map(|p| p.monitors.remove(&reference));
-            let message = Term::tuple(vec![
-                reply_tag,
-                reference.term(),
-                Term::static_atom("error"),
-                Term::Atom(reason.clone()),
-            ]);
             let process = self.processes.get_mut(id).expect("the process is alive");
-            process.mailbox.convert(walk, node_id, message);
-            self.activate(id);
+            if reply.no_emsg {
+                process.mailbox.remove(node_id);
+            } else {
+                let message = Term::tuple(vec![
+                    reply_tag,
+                    reference.term(),
+                    Term::static_atom("error"),
+                    Term::Atom(reason.clone()),
+                ]);
+                process.mailbox.convert(walk, node_id, message);
+                self.activate(id);
+            }
         } else {
-            let Some(remote) = RemotePid::of(result) else {
-                return 0;
-            };
-            let pid = result.clone();
-            let message = Term::tuple(vec![
-                reply_tag,
-                reference.term(),
-                Term::static_atom("ok"),
-                pid.clone(),
-            ]);
+            // `net_spawn_reply` accepts a pid or an error atom, so a result
+            // that is not an atom here is a pid.
+            let remote = RemotePid::of(result).expect("the reply names a pid or an atom");
             let process = self.processes.get_mut(id).expect("the process is alive");
-            process.mailbox.convert(walk, node_id, message);
-            self.activate(id);
+            if reply.no_smsg {
+                process.mailbox.remove(node_id);
+            } else {
+                let message = Term::tuple(vec![
+                    reply_tag,
+                    reference.term(),
+                    Term::static_atom("ok"),
+                    result.clone(),
+                ]);
+                process.mailbox.convert(walk, node_id, message);
+                self.activate(id);
+            }
             if flags & super::dist_spawn::SPAWN_MONITOR != 0 {
                 if let Some(monitor) = self
                     .processes
@@ -1229,8 +1271,9 @@ impl Scheduler {
                     .and_then(|origin| origin.monitor.as_mut())
                 {
                     monitor.target = None;
-                    monitor.item = pid;
+                    monitor.item = result.clone();
                     monitor.connection = connection;
+                    monitor.spawn = None;
                 }
                 self.node.dist().insert_monitor(
                     id,

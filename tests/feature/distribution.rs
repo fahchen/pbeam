@@ -305,9 +305,30 @@ fn stops_at_a_part_of_a_channel_that_pbeam_does_not_have() {
             "reply_bad_flags()",
             "reply_bad_result()",
             "group_leader_bad()",
+            "spawn_bad_local_leader()",
+            "spawn_bad_mfa_not_tuple()",
+            "spawn_bad_mfa_tuple()",
+            "spawn_bad_mfa_fields()",
+            "spawn_bad_arguments_list()",
         ]
         .map(|call| (call.to_owned(), rejected)),
     );
+    // PBeam does not implement the priority option of a monitor or a link and
+    // the alias option of a monitor (`bif.c:675-780`).
+    cases.extend([
+        (
+            "spawn_monitor_priority()".to_owned(),
+            "unsupported monitor option priority",
+        ),
+        (
+            "spawn_monitor_alias()".to_owned(),
+            "unsupported spawn monitor option alias",
+        ),
+        (
+            "spawn_link_priority()".to_owned(),
+            "unsupported link option priority",
+        ),
+    ]);
     cases.extend([12, 13, 18, 25, 27].map(|op| {
         (
             format!("trace_token({op})"),
@@ -771,7 +792,10 @@ fn spawns_processes_on_another_node_as_pinned_erts() {
     let id = std::process::id();
     let expected = "[{spawn,true},{monitor,normal},{link,boom},{request,ok},\
                     {request_down,boom},{noconnection,noconnection},\
-                    {lost,noconnection},{badopt,{badopt,badopt,badarg}}]\n";
+                    {lost,noconnection},{badopt,{badopt,badopt,badarg}},\
+                    {unknown,{badopt,badarg}},\
+                    {reply,[{no,{none,normal}},{error_only,{none,normal}},\
+                            {success_only,none},{no_error,none}]}]\n";
     for (server_pbeam, socket) in [(false, true), (false, false), (true, true), (true, false)] {
         for client_pbeam in [false, true] {
             let name = format!("dssrv{server_pbeam}{socket}{client_pbeam}{id}");
@@ -807,6 +831,177 @@ fn spawns_processes_on_another_node_as_pinned_erts() {
             );
         }
     }
+}
+
+#[test]
+fn gives_a_spawned_process_the_group_leader_of_the_caller_as_pinned_erts() {
+    // A spawn request carries the group leader of the caller, so the new
+    // process writes `io:format/2` to the caller's group leader on ERTS
+    // (`dist.c:6129-6131`, `erl_process.c:12440-12530`). PBeam keeps no
+    // group leader of another node: the process gets the group leader of the
+    // `user` process of the node that spawns it, and the output goes there
+    // (row "Distribution" of `docs/erts-differences.md`). The probe prints
+    // `gl` on the group leader of the new process, then whether that leader
+    // is the leader of the caller and whether it is a pid of the caller's
+    // node.
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    for (server_pbeam, socket) in [(false, true), (false, false), (true, true), (true, false)] {
+        for client_pbeam in [false, true] {
+            let name = format!("dlsrv{server_pbeam}{socket}{client_pbeam}{id}");
+            let mut arguments = vec!["-sname", &name, "-setcookie", "ck", "-pa", "fixtures/dist"];
+            if socket {
+                arguments.extend(SOCKET_CARRIER);
+            }
+            let server = "dist_spawn_probe:server().";
+            let node = if server_pbeam {
+                pbeam_node(&epmd, &arguments, server)
+            } else {
+                ErtsNode::start(&epmd, &arguments, server)
+            };
+            let expression = format!("dist_spawn_probe:leader('{}'), halt().", node.line());
+            let client = |name: &str| {
+                let mut arguments = vec!["-sname", name, "-setcookie", "ck", "-hidden"];
+                if socket {
+                    arguments.extend(SOCKET_CARRIER);
+                }
+                arguments.extend(["-noshell", "-pa", "fixtures/dist", "-eval", &expression]);
+                arguments.into_iter().map(str::to_owned).collect::<Vec<_>>()
+            };
+            let client_name = format!("dlcl{server_pbeam}{socket}{client_pbeam}{id}");
+            let output = if client_pbeam {
+                pbeam_erl(&epmd, &client(&client_name))
+            } else {
+                erts_erl(&epmd, &client(&client_name))
+            };
+            let expected = if server_pbeam {
+                "leader: [{false,false}]\n"
+            } else {
+                "gl\nleader: [{true,true}]\n"
+            };
+            assert_eq!(
+                stdout(&output),
+                expected,
+                "server pbeam {server_pbeam}, socket {socket}, client pbeam {client_pbeam}"
+            );
+        }
+    }
+}
+
+#[test]
+fn shows_the_options_of_a_spawn_as_pinned_erts() {
+    // Each argument check of `erts_internal:dist_spawn_request/4` returns
+    // `badarg`, and the option list gives the reply policy, the tag, and the
+    // link and monitor options (`dist.c:5860-5975`). The probe sends each
+    // option list to a server of the pinned ERTS, so only the caller differs
+    // between the two runs.
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let name = format!("dsopt{id}");
+    let arguments = vec!["-sname", &name, "-setcookie", "ck", "-pa", "fixtures/dist"];
+    let server = ErtsNode::start(&epmd, &arguments, "dist_spawn_probe:server().");
+    let expression = format!("dist_spawn_probe:options('{}'), halt().", server.line());
+    let client = [
+        "-sname",
+        &format!("dsoptc{id}"),
+        "-setcookie",
+        "ck",
+        "-hidden",
+        "-noshell",
+        "-pa",
+        "fixtures/dist",
+        "-eval",
+        &expression,
+    ];
+    let erts = stdout(&erts_erl(&epmd, &client));
+    assert!(
+        erts.starts_with("options: [{bad_node,badarg},{local,badarg},"),
+        "{erts}"
+    );
+    assert!(
+        erts.ends_with("{no_connection,none},{no_receiver,none}]\n"),
+        "{erts}"
+    );
+    assert_eq!(stdout(&pbeam_erl(&epmd, &client)), erts);
+}
+
+#[test]
+fn spawns_a_request_over_a_channel_as_pinned_erts() {
+    // A connection whose flags have no `DFLAG_SPAWN` answers a spawn request
+    // with `notsup`, the end of a connection answers a spawn request that
+    // waits with `noconnection` or with no message for a suppressed error,
+    // and a reply for a reference that no monitor holds is ignored
+    // (`dist.c:3086-3130`, `6081-6093`, `6197-6202`,
+    // `erl_proc_sig_queue.c:4864-4900`).
+    let epmd = Epmd::start();
+    let name = format!("dspawnc{}", std::process::id());
+    for (function, expected) in [
+        ("spawn_notsup", "spawn_notsup: notsup\n"),
+        ("spawn_lost", "spawn_lost: noconnection\n"),
+        ("spawn_lost_suppressed", "spawn_lost_suppressed: none\n"),
+        ("spawn_reply_unknown", "spawn_reply_unknown: true\n"),
+    ] {
+        let expression = format!("dist_channel_probe:{function}(), halt().");
+        let arguments = probe(&["-sname", &name], &expression);
+        let erts = stdout(&erts_erl(&epmd, &arguments));
+        assert_eq!(erts, expected, "{function}");
+        assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), erts, "{function}");
+    }
+}
+
+#[test]
+fn sets_the_group_leader_of_a_local_process_as_pinned_erts() {
+    // A spawn request that names a local pid as the group leader uses it, a
+    // `DOP_GROUP_LEADER` packet sets the group leader of a local process,
+    // and a monitor down for a reference that no monitor holds is ignored
+    // (`dist.c:2889-2901`, `3086-3130`). The probes print the reply of the
+    // first packet, the new group leader, and whether the connection stays
+    // open.
+    let epmd = Epmd::start();
+    let name = format!("dsgl{}", std::process::id());
+    for function in [
+        "spawn_local_leader",
+        "group_leader_packet",
+        "monitor_down_unknown",
+    ] {
+        let expression = format!("dist_channel_probe:{function}(), halt().");
+        let arguments = probe(&["-sname", &name], &expression);
+        let erts = stdout(&erts_erl(&epmd, &arguments));
+        assert!(!erts.is_empty(), "{function}");
+        assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), erts, "{function}");
+    }
+}
+
+#[test]
+fn reads_the_options_of_a_spawn_request_as_pinned_erts() {
+    // A spawn request that this node receives reads its option list as
+    // `erts_parse_spawn_opts` does (`erl_process.c:12222-12428`,
+    // `dist.c:2949-2984`): a valid option spawns the process with the reply
+    // flags of the link and the monitor, and each rejected option, also an
+    // improper list, answers `badopt` with no process. The reply of the
+    // first packet names the reference, the pid of the other node, the
+    // flags, and the new pid or `badopt`.
+    let epmd = Epmd::start();
+    let name = format!("dsopts{}", std::process::id());
+    let arguments = probe(
+        &["-sname", &name],
+        "dist_channel_probe:spawn_options(), halt().",
+    );
+    let erts = stdout(&erts_erl(&epmd, &arguments));
+    assert!(
+        erts.contains("link: [{{31,{ref,so1@nohost},{pid,so1@nohost},1"),
+        "link reply"
+    );
+    assert!(
+        erts.contains("atom: [{{31,{ref,so4@nohost},{pid,so4@nohost},0,badopt}"),
+        "badopt"
+    );
+    assert!(
+        erts.contains("improper_list: [{{31,{ref,so51@nohost},{pid,so51@nohost},0,badopt}"),
+        "improper list"
+    );
+    let pbeam = stdout(&pbeam_erl(&epmd, &arguments));
+    assert_eq!(pbeam, erts);
 }
 
 #[test]

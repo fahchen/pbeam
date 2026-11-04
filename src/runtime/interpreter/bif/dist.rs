@@ -7,7 +7,10 @@ use num_bigint::BigInt;
 
 use super::{BifContext, BifResult, Term};
 use crate::error::{BeamError, error};
-use crate::runtime::scheduler::{Scheduler, dist_table::Controller, node::Named};
+use crate::runtime::{
+    process::SpawnReply,
+    scheduler::{Scheduler, dist_table::Controller, node::Named},
+};
 use crate::term::{Atom, PortId, ProcessId};
 
 /// The lowest creation of an alive node. `setnode/2` raises a lower
@@ -747,6 +750,10 @@ pub(super) fn dist_get_stat(context: &mut BifContext<'_>, handle: &Term) -> BifR
 /// # Errors
 ///
 /// The errors of the encode of the request.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the option table follows `erts_internal_dist_spawn_request_4`"
+)]
 pub(super) fn dist_spawn_request(
     context: &mut BifContext<'_>,
     node: &Term,
@@ -758,11 +765,9 @@ pub(super) fn dist_spawn_request(
     let Term::Atom(node) = node else {
         return badarg();
     };
-    let spawn_opt = match wait {
-        Term::Atom(wait) if wait.is_static("spawn_opt") => true,
-        Term::Atom(wait) if wait.is_static("spawn_request") => false,
-        _ => return badarg(),
-    };
+    // ERTS reads `spawn_request` and treats each other value as `spawn_opt`,
+    // which its `ASSERT` checks in a debug build only (`dist.c:6106-6115`).
+    let spawn_opt = !matches!(wait, Term::Atom(wait) if wait.is_static("spawn_request"));
     // The request cannot go to the node that the caller runs on
     // (`dist.c:5875-5878`).
     if *node == context.scheduler.atoms.this_node().0 {
@@ -785,6 +790,10 @@ pub(super) fn dist_spawn_request(
     let mut link = false;
     let mut monitor = None;
     let mut reply_tag = Term::static_atom("spawn_reply");
+    let mut reply = SpawnReply {
+        no_smsg: false,
+        no_emsg: false,
+    };
     let mut badopt = false;
     let mut kept = Vec::new();
     for option in options {
@@ -795,27 +804,60 @@ pub(super) fn dist_spawn_request(
             }
             Term::Tuple(fields) => match fields.as_ref() {
                 [Term::Atom(name), value] if name.is_static("reply_tag") => {
+                    // The `reply_tag` option is for a spawn request only
+                    // (`dist.c:5897-5928`).
+                    if spawn_opt {
+                        return badarg();
+                    }
                     reply_tag = value.clone();
                 }
-                [Term::Atom(name), _] if name.is_static("reply") => {}
+                [Term::Atom(name), value] if name.is_static("reply") => {
+                    // The `reply` option is for a spawn request only
+                    // (`dist.c:5901-5928`).
+                    if spawn_opt {
+                        return badarg();
+                    }
+                    let Some(policy) = reply_option(value) else {
+                        badopt = true;
+                        break;
+                    };
+                    reply = policy;
+                }
                 [Term::Atom(name), value] if name.is_static("monitor") => {
-                    match monitor_tag(value) {
-                        Some(tag) => monitor = Some(tag),
+                    let Some((tag, priority, alias)) = monitor_option(value) else {
                         // A bad `monitor` option is `badarg` for a spawn
                         // and a `badopt` reply for a spawn request.
-                        None if spawn_opt => return badarg(),
-                        None => badopt = true,
-                    }
-                }
-                [Term::Atom(name), value] if name.is_static("link") => {
-                    if link_tag(value) {
-                        link = true;
-                    } else if spawn_opt {
-                        return badarg();
-                    } else {
+                        if spawn_opt {
+                            return badarg();
+                        }
                         badopt = true;
+                        break;
+                    };
+                    if priority {
+                        return Err(error(
+                            "unsupported monitor option priority: see \"Distribution\" in docs/erts-differences.md",
+                        ));
                     }
+                    if alias {
+                        return Err(error(
+                            "unsupported spawn monitor option alias: see \"Distribution\" in docs/erts-differences.md",
+                        ));
+                    }
+                    monitor = Some(tag);
                 }
+                [Term::Atom(name), value] if name.is_static("link") => match link_option(value) {
+                    LinkOption::Ok => link = true,
+                    LinkOption::Priority => {
+                        return Err(error(
+                            "unsupported link option priority: see \"Distribution\" in docs/erts-differences.md",
+                        ));
+                    }
+                    LinkOption::Invalid if spawn_opt => return badarg(),
+                    LinkOption::Invalid => {
+                        badopt = true;
+                        break;
+                    }
+                },
                 _ => kept.push(option.clone()),
             },
             _ => kept.push(option.clone()),
@@ -823,7 +865,7 @@ pub(super) fn dist_spawn_request(
     }
     let scheduler = &mut *context.scheduler;
     if badopt {
-        let reference = scheduler.dist_spawn_badopt(&reply_tag)?;
+        let reference = scheduler.dist_spawn_badopt(&reply_tag, reply)?;
         return Ok(BifResult::Value(Term::Reference(reference)));
     }
     // The request names `link` and `monitor` so that the receiver sets the
@@ -837,7 +879,7 @@ pub(super) fn dist_spawn_request(
         sent.push(Term::static_atom("monitor"));
     }
     sent.extend(kept);
-    let (reference, monitored) = scheduler.dist_spawn_request(
+    let request = scheduler.dist_spawn_request(
         node,
         module,
         function,
@@ -846,7 +888,9 @@ pub(super) fn dist_spawn_request(
         Term::list_from(sent),
         monitor.as_ref(),
         &reply_tag,
-    )?;
+        reply,
+    );
+    let (reference, monitored) = request?;
     let value = if spawn_opt {
         Term::tuple(vec![
             Term::Reference(reference),
@@ -858,29 +902,87 @@ pub(super) fn dist_spawn_request(
     Ok(BifResult::Value(value))
 }
 
-/// Return whether the `{link, Options}` spawn option is valid: a proper list
-/// of `priority` (`erts_link_opts`, `bif.c:675-699`).
-fn link_tag(options: &Term) -> bool {
-    let Some(options) = options.proper_list() else {
-        return false;
-    };
-    options
-        .into_iter()
-        .all(|option| matches!(option, Term::Atom(name) if name.is_static("priority")))
+/// The validity of a `{link, Options}` spawn option
+/// (`erts_link_opts`, `bif.c:675-699`).
+enum LinkOption {
+    /// The options are a proper list of `priority`.
+    Ok,
+    /// The options name `priority`, which PBeam does not implement.
+    Priority,
+    /// The options are each other term, which ERTS rejects.
+    Invalid,
 }
 
-/// Return the tag of a `{monitor, Options}` spawn option, or `None` when the
-/// options are not a proper list of `{tag, Tag}`.
-fn monitor_tag(options: &Term) -> Option<Term> {
+/// Read the options of a `{link, Options}` spawn option as
+/// `erts_link_opts` does (`bif.c:675-699`).
+fn link_option(options: &Term) -> LinkOption {
+    let Some(options) = options.proper_list() else {
+        return LinkOption::Invalid;
+    };
+    let mut priority = false;
+    for option in options {
+        match option {
+            Term::Atom(name) if name.is_static("priority") => priority = true,
+            _ => return LinkOption::Invalid,
+        }
+    }
+    if priority {
+        LinkOption::Priority
+    } else {
+        LinkOption::Ok
+    }
+}
+
+/// Read the options of a `{monitor, Options}` spawn option as
+/// `erts_monitor_opts` does (`bif.c:702-780`): the tag, whether the
+/// options name `priority`, and whether they name `alias`.
+fn monitor_option(options: &Term) -> Option<(Term, bool, bool)> {
     let mut tag = Term::static_atom("DOWN");
+    let mut priority = false;
+    let mut alias = false;
     for option in options.proper_list()? {
         match option {
+            Term::Atom(name) if name.is_static("priority") => priority = true,
             Term::Tuple(fields) => match fields.as_ref() {
                 [Term::Atom(name), value] if name.is_static("tag") => tag = value.clone(),
+                [Term::Atom(name), mode] if name.is_static("alias") => {
+                    let known = matches!(mode, Term::Atom(mode)
+                        if mode.is_static("explicit_unalias")
+                            || mode.is_static("demonitor")
+                            || mode.is_static("reply_demonitor"));
+                    if !known {
+                        return None;
+                    }
+                    alias = true;
+                }
                 _ => return None,
             },
             _ => return None,
         }
     }
-    Some(tag)
+    Some((tag, priority, alias))
+}
+
+/// Read the value of a `{reply, Value}` spawn option as `dist.c:5901-5924`
+/// does: the message of a successful spawn, and the message of a failed
+/// spawn, are each kept or suppressed.
+fn reply_option(value: &Term) -> Option<SpawnReply> {
+    let Term::Atom(value) = value else {
+        return None;
+    };
+    let (suppress_success, suppress_error) = if value.is_static("error_only") {
+        (true, false)
+    } else if value.is_static("success_only") {
+        (false, true)
+    } else if value.is_static("no") {
+        (true, true)
+    } else if value.is_static("yes") {
+        (false, false)
+    } else {
+        return None;
+    };
+    Some(SpawnReply {
+        no_smsg: suppress_success,
+        no_emsg: suppress_error,
+    })
 }

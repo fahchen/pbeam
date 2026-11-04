@@ -4,7 +4,7 @@ use super::Scheduler;
 use crate::{
     error::BeamError,
     runtime::{
-        process::{MonitorKey, Origin, OriginMonitor},
+        process::{MonitorKey, Origin, OriginMonitor, SpawnReply},
         signal::Signal,
     },
     term::{Atom, ProcessId, Reference, Term},
@@ -42,6 +42,7 @@ impl Scheduler {
         options: Term,
         monitor: Option<&Term>,
         reply_tag: &Term,
+        reply: SpawnReply,
     ) -> Result<(Reference, bool), BeamError> {
         let watcher = self.current_process_mut().id;
         let reference = self.make_ref()?;
@@ -56,6 +57,7 @@ impl Scheduler {
                     .unwrap_or_else(|| Term::static_atom("DOWN")),
                 connection: 0,
                 remote: None,
+                spawn: Some(reply),
             }),
             alias: None,
             watched_by: None,
@@ -77,16 +79,40 @@ impl Scheduler {
             mfa,
             options,
         ]);
-        let sent = self.dist_spawn_output(watcher, node, &control, arguments)?;
-        if !sent {
-            self.spawn_reply_error(watcher, key, reply_tag, Term::static_atom("noconnection"));
+        match self.dist_spawn_output(watcher, node, &control, arguments)? {
+            SpawnSend::Sent(connection) => {
+                // The pending request joins the monitor list of its
+                // connection, so that the end of the connection gives the
+                // caller `noconnection` (`dist.c:6112-6120`,
+                // `erl_proc_sig_queue.c:4864-4900`).
+                self.node.dist().insert_monitor(
+                    watcher,
+                    node,
+                    None,
+                    key,
+                    connection,
+                    super::dist_table::MonitorSide::Watcher,
+                );
+            }
+            SpawnSend::NoConnection => {
+                self.spawn_reply_error(
+                    watcher,
+                    key,
+                    reply_tag,
+                    Term::static_atom("noconnection"),
+                    reply,
+                );
+            }
+            SpawnSend::NoSupport => {
+                self.spawn_reply_error(watcher, key, reply_tag, Term::static_atom("notsup"), reply);
+            }
         }
         Ok((reference, monitor.is_some()))
     }
 
     /// Give the caller of a spawn request that names a bad option the reply
     /// `{Tag, Ref, error, badopt}` and return the reference
-    /// (`dist.c:5955-5975`).
+    /// (`dist.c:5955-5975`, `6204-6211`).
     ///
     /// # Errors
     ///
@@ -94,49 +120,67 @@ impl Scheduler {
     pub(in crate::runtime) fn dist_spawn_badopt(
         &mut self,
         reply_tag: &Term,
+        reply: SpawnReply,
     ) -> Result<Reference, BeamError> {
         let caller = self.current_process().id;
         let reference = self.make_ref()?;
-        let message = Term::tuple(vec![
-            reply_tag.clone(),
-            Term::Reference(reference),
-            Term::static_atom("error"),
-            Term::static_atom("badopt"),
-        ]);
-        self.send_message(caller, caller, message);
+        if !reply.no_emsg {
+            let message = Term::tuple(vec![
+                reply_tag.clone(),
+                Term::Reference(reference),
+                Term::static_atom("error"),
+                Term::static_atom("badopt"),
+            ]);
+            self.send_message(caller, caller, message);
+        }
         Ok(reference)
     }
 
     /// Send the spawn request `control` with the message `arguments` on the
-    /// connection of `node`, and return whether it went out.
+    /// connection of `node`, and return how the send ended.
     fn dist_spawn_output(
         &mut self,
         sender: ProcessId,
         node: &Atom,
         control: &Term,
         arguments: &Term,
-    ) -> Result<bool, BeamError> {
-        let mut sent = false;
-        self.dist_output(sender, node, |flags, _| {
-            sent = flags & DIST_SPAWN != 0;
-            sent.then(|| (control.clone(), Some(arguments.clone())))
+    ) -> Result<SpawnSend, BeamError> {
+        let mut connection = None;
+        let sent = self.dist_output(sender, node, |flags, current| {
+            if flags & DIST_SPAWN == 0 {
+                return None;
+            }
+            connection = Some(current);
+            Some((control.clone(), Some(arguments.clone())))
+        })?;
+        Ok(match (sent, connection) {
+            (false, _) => SpawnSend::NoConnection,
+            (true, Some(connection)) => SpawnSend::Sent(connection),
+            // A connection without `DFLAG_SPAWN` drops the request
+            // (`dist.c:6089-6093`).
+            (true, None) => SpawnSend::NoSupport,
         })
     }
 
     /// Give the caller of a spawn request the message `{Tag, Ref, error,
     /// Reason}` and remove the pending monitor, as a failed request does
-    /// (`dist.c:6111-6121`).
+    /// (`dist.c:6111-6121`, `6204-6211`). A `{reply, ...}` option that
+    /// suppresses the error message removes the monitor with no message.
     pub(super) fn spawn_reply_error(
         &mut self,
         process: ProcessId,
         key: MonitorKey,
         tag: &Term,
         reason: Term,
+        reply: SpawnReply,
     ) {
         let reference = key.term();
         self.processes
             .get_mut(process)
             .map(|process| process.monitors.remove(&key));
+        if reply.no_emsg {
+            return;
+        }
         let message = Term::tuple(vec![
             tag.clone(),
             reference,
@@ -147,11 +191,25 @@ impl Scheduler {
     }
 }
 
+/// How the send of a spawn request ended (`dist.c:6081-6093`,
+/// `6194-6202`).
+enum SpawnSend {
+    /// The request went out on the connection.
+    Sent(u32),
+    /// The node has no connection.
+    NoConnection,
+    /// The connection has no `DFLAG_SPAWN`.
+    NoSupport,
+}
+
 impl Scheduler {
     /// Start the process of a spawn request on this node, as
     /// `erl_create_process` with `dist_spawn_init` does
     /// (`dist.c:2980-3030`): the start is `module:function` with `arguments`,
-    /// the group leader is `group_leader`, and no local parent exists.
+    /// the group leader is `group_leader`, and no local parent exists. The
+    /// process is a runtime process with no capability copy, because PBeam
+    /// has no channel for the policy of another node, and row "Distribution"
+    /// of `docs/erts-differences.md` records the gap.
     ///
     /// # Errors
     ///
@@ -168,12 +226,14 @@ impl Scheduler {
         let mut child =
             crate::runtime::process::ProcessState::new(self.next_pid()?, start, arguments);
         child.parent = None;
-        child.group_leader = group_leader.unwrap_or_else(|| {
-            self.processes
-                .get(super::ROOT)
-                .map_or(child.id, |root| root.group_leader)
-        });
-        child.security = crate::runtime::capability::SecurityContext::boot();
+        // A request that names a local pid uses it, and PBeam keeps no group
+        // leader of another node: the process gets the io server of this node
+        // (row "Distribution" of `docs/erts-differences.md`).
+        if let Some(leader) = group_leader {
+            child.group_leader = leader;
+        } else if let Some(super::node::Named::Process(leader)) = self.name_owner("user") {
+            child.group_leader = leader;
+        }
         let id = child.id;
         self.insert(child);
         Ok(id)
@@ -185,8 +245,11 @@ impl Scheduler {
     ///
     /// # Errors
     ///
-    /// A request that ERTS rejects, and the errors of the encode of the
-    /// answer.
+    /// A request that ERTS rejects, the errors of the encode of the answer,
+    /// and the error of a process that this node cannot start. ERTS answers
+    /// `system_limit` for the last one (`dist.c:3020-3032`), and PBeam stops
+    /// the run with the error of its process table (row "Distribution" of
+    /// `docs/erts-differences.md`).
     #[expect(clippy::too_many_arguments, reason = "the fields of the packet")]
     pub(super) fn net_spawn_request(
         &mut self,
@@ -225,62 +288,57 @@ impl Scheduler {
             return Err(crate::error::error(super::dist_input::REJECTED));
         };
         let arguments: Vec<Term> = arguments.cloned().collect();
-        let mut link = false;
-        let mut monitor = false;
-        if let Some(options) = options.proper_list() {
-            for option in options {
-                match option {
-                    Term::Atom(name) if name.is_static("link") => link = true,
-                    Term::Atom(name) if name.is_static("monitor") => monitor = true,
-                    _ => {}
-                }
+        let (link, monitor) = match spawn_options(options, self.scheduler_count()) {
+            SpawnOptions::Ok { link, monitor } => (link, monitor),
+            // ERTS answers each rejected option list, also an improper
+            // list, with `badopt` and no process (`dist.c:2949-2984`).
+            SpawnOptions::Badopt => {
+                return self.spawn_request_error(node, connection, &key.term(), from);
             }
+        };
+        let pid = self.spawn_dist(module, function, arguments, group_leader)?;
+        let remote = super::dist_monitor::remote_of(node, from)
+            .expect("the request names a pid of the node");
+        if link {
+            self.link_on(
+                pid,
+                crate::runtime::process::LinkId::Remote(remote),
+                remote,
+                connection,
+            );
         }
-        let spawned = self.spawn_dist(module, function, arguments, group_leader);
-        if let Ok(pid) = spawned {
-            let remote = super::dist_monitor::remote_of(node, from)
-                .expect("the request names a pid of the node");
-            if link {
-                self.link_on(
-                    pid,
-                    crate::runtime::process::LinkId::Remote(remote),
-                    remote,
-                    connection,
-                );
-            }
-            if monitor {
-                let key = crate::runtime::process::MonitorKey::Remote(
-                    crate::runtime::process::RemoteReference::of(reference)
-                        .expect("the request names a reference of the node"),
-                );
-                let watcher = crate::runtime::process::RemoteWatcher {
-                    watcher: remote,
-                    name: None,
-                    connection,
-                };
-                self.processes
-                    .get_mut(pid)
-                    .expect("the new process is alive")
-                    .monitors
-                    .insert(
-                        key,
-                        crate::runtime::process::Origin {
-                            monitor: None,
-                            alias: None,
-                            watched_by: Some(watcher),
-                        },
-                    );
-                self.node.dist().insert_monitor(
-                    pid,
-                    node,
-                    Some(remote),
+        if monitor {
+            let key = crate::runtime::process::MonitorKey::Remote(
+                crate::runtime::process::RemoteReference::of(reference)
+                    .expect("the request names a reference of the node"),
+            );
+            let watcher = crate::runtime::process::RemoteWatcher {
+                watcher: remote,
+                name: None,
+                connection,
+            };
+            self.processes
+                .get_mut(pid)
+                .expect("the new process is alive")
+                .monitors
+                .insert(
                     key,
-                    connection,
-                    super::dist_table::MonitorSide::Watched,
+                    crate::runtime::process::Origin {
+                        monitor: None,
+                        alias: None,
+                        watched_by: Some(watcher),
+                    },
                 );
-            }
+            self.node.dist().insert_monitor(
+                pid,
+                node,
+                Some(remote),
+                key,
+                connection,
+                super::dist_table::MonitorSide::Watched,
+            );
         }
-        let result = spawned.map_or_else(|_| Term::static_atom("system_limit"), Term::Pid);
+        let result = Term::Pid(pid);
         // The reply names the link and the monitor, so the caller joins them
         // (`dist.c:3033-3130`).
         let mut reply_flags = 0;
@@ -297,6 +355,46 @@ impl Scheduler {
             Term::Integer(reply_flags),
             result,
         ]);
+        self.dist_reply(connection, node, &control)?;
+        Ok(())
+    }
+
+    /// Answer a spawn request that ERTS rejects with `{31, Ref, From, 0,
+    /// badopt}` and no process (`dist.c:2931-2980`).
+    ///
+    /// # Errors
+    ///
+    /// The errors of the encode of the answer.
+    fn spawn_request_error(
+        &mut self,
+        node: &Atom,
+        connection: u32,
+        reference: &Term,
+        from: &Term,
+    ) -> Result<(), BeamError> {
+        let control = Term::tuple(vec![
+            Term::Integer(SPAWN_REPLY),
+            reference.clone(),
+            from.clone(),
+            Term::Integer(0),
+            Term::static_atom("badopt"),
+        ]);
+        self.dist_reply(connection, node, &control)
+    }
+
+    /// Send the `DOP_SPAWN_REPLY` control message `control` on the
+    /// connection `connection` of `node` (`dist.c:2968-2979`,
+    /// `3090-3120`).
+    ///
+    /// # Errors
+    ///
+    /// The errors of the encode of the control message.
+    fn dist_reply(
+        &mut self,
+        connection: u32,
+        node: &Atom,
+        control: &Term,
+    ) -> Result<(), BeamError> {
         self.dist_output(ProcessId(0), node, |_, current| {
             (current == connection).then(|| (control.clone(), None))
         })?;
@@ -358,4 +456,167 @@ impl Scheduler {
         let _ = self.send_signal(None, *to, signal);
         Ok(())
     }
+}
+
+/// The options of a spawn request that this node receives, as
+/// `erts_parse_spawn_opts` reads them (`erl_process.c:12222-12428`).
+enum SpawnOptions {
+    /// The request names a valid option list.
+    Ok {
+        /// The request asks for a link.
+        link: bool,
+        /// The request asks for a monitor.
+        monitor: bool,
+    },
+    /// An option list that ERTS answers with `badopt` and no process
+    /// (`dist.c:2949-2984`).
+    Badopt,
+}
+
+/// Read the options `options` of a spawn request that this node receives,
+/// as `erts_parse_spawn_opts` reads them (`erl_process.c:12222-12428`).
+/// PBeam has no heap accounting, so a heap size option keeps its value for
+/// the checks only (row "Heap limit" in `docs/erts-differences.md`).
+fn spawn_options(options: &Term, schedulers: i64) -> SpawnOptions {
+    let Some(options) = options.proper_list() else {
+        return SpawnOptions::Badopt;
+    };
+    let mut link = false;
+    let mut monitor = false;
+    // `H_DEFAULT_SIZE` and `H_MAX_SIZE` (`erl_vm.h:60-61`,
+    // `erlang.c:12245-12250`).
+    let mut min_heap_size = 233;
+    let mut max_heap_size = 0;
+    for option in options {
+        let valid = match option {
+            Term::Atom(name) if name.is_static("link") => {
+                link = true;
+                true
+            }
+            Term::Atom(name) if name.is_static("monitor") => {
+                monitor = true;
+                true
+            }
+            Term::Tuple(fields) if fields.len() == 2 => {
+                let (Term::Atom(name), value) = (&fields[0], &fields[1]) else {
+                    return SpawnOptions::Badopt;
+                };
+                if name.is_static("priority") {
+                    is_one_of(value, &["max", "high", "normal", "low"])
+                } else if name.is_static("async_dist") {
+                    matches!(value, Term::Atom(name) if name.is_static("true") || name.is_static("false"))
+                } else if name.is_static("message_queue_data") {
+                    is_one_of(value, &["on_heap", "off_heap"])
+                } else if name.is_static("min_heap_size") {
+                    match non_negative(value) {
+                        Some(size) => {
+                            min_heap_size = size.max(min_heap_size);
+                            true
+                        }
+                        None => false,
+                    }
+                } else if name.is_static("min_bin_vheap_size") || name.is_static("fullsweep_after")
+                {
+                    non_negative(value).is_some()
+                } else if name.is_static("max_heap_size") {
+                    match max_heap_size_option(value) {
+                        Some(size) => {
+                            max_heap_size = size;
+                            true
+                        }
+                        None => false,
+                    }
+                } else if name.is_static("scheduler") {
+                    match non_negative(value) {
+                        // ERTS rejects an index above the scheduler count
+                        // only (`erl_process.c:12355-12368`).
+                        Some(index) => index <= schedulers,
+                        None => false,
+                    }
+                } else if name.is_static("link") {
+                    link = true;
+                    link_options(value)
+                } else if name.is_static("monitor") {
+                    monitor = true;
+                    monitor_options(value)
+                } else if name.is_static("reply") || name.is_static("reply_tag") {
+                    // The receiver of a request accepts neither option: its
+                    // `erts_parse_spawn_opts` call has no message option and
+                    // no reply tag (`dist.c:2951`, `erl_process.c:12356`,
+                    // `12392`).
+                    false
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        };
+        if !valid {
+            return SpawnOptions::Badopt;
+        }
+    }
+    if max_heap_size != 0 && max_heap_size < min_heap_size {
+        return SpawnOptions::Badopt;
+    }
+    SpawnOptions::Ok { link, monitor }
+}
+
+/// Return the size of a `{max_heap_size, Value}` option, or `None` when
+/// ERTS rejects it (`erts_max_heap_size`, `erl_gc.c:3833-3881`): a
+/// non-negative small integer, or a map with a non-negative small `size`
+/// and a boolean `kill`, `error_logger`, and `include_shared_binaries`.
+fn max_heap_size_option(value: &Term) -> Option<i64> {
+    let Term::Map(map) = value else {
+        return non_negative(value);
+    };
+    let size = non_negative(map.get(&Term::static_atom("size"))?)?;
+    for key in ["kill", "error_logger", "include_shared_binaries"] {
+        if let Some(value) = map.get(&Term::static_atom(key))
+            && !matches!(value, Term::Atom(name) if name.is_static("true") || name.is_static("false"))
+        {
+            return None;
+        }
+    }
+    Some(size)
+}
+
+/// Return whether `value` is an atom with a name in `names`.
+fn is_one_of(value: &Term, names: &[&str]) -> bool {
+    matches!(value, Term::Atom(name) if names.iter().any(|wanted| name.is_static(wanted)))
+}
+
+/// Return the value of a non-negative small integer, or `None` for each
+/// other term.
+fn non_negative(value: &Term) -> Option<i64> {
+    value.small_integer().filter(|value| *value >= 0)
+}
+
+/// Return whether `options` is a valid `{link, Options}` option list: each
+/// element is the atom `priority` (`erts_link_opts`, `bif.c:675-699`).
+fn link_options(options: &Term) -> bool {
+    options.proper_list().is_some_and(|options| {
+        options
+            .into_iter()
+            .all(|option| matches!(option, Term::Atom(name) if name.is_static("priority")))
+    })
+}
+
+/// Return whether `options` is a valid `{monitor, Options}` option list:
+/// each element is the atom `priority` or a `{tag, Tag}` or `{alias, How}`
+/// tuple (`erts_monitor_opts`, `bif.c:702-780`).
+fn monitor_options(options: &Term) -> bool {
+    options.proper_list().is_some_and(|options| {
+        options.into_iter().all(|option| match option {
+            Term::Atom(name) => name.is_static("priority"),
+            Term::Tuple(fields) if fields.len() == 2 => match &fields[0] {
+                Term::Atom(name) if name.is_static("tag") => true,
+                Term::Atom(name) if name.is_static("alias") => is_one_of(
+                    &fields[1],
+                    &["explicit_unalias", "demonitor", "reply_demonitor"],
+                ),
+                _ => false,
+            },
+            _ => false,
+        })
+    })
 }

@@ -442,6 +442,25 @@ pub(super) struct OriginMonitor {
     /// `None` for a monitor of a process or a port of this node
     /// (`ERTS_MON_TYPE_DIST_PROC`, `bif.c:811-894`).
     pub(super) remote: Option<RemoteTarget>,
+    /// The reply policy of a spawn request that waits for its reply, or
+    /// `None` for each other monitor (`ERTS_ML_FLG_SPAWN_PENDING`,
+    /// `ERTS_ML_FLG_SPAWN_NO_SMSG`, `ERTS_ML_FLG_SPAWN_NO_EMSG`,
+    /// `dist.c:5880-5930`, `erl_proc_sig_queue.c:4877-4900`).
+    pub(super) spawn: Option<SpawnReply>,
+}
+
+/// The reply policy of a spawn request: whether the caller suppresses the
+/// message of a successful spawn, and the message of a failed spawn
+/// (`ERTS_ML_FLG_SPAWN_NO_SMSG`, `ERTS_ML_FLG_SPAWN_NO_EMSG`,
+/// `dist.c:5901-5918`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct SpawnReply {
+    /// The `{reply, no}` and `{reply, success_only}` options suppress the
+    /// message of a successful spawn.
+    pub(super) no_smsg: bool,
+    /// The `{reply, no}` and `{reply, error_only}` options suppress the
+    /// message of a failed spawn.
+    pub(super) no_emsg: bool,
 }
 
 /// The target of a monitor of a process of another node: the pid of the
