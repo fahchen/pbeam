@@ -807,15 +807,12 @@ fn gives_the_crypto_algorithm_lists_and_fips_status_as_pinned_erts() {
                  {kems,[]},\n  \
                  {macs,[cmac,hmac,poly1305]},\n  \
                  {rsa_opts,[]}]";
-    let rest = format!(",\n {items},\n false,true]\n");
-    let count = erts
-        .strip_suffix(rest.as_str())
-        .and_then(|head| head.strip_prefix('['));
-    assert!(matches!(count, Some("187" | "177")), "{erts}");
     assert_eq!(pbeam, format!("[131,\n {items},\n true,true]\n"));
-    // The curves and the public key algorithms of the pinned ERTS depend on
-    // the libcrypto of the host, so only the pinned macOS ERTS is the
-    // reference (algorithms.c:162-202, 241-640, pkey.c:201-210).
+    // The count and the list of the pinned ERTS depend on the libcrypto of
+    // the host, so only the pinned macOS ERTS is the reference
+    // (algorithms.c:162-202, 241-640, pkey.c:201-210). A Linux host with
+    // another OpenSSL adds algorithms, and then the count and the lists
+    // differ from the ones that PBeam runs.
     let pbeam = run(&mut pbeam_probe(
         CRYPTO_PROBE,
         "crypto_probe",
@@ -823,6 +820,11 @@ fn gives_the_crypto_algorithm_lists_and_fips_status_as_pinned_erts() {
         &[],
     ));
     assert_eq!(pbeam, SUPPORTS_HOST);
+    if cfg!(target_os = "macos") {
+        assert_eq!(erts, format!("[187,\n {items},\n false,true]\n"));
+    } else {
+        assert!(erts.starts_with('['), "{erts}");
+    }
     if cfg!(target_os = "macos") {
         let erts = run(&mut erts_probe(
             CRYPTO_PROBE,
