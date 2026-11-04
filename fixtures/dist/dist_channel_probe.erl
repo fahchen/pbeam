@@ -8,9 +8,11 @@
          atom_cache/0, output/0, port_output/0,
          alias_ext/0, dead_alias/1, exit_input/0, link_input/0,
          link_noconnection/0, altact_op/0, spawn_bad_ref/0, spawn_bad_from/0,
+         spawn_bad_from_local/0,
          spawn_bad_leader/0, spawn_bad_mfa/0, spawn_bad_arity/0,
          spawn_bad_arguments/0, reply_bad_to/0, reply_bad_ref/0,
          reply_bad_flags/0, reply_bad_result/0, group_leader_bad/0,
+         group_leader_bad_to/0, group_leader_external_to/0,
          spawn_notsup/0, spawn_lost/0, spawn_options/0,
          spawn_reply_unknown/0, spawn_reply_ordinary_monitor/0,
          spawn_lost_suppressed/0, spawn_local_leader/0,
@@ -567,6 +569,12 @@ spawn_bad_ref() ->
 spawn_bad_from() ->
     channel({29, make_ref(), make_ref(), self(), {erlang, node, []}, []}, []).
 
+%% A `from` that is a local pid, not a pid of another node, is rejected
+%% (dist.c:2935).
+spawn_bad_from_local() ->
+    channel({29, remote_ref(zz@nohost), self(), remote_pid(zz@nohost),
+             {erlang, node, []}, []}, []).
+
 spawn_bad_leader() ->
     channel({29, make_ref(), self(), make_ref(), {erlang, node, []}, []}, []).
 
@@ -593,6 +601,35 @@ reply_bad_result() ->
 
 group_leader_bad() ->
     channel({7, make_ref(), self()}, []).
+
+%% A `DOP_GROUP_LEADER` packet whose target is not a pid is rejected
+%% (dist.c:2895-2897). A target that is an external pid has no local
+%% process, so the signal is dropped.
+group_leader_bad_to() ->
+    channel({7, remote_pid(zz@nohost), foo}, []).
+
+%% A `DOP_GROUP_LEADER` packet whose target is a pid of another node is
+%% accepted and dropped, because no local process has that pid
+%% (`erl_proc_sig_queue.c:1170-1174`).
+group_leader_external_to() ->
+    logger:set_primary_config(level, none),
+    Node = zz@nohost,
+    Parent = self(),
+    Ctrl = spawn(fun() ->
+                         erts_internal:new_connection(Node),
+                         {ok, DH} =
+                             erts_internal:create_dist_channel(Node, self(),
+                                                               {mandatory(), 1}),
+                         erlang:dist_ctrl_put_data(
+                           DH, packet_only({7, remote_pid(Node),
+                                            remote_pid(yy@nohost)})),
+                         receive after 200 -> ok end,
+                         Parent ! {self(), lists:member(Node, nodes(connected))},
+                         receive stop -> ok end
+                 end),
+    Connected = receive {Ctrl, C} -> C after 5000 -> timeout end,
+    io:format("group_leader_external_to: ~p~n", [Connected]),
+    Ctrl ! stop.
 
 %% A connection whose flags have no `DFLAG_SPAWN` answers a spawn request
 %% with `notsup` (`dist.c:6089-6093`, `6197-6202`).

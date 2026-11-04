@@ -296,6 +296,7 @@ fn stops_at_a_part_of_a_channel_that_pbeam_does_not_have() {
         [
             "spawn_bad_ref()",
             "spawn_bad_from()",
+            "spawn_bad_from_local()",
             "spawn_bad_leader()",
             "spawn_bad_mfa()",
             "spawn_bad_arity()",
@@ -305,6 +306,7 @@ fn stops_at_a_part_of_a_channel_that_pbeam_does_not_have() {
             "reply_bad_flags()",
             "reply_bad_result()",
             "group_leader_bad()",
+            "group_leader_bad_to()",
             "spawn_local_ref()",
             "spawn_bad_local_leader()",
             "spawn_bad_mfa_not_tuple()",
@@ -965,6 +967,7 @@ fn sets_the_group_leader_of_a_local_process_as_pinned_erts() {
     for function in [
         "spawn_local_leader",
         "group_leader_packet",
+        "group_leader_external_to",
         "monitor_down_unknown",
     ] {
         let expression = format!("dist_channel_probe:{function}(), halt().");

@@ -100,6 +100,7 @@ fn takes_the_term_of_each_signal_that_holds_one() {
     // The scheduler moves the term of each signal of the mailbox of an
     // exiting process to its release work list (`Signal::take_terms`, row 11
     // of docs/term-performance-design-codex-v2.md).
+    let node = Atom::from_static("nonode@nohost").unwrap();
     for (mut signal, expected) in [
         (
             Signal::Exit {
@@ -109,21 +110,21 @@ fn takes_the_term_of_each_signal_that_holds_one() {
                 normal_kills: false,
                 alias: None,
             },
-            marker(1),
+            vec![marker(1)],
         ),
         (
             Signal::DistExit {
                 from: Term::Pid(ProcessId(1)),
                 reason: marker(5),
             },
-            marker(5),
+            vec![marker(5)],
         ),
         (
             Signal::MonitorDown {
                 reference: MonitorKey::Local(Reference(1)),
                 reason: marker(2),
             },
-            marker(2),
+            vec![marker(2)],
         ),
         (
             Signal::ProcessInfo {
@@ -131,19 +132,32 @@ fn takes_the_term_of_each_signal_that_holds_one() {
                 reference: Reference(1),
                 item: marker(3),
             },
-            marker(3),
+            vec![marker(3)],
         ),
         (
             Signal::AliasMessage {
                 alias: Reference(1),
                 message: marker(4),
             },
-            marker(4),
+            vec![marker(4)],
+        ),
+        // A spawn reply holds the node atom of the request and the pid or
+        // the error atom of the result, in that order
+        // (`dist.c:3095-3129`).
+        (
+            Signal::SpawnReply {
+                node: node.clone(),
+                reference: MonitorKey::Local(Reference(1)),
+                flags: 0,
+                result: marker(6),
+                connection: 1,
+            },
+            vec![Term::Atom(node), marker(6)],
         ),
     ] {
         let mut pending = Vec::new();
         signal.take_terms(&mut pending);
-        assert_eq!(pending, vec![expected]);
+        assert_eq!(pending, expected);
     }
 }
 

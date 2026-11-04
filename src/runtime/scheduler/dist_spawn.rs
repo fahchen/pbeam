@@ -458,12 +458,20 @@ impl Scheduler {
     ///
     /// A term that is not a pid.
     pub(super) fn net_group_leader(&mut self, leader: &Term, to: &Term) -> Result<(), BeamError> {
-        let Term::Pid(to) = to else {
+        // ERTS requires a pid for the leader and the target
+        // (`dist.c:2895-2897`).
+        if crate::term::external_id::pid_parts(to).is_none() {
             return Err(crate::error::error(super::dist_input::REJECTED));
-        };
+        }
         if crate::term::external_id::pid_parts(leader).is_none() {
             return Err(crate::error::error(super::dist_input::REJECTED));
         }
+        let Term::Pid(to) = to else {
+            // A target pid of another node has no local process, so the
+            // signal drops, as `proc_queue_signal` drops a signal to a pid
+            // that no local process has (`erl_proc_sig_queue.c:1170-1174`).
+            return Ok(());
+        };
         let signal = Signal::DistGroupLeader {
             leader: leader.clone(),
         };
