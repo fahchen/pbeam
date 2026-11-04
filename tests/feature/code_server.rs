@@ -1399,12 +1399,35 @@ fn encodes_and_decodes_the_pids_ports_and_references_as_pinned_erts() {
 }
 
 #[test]
+fn keeps_a_group_leader_of_another_node_as_pinned_erts() {
+    // A process keeps a group leader of another node as `proc->group_leader`
+    // keeps an Eterm, and the pid only needs a connection for its output
+    // (`bif.c:4914-4964`).
+    let erts = run(&mut erts_probe(
+        REMOTE_ID_PROBE,
+        "remote_id_probe",
+        "group_leader_leader",
+        &[],
+    ));
+    assert!(erts.contains("group_leader_leader: [true,true]"), "{erts}");
+    assert_eq!(
+        run(&mut pbeam_probe(
+            REMOTE_ID_PROBE,
+            "remote_id_probe",
+            "group_leader_leader",
+            &[]
+        )),
+        erts
+    );
+}
+
+#[test]
 fn stops_with_a_runtime_error_for_each_signal_to_another_node() {
     // A group leader of a pid of another node needs a connection
     // (bif.c:4942-4964); a monitor of an old incarnation of the local node
-    // and a group leader of another node need state that PBeam does not keep
-    // (bif.c:811-825, 925-935, 4935); a send to an old incarnation of the
-    // local node logs an error report (bif.c:2489-2503). A monitor of a pid
+    // needs state that PBeam does not keep (bif.c:811-825, 925-935); a send
+    // to an old incarnation of the local node logs an error report
+    // (bif.c:2489-2503). A monitor of a pid
     // of another node no longer stops the run: it ends at once with the
     // `DOWN` message `noconnection` on a node without a connection, as ERTS
     // does (bif.c:842-849, #1493).
@@ -1420,10 +1443,6 @@ fn stops_with_a_runtime_error_for_each_signal_to_another_node() {
         (
             "group_leader",
             "unsupported erlang:group_leader/2 with a pid of another node",
-        ),
-        (
-            "group_leader_leader",
-            "unsupported erlang:group_leader/2 with a leader of another node",
         ),
         (
             "other_scheduler",

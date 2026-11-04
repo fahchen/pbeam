@@ -196,7 +196,14 @@ remote() -> hd(ids()).
 old_monitor() -> erlang:monitor(port, binary_to_term(<<131, 89, 100, 13:16, "nonode@nohost", 8:32, 7:32>>)).
 old_process_monitor() -> erlang:monitor(process, lists:last(ids())).
 group_leader() -> erlang:group_leader(self(), remote()).
-group_leader_leader() -> erlang:group_leader(remote(), self()).
+group_leader_leader() ->
+    Leader = erlang:group_leader(),
+    Remote = remote(),
+    Result = erlang:group_leader(Remote, self()),
+    IsRemote = erlang:group_leader() =:= Remote,
+    true = erlang:group_leader(Leader, self()),
+    io:format("group_leader_leader: ~p~n", [[Result, IsRemote]]),
+    ok.
 old_send() -> lists:last(ids()) ! x.
 %% A local reference of the second scheduler, which PBeam does not hold.
 other_scheduler() ->
