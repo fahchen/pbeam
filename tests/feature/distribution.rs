@@ -329,6 +329,10 @@ fn stops_at_a_part_of_a_channel_that_pbeam_does_not_have() {
             "spawn_link_priority()".to_owned(),
             "unsupported link option priority",
         ),
+        (
+            "spawn_scheduler()".to_owned(),
+            "unsupported spawn option Tuple([Atom(\"scheduler\"), Integer(1)])",
+        ),
     ]);
     cases.extend([12, 13, 18, 25, 27].map(|op| {
         (
@@ -986,6 +990,51 @@ fn gives_the_unicode_io_flag_of_a_remote_group_leader_as_pinned_erts() {
         "{erts}"
     );
     assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), erts);
+}
+
+#[test]
+fn applies_the_options_of_a_spawn_request_as_pinned_erts() {
+    // The options of a spawn request set the start values of the priority,
+    // the message queue data, and the `async_dist` flag of the new process,
+    // as `erlang:spawn_opt/4` does (`erl_process.c:12275-12320`,
+    // `12552-12558`). The probe reads each start value and prints it, and
+    // `{scheduler, 1}` stops the run as the local spawn does, because PBeam
+    // does not bind a process to a scheduler (`erl_process.c:12500-12507`).
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    for server_pbeam in [false, true] {
+        let name = format!("dsfl{server_pbeam}{id}");
+        let arguments = vec!["-sname", &name, "-setcookie", "ck", "-pa", "fixtures/dist"];
+        let server = "dist_spawn_probe:server().";
+        let node = if server_pbeam {
+            pbeam_node(&epmd, &arguments, server)
+        } else {
+            ErtsNode::start(&epmd, &arguments, server)
+        };
+        let expression = format!("dist_spawn_probe:flags('{}'), halt().", node.line());
+        let client = [
+            "-sname",
+            &format!("dsfc{server_pbeam}{id}"),
+            "-setcookie",
+            "ck",
+            "-hidden",
+            "-noshell",
+            "-pa",
+            "fixtures/dist",
+            "-eval",
+            &expression,
+        ];
+        let output = if server_pbeam {
+            pbeam_erl(&epmd, &client)
+        } else {
+            erts_erl(&epmd, &client)
+        };
+        assert_eq!(
+            stdout(&output),
+            "flags: [{spawn,true},{info,{{priority,high},off_heap,true}}]\n",
+            "server pbeam {server_pbeam}"
+        );
+    }
 }
 
 #[test]

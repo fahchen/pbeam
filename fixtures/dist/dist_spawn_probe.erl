@@ -3,7 +3,8 @@
 %% and a node with no connection (bif.c:1027-1075,
 %% erl_process.c:12440-12530, dist.c:5850-6260).
 -module(dist_spawn_probe).
--export([server/0, client/1, leader/1, options/1, report/1, boom/0]).
+-export([server/0, client/1, leader/1, options/1, flags/1, report/1,
+         report_flags/1, boom/0]).
 
 server() ->
     io:format("~s~n", [node()]),
@@ -178,6 +179,25 @@ options(Server) ->
                 {link_empty, LinkEmpty}, {monitor_empty, MonitorEmpty},
                 {monitor_tag, MonitorTag}, {reply_yes, ReplyYes},
                 {no_connection, NoConnection}, {no_receiver, NoReceiver}]]),
+    ok.
+
+%% The options of a spawn request set the start values of the priority, the
+%% message queue data, and the async_dist flag of the new process
+%% (`erl_process.c:12275-12320`, `12552-12558`).
+flags(Server) ->
+    true = net_kernel:connect_node(Server),
+    Req = spawn_request(Server, dist_spawn_probe, report_flags, [self()],
+                        [monitor, {priority, high}, {message_queue_data, off_heap},
+                         {async_dist, true}]),
+    Pid = receive {spawn_reply, Req, ok, P} -> P after 5000 -> timeout end,
+    Info = receive {flags, I} -> I after 5000 -> timeout end,
+    io:format("flags: ~p~n", [[{spawn, is_pid(Pid)}, {info, Info}]]),
+    ok.
+
+report_flags(Client) ->
+    Client ! {flags, {process_info(self(), priority),
+                      process_flag(message_queue_data, on_heap),
+                      process_flag(async_dist, false)}},
     ok.
 
 %% Return whether the request gave a message within half a second.

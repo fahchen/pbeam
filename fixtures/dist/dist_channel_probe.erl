@@ -18,7 +18,7 @@
          spawn_bad_mfa_not_tuple/0, spawn_bad_mfa_tuple/0,
          spawn_bad_mfa_fields/0,
          spawn_bad_arguments_list/0, spawn_monitor_priority/0,
-         spawn_monitor_alias/0, spawn_link_priority/0,
+         spawn_monitor_alias/0, spawn_link_priority/0, spawn_scheduler/0,
          dflag_unicode_io/0]).
 
 main() ->
@@ -688,7 +688,10 @@ spawn_options() ->
          {reply_tag, [{reply_tag, mine}]},
          {unknown_tuple, [{foo, bar}]},
          {improper_list, [link | foo]},
-         {monitor_name_not_atom, [{monitor, [{1, 2}]}]}],
+         {monitor_name_not_atom, [{monitor, [{1, 2}]}]},
+         {priority_max, [{priority, max}]},
+         {priority_normal, [{priority, normal}]},
+         {priority_low, [{priority, low}]}],
     [show(Tag, [request(list_to_atom("so" ++ integer_to_list(N) ++ "@nohost"),
                         Options)])
      || {N, {Tag, Options}} <- lists:zip(lists:seq(1, length(Cases)), Cases)],
@@ -824,6 +827,12 @@ spawn_monitor_alias() ->
 spawn_link_priority() ->
     erts_internal:dist_spawn_request(zz@nohost, {erlang, node, []},
                                      [{link, [priority]}], spawn_request).
+
+%% PBeam does not bind a process to a scheduler, as its local spawn does
+%% (`erl_process.c:12500-12507`), so the request stops the run.
+spawn_scheduler() ->
+    channel({29, remote_ref(zz@nohost), remote_pid(zz@nohost),
+             remote_pid(zz@nohost), {erlang, node, 0}, [{scheduler, 1}]}, []).
 
 %% A `DOP_GROUP_LEADER` packet makes the leader of a local process
 %% (`dist.c:2889-2901`).

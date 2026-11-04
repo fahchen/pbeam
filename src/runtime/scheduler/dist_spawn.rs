@@ -4,7 +4,7 @@ use super::Scheduler;
 use crate::{
     error::BeamError,
     runtime::{
-        process::{MonitorKey, Origin, OriginMonitor, SpawnReply},
+        process::{MonitorKey, Origin, OriginMonitor, Priority, SpawnReply, StartFlags},
         signal::Signal,
     },
     term::{Atom, ProcessId, Reference, Term},
@@ -220,6 +220,7 @@ impl Scheduler {
         function: &Atom,
         arguments: Vec<Term>,
         group_leader: &Term,
+        flags: StartFlags,
     ) -> Result<ProcessId, BeamError> {
         let start =
             crate::runtime::interpreter::initial_start(self, module, function, arguments.len())?;
@@ -229,6 +230,11 @@ impl Scheduler {
         // The request names the group leader of the caller: a pid of this
         // node or of another node (`bif.c:4914-4944`).
         child.group_leader = group_leader.clone();
+        // The options set the start values of the same process flags that
+        // `erlang:spawn_opt/4` sets (`erl_process.c:12552-12558`).
+        child.off_heap_message_queue = flags.off_heap_message_queue;
+        child.priority = flags.priority;
+        child.async_dist = flags.async_dist;
         let id = child.id;
         self.insert(child);
         Ok(id)
@@ -280,15 +286,29 @@ impl Scheduler {
             return Err(crate::error::error(super::dist_input::REJECTED));
         };
         let arguments: Vec<Term> = arguments.cloned().collect();
-        let (link, monitor) = match spawn_options(options, self.scheduler_count()) {
-            SpawnOptions::Ok { link, monitor } => (link, monitor),
+        let (link, monitor, flags) = match spawn_options(options, self.scheduler_count()) {
+            SpawnOptions::Ok {
+                link,
+                monitor,
+                flags,
+            } => (link, monitor, flags),
             // ERTS answers each rejected option list, also an improper
             // list, with `badopt` and no process (`dist.c:2949-2984`).
             SpawnOptions::Badopt => {
                 return self.spawn_request_error(node, connection, &key.term(), from);
             }
+            // PBeam does not bind a process to a scheduler, as its local
+            // spawn does (`erl_process.c:12500-12507`).
+            SpawnOptions::Scheduler(index) => {
+                let option =
+                    Term::tuple(vec![Term::static_atom("scheduler"), Term::Integer(index)]);
+                return Err(crate::error::error(format!(
+                    "unsupported spawn option {}",
+                    crate::term::debug_term(&option, &self.atoms)
+                )));
+            }
         };
-        let pid = self.spawn_dist(module, function, arguments, group_leader)?;
+        let pid = self.spawn_dist(module, function, arguments, group_leader, flags)?;
         let remote = super::dist_monitor::remote_of(node, from)
             .expect("the request names a pid of the node");
         if link {
@@ -463,22 +483,33 @@ enum SpawnOptions {
         link: bool,
         /// The request asks for a monitor.
         monitor: bool,
+        /// The start values of the `message_queue_data` flag, the priority,
+        /// and the `async_dist` flag (`erl_process.c:12275-12320`).
+        flags: crate::runtime::process::StartFlags,
     },
     /// An option list that ERTS answers with `badopt` and no process
     /// (`dist.c:2949-2984`).
     Badopt,
+    /// The request names a scheduler above 0, which PBeam does not bind
+    /// (`erl_process.c:12500-12507`).
+    Scheduler(i64),
 }
 
 /// Read the options `options` of a spawn request that this node receives,
 /// as `erts_parse_spawn_opts` reads them (`erl_process.c:12222-12428`).
 /// PBeam has no heap accounting, so a heap size option keeps its value for
 /// the checks only (row "Heap limit" in `docs/erts-differences.md`).
+#[expect(
+    clippy::too_many_lines,
+    reason = "the option table follows `erts_parse_spawn_opts`"
+)]
 fn spawn_options(options: &Term, schedulers: i64) -> SpawnOptions {
     let Some(options) = options.proper_list() else {
         return SpawnOptions::Badopt;
     };
     let mut link = false;
     let mut monitor = false;
+    let mut flags = crate::runtime::process::StartFlags::default();
     // `H_DEFAULT_SIZE` and `H_MAX_SIZE` (`erl_vm.h:60-61`,
     // `erlang.c:12245-12250`).
     let mut min_heap_size = 233;
@@ -498,11 +529,49 @@ fn spawn_options(options: &Term, schedulers: i64) -> SpawnOptions {
                     return SpawnOptions::Badopt;
                 };
                 if name.is_static("priority") {
-                    is_one_of(value, &["max", "high", "normal", "low"])
+                    match value {
+                        Term::Atom(priority) if priority.is_static("max") => {
+                            flags.priority = Priority::Max;
+                            true
+                        }
+                        Term::Atom(priority) if priority.is_static("high") => {
+                            flags.priority = Priority::High;
+                            true
+                        }
+                        Term::Atom(priority) if priority.is_static("normal") => {
+                            flags.priority = Priority::Normal;
+                            true
+                        }
+                        Term::Atom(priority) if priority.is_static("low") => {
+                            flags.priority = Priority::Low;
+                            true
+                        }
+                        _ => false,
+                    }
                 } else if name.is_static("async_dist") {
-                    matches!(value, Term::Atom(name) if name.is_static("true") || name.is_static("false"))
+                    match value {
+                        Term::Atom(value) if value.is_static("true") => {
+                            flags.async_dist = true;
+                            true
+                        }
+                        Term::Atom(value) if value.is_static("false") => {
+                            flags.async_dist = false;
+                            true
+                        }
+                        _ => false,
+                    }
                 } else if name.is_static("message_queue_data") {
-                    is_one_of(value, &["on_heap", "off_heap"])
+                    match value {
+                        Term::Atom(value) if value.is_static("on_heap") => {
+                            flags.off_heap_message_queue = false;
+                            true
+                        }
+                        Term::Atom(value) if value.is_static("off_heap") => {
+                            flags.off_heap_message_queue = true;
+                            true
+                        }
+                        _ => false,
+                    }
                 } else if name.is_static("min_heap_size") {
                     match non_negative(value) {
                         Some(size) => {
@@ -526,8 +595,14 @@ fn spawn_options(options: &Term, schedulers: i64) -> SpawnOptions {
                     match non_negative(value) {
                         // ERTS rejects an index above the scheduler count
                         // only (`erl_process.c:12355-12368`).
-                        Some(index) => index <= schedulers,
-                        None => false,
+                        Some(index) if index <= schedulers => {
+                            if index == 0 {
+                                true
+                            } else {
+                                return SpawnOptions::Scheduler(index);
+                            }
+                        }
+                        _ => false,
                     }
                 } else if name.is_static("link") {
                     link = true;
@@ -554,7 +629,11 @@ fn spawn_options(options: &Term, schedulers: i64) -> SpawnOptions {
     if max_heap_size != 0 && max_heap_size < min_heap_size {
         return SpawnOptions::Badopt;
     }
-    SpawnOptions::Ok { link, monitor }
+    SpawnOptions::Ok {
+        link,
+        monitor,
+        flags,
+    }
 }
 
 /// Return the size of a `{max_heap_size, Value}` option, or `None` when
