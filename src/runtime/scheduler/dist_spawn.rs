@@ -79,21 +79,12 @@ impl Scheduler {
             mfa,
             options,
         ]);
-        match self.dist_spawn_output(watcher, node, &control, arguments)? {
-            SpawnSend::Sent(connection) => {
-                // The pending request joins the monitor list of its
-                // connection, so that the end of the connection gives the
-                // caller `noconnection` (`dist.c:6112-6120`,
-                // `erl_proc_sig_queue.c:4864-4900`).
-                self.node.dist().insert_monitor(
-                    watcher,
-                    node,
-                    None,
-                    key,
-                    connection,
-                    super::dist_table::MonitorSide::Watcher,
-                );
-            }
+        match self.dist_spawn_output(watcher, node, key, &control, arguments)? {
+            // The pending request joined the monitor list of its connection
+            // before the send, so the end of the connection gives the caller
+            // `noconnection` (`dist.c:6112-6120`,
+            // `erl_proc_sig_queue.c:4864-4900`).
+            SpawnSend::Sent => {}
             SpawnSend::NoConnection => {
                 self.spawn_reply_error(
                     watcher,
@@ -142,11 +133,18 @@ impl Scheduler {
         &mut self,
         sender: ProcessId,
         node: &Atom,
+        key: MonitorKey,
         control: &Term,
         arguments: &Term,
     ) -> Result<SpawnSend, BeamError> {
+        let monitor = super::dist_table::DistMonitor {
+            process: sender,
+            remote: None,
+            key,
+            side: super::dist_table::MonitorSide::Watcher,
+        };
         let mut connection = None;
-        let sent = self.dist_output(sender, node, |flags, current| {
+        let sent = self.dist_output_monitor(sender, node, Some(monitor), |flags, current| {
             if flags & DIST_SPAWN == 0 {
                 return None;
             }
@@ -155,7 +153,7 @@ impl Scheduler {
         })?;
         Ok(match (sent, connection) {
             (false, _) => SpawnSend::NoConnection,
-            (true, Some(connection)) => SpawnSend::Sent(connection),
+            (true, Some(_)) => SpawnSend::Sent,
             // A connection without `DFLAG_SPAWN` drops the request
             // (`dist.c:6089-6093`).
             (true, None) => SpawnSend::NoSupport,
@@ -195,7 +193,7 @@ impl Scheduler {
 /// `6194-6202`).
 enum SpawnSend {
     /// The request went out on the connection.
-    Sent(u32),
+    Sent,
     /// The node has no connection.
     NoConnection,
     /// The connection has no `DFLAG_SPAWN`.

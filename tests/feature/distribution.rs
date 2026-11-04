@@ -939,6 +939,10 @@ fn spawns_a_request_over_a_channel_as_pinned_erts() {
         ("spawn_lost", "spawn_lost: noconnection\n"),
         ("spawn_lost_suppressed", "spawn_lost_suppressed: none\n"),
         ("spawn_reply_unknown", "spawn_reply_unknown: true\n"),
+        (
+            "spawn_reply_ordinary_monitor",
+            "spawn_reply_ordinary_monitor: [{normal,true}]\n",
+        ),
     ] {
         let expression = format!("dist_channel_probe:{function}(), halt().");
         let arguments = probe(&["-sname", &name], &expression);

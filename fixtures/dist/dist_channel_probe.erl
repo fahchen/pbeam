@@ -12,7 +12,8 @@
          spawn_bad_arguments/0, reply_bad_to/0, reply_bad_ref/0,
          reply_bad_flags/0, reply_bad_result/0, group_leader_bad/0,
          spawn_notsup/0, spawn_lost/0, spawn_options/0,
-         spawn_reply_unknown/0, spawn_lost_suppressed/0, spawn_local_leader/0,
+         spawn_reply_unknown/0, spawn_reply_ordinary_monitor/0,
+         spawn_lost_suppressed/0, spawn_local_leader/0,
          group_leader_packet/0,
          monitor_down_unknown/0, spawn_local_ref/0, spawn_bad_local_leader/0,
          spawn_bad_mfa_not_tuple/0, spawn_bad_mfa_tuple/0,
@@ -742,6 +743,34 @@ first(Data) when is_list(Data) ->
 first(<<112, Rest/binary>>) ->
     {Control, _Used} = binary_to_term(Rest, [used]),
     anon(Control).
+
+%% A spawn reply that names the reference of an ordinary monitor is ignored,
+%% and the monitor stays (`dist.c:3033-3086`).
+spawn_reply_ordinary_monitor() ->
+    logger:set_primary_config(level, none),
+    Node = zz@nohost,
+    Parent = self(),
+    Target = spawn(fun() -> receive stop -> ok end end),
+    Ref = monitor(process, Target),
+    Ctrl = spawn(fun() ->
+                         erts_internal:new_connection(Node),
+                         {ok, DH} =
+                             erts_internal:create_dist_channel(Node, self(),
+                                                               {mandatory(), 1}),
+                         erlang:dist_ctrl_put_data(
+                           DH, packet_only({31, Ref, Parent, 2,
+                                            remote_pid(Node)})),
+                         receive after 200 -> ok end,
+                         Parent ! {self(), lists:member(Node, nodes(connected))},
+                         receive stop -> ok end
+                 end),
+    Connected = receive {Ctrl, C} -> C after 5000 -> timeout end,
+    Target ! stop,
+    Down = receive {'DOWN', Ref, process, Target, Why} -> Why
+           after 5000 -> timeout
+           end,
+    io:format("spawn_reply_ordinary_monitor: ~p~n", [[{Down, Connected}]]),
+    Ctrl ! stop.
 
 %% A spawn request whose error message is suppressed gives no message when
 %% its connection ends (`erl_proc_sig_queue.c:4877-4900`).

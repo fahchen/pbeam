@@ -1213,22 +1213,21 @@ impl Scheduler {
             process.mailbox.remove(node_id);
             return 0;
         };
+        // A reply for a reference that is not a pending spawn request, for
+        // example the reference of an ordinary monitor, is ignored
+        // (`dist.c:3033-3086`).
+        let Some(reply) = monitor.spawn else {
+            let process = self.processes.get_mut(id).expect("the process is alive");
+            process.mailbox.remove(node_id);
+            return 0;
+        };
         let reply_tag = monitor.item.clone();
-        // A request that names no `{reply, ...}` option keeps both messages
-        // (`dist.c:5901-5918`).
-        let reply = monitor
-            .spawn
-            .unwrap_or(crate::runtime::process::SpawnReply {
-                no_smsg: false,
-                no_emsg: false,
-            });
-        // The pending request leaves the monitor list of its connection, and
-        // the monitor of a successful spawn joins it again with the pid of
-        // the new process (`erl_proc_sig_queue.c:6408-6412`).
-        self.node
-            .dist()
-            .remove_monitor(id, node, reference, connection);
         if let Term::Atom(reason) = result {
+            // The pending request leaves the monitor list of its connection
+            // (`erl_proc_sig_queue.c:6408-6412`).
+            self.node
+                .dist()
+                .remove_monitor(id, node, reference, connection);
             let _ = self
                 .processes
                 .get_mut(id)
@@ -1275,15 +1274,14 @@ impl Scheduler {
                     monitor.connection = connection;
                     monitor.spawn = None;
                 }
-                self.node.dist().insert_monitor(
-                    id,
-                    node,
-                    Some(remote),
-                    reference,
-                    connection,
-                    super::dist_table::MonitorSide::Watcher,
-                );
+                // The pending monitor becomes a monitor of the pid of the
+                // new process in the list of its connection, so the end of
+                // the connection still sees it (`dist.c:3033-3130`).
+                self.node.dist().update_monitor(id, node, reference, remote);
             } else {
+                self.node
+                    .dist()
+                    .remove_monitor(id, node, reference, connection);
                 let _ = self
                     .processes
                     .get_mut(id)
