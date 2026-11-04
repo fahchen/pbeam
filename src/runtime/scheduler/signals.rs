@@ -1271,6 +1271,11 @@ impl Scheduler {
                 {
                     monitor.target = None;
                     monitor.item = result.clone();
+                    // A later `demonitor/1` and the exit of the caller find
+                    // the pid of the process and its connection to send
+                    // `DEMONITOR_P` and to remove the monitor of the
+                    // connection (`bif.c:436-541`, `dist.c:2434-2459`).
+                    monitor.remote = Some(crate::runtime::process::RemoteTarget::Pid(remote));
                     monitor.connection = connection;
                     monitor.spawn = None;
                 }

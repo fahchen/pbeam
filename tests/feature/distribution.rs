@@ -1042,6 +1042,37 @@ fn applies_the_options_of_a_spawn_request_as_pinned_erts() {
 }
 
 #[test]
+fn demonitors_a_process_of_another_node_as_pinned_erts() {
+    // A monitor that `spawn_monitor/4` started keeps the pid of the new
+    // process and its connection, so `demonitor/1` sends `DEMONITOR_P` and
+    // removes the monitor of the connection (`bif.c:436-541`,
+    // `dist.c:2434-2459`). The probe asks the target for the monitors of the
+    // process after the demonitor.
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let name = format!("dsdm{id}");
+    let arguments = vec!["-sname", &name, "-setcookie", "ck", "-pa", "fixtures/dist"];
+    let server = ErtsNode::start(&epmd, &arguments, "dist_spawn_probe:server().");
+    let expression = format!("dist_spawn_probe:demonitor('{}'), halt().", server.line());
+    let client = [
+        "-sname",
+        &format!("dsdmc{id}"),
+        "-setcookie",
+        "ck",
+        "-hidden",
+        "-noshell",
+        "-pa",
+        "fixtures/dist",
+        "-eval",
+        &expression,
+    ];
+    assert_eq!(
+        stdout(&pbeam_erl(&epmd, &client)),
+        "demonitor: {monitored_by,[]}\n"
+    );
+}
+
+#[test]
 fn reads_the_options_of_a_spawn_request_as_pinned_erts() {
     // A spawn request that this node receives reads its option list as
     // `erts_parse_spawn_opts` does (`erl_process.c:12222-12428`,

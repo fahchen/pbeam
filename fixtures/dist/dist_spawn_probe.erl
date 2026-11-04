@@ -3,8 +3,8 @@
 %% and a node with no connection (bif.c:1027-1075,
 %% erl_process.c:12440-12530, dist.c:5850-6260).
 -module(dist_spawn_probe).
--export([server/0, client/1, leader/1, options/1, flags/1, report/1,
-         report_flags/1, boom/0]).
+-export([server/0, client/1, leader/1, options/1, flags/1, demonitor/1,
+         report/1, report_flags/1, wait/1, boom/0]).
 
 server() ->
     io:format("~s~n", [node()]),
@@ -199,6 +199,23 @@ report_flags(Client) ->
                       process_flag(message_queue_data, on_heap),
                       process_flag(async_dist, false)}},
     ok.
+
+%% `demonitor/1` of a monitor that a spawn_monitor/4 started removes the
+%% monitor of the process on the node (`bif.c:436-541`, `dist.c:2434-2459`).
+demonitor(Server) ->
+    true = net_kernel:connect_node(Server),
+    {Pid, Ref} = spawn_monitor(Server, dist_spawn_probe, wait, [self()]),
+    receive {started, Pid} -> ok after 5000 -> timeout end,
+    true = erlang:demonitor(Ref),
+    receive after 200 -> ok end,
+    Observed = rpc:call(Server, erlang, process_info, [Pid, monitored_by]),
+    Pid ! stop,
+    io:format("demonitor: ~p~n", [Observed]),
+    ok.
+
+wait(Parent) ->
+    Parent ! {started, self()},
+    receive stop -> ok end.
 
 %% Return whether the request gave a message within half a second.
 received(Request) ->
