@@ -83,11 +83,6 @@ pub(super) fn group_leader(
         }
         _ => return Ok(Value(Term::static_atom("badarg"))),
     };
-    let Term::Pid(leader) = leader else {
-        return Err(error(
-            "unsupported erlang:group_leader/2 with a leader of another node or of an old incarnation of the local node: see \"Distribution\" in docs/erts-differences.md",
-        ));
-    };
     let scheduler = &mut *context.scheduler;
     if let Some(denied) = other_process_denial(scheduler, *target, Operation::GroupLeader)? {
         return Ok(denied);
@@ -101,7 +96,7 @@ pub(super) fn group_leader(
         Some(process) if *target != caller && process.mailbox.has_incoming() => "false",
         Some(process) if process.exiting.is_some() => "badarg",
         Some(process) => {
-            process.group_leader = *leader;
+            process.group_leader = leader.clone();
             "true"
         }
     };
@@ -136,18 +131,19 @@ pub(super) fn group_leader_request(
     target: &Term,
     reference: &Term,
 ) -> Result<BifResult, BeamError> {
-    let (Term::Pid(leader), Term::Pid(target), Term::Reference(reference)) =
-        (leader, target, reference)
-    else {
+    let (Term::Pid(target), Term::Reference(reference)) = (target, reference) else {
         return Ok(BifResult::badarg());
     };
+    if crate::term::external_id::pid_parts(leader).is_none() {
+        return Ok(BifResult::badarg());
+    }
     let scheduler = &mut *context.scheduler;
     if let Some(denied) = other_process_denial(scheduler, *target, Operation::GroupLeader)? {
         return Ok(denied);
     }
     let caller = scheduler.current_process_mut().id;
     let request = Signal::GroupLeader {
-        leader: *leader,
+        leader: leader.clone(),
         requester: caller,
         reference: *reference,
     };

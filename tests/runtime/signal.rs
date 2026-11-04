@@ -188,7 +188,7 @@ fn takes_no_term_of_a_signal_that_holds_none() {
             reference: MonitorKey::Remote(remote_reference(1)),
         },
         Signal::GroupLeader {
-            leader: ProcessId(1),
+            leader: Term::Pid(ProcessId(1)),
             requester: ProcessId(2),
             reference: Reference(1),
         },

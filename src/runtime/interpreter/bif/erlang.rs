@@ -6289,7 +6289,7 @@ struct ProcessInfoValues {
     trap_exit: bool,
     error_handler: Option<String>,
     priority: &'static str,
-    group_leader: ProcessId,
+    group_leader: Term,
     total_heap_size: i64,
     heap_size: i64,
     stack_size: i64,
@@ -6487,7 +6487,7 @@ fn process_info_values(
         trap_exit: process.trap_exit,
         error_handler: process.error_handler.clone(),
         priority: process.priority.name(),
-        group_leader: process.group_leader,
+        group_leader: process.group_leader.clone(),
         total_heap_size: heap_size,
         heap_size,
         stack_size,
@@ -6606,7 +6606,7 @@ impl ProcessInfoRequest<'_> {
                 None => Term::static_atom("error_handler"),
             },
             "priority" => Term::static_atom(values.priority),
-            "group_leader" => Term::Pid(values.group_leader),
+            "group_leader" => values.group_leader.clone(),
             "total_heap_size" => Term::Integer(values.total_heap_size),
             "heap_size" => Term::Integer(values.heap_size),
             "stack_size" => Term::Integer(values.stack_size),
@@ -6715,7 +6715,7 @@ fn process_info_term(atoms: &AtomTable, values: ProcessInfoValues) -> Result<Ter
     ]));
     items.push(Term::tuple(vec![
         Term::static_atom("group_leader"),
-        Term::Pid(values.group_leader),
+        values.group_leader.clone(),
     ]));
     for (key, value) in [
         ("total_heap_size", values.total_heap_size),

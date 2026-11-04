@@ -749,10 +749,13 @@ pub(super) struct ProcessState {
     /// monitor down signal for each process monitor and runs each TTY
     /// monitor, in this order.
     pub(super) monitored_by: Vec<TargetMonitor>,
-    /// Group leader that receives the IO requests of this process. A new
+    /// Group leader that receives the IO requests of this process: the pid
+    /// of a process of this node or of another node, as
+    /// `proc->group_leader` keeps an `Eterm` (`bif.c:4914-4944`). A new
     /// process starts as its own group leader, as `init` does in ERTS; a
-    /// spawned process gets the group leader of its parent.
-    pub(super) group_leader: ProcessId,
+    /// spawned process gets the group leader of its parent, and a spawn
+    /// request gets the group leader that the caller names.
+    pub(super) group_leader: Term,
     /// Process dictionary, as the ERTS linear hash table of
     /// `erl_process_dict.c`. Keys compare with exact equality (`=:=`).
     pub(super) dictionary: Dictionary,
@@ -1067,7 +1070,7 @@ impl ProcessState {
             monitors: MonitorLinkTree::default(),
             dist_monitors: MonitorLinkTree::default(),
             monitored_by: Vec::new(),
-            group_leader: id,
+            group_leader: Term::Pid(id),
             dictionary: Dictionary::default(),
             registered_name: None,
             error_handler: None,

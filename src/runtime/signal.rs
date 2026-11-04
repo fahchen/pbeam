@@ -77,8 +77,8 @@ pub(super) enum Signal {
     /// group leader of the local process (`dist.c:2889-2901`). The receiver
     /// sets the group leader and answers nothing.
     DistGroupLeader {
-        /// The new group leader.
-        leader: ProcessId,
+        /// The new group leader: a pid of this node or of another node.
+        leader: Term,
     },
     /// `ERTS_SIG_Q_OP_LINK`: the sender linked to the receiver. The receiver
     /// adds the link unless it has a link or an unlinking link to the
@@ -304,8 +304,8 @@ pub(super) enum Signal {
     /// 0 (`handle_group_leader`, `erl_proc_sig_queue.c:5295-5310`). At exit
     /// it replies `{Ref, badarg}` (`erl_proc_sig_queue.c:7394-7399`).
     GroupLeader {
-        /// The new group leader.
-        leader: ProcessId,
+        /// The new group leader: a pid of this node or of another node.
+        leader: Term,
         /// The process that gets the reply.
         requester: ProcessId,
         /// The reference of the reply.

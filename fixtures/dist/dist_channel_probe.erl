@@ -14,11 +14,12 @@
          spawn_notsup/0, spawn_lost/0, spawn_options/0,
          spawn_reply_unknown/0, spawn_lost_suppressed/0, spawn_local_leader/0,
          group_leader_packet/0,
-         monitor_down_unknown/0, spawn_bad_local_leader/0,
+         monitor_down_unknown/0, spawn_local_ref/0, spawn_bad_local_leader/0,
          spawn_bad_mfa_not_tuple/0, spawn_bad_mfa_tuple/0,
          spawn_bad_mfa_fields/0,
          spawn_bad_arguments_list/0, spawn_monitor_priority/0,
-         spawn_monitor_alias/0, spawn_link_priority/0]).
+         spawn_monitor_alias/0, spawn_link_priority/0,
+         dflag_unicode_io/0]).
 
 main() ->
     %% net_kernel reports the dist_ctrlr message of a connection that it
@@ -782,6 +783,12 @@ spawn_local_leader() ->
     io:format("spawn_local_leader: ~p~n", [Result]),
     Ctrl ! stop.
 
+%% ERTS requires an external reference in a spawn request
+%% (`dist.c:2913-2914`), so a reference of this node ends the connection.
+spawn_local_ref() ->
+    channel({29, make_ref(), remote_pid(zz@nohost), remote_pid(zz@nohost),
+             {erlang, node, 0}, [monitor]}, []).
+
 spawn_bad_local_leader() ->
     channel({29, remote_ref(zz@nohost), remote_pid(zz@nohost), make_ref(),
              {erlang, node, 0}, []}, []).
@@ -887,6 +894,47 @@ spawn_reply_unknown() ->
     Connected = receive {Ctrl, C} -> C after 5000 -> timeout end,
     io:format("spawn_reply_unknown: ~p~n", [Connected]),
     Ctrl ! stop.
+
+%% `net_kernel:dflag_unicode_io/1` gives whether the connection of a pid of
+%% another node has `DFLAG_UNICODE_IO`, `true` for a pid of this node also of
+%% an old incarnation, and `false` for a node with no connection
+%% (`dist.c:6693-6711`).
+dflag_unicode_io() ->
+    logger:set_primary_config(level, none),
+    NotUnicode = unicode_flag(zz@nohost, mandatory() band bnot 16#1000),
+    Unicode = unicode_flag(ww@nohost, mandatory() bor 16#1000),
+    Missing = net_kernel:dflag_unicode_io(remote_pid(yy@nohost)),
+    Local = net_kernel:dflag_unicode_io(self()),
+    Old = net_kernel:dflag_unicode_io(old_pid()),
+    Ref = try net_kernel:dflag_unicode_io(make_ref()) catch error:badarg -> badarg end,
+    Atom = try net_kernel:dflag_unicode_io(foo) catch error:badarg -> badarg end,
+    io:format("dflag_unicode_io: ~p~n",
+              [[{not_unicode, NotUnicode}, {unicode, Unicode}, {missing, Missing},
+                {local, Local}, {old, Old}, {ref, Ref}, {atom, Atom}]]),
+    ok.
+
+%% Return `net_kernel:dflag_unicode_io/1` of a pid of `Node` on a connection
+%% with the flags `Flags`.
+unicode_flag(Node, Flags) ->
+    Parent = self(),
+    Ctrl = spawn(fun() ->
+                         erts_internal:new_connection(Node),
+                         {ok, _DH} =
+                             erts_internal:create_dist_channel(Node, self(),
+                                                               {Flags, 1}),
+                         Parent ! {self(), go},
+                         receive stop -> ok end
+                 end),
+    receive {Ctrl, go} -> ok end,
+    Flag = net_kernel:dflag_unicode_io(remote_pid(Node)),
+    Ctrl ! stop,
+    Flag.
+
+%% A pid of this node with the creation 0, which is an old incarnation.
+old_pid() ->
+    Name = atom_to_binary(node()),
+    binary_to_term(<<131, 88, 118, (byte_size(Name)):16, Name/binary,
+                     0:32, 0:32, 0:32>>).
 
 %% A pid of the node Node.
 remote_pid(Node) ->

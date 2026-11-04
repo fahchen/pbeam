@@ -305,6 +305,7 @@ fn stops_at_a_part_of_a_channel_that_pbeam_does_not_have() {
             "reply_bad_flags()",
             "reply_bad_result()",
             "group_leader_bad()",
+            "spawn_local_ref()",
             "spawn_bad_local_leader()",
             "spawn_bad_mfa_not_tuple()",
             "spawn_bad_mfa_tuple()",
@@ -836,14 +837,12 @@ fn spawns_processes_on_another_node_as_pinned_erts() {
 #[test]
 fn gives_a_spawned_process_the_group_leader_of_the_caller_as_pinned_erts() {
     // A spawn request carries the group leader of the caller, so the new
-    // process writes `io:format/2` to the caller's group leader on ERTS
-    // (`dist.c:6129-6131`, `erl_process.c:12440-12530`). PBeam keeps no
-    // group leader of another node: the process gets the group leader of the
-    // `user` process of the node that spawns it, and the output goes there
-    // (row "Distribution" of `docs/erts-differences.md`). The probe prints
-    // `gl` on the group leader of the new process, then whether that leader
-    // is the leader of the caller and whether it is a pid of the caller's
-    // node.
+    // process writes `io:format/2` to the caller's group leader
+    // (`dist.c:6129-6131`, `erl_process.c:12440-12530`). PBeam keeps that
+    // pid, also when it belongs to another node (`bif.c:4914-4944`). The
+    // probe prints `gl` on the group leader of the new process, then whether
+    // that leader is the leader of the caller and whether it is a pid of the
+    // caller's node.
     let epmd = Epmd::start();
     let id = std::process::id();
     for (server_pbeam, socket) in [(false, true), (false, false), (true, true), (true, false)] {
@@ -874,11 +873,7 @@ fn gives_a_spawned_process_the_group_leader_of_the_caller_as_pinned_erts() {
             } else {
                 erts_erl(&epmd, &client(&client_name))
             };
-            let expected = if server_pbeam {
-                "leader: [{false,false}]\n"
-            } else {
-                "gl\nleader: [{true,true}]\n"
-            };
+            let expected = "gl\nleader: [{true,true}]\n";
             assert_eq!(
                 stdout(&output),
                 expected,
@@ -970,6 +965,27 @@ fn sets_the_group_leader_of_a_local_process_as_pinned_erts() {
         assert!(!erts.is_empty(), "{function}");
         assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), erts, "{function}");
     }
+}
+
+#[test]
+fn gives_the_unicode_io_flag_of_a_remote_group_leader_as_pinned_erts() {
+    // `net_kernel:dflag_unicode_io/1` gives the flag of the connection of a
+    // pid of another node, `true` for a pid of this node also of an old
+    // incarnation, and `false` for a node with no connection
+    // (`dist.c:6693-6711`). `io:format/2` of a process whose group leader is
+    // a pid of another node asks this flag with that pid.
+    let epmd = Epmd::start();
+    let name = format!("dsflag{}", std::process::id());
+    let arguments = probe(
+        &["-sname", &name],
+        "dist_channel_probe:dflag_unicode_io(), halt().",
+    );
+    let erts = stdout(&erts_erl(&epmd, &arguments));
+    assert!(
+        erts.contains("{not_unicode,false}") && erts.contains("{unicode,true}"),
+        "{erts}"
+    );
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), erts);
 }
 
 #[test]

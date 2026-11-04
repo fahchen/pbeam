@@ -201,6 +201,46 @@ fn node_name_atom<'a>(context: &BifContext<'_>, name: &'a Term) -> Option<&'a At
 /// let Term::Tuple(record) = get_dflags() else { unreachable!() };
 /// assert_eq!(record.len(), 6);
 /// ```
+/// The flag `DFLAG_UNICODE_IO` (`dist.h:42`).
+const UNICODE_IO: u64 = 0x1000;
+
+/// Run `net_kernel:dflag_unicode_io(Pid)` as `net_kernel_dflag_unicode_io_1`
+/// does (`dist.c:6693-6711`): a pid of this node, also of an old
+/// incarnation of this node, gives `true`; a pid of another node gives
+/// whether its connection has `DFLAG_UNICODE_IO`, and a node with no
+/// connection gives `false`. A term that is not a pid raises `badarg`.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let value = dflag_unicode_io(&mut context, &Term::Pid(scheduler.current_process().id));
+/// assert!(matches!(value, BifResult::Value(Term::Atom(atom)) if atom.is_static("true")));
+/// ```
+pub(super) fn dflag_unicode_io(context: &mut BifContext<'_>, pid: &Term) -> BifResult {
+    let Term::External(external) = pid else {
+        return match pid {
+            Term::Pid(_) => BifResult::Value(Term::static_atom("true")),
+            _ => BifResult::badarg(),
+        };
+    };
+    if !matches!(
+        external.data,
+        crate::term::external_id::ExternalData::Pid { .. }
+    ) {
+        return BifResult::badarg();
+    }
+    let scheduler = &mut *context.scheduler;
+    if external.node == scheduler.atoms.this_node().0 {
+        return BifResult::Value(Term::static_atom("true"));
+    }
+    let unicode = scheduler
+        .node()
+        .dist()
+        .connected(&external.node)
+        .is_some_and(|(flags, _, _)| flags & UNICODE_IO != 0);
+    BifResult::Value(Term::static_atom(if unicode { "true" } else { "false" }))
+}
+
 pub(super) fn get_dflags() -> Term {
     let flags = |flags: u64| Term::from_bigint(BigInt::from(flags));
     Term::tuple(vec![

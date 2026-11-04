@@ -752,7 +752,9 @@ impl Scheduler {
         let mut process = ProcessState::new(id, start, Vec::new());
         process.priority = priority;
         process.parent = Some(parent);
-        process.group_leader = self.process(parent).map_or(parent, |p| p.group_leader);
+        process.group_leader = self
+            .process(parent)
+            .map_or(Term::Pid(parent), |p| p.group_leader.clone());
         process.off_heap_message_queue = true;
         self.mark_system(id);
         self.insert(process);
@@ -3219,7 +3221,7 @@ impl Scheduler {
         };
         let parent = self.current_process_mut().id;
         child.parent = Some(parent);
-        child.group_leader = self.current_process_mut().group_leader;
+        child.group_leader = self.current_process_mut().group_leader.clone();
         let reference = if let Some(tag) = monitor {
             let reference = self.make_ref()?;
             child.monitored_by.push(TargetMonitor::Process(Monitor {
@@ -3904,7 +3906,7 @@ impl Scheduler {
                         .expect("atom keys fit each map form"),
                     ),
                 ),
-                (Term::Atom(gl), Term::Pid(process.group_leader)),
+                (Term::Atom(gl), process.group_leader.clone()),
                 (Term::static_atom("pid"), Term::Pid(id)),
                 (
                     Term::static_atom("time"),

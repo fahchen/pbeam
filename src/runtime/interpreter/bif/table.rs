@@ -190,7 +190,9 @@ bifs! {
     erlang:get_keys/1 as ErlangGetKeys1 => |cx, [value]| Ok(erlang::get_keys_of(cx, value)),
     erlang:get_module_info/1 as ErlangGetModuleInfo1 => |cx, [module]| erlang::get_module_info_1(cx, module),
     erlang:get_module_info/2 as ErlangGetModuleInfo2 => |cx, [module, what]| erlang::get_module_info(cx, module, what),
-    erlang:group_leader/0 as ErlangGroupLeader0 => |cx, []| Ok(Value(Term::Pid(cx.scheduler.current_process_mut().group_leader))),
+    erlang:group_leader/0 as ErlangGroupLeader0 => |cx, []| {
+        Ok(Value(cx.scheduler.current_process_mut().group_leader.clone()))
+    },
     erlang:halt/2 as ErlangHalt2 => |cx, [status, options]| erlang::halt(cx.scheduler, status, options),
     erlang:has_prepared_code_on_load/1 as ErlangHasPreparedCodeOnLoad1 => |cx, [reference]| erlang::has_prepared_code_on_load(cx.scheduler, reference),
     erlang:hd/1 as ErlangHd1 => |_, [list]| Ok(match list.list_head() { Some(head) => Value(head.clone()), None => BifResult::badarg() }),
@@ -538,7 +540,9 @@ bifs! {
     math:sqrt/1 as MathSqrt1 => |_, [argument]| Ok(math::sqrt(argument)),
     math:tan/1 as MathTan1 => |_, [argument]| Ok(math::call_1(f64::tan, argument)),
     math:tanh/1 as MathTanh1 => |_, [argument]| Ok(math::call_1(f64::tanh, argument)),
-    net_kernel:dflag_unicode_io/1 as NetKernelDflagUnicodeIo1 => |_, [term]| Ok(match term { Term::Pid(_) => Value(Term::static_atom("true")), _ => BifResult::badarg() }),
+    net_kernel:dflag_unicode_io/1 as NetKernelDflagUnicodeIo1 => |cx, [term]| {
+        Ok(dist::dflag_unicode_io(cx, term))
+    },
     os:env/0 as OsEnv0 => |cx, []| os::env(cx.scheduler),
     os:getenv/1 as OsGetenv1 => |cx, [name]| os::getenv(cx.scheduler, name),
     os:getpid/0 as OsGetpid0 => |_, []| Ok(os::getpid()),

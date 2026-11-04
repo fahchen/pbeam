@@ -64,7 +64,7 @@ impl Scheduler {
         };
         self.current_process_mut().monitors.insert(key, pending);
         let from = Term::Pid(watcher);
-        let group_leader = Term::Pid(self.current_process_mut().group_leader);
+        let group_leader = self.current_process_mut().group_leader.clone();
         let mfa = Term::tuple(vec![
             Term::Atom(module.clone()),
             Term::Atom(function.clone()),
@@ -219,21 +219,16 @@ impl Scheduler {
         module: &Atom,
         function: &Atom,
         arguments: Vec<Term>,
-        group_leader: Option<ProcessId>,
+        group_leader: &Term,
     ) -> Result<ProcessId, BeamError> {
         let start =
             crate::runtime::interpreter::initial_start(self, module, function, arguments.len())?;
         let mut child =
             crate::runtime::process::ProcessState::new(self.next_pid()?, start, arguments);
         child.parent = None;
-        // A request that names a local pid uses it, and PBeam keeps no group
-        // leader of another node: the process gets the io server of this node
-        // (row "Distribution" of `docs/erts-differences.md`).
-        if let Some(leader) = group_leader {
-            child.group_leader = leader;
-        } else if let Some(super::node::Named::Process(leader)) = self.name_owner("user") {
-            child.group_leader = leader;
-        }
+        // The request names the group leader of the caller: a pid of this
+        // node or of another node (`bif.c:4914-4944`).
+        child.group_leader = group_leader.clone();
         let id = child.id;
         self.insert(child);
         Ok(id)
@@ -262,22 +257,19 @@ impl Scheduler {
         options: &Term,
         arguments: &Term,
     ) -> Result<(), BeamError> {
-        let Some(key) = super::dist_monitor::monitor_key(reference) else {
+        // ERTS requires an external reference (`dist.c:2913-2914`), so a
+        // request that names a reference of this node ends the connection.
+        let Some(remote_reference) = crate::runtime::process::RemoteReference::of(reference) else {
             return Err(crate::error::error(super::dist_input::REJECTED));
         };
+        let key = super::dist_monitor::monitor_key(reference)
+            .expect("an external reference gives a monitor key");
         let Ok(_) = super::dist_monitor::remote_of(node, from) else {
             return Err(crate::error::error(super::dist_input::REJECTED));
         };
-        let group_leader = match group_leader {
-            Term::Pid(id) => Some(*id),
-            // A group leader of another node is not a local pid; PBeam gives
-            // the process the group leader of the root process and records
-            // the gap in row "Distribution".
-            Term::External(_) if crate::term::external_id::pid_parts(group_leader).is_some() => {
-                None
-            }
-            _ => return Err(crate::error::error(super::dist_input::REJECTED)),
-        };
+        if crate::term::external_id::pid_parts(group_leader).is_none() {
+            return Err(crate::error::error(super::dist_input::REJECTED));
+        }
         let Term::Tuple(triple) = mfa else {
             return Err(crate::error::error(super::dist_input::REJECTED));
         };
@@ -308,10 +300,7 @@ impl Scheduler {
             );
         }
         if monitor {
-            let key = crate::runtime::process::MonitorKey::Remote(
-                crate::runtime::process::RemoteReference::of(reference)
-                    .expect("the request names a reference of the node"),
-            );
+            let key = crate::runtime::process::MonitorKey::Remote(remote_reference);
             let watcher = crate::runtime::process::RemoteWatcher {
                 watcher: remote,
                 name: None,
@@ -420,6 +409,8 @@ impl Scheduler {
         let Term::Pid(process) = to else {
             return Err(crate::error::error(super::dist_input::REJECTED));
         };
+        // A reply names an internal reference of the caller, or an external
+        // reference of an old incarnation of this node (`dist.c:3055-3068`).
         let Some(key) = super::dist_monitor::monitor_key(reference) else {
             return Err(crate::error::error(super::dist_input::REJECTED));
         };
@@ -449,10 +440,15 @@ impl Scheduler {
     ///
     /// A term that is not a pid.
     pub(super) fn net_group_leader(&mut self, leader: &Term, to: &Term) -> Result<(), BeamError> {
-        let (Term::Pid(leader), Term::Pid(to)) = (leader, to) else {
+        let Term::Pid(to) = to else {
             return Err(crate::error::error(super::dist_input::REJECTED));
         };
-        let signal = Signal::DistGroupLeader { leader: *leader };
+        if crate::term::external_id::pid_parts(leader).is_none() {
+            return Err(crate::error::error(super::dist_input::REJECTED));
+        }
+        let signal = Signal::DistGroupLeader {
+            leader: leader.clone(),
+        };
         let _ = self.send_signal(None, *to, signal);
         Ok(())
     }

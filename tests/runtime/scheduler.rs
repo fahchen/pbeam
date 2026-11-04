@@ -3839,7 +3839,7 @@ fn a_signal_to_a_dead_process_answers_a_group_leader_and_an_is_alive() {
     scheduler.dead_target_signal(
         ProcessId(99),
         &Signal::GroupLeader {
-            leader: ProcessId(98),
+            leader: Term::Pid(ProcessId(98)),
             requester: root,
             reference: leader_reference,
         },
