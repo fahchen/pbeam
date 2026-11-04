@@ -1057,18 +1057,19 @@ fn reads_the_options_of_a_spawn_request_as_pinned_erts() {
         "dist_channel_probe:spawn_options(), halt().",
     );
     let erts = stdout(&erts_erl(&epmd, &arguments));
-    assert!(
-        erts.contains("link: [{{31,{ref,so1@nohost},{pid,so1@nohost},1"),
-        "link reply"
-    );
-    assert!(
-        erts.contains("atom: [{{31,{ref,so4@nohost},{pid,so4@nohost},0,badopt}"),
-        "badopt"
-    );
-    assert!(
-        erts.contains("improper_list: [{{31,{ref,so51@nohost},{pid,so51@nohost},0,badopt}"),
-        "improper list"
-    );
+    // `~p` wraps a term at 80 columns and the host name of the node changes
+    // where it wraps, so the check names the case and not the reply text.
+    for tag in [
+        "link: ",
+        "atom: ",
+        "improper_list: ",
+        "monitor_name_not_atom: ",
+    ] {
+        assert!(
+            erts.lines().any(|line| line.starts_with(tag)),
+            "{tag}\n{erts}"
+        );
+    }
     let pbeam = stdout(&pbeam_erl(&epmd, &arguments));
     assert_eq!(pbeam, erts);
 }
