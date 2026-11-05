@@ -27,6 +27,12 @@ local() ->
     Abandon = [spawn_request_abandon(make_ref()),
                class(fun() -> spawn_request_abandon(42) end),
                abandoned(spawn_request(timer, sleep, [50], [{reply, no}, monitor]))],
+    Options = [messages(spawn_request(lists, seq, [1, 3], [Option]))
+               || Option <- [[{min_heap_size, 10}], [{min_bin_vheap_size, 10}],
+                             [{fullsweep_after, 10}], [{scheduler, 0}],
+                             [{scheduler, 1}], [{link, [priority]}],
+                             [{min_heap_size, -1}], [{fullsweep_after, -1}],
+                             [{scheduler, -1}]]],
     Internal = [internal(erlang, node, [], []), internal(1, node, [], []),
                 internal(erlang, 1, [], []), internal(erlang, node, [], 1),
                 internal(erlang, node, [], foo),
@@ -37,7 +43,8 @@ local() ->
                                 {bad_arguments, BadArguments},
                                 {replies, Replies}, {tag, Tag},
                                 {monitors, Monitors}, {link, Link},
-                                {abandon, Abandon}, {internal, Internal}]]),
+                                {abandon, Abandon}, {options, Options},
+                                {internal, Internal}]]),
     ok.
 
 %% Print how `spawn_request_abandon/1` treats a request that waits on the
