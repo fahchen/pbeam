@@ -4162,3 +4162,193 @@ fn treats_a_local_port_as_an_immediate_reason() {
     )));
     assert!(!super::signals::is_immediate(&Term::tuple(vec![])));
 }
+
+#[test]
+fn second_abandon_of_a_linked_spawn_request_keeps_its_monitor() {
+    use crate::runtime::process::{MonitorKey, Origin, OriginMonitor, SpawnReply};
+    // `spawn_request_abandon_1` marks a linked pending request abandoned on
+    // the first call, and a second call is no longer an outstanding request,
+    // so it returns `false` and keeps the monitor, whose reply still sends
+    // the child the exit signal `abandoned` (`bif.c:1177-1208`).
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let id = current(&mut scheduler);
+    let key = MonitorKey::Local(Reference(1));
+    {
+        let process = scheduler.processes.get_mut(id).unwrap();
+        process.monitors.insert(
+            key,
+            Origin {
+                monitor: Some(OriginMonitor {
+                    kind: "process",
+                    target: None,
+                    item: atom("spawn_reply"),
+                    tag: atom("DOWN"),
+                    connection: 0,
+                    remote: None,
+                    spawn: Some(SpawnReply {
+                        no_smsg: false,
+                        no_emsg: false,
+                    }),
+                    abandoned: false,
+                    spawn_link: true,
+                }),
+                alias: None,
+                watched_by: None,
+            },
+        );
+    }
+    assert!(scheduler.abandon_spawn_request(Reference(1)));
+    assert!(!scheduler.abandon_spawn_request(Reference(1)));
+    assert!(
+        scheduler.processes[&id].monitors.get(&key).is_some(),
+        "the second abandon keeps the pending monitor of a linked request"
+    );
+}
+
+#[test]
+fn an_abandoned_spawn_request_error_sends_no_reply() {
+    use super::{dist_table::Controller, signals::HandlingPoint};
+    use crate::runtime::process::{MonitorKey, Origin, OriginMonitor, SpawnReply};
+    // `net_spawn_reply` with an error atom suppresses the message of an
+    // abandoned request, as it suppresses a `{reply, no}` error
+    // (`erl_proc_sig_queue.c:5779-5784`).
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let id = current(&mut scheduler);
+    let name = scheduler.atoms.put("other@host").unwrap();
+    let key = MonitorKey::Local(Reference(1));
+    {
+        let process = scheduler.processes.get_mut(id).unwrap();
+        process.monitors.insert(
+            key,
+            Origin {
+                monitor: Some(OriginMonitor {
+                    kind: "process",
+                    target: None,
+                    item: atom("spawn_reply"),
+                    tag: atom("DOWN"),
+                    connection: 1,
+                    remote: None,
+                    spawn: Some(SpawnReply {
+                        no_smsg: false,
+                        no_emsg: false,
+                    }),
+                    abandoned: true,
+                    spawn_link: true,
+                }),
+                alias: None,
+                watched_by: None,
+            },
+        );
+    }
+    {
+        let mut dist = scheduler.node.dist();
+        dist.insert(&name, Reference(7), 1);
+        dist.new_connection(&name);
+        assert!(dist.connect(&name, Controller::Process(id), 0).is_some());
+    }
+    scheduler
+        .send_signal(
+            None,
+            id,
+            Signal::SpawnReply {
+                node: name,
+                reference: key,
+                flags: super::dist_spawn::SPAWN_LINK,
+                result: atom("badarg"),
+                connection: 1,
+            },
+        )
+        .unwrap();
+    scheduler
+        .handle_signals(id, 100, 100, HandlingPoint::ScheduleIn)
+        .unwrap();
+    assert_eq!(
+        messages(&scheduler, id.0),
+        [],
+        "an abandoned request gets no error message"
+    );
+}
+
+#[test]
+fn an_abandoned_spawn_request_success_installs_no_link_and_sends_abandoned() {
+    use super::{dist_table::Controller, signals::HandlingPoint};
+    use crate::runtime::process::{MonitorKey, Origin, OriginMonitor, RemotePid, SpawnReply};
+    // `net_spawn_reply` with a pid for an abandoned linked request gives the
+    // caller no message, sends the new process the exit signal `abandoned`,
+    // and installs no link (`erl_proc_sig_queue.c:5785-5840`). The exit
+    // signal goes to the connection of the new process.
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let id = current(&mut scheduler);
+    let name = scheduler.atoms.put("other@host").unwrap();
+    let key = MonitorKey::Local(Reference(1));
+    {
+        let process = scheduler.processes.get_mut(id).unwrap();
+        process.monitors.insert(
+            key,
+            Origin {
+                monitor: Some(OriginMonitor {
+                    kind: "process",
+                    target: None,
+                    item: atom("spawn_reply"),
+                    tag: atom("DOWN"),
+                    connection: 1,
+                    remote: None,
+                    spawn: Some(SpawnReply {
+                        no_smsg: false,
+                        no_emsg: false,
+                    }),
+                    abandoned: true,
+                    spawn_link: true,
+                }),
+                alias: None,
+                watched_by: None,
+            },
+        );
+    }
+    let remote = RemotePid {
+        node: name.index(),
+        creation: 1,
+        number: 2,
+        serial: 0,
+    };
+    {
+        let mut dist = scheduler.node.dist();
+        dist.insert(&name, Reference(7), 1);
+        dist.new_connection(&name);
+        assert!(dist.connect(&name, Controller::Process(id), 0).is_some());
+    }
+    scheduler
+        .send_signal(
+            None,
+            id,
+            Signal::SpawnReply {
+                node: name,
+                reference: key,
+                flags: super::dist_spawn::SPAWN_LINK,
+                result: remote.term(),
+                connection: 1,
+            },
+        )
+        .unwrap();
+    scheduler
+        .handle_signals(id, 100, 100, HandlingPoint::ScheduleIn)
+        .unwrap();
+    assert_eq!(
+        messages(&scheduler, id.0),
+        [],
+        "an abandoned request gets no success message"
+    );
+    assert!(
+        scheduler.processes[&id]
+            .links
+            .get(&LinkId::Remote(remote))
+            .is_none(),
+        "an abandoned request installs no link"
+    );
+}

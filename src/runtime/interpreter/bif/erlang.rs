@@ -2387,21 +2387,48 @@ pub(super) fn spawn_request(
 /// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.is_static("true") || atom.is_static("false")));
 /// ```
 pub(super) fn spawn_request_abandon(context: &mut BifContext<'_>, reference: &Term) -> BifResult {
-    // An internal reference that no pending monitor of the caller holds is
-    // no outstanding request (`bif.c:1170-1175`).
-    let Some(id) = reference.reference() else {
-        // An external reference of another node is no outstanding request of
-        // this process (`bif.c:1171-1174`).
-        if is_reference(reference) {
-            return Value(Term::static_atom("false"));
+    match abandon_reference(reference) {
+        // An internal reference that no pending monitor of the caller holds is
+        // no outstanding request (`bif.c:1170-1175`).
+        AbandonReference::Pending(id) => {
+            let abandoned = context.scheduler.abandon_spawn_request(id);
+            Value(Term::static_atom(if abandoned { "true" } else { "false" }))
         }
-        return Raise {
+        AbandonReference::False => Value(Term::static_atom("false")),
+        AbandonReference::Badarg => Raise {
             class: ExceptionClass::Error,
             reason: Term::static_atom("badarg"),
-        };
-    };
-    let abandoned = context.scheduler.abandon_spawn_request(id);
-    Value(Term::static_atom(if abandoned { "true" } else { "false" }))
+        },
+    }
+}
+
+/// The result of the reference-class check of `spawn_request_abandon/1`:
+/// an internal reference that `abandon_spawn_request` may end, an external
+/// reference that is no outstanding request of this process, and a term
+/// that is not a reference, which raises `badarg` (`bif.c:1170-1175`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(abandon_reference(&Term::Reference(Reference(1))), AbandonReference::Pending(_)));
+/// assert!(matches!(abandon_reference(&Term::Integer(1)), AbandonReference::Badarg));
+/// ```
+fn abandon_reference(reference: &Term) -> AbandonReference {
+    match reference.reference() {
+        Some(id) => AbandonReference::Pending(id),
+        None if is_reference(reference) => AbandonReference::False,
+        None => AbandonReference::Badarg,
+    }
+}
+
+/// The classes of [`abandon_reference`].
+enum AbandonReference {
+    /// An internal reference, which may end an outstanding request.
+    Pending(Reference),
+    /// An external reference of another node.
+    False,
+    /// A term that is not a reference.
+    Badarg,
 }
 
 /// Run `erlang:put/2`: set the value of `key` in the process dictionary of

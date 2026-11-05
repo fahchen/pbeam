@@ -671,3 +671,32 @@ fn spawn_reply_pair_returns_none_for_a_malformed_monitor_tuple() {
     let not_a_tuple = BifResult::Value(Term::static_atom("ok"));
     assert_eq!(spawn_reply_pair(&not_a_tuple), None);
 }
+
+#[test]
+fn abandon_reference_classifies_a_term() {
+    // `spawn_request_abandon/1` ends an internal reference, gives `false`
+    // for an external reference of another node, and raises `badarg` for a
+    // term that is not a reference (`bif.c:1170-1175`). A fixture reaches
+    // no external reference and no non-reference in the same run, so the
+    // pure check covers the three classes.
+    use crate::term::Atom;
+    use crate::term::external_id::{ExternalData, ExternalId};
+    use std::sync::Arc;
+    assert!(matches!(
+        abandon_reference(&Term::Reference(crate::term::Reference(1))),
+        AbandonReference::Pending(_)
+    ));
+    assert!(matches!(
+        abandon_reference(&Term::Integer(1)),
+        AbandonReference::Badarg
+    ));
+    let external = Term::External(Arc::new(ExternalId {
+        node: Atom::from_static("nonode@nohost").unwrap(),
+        creation: 1,
+        data: ExternalData::Reference(vec![1].into_boxed_slice()),
+    }));
+    assert!(matches!(
+        abandon_reference(&external),
+        AbandonReference::False
+    ));
+}
