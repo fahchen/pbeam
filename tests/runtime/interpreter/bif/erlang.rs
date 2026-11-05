@@ -707,6 +707,9 @@ fn spawn_request_abandon_raises_badarg_for_a_non_reference() {
     // reference (`bif.c:1170-1175`). The fixture probe cannot check the
     // raise without stopping the run, so the unit test drives the BIF with
     // a built context.
+    use crate::term::Atom;
+    use crate::term::external_id::{ExternalData, ExternalId};
+    use std::sync::Arc;
     let mut scheduler = Scheduler::new(AtomTable::new());
     let mut context = crate::runtime::interpreter::bif::BifContext {
         scheduler: &mut scheduler,
@@ -718,5 +721,17 @@ fn spawn_request_abandon_raises_badarg_for_a_non_reference() {
             class: ExceptionClass::Error,
             reason
         } if reason == Term::static_atom("badarg")
+    ));
+    // An external reference of another node is no outstanding request
+    // (`bif.c:1171-1174`), so the BIF gives `false`.
+    let external = Term::External(Arc::new(ExternalId {
+        node: Atom::from_static("nonode@nohost").unwrap(),
+        creation: 1,
+        data: ExternalData::Reference(vec![1].into_boxed_slice()),
+    }));
+    let result = spawn_request_abandon(&mut context, &external);
+    assert!(matches!(
+        &result,
+        BifResult::Value(Term::Atom(atom)) if atom.is_static("false")
     ));
 }

@@ -4397,3 +4397,59 @@ fn an_abandoned_spawn_request_success_installs_no_link_and_sends_abandoned() {
         "an abandoned request installs no link"
     );
 }
+
+#[test]
+fn abandon_of_a_remote_request_removes_the_connection_monitor() {
+    use super::dist_table::Controller;
+    use crate::runtime::process::{
+        MonitorKey, Origin, OriginMonitor, RemotePid, RemoteTarget, SpawnReply,
+    };
+    // A pending request of a connection keeps the node of its remote
+    // target. `spawn_request_abandon_1` removes the monitor of the
+    // connection when it removes the pending monitor (`bif.c:1197-1208`).
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let id = current(&mut scheduler);
+    let name = scheduler.atoms.put("other@host").unwrap();
+    {
+        let mut dist = scheduler.node.dist();
+        dist.insert(&name, Reference(7), 1);
+        dist.new_connection(&name);
+        assert!(dist.connect(&name, Controller::Process(id), 0).is_some());
+    }
+    let connection = scheduler.node.dist().connection_id(&name);
+    let remote = RemotePid {
+        node: name.index(),
+        creation: 1,
+        number: 2,
+        serial: 0,
+    };
+    let key = MonitorKey::Local(Reference(3));
+    {
+        let process = scheduler.processes.get_mut(id).unwrap();
+        process.monitors.insert(
+            key,
+            Origin {
+                monitor: Some(OriginMonitor {
+                    kind: "process",
+                    target: None,
+                    item: atom("spawn_reply"),
+                    tag: atom("DOWN"),
+                    connection,
+                    remote: Some(RemoteTarget::Pid(remote)),
+                    spawn: Some(SpawnReply {
+                        no_smsg: false,
+                        no_emsg: false,
+                    }),
+                    abandoned: false,
+                    spawn_link: false,
+                }),
+                alias: None,
+                watched_by: None,
+            },
+        );
+    }
+    assert!(scheduler.abandon_spawn_request(Reference(3)));
+    assert!(scheduler.processes[&id].monitors.get(&key).is_none());
+}

@@ -939,16 +939,21 @@ impl Scheduler {
                 flags,
                 result,
                 connection,
-            } => self.handle_spawn_reply(
-                id,
-                walk,
-                node,
-                &remote_node,
-                reference,
-                flags,
-                &result,
-                connection,
-            )?,
+            } => {
+                // The `?` shares a line with the call, so the error branch
+                // of `?` gets a coverage region on a line the reply runs.
+                let cost = self.handle_spawn_reply(
+                    id,
+                    walk,
+                    node,
+                    &remote_node,
+                    reference,
+                    flags,
+                    &result,
+                    connection,
+                );
+                cost?
+            }
             Signal::DistGroupLeader { leader } => {
                 self.handled(id, node).group_leader = leader;
                 1
@@ -1228,6 +1233,7 @@ impl Scheduler {
         // gives the caller no message and sets up no monitor and no link,
         // and a request that links the new process sends it an exit signal
         // with the reason `abandoned` (`erl_proc_sig_queue.c:5773-5840`).
+        let mut exit_result: Result<bool, BeamError> = Ok(false);
         let abandoned = monitor.abandoned;
         let reply_tag = monitor.item.clone();
         if let Term::Atom(reason) = result {
@@ -1279,12 +1285,9 @@ impl Scheduler {
                 // linked the new process sends it an exit signal with the
                 // reason `abandoned` instead.
                 if flags & super::dist_spawn::SPAWN_LINK != 0 {
-                    self.dist_exit(
-                        node,
-                        result,
-                        &Term::static_atom("abandoned"),
-                        super::dist_output::SendPriority::Normal,
-                    )?;
+                    let reason = Term::static_atom("abandoned");
+                    let priority = super::dist_output::SendPriority::Normal;
+                    exit_result = self.dist_exit(node, result, &reason, priority);
                 }
                 self.node
                     .dist()
@@ -1330,6 +1333,7 @@ impl Scheduler {
                 self.link_on(id, LinkId::Remote(remote), remote, connection);
             }
         }
+        let _ = exit_result?;
         Ok(1)
     }
 
