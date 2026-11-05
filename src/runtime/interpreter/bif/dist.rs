@@ -929,6 +929,7 @@ pub(super) fn dist_spawn_request(
         monitor.as_ref(),
         &reply_tag,
         reply,
+        link,
     );
     let (reference, monitored) = request?;
     let value = if spawn_opt {
@@ -1003,10 +1004,12 @@ fn monitor_option(options: &Term) -> Option<(Term, bool, bool)> {
     Some((tag, priority, alias))
 }
 
-/// Read the value of a `{reply, Value}` spawn option as `dist.c:5901-5924`
-/// does: the message of a successful spawn, and the message of a failed
-/// spawn, are each kept or suppressed.
-fn reply_option(value: &Term) -> Option<SpawnReply> {
+/// Read the value of a `{reply, Value}` spawn option as
+/// `erts_parse_spawn_opts` reads it (`erl_process.c:12370-12390`) and as
+/// `erts_internal_dist_spawn_request_4` reads it (`dist.c:5901-5924`): the
+/// message of a successful spawn, and the message of a failed spawn, are
+/// each kept or suppressed.
+pub(super) fn reply_option(value: &Term) -> Option<SpawnReply> {
     let Term::Atom(value) = value else {
         return None;
     };

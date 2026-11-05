@@ -14,6 +14,7 @@ use super::{
     other_process_denial, process_stacktrace,
 };
 use super::{to_i64, to_u64, to_usize};
+use crate::runtime::interpreter::bif::dist::reply_option;
 use crate::beam::code::Instruction;
 use crate::runtime::capability;
 use crate::runtime::dirty::DIRTY_IO_THREADS;
@@ -24,7 +25,7 @@ use crate::runtime::host;
 use crate::runtime::interpreter::DEFAULT_ERROR_HANDLER;
 use crate::runtime::interpreter::code_table::{AfterOnLoad, CodeTable, Finish};
 use crate::runtime::local_node;
-use crate::runtime::process::{Flush, MonitorKey, Origin, Priority};
+use crate::runtime::process::{Flush, MonitorKey, Origin, Priority, SpawnReply};
 use crate::runtime::process::{InitialCall, OTHER_PROCESS_INFO_ITEMS};
 use crate::runtime::process::{LinkId, ProcessState, RemotePid};
 use crate::runtime::scheduler::PTAB_SIZE;
@@ -1941,7 +1942,112 @@ pub(super) fn spawn_link(
 
 /// Run `erlang:spawn_opt/4`: start a process with the spawn options in
 /// `options`, as ERTS `spawn_opt_4` (`bif.c:1027-1074`) and
-/// `erts_parse_spawn_opts` (`erl_process.c:12222-12434`) do:
+/// `erts_parse_spawn_opts` (`erl_process.c:12222-12434`) do. See
+/// [`read_spawn_options`] for the options.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = spawn_opt(&mut context, &module, &function, &Term::nil(), &Term::list_from(vec![monitor]))?;
+/// assert!(matches!(result, BifResult::Value(Term::Tuple(_))));
+/// assert!(matches!(spawn_opt(&mut context, &module, &function, &Term::nil(), &link_x)?, BifResult::Raise { .. }));
+/// ```
+pub(super) fn spawn_opt(
+    context: &mut BifContext<'_>,
+    module: &Term,
+    function: &Term,
+    arguments: &Term,
+    options: &Term,
+) -> Result<BifResult, BeamError> {
+    let values = match read_spawn_options(
+        &context.scheduler.atoms,
+        context.scheduler.node().heap_flags(),
+        context.scheduler.scheduler_count(),
+        options,
+        SpawnCaller::SpawnOpt,
+    ) {
+        Ok(values) => values,
+        // A spawn, unlike a spawn request, raises `badarg` also for an
+        // option that the callee rejects (`bif.c:1039-1051`).
+        Err(_) => return Ok(BifResult::badopt()),
+    };
+    if let Some(unsupported) = values.unsupported {
+        // `erl_create_process` checks the MFA types before it uses an option
+        // (`erl_process.c:12490-12492`).
+        if !matches!((module, function), (Term::Atom(_), Term::Atom(_)))
+            || arguments.proper_list().is_none()
+        {
+            return Ok(BifResult::badarg());
+        }
+        return Err(unsupported);
+    }
+    create_process(
+        context.scheduler,
+        module,
+        function,
+        arguments,
+        values.options,
+    )
+}
+
+/// The caller of [`read_spawn_options`]: each caller accepts a different
+/// set of options (`erl_process.c:12221-12434`).
+#[derive(Clone, Copy)]
+pub(super) enum SpawnCaller {
+    /// `erlang:spawn_opt/4` accepts the PBeam option `{capabilities, Map}`
+    /// and no message option (`bif.c:1027-1074`).
+    SpawnOpt,
+    /// `erts_internal:spawn_request/4` accepts the message options `{reply,
+    /// Value}` and `{reply_tag, Tag}` (`bif.c:1078-1164`).
+    SpawnRequest,
+}
+
+/// The options of a spawn that [`read_spawn_options`] reads.
+pub(super) struct SpawnOptionValues {
+    /// The link and monitor values, the start flags, and the capabilities
+    /// of the new process.
+    pub(super) options: SpawnOptions,
+    /// The reply policy and the reply tag of a spawn request.
+    pub(super) message: SpawnMessage,
+    /// The runtime error of an option that PBeam does not support, or
+    /// `None` when each option is supported.
+    pub(super) unsupported: Option<BeamError>,
+}
+
+/// The message options of a spawn request, as `erts_parse_spawn_opts` reads
+/// them into `sop->flags` and `*tag` (`erl_process.c:12370-12395`).
+pub(super) struct SpawnMessage {
+    /// The `{reply, Value}` option: the messages of a successful spawn and
+    /// of a failed spawn are each kept or suppressed.
+    pub(super) reply: SpawnReply,
+    /// The `{reply_tag, Tag}` option, or `spawn_reply` (`dist.c:5901-5928`).
+    pub(super) tag: Term,
+}
+
+impl Default for SpawnMessage {
+    fn default() -> Self {
+        SpawnMessage {
+            reply: SpawnReply {
+                no_smsg: false,
+                no_emsg: false,
+            },
+            tag: Term::static_atom("spawn_reply"),
+        }
+    }
+}
+
+/// Why [`read_spawn_options`] rejects an option list, with the message
+/// options that it read before it stopped (`erl_process.c:12425-12433`).
+pub(super) enum SpawnOptionError {
+    /// The option list is not a proper list: `erts_parse_spawn_opts`
+    /// returns a positive value.
+    NotList,
+    /// An option is not valid: `erts_parse_spawn_opts` returns -1.
+    Invalid(SpawnMessage),
+}
+
+/// Read the option list `options` as `erts_parse_spawn_opts` reads it
+/// (`erl_process.c:12221-12434`), for the caller `caller`:
 ///
 /// - `link` and `{link, []}` link the new process (`erl_process.c:12256`,
 ///   `12396-12405`). `monitor` and `{monitor, MonitorOpts}` monitor it, with
@@ -1958,6 +2064,8 @@ pub(super) fn spawn_link(
 ///   heap size of the options (`erl_process.c:12321-12360`, `12429-12431`).
 /// - `{scheduler, N}` takes a small integer from 0 to the scheduler count
 ///   (`erl_process.c:12361-12369`); 0 does not bind the process.
+/// - `{reply, Value}` and `{reply_tag, Tag}` set the reply of a spawn
+///   request (`erl_process.c:12370-12395`).
 /// - The PBeam option `{capabilities, Map}` restricts the capabilities of
 ///   the new process (see `capability::restrictions`).
 ///
@@ -1965,41 +2073,26 @@ pub(super) fn spawn_link(
 /// apply only when the options include `min_heap_size`, `priority`,
 /// `fullsweep_after`, `max_heap_size`, or `scheduler` (`SPO_USE_ARGS`,
 /// `erl_process.h:1515-1520`), else the new process has the node heap flags.
-/// Each other option, a value that is not valid, and `options` that are not
-/// a proper list raise `badarg` with the `error_info` cause `badopt`
-/// (`bif.c:1039-1051`). After the options, a `module` or `function` that is
-/// not an atom raises `badarg`, as in `spawn/3`.
 ///
 /// # Errors
 ///
-/// The monitor options `alias` and `priority`, the link option `priority`,
-/// `{scheduler, N}` with `N` above 0, and a minimum heap size at or above the largest heap size of ERTS give a
-/// runtime error when all options are valid.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let result = spawn_opt(&mut context, &module, &function, &Term::nil(), &Term::list_from(vec![monitor]))?;
-/// assert!(matches!(result, BifResult::Value(Term::Tuple(_))));
-/// assert!(matches!(spawn_opt(&mut context, &module, &function, &Term::nil(), &link_x)?, BifResult::Raise { .. }));
-/// ```
-#[expect(
-    clippy::too_many_lines,
-    reason = "option table: one arm for each spawn option, as the option parser of `erl_process.c` (12253-12424); the arms share the state of the loop"
-)]
-pub(super) fn spawn_opt(
-    context: &mut BifContext<'_>,
-    module: &Term,
-    function: &Term,
-    arguments: &Term,
+/// `SpawnOptionError` for each option list that ERTS rejects, with the
+/// message options that the parser read before it stopped. The runtime
+/// error of an option that PBeam does not support is the `unsupported`
+/// field of the values: the monitor options `alias` and `priority`, the
+/// link option `priority`, `{scheduler, N}` with `N` above 0, and a minimum
+/// heap size at or above the largest heap size of ERTS.
+pub(super) fn read_spawn_options(
+    atoms: &AtomTable,
+    node: HeapFlags,
+    schedulers: i64,
     options: &Term,
-) -> Result<BifResult, BeamError> {
+    caller: SpawnCaller,
+) -> Result<SpawnOptionValues, SpawnOptionError> {
+    let mut message = SpawnMessage::default();
     let Some(options) = options.proper_list() else {
-        return Ok(BifResult::badopt());
+        return Err(SpawnOptionError::NotList);
     };
-    let node = context.scheduler.node().heap_flags();
-    let schedulers = context.scheduler.scheduler_count();
-    let atoms = &context.scheduler.atoms;
     let mut spawn_options = SpawnOptions::default();
     let mut heap = node;
     let mut use_heap = false;
@@ -2114,38 +2207,193 @@ pub(super) fn spawn_opt(
                 use_heap = true;
             }
             (_, Some(("capabilities", value)))
-                if let Some(restrictions) = capability::restrictions(atoms, value) =>
+                if matches!(caller, SpawnCaller::SpawnOpt)
+                    && let Some(restrictions) = capability::restrictions(atoms, value) =>
             {
                 spawn_options.capabilities = Some(restrictions);
+            }
+            // The message options belong to a spawn request only
+            // (`erl_process.c:12370-12395`).
+            (_, Some(("reply", value))) if matches!(caller, SpawnCaller::SpawnRequest) => {
+                match reply_option(value) {
+                    Some(reply) => message.reply = reply,
+                    None => valid = false,
+                }
+            }
+            (_, Some(("reply_tag", value))) if matches!(caller, SpawnCaller::SpawnRequest) => {
+                message.tag = value.clone();
             }
             _ => valid = false,
         }
     }
+    // `erts_parse_spawn_opts` reads each option before it fails, so a bad
+    // option gives its error after the message options that it read
+    // (`erl_process.c:12425-12433`).
     if !valid || (heap.max_heap_size != 0 && heap.max_heap_size < heap.min_heap_size) {
-        return Ok(BifResult::badopt());
-    }
-    if let Some(unsupported) = heap_error
-        .or(link_error)
-        .or(monitor_error)
-        .or(scheduler_error)
-    {
-        // `erl_create_process` checks the MFA types before it uses an option
-        // (`erl_process.c:12490-12492`).
-        if !matches!((module, function), (Term::Atom(_), Term::Atom(_)))
-            || arguments.proper_list().is_none()
-        {
-            return Ok(BifResult::badarg());
-        }
-        return Err(unsupported);
+        return Err(SpawnOptionError::Invalid(message));
     }
     spawn_options.flags.heap_flags = use_heap.then_some(heap);
-    create_process(
+    Ok(SpawnOptionValues {
+        options: spawn_options,
+        message,
+        // The first option of a kind names the runtime error of a value
+        // that PBeam does not support.
+        unsupported: heap_error
+            .or(link_error)
+            .or(monitor_error)
+            .or(scheduler_error),
+    })
+}
+
+/// Run `erts_internal:spawn_request/4` as ERTS `erts_internal_spawn_request_4`
+/// does (`bif.c:1078-1164`): start a process that runs `module:function`
+/// with the elements of `arguments`, and return the request reference. The
+/// success reply `{Tag, Ref, ok, Pid}` and the failure reply `{Tag, Ref,
+/// error, Reason}` go to the caller as the process starts, or at once for an
+/// option that ERTS rejects (`erl_process.c:12949-12976`,
+/// `erts_send_local_spawn_reply`, `erl_process.c:13146-13198`).
+/// Run `erts_internal:spawn_request/4` as ERTS `erts_internal_spawn_request_4`
+/// does (`bif.c:1078-1164`): start a process that runs `module:function`
+/// with the elements of `arguments`, and return the request reference. The
+/// success reply `{Tag, Ref, ok, Pid}` and the failure reply `{Tag, Ref,
+/// error, Reason}` go to the caller as the process starts, or at once for an
+/// option that the callee rejects (`erl_process.c:12949-12976`,
+/// `erts_send_local_spawn_reply`, `erl_process.c:13146-13198`).
+///
+/// The fail order is that of `erts_internal_spawn_request_4`
+/// (`bif.c:1086-1162`): first a `module` or `function` that is not an atom
+/// and `arguments` that are not a proper list return the atom `badarg`;
+/// then an option list that is not a proper list returns the atom `badopt`;
+/// then an option that the callee rejects returns the reference and sends
+/// `{Tag, Ref, error, badopt}`. The `erlang:spawn_request/4` wrapper raises
+/// the `error:badarg` and `error:badarg` with cause `badopt` for these
+/// atoms (see `erlang.erl:11256-11264`).
+///
+/// The options are the spawn options of `erlang:spawn_opt/4`, and for a
+/// spawn request also `{reply, Value}` and `{reply_tag, Tag}` (see
+/// [`read_spawn_options`]).
+///
+/// A `link` option links the caller and the new process, and a `monitor`
+/// option monitors the new process with the reference of the request as
+/// the monitor reference, as in `spawn_opt/4`; the success reply of the
+/// request comes before the `DOWN` message of the monitor
+/// (`erl_process.c:12967-12975`).
+///
+/// # Errors
+///
+/// The errors of the reference and of the process start, and the runtime
+/// error of an option that PBeam does not support.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = spawn_request(&mut context, &module, &function, &arguments, &options)?;
+/// assert!(matches!(result, BifResult::Value(Term::Reference(_))));
+/// ```
+pub(super) fn spawn_request(
+    context: &mut BifContext<'_>,
+    module: &Term,
+    function: &Term,
+    arguments: &Term,
+    options: &Term,
+) -> Result<BifResult, BeamError> {
+    let badarg = || BifResult::Value(Term::static_atom("badarg"));
+    // `module`, `function`, and `arguments` are the first checks
+    // (`bif.c:1086-1092`).
+    if !matches!((module, function), (Term::Atom(_), Term::Atom(_))) {
+        return Ok(badarg());
+    }
+    if arguments.proper_list().is_none() {
+        return Ok(badarg());
+    }
+    let values = match read_spawn_options(
+        &context.scheduler.atoms,
+        context.scheduler.node().heap_flags(),
+        context.scheduler.scheduler_count(),
+        options,
+        SpawnCaller::SpawnRequest,
+    ) {
+        Ok(values) => values,
+        // An option list that is not a proper list returns the atom
+        // `badopt` with no message (`bif.c:1102-1107`).
+        Err(SpawnOptionError::NotList) => return Ok(BifResult::Value(Term::static_atom("badopt"))),
+        // An option that the callee rejects returns the reference and sends
+        // the failure reply `{Tag, Ref, error, badopt}` (`bif.c:1150-1162`).
+        Err(SpawnOptionError::Invalid(message)) => {
+            let scheduler = &mut *context.scheduler;
+            let reference = scheduler.dist_spawn_badopt(&message.tag, message.reply)?;
+            return Ok(BifResult::Value(Term::Reference(reference)));
+        }
+    };
+    if let Some(unsupported) = values.unsupported {
+        return Err(unsupported);
+    }
+    let SpawnOptionValues { options, message, .. } = values;
+    let result = create_process(
         context.scheduler,
         module,
         function,
         arguments,
-        spawn_options,
-    )
+        options,
+    )?;
+    // A monitor of a spawn request uses the reference of the request
+    // (`so.mref = erts_make_ref(parent)`, `erl_process.c:12478-12479`), so
+    // the reference of `create_process` is the request reference. Without a
+    // monitor the request makes its own (`SPO_ASYNC`, `erl_process.c:12478`).
+    let (pid, reference) = match &result {
+        BifResult::Value(Term::Pid(pid)) => {
+            let scheduler = &mut *context.scheduler;
+            (pid.clone(), scheduler.make_ref()?)
+        }
+        BifResult::Value(Term::Tuple(pair)) => {
+            let [Term::Pid(pid), Term::Reference(reference)] = pair.as_ref() else {
+                return Ok(result);
+            };
+            (pid.clone(), *reference)
+        }
+        _ => return Ok(result),
+    };
+    if !message.reply.no_smsg {
+        let message = Term::tuple(vec![
+            message.tag.clone(),
+            Term::Reference(reference),
+            Term::static_atom("ok"),
+            Term::Pid(pid),
+        ]);
+        let caller = context.scheduler.current_process().id;
+        context.scheduler.send_message(caller, caller, message);
+    }
+    Ok(BifResult::Value(Term::Reference(reference)))
+}
+
+/// Run `erlang:spawn_request_abandon/1` as ERTS `spawn_request_abandon_1`
+/// does (`bif.c:1166-1208`): remove the pending monitor of a spawn request
+/// that the caller made, and return `true`; return `false` for each other
+/// internal reference, for an external reference, and for a reference of
+/// another node, and raise `badarg` for a term that is not a reference.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let result = spawn_request_abandon(&mut context, &reference);
+/// assert!(matches!(result, BifResult::Value(Term::Atom(atom)) if atom.is_static("true") || atom.is_static("false")));
+/// ```
+pub(super) fn spawn_request_abandon(context: &mut BifContext<'_>, reference: &Term) -> BifResult {
+    // An internal reference that no pending monitor of the caller holds is
+    // no outstanding request (`bif.c:1170-1175`).
+    let Some(id) = reference.reference() else {
+        // An external reference of another node is no outstanding request of
+        // this process (`bif.c:1171-1174`).
+        if is_reference(reference) {
+            return Value(Term::static_atom("false"));
+        }
+        return Raise {
+            class: ExceptionClass::Error,
+            reason: Term::static_atom("badarg"),
+        };
+    };
+    let abandoned = context.scheduler.abandon_spawn_request(id);
+    Value(Term::static_atom(if abandoned { "true" } else { "false" }))
 }
 
 /// Run `erlang:put/2`: set the value of `key` in the process dictionary of

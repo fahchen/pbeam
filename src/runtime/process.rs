@@ -447,6 +447,18 @@ pub(super) struct OriginMonitor {
     /// `ERTS_ML_FLG_SPAWN_NO_SMSG`, `ERTS_ML_FLG_SPAWN_NO_EMSG`,
     /// `dist.c:5880-5930`, `erl_proc_sig_queue.c:4877-4900`).
     pub(super) spawn: Option<SpawnReply>,
+    /// Whether `spawn_request_abandon/1` abandoned the pending monitor of
+    /// the spawn request (`ERTS_ML_FLG_SPAWN_ABANDONED`). The reply keeps
+    /// the abandoned monitor and sends the child an exit signal with the
+    /// reason `abandoned` when the request links the new process, and
+    /// removes it with no message when it does not (`bif.c:1166-1208`,
+    /// `erl_proc_sig_queue.c:5773-5840`).
+    pub(super) abandoned: bool,
+    /// Whether the spawn request links the new process
+    /// (`ERTS_ML_FLG_SPAWN_LINK`). The reply of an abandoned request that
+    /// links sends the child the exit signal `abandoned`
+    /// (`erl_proc_sig_queue.c:5785-5840`).
+    pub(super) spawn_link: bool,
 }
 
 /// The reply policy of a spawn request: whether the caller suppresses the
