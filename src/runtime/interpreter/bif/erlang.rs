@@ -1959,17 +1959,16 @@ pub(super) fn spawn_opt(
     arguments: &Term,
     options: &Term,
 ) -> Result<BifResult, BeamError> {
-    let values = match read_spawn_options(
+    let Ok(values) = read_spawn_options(
         &context.scheduler.atoms,
         context.scheduler.node().heap_flags(),
         context.scheduler.scheduler_count(),
         options,
         SpawnCaller::SpawnOpt,
-    ) {
-        Ok(values) => values,
+    ) else {
         // A spawn, unlike a spawn request, raises `badarg` also for an
         // option that the callee rejects (`bif.c:1039-1051`).
-        Err(_) => return Ok(BifResult::badopt()),
+        return Ok(BifResult::badopt());
     };
     if let Some(unsupported) = values.unsupported {
         // `erl_create_process` checks the MFA types before it uses an option
@@ -2082,6 +2081,10 @@ pub(super) enum SpawnOptionError {
 /// field of the values: the monitor options `alias` and `priority`, the
 /// link option `priority`, `{scheduler, N}` with `N` above 0, and a minimum
 /// heap size at or above the largest heap size of ERTS.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one match arm for each spawn option, and ERTS reads each option before it fails; a split would spread the option table over helpers"
+)]
 pub(super) fn read_spawn_options(
     atoms: &AtomTable,
     node: HeapFlags,
@@ -2252,13 +2255,6 @@ pub(super) fn read_spawn_options(
 /// error, Reason}` go to the caller as the process starts, or at once for an
 /// option that ERTS rejects (`erl_process.c:12949-12976`,
 /// `erts_send_local_spawn_reply`, `erl_process.c:13146-13198`).
-/// Run `erts_internal:spawn_request/4` as ERTS `erts_internal_spawn_request_4`
-/// does (`bif.c:1078-1164`): start a process that runs `module:function`
-/// with the elements of `arguments`, and return the request reference. The
-/// success reply `{Tag, Ref, ok, Pid}` and the failure reply `{Tag, Ref,
-/// error, Reason}` go to the caller as the process starts, or at once for an
-/// option that the callee rejects (`erl_process.c:12949-12976`,
-/// `erts_send_local_spawn_reply`, `erl_process.c:13146-13198`).
 ///
 /// The fail order is that of `erts_internal_spawn_request_4`
 /// (`bif.c:1086-1162`): first a `module` or `function` that is not an atom
@@ -2339,19 +2335,19 @@ pub(super) fn spawn_request(
     let (pid, reference) = match &result {
         BifResult::Value(Term::Pid(pid)) => {
             let scheduler = &mut *context.scheduler;
-            (pid.clone(), scheduler.make_ref()?)
+            (*pid, scheduler.make_ref()?)
         }
         BifResult::Value(Term::Tuple(pair)) => {
             let [Term::Pid(pid), Term::Reference(reference)] = pair.as_ref() else {
                 return Ok(result);
             };
-            (pid.clone(), *reference)
+            (*pid, *reference)
         }
         _ => return Ok(result),
     };
     if !message.reply.no_smsg {
         let message = Term::tuple(vec![
-            message.tag.clone(),
+            message.tag,
             Term::Reference(reference),
             Term::static_atom("ok"),
             Term::Pid(pid),

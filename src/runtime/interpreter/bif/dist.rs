@@ -8,7 +8,7 @@ use num_bigint::BigInt;
 use super::{BifContext, BifResult, Term};
 use crate::error::{BeamError, error};
 use crate::runtime::{
-    process::SpawnReply,
+    process::{SpawnLink, SpawnReply},
     scheduler::{Scheduler, dist_table::Controller, node::Named},
 };
 use crate::term::{Atom, PortId, ProcessId};
@@ -929,7 +929,7 @@ pub(super) fn dist_spawn_request(
         monitor.as_ref(),
         &reply_tag,
         reply,
-        link,
+        if link { SpawnLink::Yes } else { SpawnLink::No },
     );
     let (reference, monitored) = request?;
     let value = if spawn_opt {

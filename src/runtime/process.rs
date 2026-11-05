@@ -475,6 +475,23 @@ pub(super) struct SpawnReply {
     pub(super) no_emsg: bool,
 }
 
+/// Whether a spawn request links the new process to its caller
+/// (`ERTS_ML_FLG_SPAWN_LINK`). A method parameter cannot be a bool
+/// (`max-fn-params-bools`).
+#[derive(Clone, Copy)]
+pub(super) enum SpawnLink {
+    /// The request links the new process.
+    Yes,
+    /// The request does not link the new process.
+    No,
+}
+
+impl From<SpawnLink> for bool {
+    fn from(link: SpawnLink) -> Self {
+        matches!(link, SpawnLink::Yes)
+    }
+}
+
 /// The target of a monitor of a process of another node: the pid of the
 /// process, or a registered name of its node (`bif.c:811-894`,
 /// `dist.c:2364-2380`). The packets name the pid or the atom, and the

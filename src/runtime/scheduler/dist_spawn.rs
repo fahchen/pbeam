@@ -4,7 +4,7 @@ use super::Scheduler;
 use crate::{
     error::BeamError,
     runtime::{
-        process::{MonitorKey, Origin, OriginMonitor, Priority, SpawnReply, StartFlags},
+        process::{MonitorKey, Origin, OriginMonitor, Priority, SpawnLink, SpawnReply, StartFlags},
         signal::Signal,
     },
     term::{Atom, ProcessId, Reference, Term},
@@ -44,7 +44,7 @@ impl Scheduler {
         monitor: Option<&Term>,
         reply_tag: &Term,
         reply: SpawnReply,
-        link: bool,
+        link: SpawnLink,
     ) -> Result<(Reference, bool), BeamError> {
         let watcher = self.current_process_mut().id;
         let reference = self.make_ref()?;
@@ -61,7 +61,7 @@ impl Scheduler {
                 remote: None,
                 spawn: Some(reply),
                 abandoned: false,
-                spawn_link: link,
+                spawn_link: link.into(),
             }),
             alias: None,
             watched_by: None,
