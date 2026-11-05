@@ -6605,6 +6605,14 @@ impl ProcessInfoRequest<'_> {
                 Term::list_from(frames),
             ])));
         }
+        // A `{dictionary, Key}` item gives the value of the key, or
+        // `undefined` when the dictionary has no value for it, as
+        // `erts_pd_hash_get` gives it (`erl_bif_info.c:2285-2304`). The
+        // lookup is O(1) and comes before the snapshot of the whole process,
+        // so a list of lookups does not clone the dictionary for each key.
+        if let Some(value) = dictionary_item(process, item) {
+            return Ok(Some(Term::tuple(vec![item.clone(), value])));
+        }
         let values = process_info_values(
             self.code,
             process,
@@ -6613,12 +6621,6 @@ impl ProcessInfoRequest<'_> {
             self.reader,
             self.registered_name.clone(),
         )?;
-        // A `{dictionary, Key}` item gives the value of the key, or
-        // `undefined` when the dictionary has no value for it, as
-        // `erts_pd_hash_get` gives it (`erl_bif_info.c:2285-2304`).
-        if let Some(value) = dictionary_item(process, item) {
-            return Ok(Some(Term::tuple(vec![item.clone(), value])));
-        }
         let Term::Atom(name) = item else {
             return Ok(None);
         };
