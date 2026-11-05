@@ -2,10 +2,16 @@
 %% and `erlang:spawn_request_abandon/1` (bif.c:1078-1208,
 %% erl_process.c:12440-12530, 12949-12976).
 -module(dist_request_probe).
--export([local/0, abandon/1, boom/0]).
+-export([local/0, abandon/1, boom/0, scheduler_stop/0]).
 
 boom() ->
     exit(boom).
+
+%% Stop the run with the runtime error of the unsupported `{scheduler, N}`
+%% option (`erl_process.c:12500-12507`), as the local spawn request does
+%% not bind a process to a scheduler.
+scheduler_stop() ->
+    erts_internal:spawn_request(lists, seq, [1, 3], [{scheduler, 1}]).
 
 %% Print the result class of each local spawn request form. The printed
 %% line holds no pid and no reference, so the two runs give the same text.

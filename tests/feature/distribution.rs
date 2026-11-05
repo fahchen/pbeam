@@ -1379,6 +1379,18 @@ fn runs_the_local_spawn_request_forms_as_pinned_erts() {
     let erts = stdout(&erts_erl(&epmd, &arguments));
     assert!(!erts.is_empty(), "{erts}");
     assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), erts);
+    // The unsupported `{scheduler, 1}` option stops the run, so a separate
+    // invocation asserts its runtime error text.
+    let stop_name = format!("dreqs{name}");
+    let expression = "dist_request_probe:scheduler_stop(), halt().";
+    let arguments = probe(&["-sname", &stop_name], expression);
+    let output = pbeam_erl(&epmd, &arguments);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success()
+            && stderr.contains("unsupported spawn option Tuple([Atom(\"scheduler\"), Integer(1)])"),
+        "{output:?}"
+    );
 }
 
 #[test]
