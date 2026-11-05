@@ -207,13 +207,14 @@ line() ->
     ok = inet:setopts(S, [{buffer, 4}]),
     ok = gen_tcp:send(A, <<"abcdxyz\n">>),
     Full = [gen_tcp:recv(S, 0, 1000), gen_tcp:recv(S, 0, 1000)],
-    %% A line of the length of packet_size is a packet, and a longer one
-    %% gives emsgsize (packet_parser.c:293-322, inet_drv.c:12973-12997).
-    ok = inet:setopts(S, [{packet_size, 4}]),
-    ok = gen_tcp:send(A, <<"abcd\nefgh\n">>),
-    Limited = [gen_tcp:recv(S, 0, 1000), gen_tcp:recv(S, 0, 100)],
+    %% A line above packet_size gives emsgsize, with a delimiter and
+    %% without one (packet_parser.c:293-322). Each case needs a new
+    %% socket, because a passive receive ends with emsgsize and the socket
+    %% cannot read again (inet_drv.c:12849-12890).
+    Limit = [line_limit(L, P, [{packet_size, 4}], <<"abcde\n">>),
+             line_limit(L, P, [{packet_size, 4}], <<"abcde">>)],
+    ok = inet:setopts(S, [{buffer, 9216}, {packet_size, 0}]),
     ok = gen_tcp:send(A, <<"x\n">>),
-    ok = inet:setopts(S, [{packet_size, 0}]),
     After = [gen_tcp:recv(S, 0, 1000), gen_tcp:recv(S, 0, 100)],
     %% One line for each active message, and a change to active delivers
     %% the bytes of the buffer (inet_drv.c:7971-7981, 11132-11138).
@@ -222,7 +223,20 @@ line() ->
     Once = [message(), message(), inet:getopts(S, [active])],
     [ok = gen_tcp:close(X) || X <- [S, A]],
     ok = gen_tcp:close(L),
-    io:format("~w~n", [[Send, Receive, Split2, Full, Limited, After, Once, flush()]]).
+    io:format("~w~n", [[Send, Receive, Split2, Full, Limit, After, Once, flush()]]).
+
+%% A line above packet_size with the options `Options`: a fresh socket for
+%% the case, because the receive ends with emsgsize (inet_drv.c:12849-12890,
+%% 12973-12997).
+line_limit(L, P, Options, Data) ->
+    {ok, S} = gen_tcp:connect({127, 0, 0, 1}, P,
+                              [inet, binary, {active, false}, {packet, line}
+                               | Options]),
+    {ok, A} = gen_tcp:accept(L, 5000),
+    ok = gen_tcp:send(A, Data),
+    Result = gen_tcp:recv(S, 0, 1000),
+    [ok = gen_tcp:close(X) || X <- [S, A]],
+    Result.
 
 %% In active mode, a packet that packet_size does not allow stops the
 %% delivery with no message (inet_drv.c:13118-13119). The next read event,

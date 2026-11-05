@@ -292,9 +292,9 @@ fn frames_lines_with_the_packet_option_line_as_pinned_erts() {
          [{ok,<<111,110,101,10>>},{error,timeout},{error,timeout}],\
          [{error,timeout},{ok,<<116,119,111,10>>}],\
          [{ok,<<97,98,99,100>>},{ok,<<120,121,122,10>>}],\
-         [{ok,<<97,98,99,100>>},{ok,<<10>>}],\
-         [{ok,<<101,102,103,104>>},{ok,<<10>>}],\
-         [{tcp,<<120,10>>},missing,{ok,[{active,false}]}],[]]\n",
+         [{error,emsgsize},{error,emsgsize}],\
+         [{ok,<<120,10>>},{error,timeout}],\
+         [{tcp,<<109,49,10>>},missing,{ok,[{active,false}]}],[]]\n",
     );
 }
 
