@@ -4457,12 +4457,15 @@ fn reads_process_info_of_a_process_that_is_not_alive_and_of_the_caller_items() {
         );
     }
     // ERTS 29.1.1: process_info(self(), {dictionary, k}) is
-    // {{dictionary, k}, undefined}, and process_info(self(), [messages]) is
-    // [{messages, []}]. PBeam does not implement them yet.
-    for (process, item) in [
-        (root(), dictionary()),
-        (root(), Term::list_from(vec![test_atom("messages")])),
-    ] {
+    // {{dictionary, k}, undefined} for a key that the dictionary does not
+    // hold, and process_info(self(), [messages]) is [{messages, []}]. PBeam
+    // does not implement the item list of `messages` yet.
+    assert_eq!(
+        process_info(root(), dictionary()).unwrap(),
+        Term::tuple(vec![dictionary(), test_atom("undefined")])
+    );
+    {
+        let (process, item) = (root(), Term::list_from(vec![test_atom("messages")]));
         assert_eq!(
             process_info(process.clone(), item.clone())
                 .unwrap_err()

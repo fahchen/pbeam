@@ -589,3 +589,70 @@ fn gives_undefined_for_an_empty_detected_topology() {
         Term::Atom(atom) if atom.is_static("undefined")
     ));
 }
+
+#[test]
+fn reads_the_dictionary_lookup_item_and_rejects_each_other_tuple() {
+    // `process_info(Pid, {dictionary, Key})` gives the value of the key, or
+    // `undefined` when the dictionary has no value for it
+    // (`erl_bif_info.c:2285-2304`). `pi_arg2ix` accepts only a 2-tuple whose
+    // first element is the atom `dictionary` (`1007-1015`), and
+    // `process_info/2` raises `badarg` for each other tuple before it reads
+    // an item.
+    let code = fixture_code();
+    let atoms = AtomTable::new();
+    let frame = code.mfa_frame("fixture", "main", 0).unwrap();
+    let mut process = ProcessState::new(ProcessId(1), Start::Entry(frame), vec![]);
+    process
+        .dictionary
+        .put(Term::static_atom("ok"), Term::Integer(1));
+    let present = Term::tuple(vec![
+        Term::static_atom("dictionary"),
+        Term::static_atom("ok"),
+    ]);
+    assert_eq!(dictionary_item(&process, &present), Some(Term::Integer(1)));
+    let missing = Term::tuple(vec![
+        Term::static_atom("dictionary"),
+        Term::static_atom("error"),
+    ]);
+    assert_eq!(
+        dictionary_item(&process, &missing),
+        Some(Term::static_atom("undefined"))
+    );
+    // A tuple that is not a 2-tuple, a 2-tuple whose first element is not the
+    // atom `dictionary`, and an atom give no dictionary item.
+    assert_eq!(
+        dictionary_item(
+            &process,
+            &Term::tuple(vec![Term::static_atom("dictionary")])
+        ),
+        None
+    );
+    assert_eq!(
+        dictionary_item(
+            &process,
+            &Term::tuple(vec![Term::static_atom("ok"), Term::static_atom("ok")])
+        ),
+        None
+    );
+    assert_eq!(dictionary_item(&process, &Term::static_atom("ok")), None);
+    // The item of `ProcessInfoRequest` gives `None` for a tuple that is not
+    // a dictionary lookup, as `process_info/2` raises `badarg` for it.
+    let request = ProcessInfoRequest {
+        code: &code,
+        atoms: &atoms,
+        current: 0,
+        messages: 0,
+        reader: InfoReader::Other,
+        registered_name: None,
+        backtrace_depth: 0,
+    };
+    assert!(
+        request
+            .item(
+                &process,
+                &Term::tuple(vec![Term::static_atom("ok"), Term::static_atom("ok")])
+            )
+            .unwrap()
+            .is_none()
+    );
+}
