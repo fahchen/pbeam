@@ -700,3 +700,23 @@ fn abandon_reference_classifies_a_term() {
         AbandonReference::False
     ));
 }
+
+#[test]
+fn spawn_request_abandon_raises_badarg_for_a_non_reference() {
+    // `spawn_request_abandon/1` raises `badarg` for a term that is not a
+    // reference (`bif.c:1170-1175`). The fixture probe cannot check the
+    // raise without stopping the run, so the unit test drives the BIF with
+    // a built context.
+    let mut scheduler = Scheduler::new(AtomTable::new());
+    let mut context = crate::runtime::interpreter::bif::BifContext {
+        scheduler: &mut scheduler,
+    };
+    let result = spawn_request_abandon(&mut context, &Term::Integer(1));
+    assert!(matches!(
+        result,
+        BifResult::Raise {
+            class: ExceptionClass::Error,
+            reason
+        } if reason == Term::static_atom("badarg")
+    ));
+}
