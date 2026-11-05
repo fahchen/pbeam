@@ -176,6 +176,10 @@ name = "stty"
 path = "tests/feature/stty.rs"
 
 [[test]]
+name = "ssh_tunnel"
+path = "tests/feature/ssh_tunnel.rs"
+
+[[test]]
 name = "tty_restore"
 path = "tests/feature/tty_restore.rs"
 

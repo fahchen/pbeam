@@ -277,6 +277,27 @@ fn frames_packets_with_a_header_of_1_2_and_4_bytes_as_pinned_erts() {
     );
 }
 
+#[test]
+fn frames_lines_with_the_packet_option_line_as_pinned_erts() {
+    // `{packet, line}` between a socket with the option and a raw socket,
+    // as `packet_get_length` does for `TCP_PB_LINE_LF`
+    // (packet_parser.c:293-322): one line up to and including the
+    // delimiter for each receive and each active message, no header on a
+    // send, a line split across reads, a line that fills the buffer
+    // (inet_drv.c:12973-12980), a line above `packet_size` (`emsgsize`),
+    // and a change of the option.
+    assert_connect_runs(
+        "line",
+        "[[{ok,[{packet,line},{packet_size,0}]},ok,{ok,<<97,98,99,10>>},ok,{ok,<<97,98>>}],\
+         [{ok,<<111,110,101,10>>},{error,timeout},{error,timeout}],\
+         [{error,timeout},{ok,<<116,119,111,10>>}],\
+         [{ok,<<97,98,99,100>>},{ok,<<120,121,122,10>>}],\
+         [{ok,<<97,98,99,100>>},{ok,<<10>>}],\
+         [{ok,<<101,102,103,104>>},{ok,<<10>>}],\
+         [{tcp,<<120,10>>},missing,{ok,[{active,false}]}],[]]\n",
+    );
+}
+
 /// Run `gen_tcp_connect:Function()` on the pinned ERTS and on PBeam, as
 /// [`runs_the_gen_tcp_calls_of_thousand_island_as_pinned_erts`] runs its
 /// probe, and check that each run writes `expected`.
