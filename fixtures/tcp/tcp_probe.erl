@@ -130,6 +130,7 @@ flush() ->
     end.
 
 %% Each part of the tcp_inet driver that PBeam does not run.
+unsupported(asn1) -> control(opened(), 7, [23, 0, 0, 0, 4]);
 unsupported(sctp) -> open_port({spawn_driver, "sctp_inet"}, [binary]);
 unsupported(list) -> open_port({spawn_driver, "tcp_inet"}, []);
 unsupported(mptcp) -> control(open_port({spawn_driver, "tcp_inet"}, [binary]), 1, [1, 1, 4]);

@@ -1,6 +1,7 @@
 //! The receive and send state of a connected socket of a `tcp_inet` port
 //! in passive and active mode with `{packet, raw}`, `{packet, 1}`,
-//! `{packet, 2}`, and `{packet, 4}`, as `tcp_descriptor` keeps it
+//! `{packet, 2}`, `{packet, 4}`, and `{packet, line}`, as
+//! `tcp_descriptor` keeps it
 //! (`inet_drv.c:1308`, 1050-1064, 12268-12325, 12657-12731, 12783-12890,
 //! 12967-13240, 13613-13852, 14234-14370).
 //!
@@ -36,6 +37,12 @@
 //! gives one message for each whole packet. A length above `packet_size`
 //! gives `emsgsize` (inet_drv.c:4279-4304, 12967-13235, 13736-13885;
 //! packet_parser.c:248-284, 483-494).
+//!
+//! With `{packet, line}` (the `packet` value 8), a packet is the bytes up
+//! to and including the delimiter `\n`, and a send adds no header. A line
+//! longer than `packet_size` gives `emsgsize`, and a line longer than the
+//! input buffer gives the bytes of the buffer as a packet
+//! (packet_parser.c:293-322).
 
 use std::{
     collections::VecDeque,
@@ -59,6 +66,15 @@ pub(super) const BUFFER: usize = 9216;
 
 /// The largest receive length (`TCP_MAX_PACKET_SIZE`, `inet_drv.c:1308`).
 const MAX_PACKET: i32 = 0x400_0000;
+
+/// The option `packet` value of a line, where each packet ends after the
+/// delimiter (`TCP_PB_LINE_LF`, `packet_parser.h:44`).
+const LINE: i32 = 8;
+
+/// The delimiter of a line packet (`delimiter`, `'\n'` at the start of a
+/// descriptor, `inet_drv.c:10934`). PBeam has no option `line_delimiter`
+/// (row "`tcp_inet` ports").
+const LINE_DELIMITER: u8 = b'\n';
 
 /// The largest `int` of C (`INT_MAX`), the largest packet length with its
 /// header when `packet_size` is 0 (packet_parser.c:487-489).
@@ -458,8 +474,8 @@ impl Inet {
         }
     }
 
-    /// Return the header length of the packet type: 0 for `raw`, else 1,
-    /// 2, or 4 bytes.
+    /// Return the header length of the packet type: 0 for `raw` and
+    /// `line`, else 1, 2, or 4 bytes.
     ///
     /// # Examples
     ///
@@ -477,23 +493,30 @@ impl Inet {
     }
 
     /// Return the length of the first packet of the buffer with its header,
-    /// as `packet_get_length` does for `raw` and the headers of 1, 2, and 4
-    /// bytes (packet_parser.c:248-284, 483-494): `Ok(None)` when the length
-    /// is not known yet, which is an empty buffer for `raw` and a buffer
-    /// shorter than the header else. A length after the header above
+    /// as `packet_get_length` does for `raw`, `line`, and the headers of 1,
+    /// 2, and 4 bytes (packet_parser.c:248-322, 483-494): `Ok(None)` when
+    /// the length is not known yet, which is an empty buffer for `raw`, a
+    /// buffer shorter than the header, and a line without its delimiter
+    /// that leaves room in the buffer. A length after the header above
     /// `packet_size`, or above `INT_MAX` minus the header length when
     /// `packet_size` is 0, gives `Err(())`, and so does a sum of the header
     /// length and the length that is negative as a C `int`; a sum of 0
-    /// gives `Ok(None)`.
+    /// gives `Ok(None)`. A line without its delimiter above `packet_size`
+    /// also gives `Err(())`.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// // {packet, 2} with the bytes [0, 3, $a]
     /// assert_eq!(port.packet_length(), Ok(Some(5)));
+    /// // {packet, line} with the bytes [97, 10, 98]
+    /// assert_eq!(port.packet_length(), Ok(Some(2)));
     /// ```
     fn packet_length(&self) -> Result<Option<usize>, ()> {
         let bytes = &self.stream.input[..self.stream.filled];
+        if self.packet == LINE {
+            return self.line_length(bytes);
+        }
         let header = self.header_length();
         if header == 0 {
             return Ok((!bytes.is_empty()).then_some(bytes.len()));
@@ -521,6 +544,36 @@ impl Inet {
             total => Ok(Some(
                 usize::try_from(total).expect("a positive int fits usize"),
             )),
+        }
+    }
+
+    /// Return the length of the first line of the bytes `bytes`, as
+    /// `packet_get_length` does for `TCP_PB_LINE_LF` (packet_parser.c:293-322):
+    /// the bytes up to and including the delimiter, `None` while the bytes
+    /// have no delimiter and the buffer has room, and the size of the input
+    /// buffer when the line fills it, as the truncation of
+    /// `tcp_remain` gives (inet_drv.c:12973-12980). A line above
+    /// `packet_size` gives `Err(())`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// // {packet_size, 3} with the bytes [97, 98, 99, 100]
+    /// assert_eq!(port.line_length(&[97, 98, 99, 100]), Err(()));
+    /// ```
+    fn line_length(&self, bytes: &[u8]) -> Result<Option<usize>, ()> {
+        let delimiter = bytes.iter().position(|byte| *byte == LINE_DELIMITER);
+        let length = delimiter.map_or(bytes.len(), |position| position + 1);
+        let size = usize::try_from(self.packet_size).expect("a u32 fits usize");
+        if self.packet_size != 0 && length > size {
+            return Err(());
+        }
+        if self.stream.input_size != 0 && length >= self.stream.input_size {
+            return Ok(Some(self.stream.input_size));
+        }
+        match delimiter {
+            Some(_) => Ok(Some(length)),
+            None => Ok(None),
         }
     }
 

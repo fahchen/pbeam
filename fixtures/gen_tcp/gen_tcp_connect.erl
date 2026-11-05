@@ -1,5 +1,5 @@
 -module(gen_tcp_connect).
--export([main/0, timeout/0, ipv6/0, packet/0]).
+-export([main/0, timeout/0, ipv6/0, packet/0, line/0]).
 
 %% Connects IPv4 tcp_inet sockets to a local listen socket, as
 %% gen_tcp:connect/3,4 call inet_tcp:connect/4 and prim_inet:connect/4
@@ -175,6 +175,54 @@ limit(L, P, Options, Data) ->
               gen_tcp:recv(S, 0, 100), gen_tcp:send(S, <<"z">>), gen_tcp:recv(A, 0, 1000)],
     [ok = gen_tcp:close(X) || X <- [S, A]],
     Result.
+
+%% Sends and receives with {packet, line}, as the SSH version exchange
+%% of ssh_connection_handler reads the hello and each info line
+%% (ssh_connection_handler.erl:617-628, 636-640; inet_drv.c:12967-13235,
+%% 13736-13885; packet_parser.c:293-322): one line for each active message,
+%% one line for each passive receive, a line split across reads, a line
+%% that fills the buffer, and the packet_size limit.
+line() ->
+    process_flag(trap_exit, true),
+    {ok, L} = gen_tcp:listen(0, [inet, binary, {active, false}]),
+    {ok, P} = inet:port(L),
+    {ok, S} = gen_tcp:connect({127, 0, 0, 1}, P,
+                              [inet, binary, {active, false}, {packet, line}]),
+    {ok, A} = gen_tcp:accept(L, 5000),
+    Send = [inet:getopts(S, [packet, packet_size]),
+            gen_tcp:send(S, <<"abc\n">>), gen_tcp:recv(A, 0, 1000),
+            gen_tcp:send(S, [<<"a">>, "b"]), gen_tcp:recv(A, 0, 1000)],
+    %% A send with {packet, line} adds no header: the peer gets the bytes
+    %% as they are.
+    ok = gen_tcp:send(A, <<"one\n">>),
+    Receive = [gen_tcp:recv(S, 0, 1000), gen_tcp:recv(S, 0, 100),
+               gen_tcp:recv(S, 0, 100)],
+    %% A line split across reads waits for its delimiter.
+    ok = gen_tcp:send(A, <<"tw">>),
+    Split = [gen_tcp:recv(S, 0, 100)],
+    ok = gen_tcp:send(A, <<"o\n">>),
+    Split2 = Split ++ [gen_tcp:recv(S, 0, 1000)],
+    %% A line that fills the buffer gives the bytes of the buffer, and the
+    %% rest of the line stays for the next receive.
+    ok = inet:setopts(S, [{buffer, 4}]),
+    ok = gen_tcp:send(A, <<"abcdxyz\n">>),
+    Full = [gen_tcp:recv(S, 0, 1000), gen_tcp:recv(S, 0, 1000)],
+    %% A line of the length of packet_size is a packet, and a longer one
+    %% gives emsgsize (packet_parser.c:293-322, inet_drv.c:12973-12997).
+    ok = inet:setopts(S, [{packet_size, 4}]),
+    ok = gen_tcp:send(A, <<"abcd\nefgh\n">>),
+    Limited = [gen_tcp:recv(S, 0, 1000), gen_tcp:recv(S, 0, 100)],
+    ok = gen_tcp:send(A, <<"x\n">>),
+    ok = inet:setopts(S, [{packet_size, 0}]),
+    After = [gen_tcp:recv(S, 0, 1000), gen_tcp:recv(S, 0, 100)],
+    %% One line for each active message, and a change to active delivers
+    %% the bytes of the buffer (inet_drv.c:7971-7981, 11132-11138).
+    ok = gen_tcp:send(A, [<<"m1\n">>, <<"m2\n">>]),
+    ok = inet:setopts(S, [{active, once}]),
+    Once = [message(), message(), inet:getopts(S, [active])],
+    [ok = gen_tcp:close(X) || X <- [S, A]],
+    ok = gen_tcp:close(L),
+    io:format("~w~n", [[Send, Receive, Split2, Full, Limited, After, Once, flush()]]).
 
 %% In active mode, a packet that packet_size does not allow stops the
 %% delivery with no message (inet_drv.c:13118-13119). The next read event,
