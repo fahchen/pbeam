@@ -2286,6 +2286,30 @@ pub(super) fn read_spawn_options(
 /// let result = spawn_request(&mut context, &module, &function, &arguments, &options)?;
 /// assert!(matches!(result, BifResult::Value(Term::Reference(_))));
 /// ```
+/// The pid and the monitor reference of a `create_process` result, or
+/// `None` for another result. `create_process` returns a pid, or
+/// `{Pid, Reference}` with a monitor (`interpreter.rs:4311`), so the
+/// `None` case is a defensive guard on the internal contract.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(spawn_reply_pair(&BifResult::Value(Term::Pid(ProcessId(1)))), Some((ProcessId(1), None)));
+/// assert_eq!(spawn_reply_pair(&BifResult::Value(Term::static_atom("x"))), None);
+/// ```
+fn spawn_reply_pair(result: &BifResult) -> Option<(ProcessId, Option<Reference>)> {
+    match result {
+        BifResult::Value(Term::Pid(pid)) => Some((*pid, None)),
+        BifResult::Value(Term::Tuple(pair)) => {
+            let [Term::Pid(pid), Term::Reference(reference)] = pair.as_ref() else {
+                return None;
+            };
+            Some((*pid, Some(*reference)))
+        }
+        _ => None,
+    }
+}
+
 pub(super) fn spawn_request(
     context: &mut BifContext<'_>,
     module: &Term,
@@ -2332,19 +2356,11 @@ pub(super) fn spawn_request(
     // (`so.mref = erts_make_ref(parent)`, `erl_process.c:12478-12479`), so
     // the reference of `create_process` is the request reference. Without a
     // monitor the request makes its own (`SPO_ASYNC`, `erl_process.c:12478`).
-    let (pid, reference) = match &result {
-        BifResult::Value(Term::Pid(pid)) => {
-            let scheduler = &mut *context.scheduler;
-            (*pid, scheduler.make_ref()?)
-        }
-        BifResult::Value(Term::Tuple(pair)) => {
-            let [Term::Pid(pid), Term::Reference(reference)] = pair.as_ref() else {
-                return Ok(result);
-            };
-            (*pid, *reference)
-        }
-        _ => return Ok(result),
+    let Some((pid, monitor_reference)) = spawn_reply_pair(&result) else {
+        return Ok(result);
     };
+    let scheduler = &mut *context.scheduler;
+    let reference = monitor_reference.unwrap_or(scheduler.make_ref()?);
     if !message.reply.no_smsg {
         let message = Term::tuple(vec![
             message.tag,

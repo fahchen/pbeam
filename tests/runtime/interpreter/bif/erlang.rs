@@ -656,3 +656,18 @@ fn reads_the_dictionary_lookup_item_and_rejects_each_other_tuple() {
             .is_none()
     );
 }
+
+#[test]
+fn spawn_reply_pair_returns_none_for_a_malformed_monitor_tuple() {
+    // `create_process` returns `{Pid, Reference}` with a monitor and a pid
+    // without one (interpreter.rs:4311), so a compiled fixture cannot build
+    // another tuple result. The defensive guard returns `None` for a tuple
+    // of another shape, so the caller leaves the result untouched.
+    let malformed = BifResult::Value(Term::tuple(vec![
+        Term::static_atom("ok"),
+        Term::Reference(crate::term::Reference(7)),
+    ]));
+    assert_eq!(spawn_reply_pair(&malformed), None);
+    let not_a_tuple = BifResult::Value(Term::static_atom("ok"));
+    assert_eq!(spawn_reply_pair(&not_a_tuple), None);
+}

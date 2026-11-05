@@ -1391,6 +1391,44 @@ fn runs_the_local_spawn_request_forms_as_pinned_erts() {
             && stderr.contains("unsupported spawn option Tuple([Atom(\"scheduler\"), Integer(1)])"),
         "{output:?}"
     );
+    // `abandon/1` sends a spawn request to a server node and abandons it, so
+    // it covers the external reference of a request of another node
+    // (`bif.c:1171-1174`). Each client needs a server of its own, so the
+    // server and the client pair over both carriers.
+    for socket in [true, false] {
+        let server_name = format!("dreqsv{name}{socket}");
+        let mut server_args = vec![
+            "-sname",
+            &server_name,
+            "-setcookie",
+            "ck",
+            "-pa",
+            "fixtures/dist",
+        ];
+        if socket {
+            server_args.extend(SOCKET_CARRIER);
+        }
+        let node = ErtsNode::start(
+            &epmd,
+            &server_args,
+            "io:format(\"~s~n\", [node()]), timer:sleep(5000).",
+        );
+        let expression = format!("dist_request_probe:abandon('{}'), halt().", node.line());
+        let client_name = format!("dreqac{name}{socket}");
+        let mut client_args = vec!["-sname", &client_name, "-setcookie", "ck", "-hidden"];
+        if socket {
+            client_args.extend(SOCKET_CARRIER);
+        }
+        client_args.extend(["-noshell", "-pa", "fixtures/dist", "-eval", &expression]);
+        let client_args: Vec<String> = client_args.into_iter().map(str::to_owned).collect();
+        let expected = stdout(&erts_erl(&epmd, &client_args));
+        assert!(!expected.is_empty(), "{expected}");
+        assert_eq!(
+            stdout(&pbeam_erl(&epmd, &client_args)),
+            expected,
+            "socket {socket}"
+        );
+    }
 }
 
 #[test]
