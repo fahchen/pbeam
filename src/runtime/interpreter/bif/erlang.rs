@@ -14,7 +14,6 @@ use super::{
     other_process_denial, process_stacktrace,
 };
 use super::{to_i64, to_u64, to_usize};
-use crate::runtime::interpreter::bif::dist::reply_option;
 use crate::beam::code::Instruction;
 use crate::runtime::capability;
 use crate::runtime::dirty::DIRTY_IO_THREADS;
@@ -23,6 +22,7 @@ use crate::runtime::heap_flags::{
 };
 use crate::runtime::host;
 use crate::runtime::interpreter::DEFAULT_ERROR_HANDLER;
+use crate::runtime::interpreter::bif::dist::reply_option;
 use crate::runtime::interpreter::code_table::{AfterOnLoad, CodeTable, Finish};
 use crate::runtime::local_node;
 use crate::runtime::process::{Flush, MonitorKey, Origin, Priority, SpawnReply};
@@ -2328,14 +2328,10 @@ pub(super) fn spawn_request(
     if let Some(unsupported) = values.unsupported {
         return Err(unsupported);
     }
-    let SpawnOptionValues { options, message, .. } = values;
-    let result = create_process(
-        context.scheduler,
-        module,
-        function,
-        arguments,
-        options,
-    )?;
+    let SpawnOptionValues {
+        options, message, ..
+    } = values;
+    let result = create_process(context.scheduler, module, function, arguments, options)?;
     // A monitor of a spawn request uses the reference of the request
     // (`so.mref = erts_make_ref(parent)`, `erl_process.c:12478-12479`), so
     // the reference of `create_process` is the request reference. Without a

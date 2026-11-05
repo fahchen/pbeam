@@ -50,20 +50,21 @@ client(Server) ->
     Spawn = spawn_on(Server),
     Load = load(Server),
     io:format("client: ~0p~n",
-              [[{erpc_call, Call}, {erpc_timeout, Timeout}, {erpc_error, Error},
-                {erpc_throw, Throw}, {erpc_exit, Exit},
-                {erpc_no_connection, NoConnection}, {erpc_multicall, Multicall},
-                {erpc_multicall_timeout, MulticallTimeout},
-                {erpc_multicall_throw, MulticallThrow},
-                {erpc_multicall_missing, MulticallMissing},
-                {rpc_call, Rpc}, {rpc_timeout, RpcTimeout},
-                {rpc_throw, RpcThrow}, {rpc_exit, RpcExit},
-                {rpc_error, RpcError}, {rpc_no_connection, RpcMissing},
-                {rpc_multicall, RpcMulticall},
-                {rpc_multicall_timeout, RpcMulticallTimeout},
-                {rpc_multicall_missing, RpcMulticallMissing},
-                {spawn, Spawn}, {load, Load}]]),
-    ok.
+              [normalize(Server,
+                         [{erpc_call, Call}, {erpc_timeout, Timeout},
+                          {erpc_error, Error}, {erpc_throw, Throw},
+                          {erpc_exit, Exit}, {erpc_no_connection, NoConnection},
+                          {erpc_multicall, Multicall},
+                          {erpc_multicall_timeout, MulticallTimeout},
+                          {erpc_multicall_throw, MulticallThrow},
+                          {erpc_multicall_missing, MulticallMissing},
+                          {rpc_call, Rpc}, {rpc_timeout, RpcTimeout},
+                          {rpc_throw, RpcThrow}, {rpc_exit, RpcExit},
+                          {rpc_error, RpcError}, {rpc_no_connection, RpcMissing},
+                          {rpc_multicall, RpcMulticall},
+                          {rpc_multicall_timeout, RpcMulticallTimeout},
+                          {rpc_multicall_missing, RpcMulticallMissing},
+                          {spawn, Spawn}, {load, Load}])]), ok.
 
 %% Return the name of a node that is not a node of this host.
 missing(Server) ->
@@ -103,6 +104,16 @@ element_of(Server, Name) when Name =:= Server -> server;
 element_of(_Server, Name) when Name =:= node() -> local;
 element_of(_Server, {Class, Reason}) -> {Class, reason(Reason)};
 element_of(_Server, Value) -> Value.
+
+
+%% Replace each occurrence of the server atom `Server` with the atom
+%% `server`, so that the printed line holds no name of the server node and
+%% the ERTS run and the PBeam run give the same text.
+normalize(Server, Server) -> server;
+normalize(_Server, Value) when not is_tuple(Value), not is_list(Value) -> Value;
+normalize(Server, List) when is_list(List) -> [normalize(Server, E) || E <- List];
+normalize(Server, Tuple) when is_tuple(Tuple) ->
+    list_to_tuple([normalize(Server, E) || E <- tuple_to_list(Tuple)]).
 
 %% Start a process on the server node with `erlang:spawn/4`, the call of the
 %% `Node.spawn/4` of Elixir.

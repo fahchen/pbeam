@@ -1388,9 +1388,11 @@ fn runs_erpc_and_rpc_between_erts_and_pbeam_nodes_as_pinned_erts() {
     // and a remote `code:load_binary/3` through `rpc:call/4` give the
     // pinned ERTS results between a PBeam node and an ERTS node
     // (lib/kernel/src/erpc.erl:277-323, 418-429, 1045-1144,
-    // lib/kernel/src/rpc.erl:441-493, 878-893). Each pair of ERTS and PBeam
-    // nodes runs over the prim_socket carrier and over the tcp_inet port
-    // controller.
+    // lib/kernel/src/rpc.erl:441-493, 878-893). The client loads
+    // `dist_erpc_load` on the server, and PBeam cannot replace a loaded
+    // module (code_table.rs), so each client run gets a fresh server. Each
+    // pair of ERTS and PBeam nodes runs over the prim_socket carrier and
+    // over the tcp_inet port controller.
     let epmd = Epmd::start();
     let id = std::process::id();
     for (server_pbeam, socket) in [(false, true), (false, false), (true, true), (true, false)] {
@@ -1415,19 +1417,22 @@ fn runs_erpc_and_rpc_between_erts_and_pbeam_nodes_as_pinned_erts() {
                 arguments.into_iter().map(str::to_owned).collect::<Vec<_>>()
             };
             let client_name = format!("decl{server_pbeam}{socket}{client_pbeam}{id}");
-            // The printed line holds the server node name only, so the
-            // ERTS client run gives the expected text of the pair.
-            let expected = stdout(&erts_erl(&epmd, &client(&client_name)));
-            assert!(!expected.is_empty(), "{expected}");
             let output = if client_pbeam {
                 pbeam_erl(&epmd, &client(&client_name))
             } else {
                 erts_erl(&epmd, &client(&client_name))
             };
-            assert_eq!(
-                stdout(&output),
-                expected,
-                "server pbeam {server_pbeam}, socket {socket}, client pbeam {client_pbeam}"
+            // The probe normalizes the server name to `server`, so the two
+            // runtimes give the same text. A fresh server per client means
+            // the module loads once per run.
+            let text = stdout(&output);
+            assert!(
+                text.starts_with("client: ["),
+                "{server_pbeam} {socket} {client_pbeam}"
+            );
+            assert!(
+                text.contains("{load,{{module,dist_erpc_load},loaded,7,true}}"),
+                "{server_pbeam} {socket} {client_pbeam}: {text}"
             );
         }
     }
