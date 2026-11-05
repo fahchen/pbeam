@@ -160,6 +160,8 @@ fn walks_the_terms_of_the_monitors_the_pending_bif_and_the_length_trap() {
                 connection: 0,
                 remote: None,
                 spawn: None,
+                abandoned: false,
+                spawn_link: false,
             }),
             alias: None,
             watched_by: None,

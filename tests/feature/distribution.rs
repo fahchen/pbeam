@@ -1362,3 +1362,135 @@ fn ends_the_links_of_a_lost_connection_as_pinned_erts() {
         }
     }
 }
+
+#[test]
+fn runs_the_local_spawn_request_forms_as_pinned_erts() {
+    // `erts_internal:spawn_request/4` and `erlang:spawn_request_abandon/1`
+    // of a local node give the pinned ERTS results (bif.c:1078-1208,
+    // erl_process.c:12440-12530, 12949-12976): the request id is a
+    // reference, a bad option raises `badarg` with the `badopt` cause, the
+    // reply keeps the `spawn_reply` or `reply_tag` form, and an abandoned
+    // request that links sends the child the exit signal `abandoned` while
+    // each other abandoned request gives the caller no message.
+    let epmd = Epmd::start();
+    let name = format!("dreq{}", std::process::id());
+    let expression = "dist_request_probe:local(), halt().";
+    let arguments = probe(&["-sname", &name], expression);
+    let erts = stdout(&erts_erl(&epmd, &arguments));
+    assert!(!erts.is_empty(), "{erts}");
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), erts);
+    // The unsupported `{scheduler, 1}` option stops the run, so a separate
+    // invocation asserts its runtime error text.
+    let stop_name = format!("dreqs{name}");
+    let expression = "dist_request_probe:scheduler_stop(), halt().";
+    let arguments = probe(&["-sname", &stop_name], expression);
+    let output = pbeam_erl(&epmd, &arguments);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success()
+            && stderr.contains("unsupported spawn option Tuple([Atom(\"scheduler\"), Integer(1)])"),
+        "{output:?}"
+    );
+    // `abandon/1` sends a spawn request to a server node and abandons it, so
+    // it covers the external reference of a request of another node
+    // (`bif.c:1171-1174`). Each client needs a server of its own, so the
+    // server and the client pair over both carriers.
+    for socket in [true, false] {
+        let server_name = format!("dreqsv{name}{socket}");
+        let mut server_args = vec![
+            "-sname",
+            &server_name,
+            "-setcookie",
+            "ck",
+            "-pa",
+            "fixtures/dist",
+        ];
+        if socket {
+            server_args.extend(SOCKET_CARRIER);
+        }
+        let node = ErtsNode::start(
+            &epmd,
+            &server_args,
+            "io:format(\"~s~n\", [node()]), timer:sleep(5000).",
+        );
+        let expression = format!("dist_request_probe:abandon('{}'), halt().", node.line());
+        let client_name = format!("dreqac{name}{socket}");
+        let mut client_args = vec!["-sname", &client_name, "-setcookie", "ck", "-hidden"];
+        if socket {
+            client_args.extend(SOCKET_CARRIER);
+        }
+        client_args.extend(["-noshell", "-pa", "fixtures/dist", "-eval", &expression]);
+        let client_args: Vec<String> = client_args.into_iter().map(str::to_owned).collect();
+        let expected = stdout(&erts_erl(&epmd, &client_args));
+        assert!(!expected.is_empty(), "{expected}");
+        assert_eq!(
+            stdout(&pbeam_erl(&epmd, &client_args)),
+            expected,
+            "socket {socket}"
+        );
+    }
+}
+
+#[test]
+fn runs_erpc_and_rpc_between_erts_and_pbeam_nodes_as_pinned_erts() {
+    // `erpc:call/4,5`, `erpc:multicall/4,5`, `rpc:call/4,5`,
+    // `rpc:multicall/4,5`, `erlang:spawn/4` (the `Node.spawn/4` of Elixir),
+    // and a remote `code:load_binary/3` through `rpc:call/4` give the
+    // pinned ERTS results between a PBeam node and an ERTS node
+    // (lib/kernel/src/erpc.erl:277-323, 418-429, 1045-1144,
+    // lib/kernel/src/rpc.erl:441-493, 878-893). The client loads
+    // `dist_erpc_load` on the server, and PBeam cannot replace a loaded
+    // module (code_table.rs), so each client run gets a fresh server. Each
+    // pair of ERTS and PBeam nodes runs over the prim_socket carrier and
+    // over the tcp_inet port controller.
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    for (server_pbeam, socket) in [(false, true), (false, false), (true, true), (true, false)] {
+        // The client loads `dist_erpc_load` on the server, and PBeam cannot
+        // replace a loaded module (code_table.rs), so each client run gets a
+        // fresh server. The probe normalizes the server atom to `server`,
+        // so the two runtimes give the same text.
+        let run_client = |client_pbeam: bool| {
+            let name = format!("desrv{server_pbeam}{socket}{client_pbeam}{id}");
+            let mut arguments = vec!["-sname", &name, "-setcookie", "ck", "-pa", "fixtures/dist"];
+            if socket {
+                arguments.extend(SOCKET_CARRIER);
+            }
+            let node = if server_pbeam {
+                pbeam_node(&epmd, &arguments, "dist_erpc_probe:server().")
+            } else {
+                ErtsNode::start(&epmd, &arguments, "dist_erpc_probe:server().")
+            };
+            let expression = format!("dist_erpc_probe:client('{}'), halt().", node.line());
+            let client = |name: &str| {
+                let mut arguments = vec!["-sname", name, "-setcookie", "ck", "-hidden"];
+                if socket {
+                    arguments.extend(SOCKET_CARRIER);
+                }
+                arguments.extend(["-noshell", "-pa", "fixtures/dist", "-eval", &expression]);
+                arguments.into_iter().map(str::to_owned).collect::<Vec<_>>()
+            };
+            let client_name = format!("decl{server_pbeam}{socket}{client_pbeam}{id}");
+            let output = if client_pbeam {
+                pbeam_erl(&epmd, &client(&client_name))
+            } else {
+                erts_erl(&epmd, &client(&client_name))
+            };
+            stdout(&output)
+        };
+        // The ERTS client run gives the expected text of the pair, and the
+        // PBeam client run must equal it, so a wrong timeout, exception, or
+        // nodedown result fails the test.
+        let expected = run_client(false);
+        assert!(
+            expected.starts_with("client: [")
+                && expected.contains("{load,{{module,dist_erpc_load},loaded,7,true}}"),
+            "server pbeam {server_pbeam}, socket {socket}: {expected}"
+        );
+        assert_eq!(
+            run_client(true),
+            expected,
+            "server pbeam {server_pbeam}, socket {socket}"
+        );
+    }
+}

@@ -14,6 +14,10 @@
     spawn_opt/0,
     spawn_opt_link/0,
     spawn_opt_monitor/0,
+    spawn_request/0,
+    spawn_request_link/0,
+    spawn_request_monitor/0,
+    spawn_request_abandon/0,
     open_port/0,
     port_command/0,
     port_close/0,
@@ -142,6 +146,18 @@ spawn_opt() -> attempt(fun() -> erlang:spawn_opt(?MODULE, done, [], []) end).
 spawn_opt_link() -> attempt(fun() -> erlang:spawn_opt(?MODULE, done, [], [link]) end).
 
 spawn_opt_monitor() -> attempt(fun() -> erlang:spawn_opt(?MODULE, done, [], [monitor]) end).
+
+spawn_request() -> attempt(fun() -> erts_internal:spawn_request(?MODULE, done, [], []) end).
+
+spawn_request_link() ->
+    attempt(fun() -> erts_internal:spawn_request(?MODULE, done, [], [link]) end).
+
+spawn_request_monitor() ->
+    attempt(fun() -> erts_internal:spawn_request(?MODULE, done, [], [monitor]) end).
+
+spawn_request_abandon() ->
+    Ref = erts_internal:spawn_request(?MODULE, done, [], [{reply, no}]),
+    attempt(fun() -> erlang:spawn_request_abandon(Ref) end).
 
 open_port() -> attempt(fun() -> cat() end).
 

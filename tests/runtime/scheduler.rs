@@ -1189,6 +1189,8 @@ fn moves_the_containers_of_an_exiting_process_to_the_release_work_list() {
                     connection: 0,
                     remote: None,
                     spawn: None,
+                    abandoned: false,
+                    spawn_link: false,
                 }),
                 alias: None,
                 watched_by: None,
@@ -1259,6 +1261,8 @@ fn releases_the_terms_of_every_container_of_an_exiting_process() {
                     connection: 0,
                     remote: None,
                     spawn: None,
+                    abandoned: false,
+                    spawn_link: false,
                 }),
                 alias: None,
                 watched_by: None,
@@ -1537,6 +1541,8 @@ fn moves_the_monitors_of_an_exiting_process_in_batches() {
                         connection: 0,
                         remote: None,
                         spawn: None,
+                        abandoned: false,
+                        spawn_link: false,
                     }),
                     alias: None,
                     watched_by: None,
@@ -1726,6 +1732,8 @@ fn counts_the_bytes_of_the_release_work_list() {
                     connection: 0,
                     remote: None,
                     spawn: None,
+                    abandoned: false,
+                    spawn_link: false,
                 }),
                 alias: None,
                 watched_by: None,
@@ -4153,4 +4161,295 @@ fn treats_a_local_port_as_an_immediate_reason() {
         crate::term::PortId(1)
     )));
     assert!(!super::signals::is_immediate(&Term::tuple(vec![])));
+}
+
+#[test]
+fn second_abandon_of_a_linked_spawn_request_keeps_its_monitor() {
+    use crate::runtime::process::{MonitorKey, Origin, OriginMonitor, SpawnReply};
+    // `spawn_request_abandon_1` marks a linked pending request abandoned on
+    // the first call, and a second call is no longer an outstanding request,
+    // so it returns `false` and keeps the monitor, whose reply still sends
+    // the child the exit signal `abandoned` (`bif.c:1177-1208`).
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let id = current(&mut scheduler);
+    let key = MonitorKey::Local(Reference(1));
+    {
+        let process = scheduler.processes.get_mut(id).unwrap();
+        process.monitors.insert(
+            key,
+            Origin {
+                monitor: Some(OriginMonitor {
+                    kind: "process",
+                    target: None,
+                    item: atom("spawn_reply"),
+                    tag: atom("DOWN"),
+                    connection: 0,
+                    remote: None,
+                    spawn: Some(SpawnReply {
+                        no_smsg: false,
+                        no_emsg: false,
+                    }),
+                    abandoned: false,
+                    spawn_link: true,
+                }),
+                alias: None,
+                watched_by: None,
+            },
+        );
+    }
+    assert!(scheduler.abandon_spawn_request(Reference(1)));
+    assert!(!scheduler.abandon_spawn_request(Reference(1)));
+    assert!(
+        scheduler.processes[&id].monitors.get(&key).is_some(),
+        "the second abandon keeps the pending monitor of a linked request"
+    );
+    // A request without a link loses its pending monitor on the first
+    // abandon, and a second abandon is no outstanding request
+    // (`bif.c:1197-1208`). The remove path ends the monitor of the
+    // connection.
+    let plain = MonitorKey::Local(Reference(2));
+    {
+        let process = scheduler.processes.get_mut(id).unwrap();
+        process.monitors.insert(
+            plain,
+            Origin {
+                monitor: Some(OriginMonitor {
+                    kind: "process",
+                    target: None,
+                    item: atom("spawn_reply"),
+                    tag: atom("DOWN"),
+                    connection: 0,
+                    remote: None,
+                    spawn: Some(SpawnReply {
+                        no_smsg: false,
+                        no_emsg: false,
+                    }),
+                    abandoned: false,
+                    spawn_link: false,
+                }),
+                alias: None,
+                watched_by: None,
+            },
+        );
+    }
+    assert!(scheduler.abandon_spawn_request(Reference(2)));
+    assert!(!scheduler.abandon_spawn_request(Reference(2)));
+    assert!(
+        scheduler.processes[&id].monitors.get(&plain).is_none(),
+        "the first abandon of a plain request removes its pending monitor"
+    );
+}
+
+#[test]
+fn an_abandoned_spawn_request_error_sends_no_reply() {
+    use super::{dist_table::Controller, signals::HandlingPoint};
+    use crate::runtime::process::{MonitorKey, Origin, OriginMonitor, SpawnReply};
+    // `net_spawn_reply` with an error atom suppresses the message of an
+    // abandoned request, as it suppresses a `{reply, no}` error
+    // (`erl_proc_sig_queue.c:5779-5784`).
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let id = current(&mut scheduler);
+    let name = scheduler.atoms.put("other@host").unwrap();
+    let key = MonitorKey::Local(Reference(1));
+    {
+        let mut dist = scheduler.node.dist();
+        dist.insert(&name, Reference(7), 1);
+        dist.new_connection(&name);
+        assert!(dist.connect(&name, Controller::Process(id), 0).is_some());
+    }
+    let connection = scheduler.node.dist().connection_id(&name);
+    {
+        let process = scheduler.processes.get_mut(id).unwrap();
+        process.monitors.insert(
+            key,
+            Origin {
+                monitor: Some(OriginMonitor {
+                    kind: "process",
+                    target: None,
+                    item: atom("spawn_reply"),
+                    tag: atom("DOWN"),
+                    connection,
+                    remote: None,
+                    spawn: Some(SpawnReply {
+                        no_smsg: false,
+                        no_emsg: false,
+                    }),
+                    abandoned: true,
+                    spawn_link: true,
+                }),
+                alias: None,
+                watched_by: None,
+            },
+        );
+    }
+    scheduler
+        .send_signal(
+            None,
+            id,
+            Signal::SpawnReply {
+                node: name,
+                reference: key,
+                flags: super::dist_spawn::SPAWN_LINK,
+                result: atom("badarg"),
+                connection,
+            },
+        )
+        .unwrap();
+    scheduler
+        .handle_signals(id, 100, 100, HandlingPoint::ScheduleIn)
+        .unwrap();
+    assert_eq!(
+        messages(&scheduler, id.0),
+        [],
+        "an abandoned request gets no error message"
+    );
+    assert!(
+        scheduler.processes[&id].monitors.get(&key).is_none(),
+        "the handler removed the pending monitor"
+    );
+}
+
+#[test]
+fn an_abandoned_spawn_request_success_installs_no_link_and_sends_abandoned() {
+    use super::{dist_table::Controller, signals::HandlingPoint};
+    use crate::runtime::process::{MonitorKey, Origin, OriginMonitor, RemotePid, SpawnReply};
+    // `net_spawn_reply` with a pid for an abandoned linked request gives the
+    // caller no message, sends the new process the exit signal `abandoned`,
+    // and installs no link (`erl_proc_sig_queue.c:5785-5840`). The exit
+    // signal goes to the connection of the new process.
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let id = current(&mut scheduler);
+    let name = scheduler.atoms.put("other@host").unwrap();
+    let key = MonitorKey::Local(Reference(1));
+    let remote = RemotePid {
+        node: name.index(),
+        creation: 1,
+        number: 2,
+        serial: 0,
+    };
+    {
+        let mut dist = scheduler.node.dist();
+        dist.insert(&name, Reference(7), 1);
+        dist.new_connection(&name);
+        assert!(dist.connect(&name, Controller::Process(id), 0).is_some());
+    }
+    let connection = scheduler.node.dist().connection_id(&name);
+    {
+        let process = scheduler.processes.get_mut(id).unwrap();
+        process.monitors.insert(
+            key,
+            Origin {
+                monitor: Some(OriginMonitor {
+                    kind: "process",
+                    target: None,
+                    item: atom("spawn_reply"),
+                    tag: atom("DOWN"),
+                    connection,
+                    remote: None,
+                    spawn: Some(SpawnReply {
+                        no_smsg: false,
+                        no_emsg: false,
+                    }),
+                    abandoned: true,
+                    spawn_link: true,
+                }),
+                alias: None,
+                watched_by: None,
+            },
+        );
+    }
+    scheduler
+        .send_signal(
+            None,
+            id,
+            Signal::SpawnReply {
+                node: name,
+                reference: key,
+                flags: super::dist_spawn::SPAWN_LINK,
+                result: remote.term(),
+                connection,
+            },
+        )
+        .unwrap();
+    scheduler
+        .handle_signals(id, 100, 100, HandlingPoint::ScheduleIn)
+        .unwrap();
+    assert_eq!(
+        messages(&scheduler, id.0),
+        [],
+        "an abandoned request gets no success message"
+    );
+    assert!(
+        scheduler.processes[&id].monitors.get(&key).is_none(),
+        "the handler removed the pending monitor"
+    );
+    assert!(
+        scheduler.processes[&id]
+            .links
+            .get(&LinkId::Remote(remote))
+            .is_none(),
+        "an abandoned request installs no link"
+    );
+}
+
+#[test]
+fn abandon_of_a_remote_request_removes_the_connection_monitor() {
+    use super::dist_table::Controller;
+    use crate::runtime::process::{
+        MonitorKey, Origin, OriginMonitor, RemotePid, RemoteTarget, SpawnReply,
+    };
+    // A pending request of a connection keeps the node of its remote
+    // target. `spawn_request_abandon_1` removes the monitor of the
+    // connection when it removes the pending monitor (`bif.c:1197-1208`).
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let id = current(&mut scheduler);
+    let name = scheduler.atoms.put("other@host").unwrap();
+    {
+        let mut dist = scheduler.node.dist();
+        dist.insert(&name, Reference(7), 1);
+        dist.new_connection(&name);
+        assert!(dist.connect(&name, Controller::Process(id), 0).is_some());
+    }
+    let connection = scheduler.node.dist().connection_id(&name);
+    let remote = RemotePid {
+        node: name.index(),
+        creation: 1,
+        number: 2,
+        serial: 0,
+    };
+    let key = MonitorKey::Local(Reference(3));
+    {
+        let process = scheduler.processes.get_mut(id).unwrap();
+        process.monitors.insert(
+            key,
+            Origin {
+                monitor: Some(OriginMonitor {
+                    kind: "process",
+                    target: None,
+                    item: atom("spawn_reply"),
+                    tag: atom("DOWN"),
+                    connection,
+                    remote: Some(RemoteTarget::Pid(remote)),
+                    spawn: Some(SpawnReply {
+                        no_smsg: false,
+                        no_emsg: false,
+                    }),
+                    abandoned: false,
+                    spawn_link: false,
+                }),
+                alias: None,
+                watched_by: None,
+            },
+        );
+    }
+    assert!(scheduler.abandon_spawn_request(Reference(3)));
+    assert!(scheduler.processes[&id].monitors.get(&key).is_none());
 }

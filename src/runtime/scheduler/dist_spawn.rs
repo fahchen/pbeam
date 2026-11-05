@@ -4,7 +4,7 @@ use super::Scheduler;
 use crate::{
     error::BeamError,
     runtime::{
-        process::{MonitorKey, Origin, OriginMonitor, Priority, SpawnReply, StartFlags},
+        process::{MonitorKey, Origin, OriginMonitor, Priority, SpawnLink, SpawnReply, StartFlags},
         signal::Signal,
     },
     term::{Atom, ProcessId, Reference, Term},
@@ -24,9 +24,10 @@ pub(in crate::runtime) const SPAWN_MONITOR: i64 = 2;
 impl Scheduler {
     /// Start a spawn request of `module:function` with `arity` arguments of
     /// node `node`, as `erts_internal_dist_spawn_request_4` does
-    /// (`dist.c:5850-6120`): make the reference, keep a pending monitor when
-    /// `monitor` is set, and send `DOP_SPAWN_REQUEST` with the argument list
-    /// as the message. Return the reference and whether a monitor is set.
+    /// (`dist.c:5850-6120`): make the reference, keep a pending monitor with
+    /// the reply policy, the `link` flag, and the `monitor` tag, and send
+    /// `DOP_SPAWN_REQUEST` with the argument list as the message. Return the
+    /// reference and whether a monitor is set.
     ///
     /// # Errors
     ///
@@ -43,6 +44,7 @@ impl Scheduler {
         monitor: Option<&Term>,
         reply_tag: &Term,
         reply: SpawnReply,
+        link: SpawnLink,
     ) -> Result<(Reference, bool), BeamError> {
         let watcher = self.current_process_mut().id;
         let reference = self.make_ref()?;
@@ -58,6 +60,8 @@ impl Scheduler {
                 connection: 0,
                 remote: None,
                 spawn: Some(reply),
+                abandoned: false,
+                spawn_link: link.into(),
             }),
             alias: None,
             watched_by: None,

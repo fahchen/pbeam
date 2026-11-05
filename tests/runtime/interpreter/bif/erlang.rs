@@ -656,3 +656,82 @@ fn reads_the_dictionary_lookup_item_and_rejects_each_other_tuple() {
             .is_none()
     );
 }
+
+#[test]
+fn spawn_reply_pair_returns_none_for_a_malformed_monitor_tuple() {
+    // `create_process` returns `{Pid, Reference}` with a monitor and a pid
+    // without one (interpreter.rs:4311), so a compiled fixture cannot build
+    // another tuple result. The defensive guard returns `None` for a tuple
+    // of another shape, so the caller leaves the result untouched.
+    let malformed = BifResult::Value(Term::tuple(vec![
+        Term::static_atom("ok"),
+        Term::Reference(crate::term::Reference(7)),
+    ]));
+    assert_eq!(spawn_reply_pair(&malformed), None);
+    let not_a_tuple = BifResult::Value(Term::static_atom("ok"));
+    assert_eq!(spawn_reply_pair(&not_a_tuple), None);
+}
+
+#[test]
+fn abandon_reference_classifies_a_term() {
+    // `spawn_request_abandon/1` ends an internal reference, gives `false`
+    // for an external reference of another node, and raises `badarg` for a
+    // term that is not a reference (`bif.c:1170-1175`). A fixture reaches
+    // no external reference and no non-reference in the same run, so the
+    // pure check covers the three classes.
+    use crate::term::Atom;
+    use crate::term::external_id::{ExternalData, ExternalId};
+    use std::sync::Arc;
+    assert!(matches!(
+        abandon_reference(&Term::Reference(crate::term::Reference(1))),
+        AbandonReference::Pending(_)
+    ));
+    assert!(matches!(
+        abandon_reference(&Term::Integer(1)),
+        AbandonReference::Badarg
+    ));
+    let external = Term::External(Arc::new(ExternalId {
+        node: Atom::from_static("nonode@nohost").unwrap(),
+        creation: 1,
+        data: ExternalData::Reference(vec![1].into_boxed_slice()),
+    }));
+    assert!(matches!(
+        abandon_reference(&external),
+        AbandonReference::False
+    ));
+}
+
+#[test]
+fn spawn_request_abandon_raises_badarg_for_a_non_reference() {
+    // `spawn_request_abandon/1` raises `badarg` for a term that is not a
+    // reference (`bif.c:1170-1175`). The fixture probe cannot check the
+    // raise without stopping the run, so the unit test drives the BIF with
+    // a built context.
+    use crate::term::Atom;
+    use crate::term::external_id::{ExternalData, ExternalId};
+    use std::sync::Arc;
+    let mut scheduler = Scheduler::new(AtomTable::new());
+    let mut context = crate::runtime::interpreter::bif::BifContext {
+        scheduler: &mut scheduler,
+    };
+    let result = spawn_request_abandon(&mut context, &Term::Integer(1));
+    assert!(matches!(
+        result,
+        BifResult::Raise {
+            class: ExceptionClass::Error,
+            reason
+        } if reason == Term::static_atom("badarg")
+    ));
+    // An external reference of another node is no outstanding request
+    // (`bif.c:1171-1174`), so the BIF gives `false`.
+    let external = Term::External(Arc::new(ExternalId {
+        node: Atom::from_static("nonode@nohost").unwrap(),
+        creation: 1,
+        data: ExternalData::Reference(vec![1].into_boxed_slice()),
+    }));
+    let result = spawn_request_abandon(&mut context, &external);
+    assert!(matches!(
+        &result,
+        BifResult::Value(Term::Atom(atom)) if atom.is_static("false")
+    ));
+}
