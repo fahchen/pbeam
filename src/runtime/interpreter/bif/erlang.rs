@@ -5799,7 +5799,12 @@ fn remote_process_info(
     item: &Term,
 ) -> Result<Option<BifResult>, BeamError> {
     let atoms = &scheduler.atoms;
-    let carried = |item: &Term| matches!(item, Term::Atom(name) if OTHER_PROCESS_INFO_ITEMS.contains(&atoms.name_of(name)));
+    let carried = |item: &Term| {
+        matches!(item, Term::Tuple(elements)
+            if matches!(elements.as_ref(), [Term::Atom(key), _] if key.is_static("dictionary")))
+            || matches!(item, Term::Atom(name)
+                if OTHER_PROCESS_INFO_ITEMS.contains(&atoms.name_of(name)))
+    };
     let all_carried = match item.proper_list() {
         Some(mut items) => items.all(carried),
         None => carried(item),
