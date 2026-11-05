@@ -3665,9 +3665,12 @@ impl Scheduler {
         else {
             return false;
         };
-        if monitor.spawn.is_none() || monitor.target.is_some() {
-            // An ordinary monitor and a pending request that completed are
-            // no outstanding spawn request (`bif.c:1177-1184`).
+        if monitor.spawn.is_none() || monitor.target.is_some() || monitor.abandoned {
+            // An ordinary monitor, a pending request that completed, and a
+            // request that the caller abandoned already are no outstanding
+            // spawn request (`bif.c:1177-1184`). The second abandon keeps
+            // the pending monitor of a linked request, so the reply still
+            // sends the child the exit signal `abandoned`.
             return false;
         }
         let link = monitor.spawn_link;

@@ -49,20 +49,27 @@ local() ->
                                 {bad_arguments, BadArguments},
                                 {replies, Replies}, {tag, Tag},
                                 {monitors, Monitors}, {link, Link},
-                                {abandon, Abandon}, {options, Options},
+                                {abandon, Abandon},
+                                {options, Options},
                                 {internal, Internal}]]),
     ok.
 
 %% Print how `spawn_request_abandon/1` treats a request that waits on the
 %% server node: the request of a monitor ends, and a request that has no
-%% monitor is not pending (`bif.c:1166-1208`).
+%% monitor is not pending (`bif.c:1166-1208`). A linked request stays
+%% pending for the whole sleep, so a second abandon of it gives `false` with
+%% no effect, and the reply still sends the child an exit signal with the
+%% reason `abandoned` (`erl_proc_sig_queue.c:5785-5840`).
 abandon(Server) ->
     true = net_kernel:connect_node(Server),
+    Linked = spawn_request(Server, timer, sleep, [1000],
+                           [{reply, no}, monitor, link]),
     io:format("abandon: ~0p~n",
               [[{monitored, abandoned(spawn_request(Server, timer, sleep, [1000],
                                                     [{reply, error_only}, monitor]))},
                 {plain, spawn_request_abandon(spawn_request(Server, timer, sleep,
-                                                           [1000], [{reply, no}]))}]]),
+                                                           [1000], [{reply, no}]))},
+                {double, {spawn_request_abandon(Linked), spawn_request_abandon(Linked)}}]]),
     ok.
 
 %% Return the reply of the request with the option list `Option`.

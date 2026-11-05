@@ -1446,7 +1446,11 @@ fn runs_erpc_and_rpc_between_erts_and_pbeam_nodes_as_pinned_erts() {
     let epmd = Epmd::start();
     let id = std::process::id();
     for (server_pbeam, socket) in [(false, true), (false, false), (true, true), (true, false)] {
-        for client_pbeam in [false, true] {
+        // The client loads `dist_erpc_load` on the server, and PBeam cannot
+        // replace a loaded module (code_table.rs), so each client run gets a
+        // fresh server. The probe normalizes the server atom to `server`,
+        // so the two runtimes give the same text.
+        let run_client = |client_pbeam: bool| {
             let name = format!("desrv{server_pbeam}{socket}{client_pbeam}{id}");
             let mut arguments = vec!["-sname", &name, "-setcookie", "ck", "-pa", "fixtures/dist"];
             if socket {
@@ -1472,18 +1476,21 @@ fn runs_erpc_and_rpc_between_erts_and_pbeam_nodes_as_pinned_erts() {
             } else {
                 erts_erl(&epmd, &client(&client_name))
             };
-            // The probe normalizes the server name to `server`, so the two
-            // runtimes give the same text. A fresh server per client means
-            // the module loads once per run.
-            let text = stdout(&output);
-            assert!(
-                text.starts_with("client: ["),
-                "{server_pbeam} {socket} {client_pbeam}"
-            );
-            assert!(
-                text.contains("{load,{{module,dist_erpc_load},loaded,7,true}}"),
-                "{server_pbeam} {socket} {client_pbeam}: {text}"
-            );
-        }
+            stdout(&output)
+        };
+        // The ERTS client run gives the expected text of the pair, and the
+        // PBeam client run must equal it, so a wrong timeout, exception, or
+        // nodedown result fails the test.
+        let expected = run_client(false);
+        assert!(
+            expected.starts_with("client: [")
+                && expected.contains("{load,{{module,dist_erpc_load},loaded,7,true}}"),
+            "server pbeam {server_pbeam}, socket {socket}: {expected}"
+        );
+        assert_eq!(
+            run_client(true),
+            expected,
+            "server pbeam {server_pbeam}, socket {socket}"
+        );
     }
 }

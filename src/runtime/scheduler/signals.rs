@@ -1241,7 +1241,10 @@ impl Scheduler {
                 .get_mut(id)
                 .map(|p| p.monitors.remove(&reference));
             let process = self.processes.get_mut(id).expect("the process is alive");
-            if reply.no_emsg {
+            if reply.no_emsg || abandoned {
+                // An abandoned request gives the caller no error message
+                // (`erl_proc_sig_queue.c:5779-5784`), as a suppressed error
+                // does.
                 process.mailbox.remove(node_id);
             } else {
                 let message = Term::tuple(vec![
@@ -1320,7 +1323,10 @@ impl Scheduler {
                     .get_mut(id)
                     .map(|p| p.monitors.remove(&reference));
             }
-            if flags & super::dist_spawn::SPAWN_LINK != 0 {
+            // An abandoned request installs no link: it sends the child
+            // the exit signal `abandoned` instead, in the branch above
+            // (`erl_proc_sig_queue.c:5785-5840`).
+            if !abandoned && flags & super::dist_spawn::SPAWN_LINK != 0 {
                 self.link_on(id, LinkId::Remote(remote), remote, connection);
             }
         }
