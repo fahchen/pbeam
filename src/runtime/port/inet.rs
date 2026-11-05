@@ -220,8 +220,9 @@ pub(in crate::runtime) struct Inet {
     /// the node (`inet_drv.c:4287-4288`).
     deliver: i32,
     /// The option `packet` (`htype`): 0 for `raw` (the start value), 1, 2,
-    /// or 3 for the header of 1, 2, or 4 bytes (`TCP_PB_RAW`, `TCP_PB_1`,
-    /// `TCP_PB_2`, `TCP_PB_4`, `packet_parser.h:35-38`).
+    /// or 3 for the header of 1, 2, or 4 bytes, and 8 for a line that ends
+    /// after its delimiter (`TCP_PB_RAW`, `TCP_PB_1`, `TCP_PB_2`,
+    /// `TCP_PB_4`, `TCP_PB_LINE_LF`, `packet_parser.h:35-44`).
     packet: i32,
     /// The option `packet_size` (`psize`): the largest packet length after
     /// the header, 0 (the start value) for no limit (inet_drv.c:7026-7032).
@@ -864,9 +865,9 @@ impl Inet {
             request = rest;
             let set = match option {
                 // The port stores the packet type (inet_drv.c:7018-7024).
-                // PBeam frames `raw` and the headers of 1, 2, and 4 bytes
-                // only.
-                23 if (0..=3).contains(&value) => {
+                // PBeam frames `raw`, the headers of 1, 2, and 4 bytes, and a
+                // line up to its delimiter.
+                23 if matches!(value, 0..=3 | 8) => {
                     self.packet = value;
                     true
                 }

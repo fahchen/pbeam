@@ -255,6 +255,7 @@ fn stops_the_run_for_each_tcp_inet_part_that_is_not_implemented() {
             "unsupported open_port/2 settings of an inet driver port other than [binary]",
         ),
         ("mptcp", "unsupported tcp_inet protocol 4"),
+        ("asn1", "unsupported tcp_inet option packet 4"),
         ("oobinline", "unsupported tcp_inet option 5"),
         ("recvttl", "unsupported tcp_inet option recvttl true"),
         // ERTS keeps the time of `{linger, {false, 5}}` (inet_drv.c:7362-7370).
