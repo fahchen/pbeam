@@ -111,3 +111,16 @@ fn returns_a_large_dictionary_in_the_erts_order_after_grows_and_shrinks() {
     assert_erts_result("large", &[100]);
     assert_erts_result("large", &[2000]);
 }
+
+#[test]
+fn gives_the_dictionary_item_of_process_info_2() {
+    // `info/0` reads the `{dictionary, Key}` item of the caller for a present
+    // key, a missing key, a nil value, and the whole `dictionary` item, alone
+    // and in a list. `other/0` reads the item of another process. ERTS gives
+    // the value of the key, or `undefined` when the dictionary has no value
+    // for it (`erl_bif_info.c:2285-2304`). `proc_lib:make_neighbour_report/1`
+    // reads the item for each neighbour of a crashing process
+    // (`proc_lib.erl:1073-1093`).
+    assert_erts_result("info", &[]);
+    assert_erts_result("other", &[]);
+}

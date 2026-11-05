@@ -29,8 +29,10 @@ alive_b() -> check(alive_b_run(), killed).
 info_a() ->
     Holder = wait_for(info_b),
     Live = [{registered_name, info_child}, {message_queue_len, 3},
-            {group_leader, Holder}, {priority, high}, {links, [Holder]}, true],
-    check(info_a_run(), {Live, lists:duplicate(6, undefined)}).
+            {group_leader, Holder}, {priority, high}, {links, [Holder]}, true,
+            {{dictionary, dict_key}, dict_value},
+            [{{dictionary, dict_key}, dict_value}, {{dictionary, missing}, undefined}]],
+    check(info_a_run(), {Live, lists:duplicate(7, undefined)}).
 info_b() -> check(info_b_run(), normal).
 
 check(Expected, Expected) -> ok;
@@ -94,11 +96,14 @@ info_a_run() ->
     _ = [Child ! {m, I} || I <- [1, 2, 3]],
     Live = [process_info(Child, Item) || Item <- ?ITEMS],
     {reductions, Reductions} = process_info(Child, reductions),
+    Dict = process_info(Child, {dictionary, dict_key}),
+    DictList = process_info(Child, [{dictionary, dict_key}, {dictionary, missing}]),
     Ref = monitor(process, Child),
     Child ! stop,
     receive {'DOWN', Ref, process, Child, normal} -> ok end,
     Dead = [process_info(Child, Item) || Item <- ?ITEMS ++ [reductions]],
-    {Live ++ [is_integer(Reductions)], Dead}.
+    DeadDict = process_info(Child, {dictionary, dict_key}),
+    {Live ++ [is_integer(Reductions), Dict, DictList], Dead ++ [DeadDict]}.
 
 %% The root that holds a name, starts a linked child with the priority high,
 %% and makes itself the group leader of the child. It returns the exit
@@ -114,5 +119,6 @@ info_b_run() ->
 info_child() ->
     _ = process_flag(priority, high),
     receive go -> ok end,
+    put(dict_key, dict_value),
     true = register(info_child, self()),
     receive stop -> ok end.

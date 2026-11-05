@@ -5524,6 +5524,36 @@ fn is_process_info_item(atoms: &AtomTable, item: &Term) -> bool {
     }
 }
 
+/// Return the value of a `{dictionary, Key}` item of `process`, or `None`
+/// for another item. An absent key gives `undefined`, as `erts_pd_hash_get`
+/// gives it (`erl_bif_info.c:2285-2304`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let lookup = Term::tuple(vec![Term::static_atom("dictionary"), Term::Integer(1)]);
+/// assert_eq!(dictionary_item(process, &lookup), Some(Term::static_atom("undefined")));
+/// assert_eq!(dictionary_item(process, &Term::static_atom("status")), None);
+/// ```
+fn dictionary_item(process: &ProcessState, item: &Term) -> Option<Term> {
+    let Term::Tuple(elements) = item else {
+        return None;
+    };
+    let [Term::Atom(dictionary), key] = elements.as_ref() else {
+        return None;
+    };
+    if !dictionary.is_static("dictionary") {
+        return None;
+    }
+    Some(
+        process
+            .dictionary
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| Term::static_atom("undefined")),
+    )
+}
+
 /// Run `erlang:process_info/2` as `process_info_bif`
 /// (`erl_bif_info.c:1273-1502`) does. First raise `badarg` when `item` is
 /// not an item or a proper list of items, then raise `badarg` when
@@ -5769,7 +5799,12 @@ fn remote_process_info(
     item: &Term,
 ) -> Result<Option<BifResult>, BeamError> {
     let atoms = &scheduler.atoms;
-    let carried = |item: &Term| matches!(item, Term::Atom(name) if OTHER_PROCESS_INFO_ITEMS.contains(&atoms.name_of(name)));
+    let carried = |item: &Term| {
+        matches!(item, Term::Tuple(elements)
+            if matches!(elements.as_ref(), [Term::Atom(key), _] if key.is_static("dictionary")))
+            || matches!(item, Term::Atom(name)
+                if OTHER_PROCESS_INFO_ITEMS.contains(&atoms.name_of(name)))
+    };
     let all_carried = match item.proper_list() {
         Some(mut items) => items.all(carried),
         None => carried(item),
@@ -5842,9 +5877,11 @@ fn caller_info_list(
 ) -> Result<Option<Term>, BeamError> {
     let atoms = &scheduler.atoms;
     let supported = items.iter().all(|item| {
-        matches!(item, Term::Atom(name)
-            if PROCESS_INFO_1_KEYS.contains(&atoms.name_of(name))
-                || atoms.name_of(name) == "current_stacktrace")
+        matches!(item, Term::Tuple(elements)
+            if matches!(elements.as_ref(), [Term::Atom(key), _] if key.is_static("dictionary")))
+            || matches!(item, Term::Atom(name)
+                if PROCESS_INFO_1_KEYS.contains(&atoms.name_of(name))
+                    || atoms.name_of(name) == "current_stacktrace")
     });
     if !supported {
         return Ok(None);
@@ -5866,7 +5903,10 @@ fn caller_info_list(
         let pair = match (found, caller_stacktrace(scheduler, item)?) {
             (_, Some(stacktrace)) => stacktrace,
             (Some(pair), None) => pair.clone(),
-            (None, None) => Term::tuple(vec![item.clone(), Term::nil()]),
+            (None, None) => match dictionary_item(scheduler.current_process(), item) {
+                Some(value) => Term::tuple(vec![item.clone(), value]),
+                None => Term::tuple(vec![item.clone(), Term::nil()]),
+            },
         };
         // ERTS reads a repeated item once and copies its result
         // (`part_res`, `erl_bif_info.c:1134-1145`), so only its first read costs.
@@ -6564,6 +6604,14 @@ impl ProcessInfoRequest<'_> {
                 item.clone(),
                 Term::list_from(frames),
             ])));
+        }
+        // A `{dictionary, Key}` item gives the value of the key, or
+        // `undefined` when the dictionary has no value for it, as
+        // `erts_pd_hash_get` gives it (`erl_bif_info.c:2285-2304`). The
+        // lookup is O(1) and comes before the snapshot of the whole process,
+        // so a list of lookups does not clone the dictionary for each key.
+        if let Some(value) = dictionary_item(process, item) {
+            return Ok(Some(Term::tuple(vec![item.clone(), value])));
         }
         let values = process_info_values(
             self.code,

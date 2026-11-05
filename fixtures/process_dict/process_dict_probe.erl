@@ -1,5 +1,5 @@
 -module(process_dict_probe).
--export([small/0, large/1]).
+-export([small/0, large/1, info/0, other/0, other_init/1]).
 
 %% Put a few keys of each shape, replace two values, and erase keys.
 small() ->
@@ -84,3 +84,35 @@ erase_missing(0) -> ok;
 erase_missing(I) ->
     erase({missing, I}),
     erase_missing(I - 1).
+
+%% Read the `{dictionary, Key}` item of `process_info/2` for a present key, a
+%% missing key, a nil value, and the whole `dictionary` item, alone and in a
+%% list (`erl_bif_info.c:2285-2304`).
+info() ->
+    erase(),
+    put(ok, value),
+    put(error, {1, 2}),
+    put(undefined, []),
+    One = process_info(self(), {dictionary, ok}),
+    Missing = process_info(self(), {dictionary, missing}),
+    Nil = process_info(self(), {dictionary, undefined}),
+    List = process_info(self(), [{dictionary, ok}, {dictionary, missing},
+                                 {dictionary, error}, {dictionary, undefined}]),
+    Whole = process_info(self(), dictionary),
+    {One, Missing, Nil, List, Whole}.
+
+%% Read the `{dictionary, Key}` item of another process.
+other() ->
+    Parent = self(),
+    Pid = spawn(?MODULE, other_init, [Parent]),
+    receive {Pid, ready} -> ok end,
+    One = process_info(Pid, {dictionary, k}),
+    Missing = process_info(Pid, {dictionary, missing}),
+    List = process_info(Pid, [{dictionary, k}, {dictionary, missing}]),
+    Pid ! stop,
+    {One, Missing, List}.
+
+other_init(Parent) ->
+    put(k, v),
+    Parent ! {self(), ready},
+    receive stop -> ok end.
