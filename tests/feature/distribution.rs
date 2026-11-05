@@ -1362,3 +1362,73 @@ fn ends_the_links_of_a_lost_connection_as_pinned_erts() {
         }
     }
 }
+
+#[test]
+fn runs_the_local_spawn_request_forms_as_pinned_erts() {
+    // `erts_internal:spawn_request/4` and `erlang:spawn_request_abandon/1`
+    // of a local node give the pinned ERTS results (bif.c:1078-1208,
+    // erl_process.c:12440-12530, 12949-12976): the request id is a
+    // reference, a bad option raises `badarg` with the `badopt` cause, the
+    // reply keeps the `spawn_reply` or `reply_tag` form, and an abandoned
+    // request that links sends the child the exit signal `abandoned` while
+    // each other abandoned request gives the caller no message.
+    let epmd = Epmd::start();
+    let name = format!("dreq{}", std::process::id());
+    let expression = "dist_request_probe:local(), halt().";
+    let arguments = probe(&["-sname", &name], expression);
+    let erts = stdout(&erts_erl(&epmd, &arguments));
+    assert!(!erts.is_empty(), "{erts}");
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), erts);
+}
+
+#[test]
+fn runs_erpc_and_rpc_between_erts_and_pbeam_nodes_as_pinned_erts() {
+    // `erpc:call/4,5`, `erpc:multicall/4,5`, `rpc:call/4,5`,
+    // `rpc:multicall/4,5`, `erlang:spawn/4` (the `Node.spawn/4` of Elixir),
+    // and a remote `code:load_binary/3` through `rpc:call/4` give the
+    // pinned ERTS results between a PBeam node and an ERTS node
+    // (lib/kernel/src/erpc.erl:277-323, 418-429, 1045-1144,
+    // lib/kernel/src/rpc.erl:441-493, 878-893). Each pair of ERTS and PBeam
+    // nodes runs over the prim_socket carrier and over the tcp_inet port
+    // controller.
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    for (server_pbeam, socket) in [(false, true), (false, false), (true, true), (true, false)] {
+        for client_pbeam in [false, true] {
+            let name = format!("desrv{server_pbeam}{socket}{client_pbeam}{id}");
+            let mut arguments = vec!["-sname", &name, "-setcookie", "ck", "-pa", "fixtures/dist"];
+            if socket {
+                arguments.extend(SOCKET_CARRIER);
+            }
+            let node = if server_pbeam {
+                pbeam_node(&epmd, &arguments, "dist_erpc_probe:server().")
+            } else {
+                ErtsNode::start(&epmd, &arguments, "dist_erpc_probe:server().")
+            };
+            let expression = format!("dist_erpc_probe:client('{}'), halt().", node.line());
+            let client = |name: &str| {
+                let mut arguments = vec!["-sname", name, "-setcookie", "ck", "-hidden"];
+                if socket {
+                    arguments.extend(SOCKET_CARRIER);
+                }
+                arguments.extend(["-noshell", "-pa", "fixtures/dist", "-eval", &expression]);
+                arguments.into_iter().map(str::to_owned).collect::<Vec<_>>()
+            };
+            let client_name = format!("decl{server_pbeam}{socket}{client_pbeam}{id}");
+            // The printed line holds the server node name only, so the
+            // ERTS client run gives the expected text of the pair.
+            let expected = stdout(&erts_erl(&epmd, &client(&client_name)));
+            assert!(!expected.is_empty(), "{expected}");
+            let output = if client_pbeam {
+                pbeam_erl(&epmd, &client(&client_name))
+            } else {
+                erts_erl(&epmd, &client(&client_name))
+            };
+            assert_eq!(
+                stdout(&output),
+                expected,
+                "server pbeam {server_pbeam}, socket {socket}, client pbeam {client_pbeam}"
+            );
+        }
+    }
+}
