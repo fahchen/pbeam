@@ -3237,6 +3237,8 @@ impl Scheduler {
                     connection: 0,
                     remote: None,
                     spawn: None,
+                    abandoned: false,
+                    spawn_link: false,
                 }),
                 alias: None,
                 watched_by: None,
@@ -3532,6 +3534,8 @@ impl Scheduler {
                 connection: 0,
                 remote: remote.clone(),
                 spawn: None,
+                abandoned: false,
+                spawn_link: false,
             }),
             alias: options.alias,
             watched_by: None,
@@ -3630,6 +3634,68 @@ impl Scheduler {
         };
         self.end_monitor(watcher, reference, &monitor)
             .expect("a control message of pids and references encodes");
+        true
+    }
+
+    /// Give up the outstanding spawn request `reference` of the current
+    /// process, as `spawn_request_abandon_1` does (`bif.c:1166-1208`): a
+    /// request that links the new process keeps its pending monitor and
+    /// marks it abandoned, so that the reply of the request sends the child
+    /// an exit signal with the reason `abandoned` (`bif.c:1193-1196`,
+    /// `erl_proc_sig_queue.c:5785-5840`). Each other request loses its
+    /// pending monitor and its place in the monitor list of the connection,
+    /// so the reply and the end of the connection give the caller no message
+    /// (`bif.c:1197-1206`, `erl_proc_sig_queue.c:4876-4886`, `5773-5784`).
+    /// Return whether the request was outstanding.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(scheduler.abandon_spawn_request(reference));
+    /// assert!(!scheduler.abandon_spawn_request(reference));
+    /// ```
+    pub(super) fn abandon_spawn_request(&mut self, reference: Reference) -> bool {
+        let watcher = self.current_process_mut().id;
+        let key = MonitorKey::Local(reference);
+        let Some(monitor) = self
+            .processes
+            .get(watcher)
+            .and_then(|process| process.monitors.get(&key))
+            .and_then(|origin| origin.monitor.as_ref())
+        else {
+            return false;
+        };
+        if monitor.spawn.is_none() || monitor.target.is_some() {
+            // An ordinary monitor and a pending request that completed are
+            // no outstanding spawn request (`bif.c:1177-1184`).
+            return false;
+        }
+        let link = monitor.spawn_link;
+        if link && !monitor.abandoned {
+            let process = self
+                .processes
+                .get_mut(watcher)
+                .expect("the process is alive");
+            let monitor = process
+                .monitors
+                .get_mut(&key)
+                .and_then(|origin| origin.monitor.as_mut())
+                .expect("the monitor is in the tree");
+            monitor.abandoned = true;
+            return true;
+        }
+        // The pending monitor leaves the monitor tree and the monitor list
+        // of its connection, and sends no `DEMONITOR_P` packet: the request
+        // names no remote pid yet (`dist.c:305-320`).
+        let monitor = self
+            .remove_origin_monitor(watcher, key)
+            .expect("the monitor is in the tree");
+        if let Some(target) = &monitor.remote {
+            let node = target.node();
+            self.node
+                .dist()
+                .remove_monitor(watcher, &node, key, monitor.connection);
+        }
         true
     }
 

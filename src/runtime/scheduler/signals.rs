@@ -948,7 +948,7 @@ impl Scheduler {
                 flags,
                 &result,
                 connection,
-            ),
+            )?,
             Signal::DistGroupLeader { leader } => {
                 self.handled(id, node).group_leader = leader;
                 1
@@ -1157,10 +1157,12 @@ impl Scheduler {
         let extra = if is_immediate(&reason) { 8 } else { 1 };
         // A spawn request that waits for its reply gives the caller the
         // message `{Tag, Ref, error, noconnection}` when its connection ends,
-        // and no `DOWN` message (`erl_proc_sig_queue.c:4864-4900`).
+        // and no `DOWN` message (`erl_proc_sig_queue.c:4864-4900`). An
+        // abandoned request gives no message either
+        // (`erl_proc_sig_queue.c:4876-4886`).
         if let Some(reply) = monitor.spawn {
             let process = self.processes.get_mut(id).expect("the process is alive");
-            if reply.no_emsg {
+            if reply.no_emsg || monitor.abandoned {
                 process.mailbox.remove(node);
             } else {
                 let error = Term::tuple(vec![
@@ -1202,7 +1204,7 @@ impl Scheduler {
         flags: i64,
         result: &Term,
         connection: u32,
-    ) -> i32 {
+    ) -> Result<i32, BeamError> {
         let Some(monitor) = self
             .processes
             .get(id)
@@ -1211,7 +1213,7 @@ impl Scheduler {
         else {
             let process = self.processes.get_mut(id).expect("the process is alive");
             process.mailbox.remove(node_id);
-            return 0;
+            return Ok(0);
         };
         // A reply for a reference that is not a pending spawn request, for
         // example the reference of an ordinary monitor, is ignored
@@ -1219,8 +1221,14 @@ impl Scheduler {
         let Some(reply) = monitor.spawn else {
             let process = self.processes.get_mut(id).expect("the process is alive");
             process.mailbox.remove(node_id);
-            return 0;
+            return Ok(0);
         };
+        // The caller abandoned the request with `spawn_request_abandon/1`
+        // (`ERTS_ML_FLG_SPAWN_ABANDONED`). The reply of an abandoned request
+        // gives the caller no message and sets up no monitor and no link,
+        // and a request that links the new process sends it an exit signal
+        // with the reason `abandoned` (`erl_proc_sig_queue.c:5773-5840`).
+        let abandoned = monitor.abandoned;
         let reply_tag = monitor.item.clone();
         if let Term::Atom(reason) = result {
             // The pending request leaves the monitor list of its connection
@@ -1250,9 +1258,7 @@ impl Scheduler {
             // that is not an atom here is a pid.
             let remote = RemotePid::of(result).expect("the reply names a pid or an atom");
             let process = self.processes.get_mut(id).expect("the process is alive");
-            if reply.no_smsg {
-                process.mailbox.remove(node_id);
-            } else {
+            if !abandoned && !reply.no_smsg {
                 let message = Term::tuple(vec![
                     reply_tag,
                     reference.term(),
@@ -1261,8 +1267,30 @@ impl Scheduler {
                 ]);
                 process.mailbox.convert(walk, node_id, message);
                 self.activate(id);
+            } else {
+                process.mailbox.remove(node_id);
             }
-            if flags & super::dist_spawn::SPAWN_MONITOR != 0 {
+            if abandoned {
+                // An abandoned request sets up no monitor and no link to the
+                // caller (`erl_proc_sig_queue.c:5927-6006`). A request that
+                // linked the new process sends it an exit signal with the
+                // reason `abandoned` instead.
+                if flags & super::dist_spawn::SPAWN_LINK != 0 {
+                    self.dist_exit(
+                        node,
+                        result,
+                        &Term::static_atom("abandoned"),
+                        super::dist_output::SendPriority::Normal,
+                    )?;
+                }
+                self.node
+                    .dist()
+                    .remove_monitor(id, node, reference, connection);
+                let _ = self
+                    .processes
+                    .get_mut(id)
+                    .map(|p| p.monitors.remove(&reference));
+            } else if flags & super::dist_spawn::SPAWN_MONITOR != 0 {
                 if let Some(monitor) = self
                     .processes
                     .get_mut(id)
@@ -1296,7 +1324,7 @@ impl Scheduler {
                 self.link_on(id, LinkId::Remote(remote), remote, connection);
             }
         }
-        1
+        Ok(1)
     }
 
     /// Handle a message through the alias `alias` of the process `id`, as
