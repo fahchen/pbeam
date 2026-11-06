@@ -76,6 +76,10 @@ struct Entry {
     connection_id: u32,
     /// The distribution flags of the connection (`dep->dflags`).
     flags: u64,
+    /// The peer's cache entries that this connection has sent.
+    atom_cache_out: HashMap<u16, Atom>,
+    /// The cache entries that the peer has sent on this connection.
+    atom_cache_in: HashMap<u16, Atom>,
     /// The distribution controller of a connected entry (`dep->cid`).
     controller: Option<Controller>,
     /// The process that gives the data of the connection to
@@ -231,6 +235,8 @@ impl DistTable {
                 state: State::Idle,
                 connection_id: start & CONNECTION_ID_MASK,
                 flags: 0,
+                atom_cache_out: HashMap::new(),
+                atom_cache_in: HashMap::new(),
                 controller: None,
                 input_handler: None,
                 input: 0,
@@ -858,6 +864,8 @@ impl Entry {
     fn set_idle(&mut self, order: u64) {
         self.state = State::Idle;
         self.flags = 0;
+        self.atom_cache_out.clear();
+        self.atom_cache_in.clear();
         self.get_size = false;
         self.output.clear();
         self.queue_size = 0;
