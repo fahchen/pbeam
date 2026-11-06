@@ -165,6 +165,78 @@ fn aborts_pending_connections_as_pinned_erts() {
 }
 
 #[test]
+fn delivers_name_sends_queued_on_a_pending_connection_as_pinned_erts() {
+    // bif.c:2391-2417 accepts noconnect on a pending connection.
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    for socket in [false, true] {
+        for pbeam in [false, true] {
+            let server_name = format!("dpendserver{socket}{pbeam}{id}");
+            let mut server_args = vec!["-sname", server_name.as_str(), "-setcookie", "ck"];
+            if socket {
+                server_args.extend(SOCKET_CARRIER);
+            }
+            let server = ErtsNode::start(
+                &epmd,
+                &server_args,
+                "register(pending_receiver,self()), io:format(\"~s~n\",[node()]), \
+                 receive {one,From} -> receive two -> io:format(\"~w~n\",[{one,two}]), From ! ack end end, \
+                 receive stop -> ok after 5000 -> ok end, halt().",
+            );
+            let expression = format!(
+                "N='{}', erts_internal:new_connection(N), \
+                 ok=erlang:send({{pending_receiver,N}},{{one,self()}},[noconnect]), \
+                 ok=erlang:send({{pending_receiver,N}},two,[noconnect]), \
+                 true=net_kernel:connect_node(N), \
+                 receive ack -> io:format(\"true~n\") after 5000 -> io:format(\"timeout~n\") end, halt().",
+                server.line()
+            );
+            let client_name = format!("dpendclient{socket}{pbeam}{id}");
+            let mut args = vec![
+                "-sname",
+                client_name.as_str(),
+                "-setcookie",
+                "ck",
+                "-kernel",
+                "logger_level",
+                "none",
+            ];
+            if socket {
+                args.extend(SOCKET_CARRIER);
+            }
+            args.extend(["-noshell", "-eval", expression.as_str()]);
+            let output = if pbeam {
+                pbeam_erl(&epmd, &args)
+            } else {
+                erts_erl(&epmd, &args)
+            };
+            let text = stdout(&output);
+            assert_eq!(text, "true\n", "socket={socket} pbeam={pbeam}");
+            assert_eq!(server.line(), "{one,two}");
+        }
+    }
+    let name = format!("dpendabort{id}");
+    let expression = "N=pending_abort@nohost, H=erts_internal:new_connection(N), \
+        ok=erlang:send({pending_receiver,N},discard,[noconnect]), \
+        true=erts_internal:abort_pending_connection(N,H), \
+        H2=erts_internal:new_connection(N), Flags=element(3,erts_internal:get_dflags()), \
+        {ok,H2}=erts_internal:create_dist_channel(N,self(),{Flags,1}), \
+        io:format(\"~w~n\",[erlang:dist_ctrl_get_data(H2)]), halt().";
+    let args = [
+        "-sname",
+        &name,
+        "-kernel",
+        "logger_level",
+        "none",
+        "-noshell",
+        "-eval",
+        expression,
+    ];
+    assert_eq!(stdout(&erts_erl(&epmd, &args)), "none\n");
+    assert_eq!(stdout(&pbeam_erl(&epmd, &args)), "none\n");
+}
+
+#[test]
 fn runs_the_bifs_of_a_process_controller_as_pinned_erts() {
     // new_connection/1, abort_pending_connection/2, create_dist_channel/3,
     // the dist_ctrl_* BIFs, dist_get_stat/1, and nodes/1,2 of a connection

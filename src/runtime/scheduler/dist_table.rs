@@ -103,6 +103,8 @@ struct Entry {
     /// The packets that wait for `erlang:dist_ctrl_get_data/1`, each as the
     /// binaries of its iovec (`dep->out_queue`).
     output: VecDeque<Vec<Binary>>,
+    /// Registered-name sends held until the connection flags are known.
+    pending_sends: VecDeque<(ProcessId, Term, Term)>,
     /// The queue size of the packets in `output` (`dep->total_qsize`, see
     /// [`PACKET_OVERHEAD`]).
     queue_size: u64,
@@ -315,6 +317,7 @@ impl DistTable {
                 input: 0,
                 get_size: false,
                 output: VecDeque::new(),
+                pending_sends: VecDeque::new(),
                 queue_size: 0,
                 out: 0,
                 notify: false,
@@ -719,6 +722,13 @@ impl DistTable {
         }
     }
 
+    /// Return whether the entry of `name` has a pending connection.
+    pub(super) fn pending(&self, name: &Atom) -> bool {
+        self.entries
+            .get(&name.index())
+            .is_some_and(|entry| entry.state == State::Pending)
+    }
+
     /// Return the flags, the controller, and the connection id of the entry
     /// of `name` when it is connected (`ERTS_DSIG_PREP_CONNECTED`,
     /// `dist.c:3250-3251`).
@@ -728,6 +738,24 @@ impl DistTable {
             return None;
         }
         Some((entry.flags, entry.controller?, entry.connection_id))
+    }
+
+    /// Queue an ordinary registered-name send while the entry is pending.
+    pub(super) fn enqueue_pending_send(
+        &mut self,
+        name: &Atom,
+        sender: ProcessId,
+        to: Term,
+        message: Term,
+    ) {
+        self.entry_mut(name)
+            .pending_sends
+            .push_back((sender, to, message));
+    }
+
+    /// Take the pending sends while the entry lock is held.
+    pub(super) fn take_pending_sends(&mut self, name: &Atom) -> VecDeque<(ProcessId, Term, Term)> {
+        std::mem::take(&mut self.entry_mut(name).pending_sends)
     }
 
     /// Put the packet `elements` at the end of the output queue of the
@@ -1132,6 +1160,7 @@ impl Entry {
         self.fragments.clear();
         self.get_size = false;
         self.output.clear();
+        self.pending_sends.clear();
         self.queue_size = 0;
         self.notify = false;
         self.controller = None;

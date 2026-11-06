@@ -454,8 +454,11 @@ pub(super) fn create_dist_channel(
         {
             return Ok(BifResult::Value(Term::static_atom("badarg")));
         }
-        dist.connect(name, Controller::Process(controller), flags)
-            .map(|handle| (handle, dist.connection_id(name), dist.nodes_monitors()))
+        let handle = dist.connect(name, Controller::Process(controller), flags);
+        if handle.is_some() {
+            scheduler.dist_flush_pending(&mut dist, name, flags)?;
+        }
+        handle.map(|handle| (handle, dist.connection_id(name), dist.nodes_monitors()))
     };
     let Some((handle, connection, watchers)) = handle else {
         return Ok(if caller == controller {
@@ -513,20 +516,24 @@ fn port_channel(
     let _event = event_lock
         .lock()
         .expect("the node event lock is not poisoned");
-    let setup = |item: Option<&mut crate::runtime::port::Port>| {
+    let mut setup = |item: Option<&mut crate::runtime::port::Port>| -> Result<_, BeamError> {
         let mut dist = node.dist();
-        item.filter(|item| {
-            !node.is_going_down()
-                && node.live_owner(net_kernel).is_some()
-                && !item.closing
-                && item.soft_busy()
-        })
-        .and_then(|_| dist.connect(name, Controller::Port(port), flags))
-        .map(|handle| (handle, dist.connection_id(name), dist.nodes_monitors()))
+        let handle = item
+            .filter(|item| {
+                !node.is_going_down()
+                    && node.live_owner(net_kernel).is_some()
+                    && !item.closing
+                    && item.soft_busy()
+            })
+            .and_then(|_| dist.connect(name, Controller::Port(port), flags));
+        if handle.is_some() {
+            scheduler.dist_flush_pending(&mut dist, name, flags)?;
+        }
+        Ok(handle.map(|handle| (handle, dist.connection_id(name), dist.nodes_monitors())))
     };
     let handle = match node.with_port(port, |item| setup(Some(item))) {
-        Some(handle) => handle,
-        None => setup(None),
+        Some(handle) => handle?,
+        None => setup(None)?,
     };
     let Some((handle, connection, watchers)) = handle else {
         return Ok(BifResult::Value(Term::static_atom("badarg")));
@@ -544,6 +551,7 @@ fn port_channel(
         ]),
     );
     scheduler.nodes_event(name, flags & 1 != 0, Some(connection), None, &watchers);
+    scheduler.dist_port_send(port)?;
     Ok(BifResult::Value(Term::tuple(vec![
         Term::static_atom("ok"),
         handle,

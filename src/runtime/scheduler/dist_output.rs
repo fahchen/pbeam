@@ -90,6 +90,17 @@ impl Scheduler {
     ) -> Result<bool, BeamError> {
         let caller = self.current_process().id;
         let from = Term::Pid(caller);
+        // A pending connection accepts an ordinary registered-name send even
+        // with noconnect (bif.c:2391-2417). Keep it until the negotiated
+        // flags are known, then encode it before publishing the connection.
+        if matches!(to, Term::Tuple(_)) && priority == SendPriority::Normal {
+            let node_ref = Arc::clone(&self.node);
+            let mut dist = node_ref.dist();
+            if dist.pending(node) {
+                dist.enqueue_pending_send(node, caller, to.clone(), message.clone());
+                return Ok(true);
+            }
+        }
         self.dist_output(caller, node, |flags, _| {
             if is_remote_reference(to) && flags & ALIAS == 0 {
                 return None;
@@ -205,35 +216,8 @@ impl Scheduler {
         if let Some(monitor) = monitor {
             dist.insert_monitor_now(node, monitor);
         }
-        let (elements, header_len, control_len) = if flags & 0x2000 != 0 {
-            encode_dist_cached(self, &control, message.as_ref(), dist.atom_cache_out(node))?
-        } else if flags & FRAGMENTS != 0 {
-            let mut packet = vec![131, b'D', 0];
-            let mut control_len = 0;
-            for term in std::iter::once(&control).chain(message.iter()) {
-                let bytes: Vec<u8> = encode_dist(self, term)?
-                    .iter()
-                    .flat_map(Binary::to_bytes)
-                    .collect();
-                if control_len == 0 {
-                    control_len = bytes.len() - 1;
-                }
-                packet.extend_from_slice(&bytes[1..]);
-            }
-            (vec![Binary::from(packet)], 3, control_len)
-        } else {
-            let mut elements = vec![Binary::from(vec![PASS_THROUGH])];
-            elements.extend(encode_dist(self, &control)?);
-            if let Some(message) = message {
-                elements.extend(encode_dist(self, &message)?);
-            }
-            (elements, 0, 0)
-        };
-        let packets = if flags & FRAGMENTS != 0 {
-            fragment_packet(elements, sender, header_len, control_len)
-        } else {
-            vec![elements]
-        };
+        let packets =
+            self.dist_encode_packets(&mut dist, sender, node, flags, &control, message)?;
         let mut notify = false;
         for packet in packets {
             notify |= dist.enqueue(node, packet);
@@ -253,6 +237,66 @@ impl Scheduler {
         Ok(true)
     }
 
+    /// Encode pending sends before releasing the lock that publishes a connection.
+    pub(in crate::runtime) fn dist_flush_pending(
+        &mut self,
+        dist: &mut super::dist_table::DistTable,
+        node: &Atom,
+        flags: u64,
+    ) -> Result<(), BeamError> {
+        for (sender, to, message) in dist.take_pending_sends(node) {
+            let control = send_control(flags, Term::Pid(sender), &to, SendPriority::Normal);
+            for packet in
+                self.dist_encode_packets(dist, sender, node, flags, &control, Some(message))?
+            {
+                dist.enqueue(node, packet);
+            }
+        }
+        Ok(())
+    }
+
+    /// Encode one distribution signal with the flags of its connection.
+    fn dist_encode_packets(
+        &mut self,
+        dist: &mut super::dist_table::DistTable,
+        sender: ProcessId,
+        node: &Atom,
+        flags: u64,
+        control: &Term,
+        message: Option<Term>,
+    ) -> Result<Vec<Vec<Binary>>, BeamError> {
+        let (elements, header_len, control_len) = if flags & 0x2000 != 0 {
+            encode_dist_cached(self, control, message.as_ref(), dist.atom_cache_out(node))?
+        } else if flags & FRAGMENTS != 0 {
+            let mut packet = vec![131, b'D', 0];
+            let mut control_len = 0;
+            for term in std::iter::once(control).chain(message.iter()) {
+                let bytes: Vec<u8> = encode_dist(self, term)?
+                    .iter()
+                    .flat_map(Binary::to_bytes)
+                    .collect();
+                if control_len == 0 {
+                    control_len = bytes.len() - 1;
+                }
+                packet.extend_from_slice(&bytes[1..]);
+            }
+            (vec![Binary::from(packet)], 3, control_len)
+        } else {
+            let mut elements = vec![Binary::from(vec![PASS_THROUGH])];
+            elements.extend(encode_dist(self, control)?);
+            if let Some(message) = message {
+                elements.extend(encode_dist(self, &message)?);
+            }
+            (elements, 0, 0)
+        };
+        let packets = if flags & FRAGMENTS != 0 {
+            fragment_packet(elements, sender, header_len, control_len)
+        } else {
+            vec![elements]
+        };
+        Ok(packets)
+    }
+
     /// Drain the connection queue under the port lock. The queue takes each
     /// packet under the same distribution lock as its atom-cache update, so
     /// no later packet can reach the port before an earlier cache update.
@@ -262,7 +306,7 @@ impl Scheduler {
     /// # Errors
     ///
     /// The errors of [`Self::send_events`].
-    fn dist_port_send(&mut self, port: PortId) -> Result<(), BeamError> {
+    pub(in crate::runtime) fn dist_port_send(&mut self, port: PortId) -> Result<(), BeamError> {
         if self.locked_port == Some(port) {
             self.deferred_dist = true;
             return Ok(());
