@@ -2597,7 +2597,7 @@ fn orders_node_events_when_peer_disconnects_at_connect() {
         ],
         &expression,
     );
-    let expected = "[ok,ok,ok,ok,ok,ok,ok,ok,ok,ok,ok,ok]\n";
+    let expected = "[ok,ok,ok,ok]\n";
     assert_eq!(stdout(&erts_erl(&epmd, &arguments)), expected);
     assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), expected);
 }

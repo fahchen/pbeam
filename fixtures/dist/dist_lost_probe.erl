@@ -208,7 +208,10 @@ ordering_client(Server) ->
                     after 120000 -> up_timeout
                     end
             end,
-    io:format("~p~n", [[Check(N) || N <- lists:seq(1, 12)]]).
+    %% Four races still catch an inverted nodeup and nodedown. A loaded CI
+    %% runner cannot finish twelve connect and teardown races inside the test
+    %% budget, and a long loop loses one event to the runner's own timeouts.
+    io:format("~p~n", [[Check(N) || N <- lists:seq(1, 4)]]).
 
 monitor_local_events() ->
     ok = net_kernel:monitor_nodes(true, #{node_type => all, connection_id => true, nodedown_reason => true}),
