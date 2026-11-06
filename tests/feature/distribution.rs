@@ -303,6 +303,60 @@ fn sends_to_a_name_on_the_first_signal_as_pinned_erts() {
 }
 
 #[test]
+fn applies_auto_connect_policy_to_name_sends_as_pinned_erts() {
+    // net_kernel.erl:1047-1100 aborts a barred or disabled auto-connect.
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    for policy in ["never", "once"] {
+        for pbeam in [false, true] {
+            let server_name = format!("dpolicyserver{policy}{pbeam}{id}");
+            let server = ErtsNode::start(
+                &epmd,
+                &["-sname", &server_name, "-setcookie", "ck"],
+                "register(pending_receiver,self()), io:format(\"~s~n\",[node()]), \
+                 receive {initial,P} -> P ! initial_ack; {final,P} -> P ! final_ack; _ -> halt(3) end, \
+                 receive {final,P2} -> P2 ! final_ack; _ -> halt(4) after 5000 -> ok end, halt().",
+            );
+            let first = if policy == "once" {
+                "{pending_receiver,N} ! {initial,self()}, \
+                 receive initial_ack -> ok after 5000 -> halt(5) end, \
+                 true=erlang:disconnect_node(N), timer:sleep(200),"
+            } else {
+                ""
+            };
+            let expression = format!(
+                "N='{}', {first} {{pending_receiver,N}} ! leaked, sys:get_state(net_kernel), \
+                 false=lists:member(N,nodes()), true=net_kernel:connect_node(N), \
+                 {{pending_receiver,N}} ! {{final,self()}}, \
+                 receive final_ack -> io:format(\"ok~n\") after 5000 -> halt(6) end, halt().",
+                server.line()
+            );
+            let client_name = format!("dpolicyclient{policy}{pbeam}{id}");
+            let args = [
+                "-sname",
+                &client_name,
+                "-setcookie",
+                "ck",
+                "-kernel",
+                "logger_level",
+                "none",
+                "dist_auto_connect",
+                policy,
+                "-noshell",
+                "-eval",
+                &expression,
+            ];
+            let output = if pbeam {
+                pbeam_erl(&epmd, &args)
+            } else {
+                erts_erl(&epmd, &args)
+            };
+            assert_eq!(stdout(&output), "ok\n", "policy={policy} pbeam={pbeam}");
+        }
+    }
+}
+
+#[test]
 fn runs_the_bifs_of_a_process_controller_as_pinned_erts() {
     // new_connection/1, abort_pending_connection/2, create_dist_channel/3,
     // the dist_ctrl_* BIFs, dist_get_stat/1, and nodes/1,2 of a connection
