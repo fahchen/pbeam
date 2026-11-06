@@ -544,7 +544,8 @@ fn exchanges_many_cached_atoms_with_pinned_erts() {
     let node = server.line();
     let expression = format!(
         "true = net_kernel:connect_node('{node}'), \
-         Atoms = [list_to_atom(\"cache_atom_\" ++ integer_to_list(N)) || N <- lists:seq(1,300)], \
+         Atoms = [list_to_atom(lists:duplicate(150, 228)) | \
+         [list_to_atom(\"cache_atom_\" ++ integer_to_list(N)) || N <- lists:seq(1,300)]], \
          Exchange = fun() -> {{cache_echo, '{node}'}} ! {{self(), Atoms}}, \
          receive {{atoms, Result}} -> Result =:= Atoms after 5000 -> timeout end end, \
          A = Exchange(), B = Exchange(), io:format(\"~p~n\", [{{A,B,length(Atoms)}}]), halt()."
@@ -562,11 +563,11 @@ fn exchanges_many_cached_atoms_with_pinned_erts() {
     };
     assert_eq!(
         stdout(&erts_erl(&epmd, &run(&format!("dacerts{id}")))),
-        "{true,true,300}\n"
+        "{true,true,301}\n"
     );
     assert_eq!(
         stdout(&pbeam_erl(&epmd, &run(&format!("dacpbeam{id}")))),
-        "{true,true,300}\n"
+        "{true,true,301}\n"
     );
 }
 
