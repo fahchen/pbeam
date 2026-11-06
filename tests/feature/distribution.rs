@@ -604,6 +604,82 @@ fn accepts_an_empty_distribution_atom_cache_header_as_pinned_erts() {
     );
 }
 
+// ERTS rejects a malformed header or an absent input cache entry and ends
+// the connection (external.c:991-1009, 1069-1107; dist.c:3144-3165).
+// PBeam reports that rejection as a runtime error (row "Distribution").
+fn assert_rejected_distribution_cache_header(packet: &str) {
+    let epmd = Epmd::start();
+    let name = format!("dcbad{}", std::process::id());
+    let expression = format!(
+        "erts_internal:new_connection(cache_reject_peer@nohost), \
+         Flags = element(3, erts_internal:get_dflags()) bor 16#2000, \
+         {{ok, Handle}} = erts_internal:create_dist_channel(cache_reject_peer@nohost, self(), {{Flags,1}}), \
+         erlang:dist_ctrl_put_data(Handle, {packet}), halt()."
+    );
+    let output = pbeam_erl(
+        &epmd,
+        &[
+            "-sname",
+            &name,
+            "-kernel",
+            "logger_level",
+            "none",
+            "-noshell",
+            "-eval",
+            &expression,
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "pbeam: unsupported distribution message that ERTS rejects: ERTS ends the connection: see \"Distribution\" in docs/erts-differences.md\n",
+        "{output:?}"
+    );
+}
+
+macro_rules! rejected_distribution_cache_header {
+    ($name:ident, $packet:expr) => {
+        #[test]
+        fn $name() {
+            assert_rejected_distribution_cache_header($packet);
+        }
+    };
+}
+
+rejected_distribution_cache_header!(rejects_distribution_cache_short_header, "<<131,68>>");
+rejected_distribution_cache_header!(
+    rejects_distribution_cache_unknown_term_reference,
+    "<<131,68,0,82,0>>"
+);
+rejected_distribution_cache_header!(
+    rejects_distribution_cache_unknown_node_reference,
+    "<<131,68,0,104,3,97,2,97,0,88,82,0,0:96>>"
+);
+rejected_distribution_cache_header!(rejects_distribution_cache_bad_header, "<<131,88,0>>");
+rejected_distribution_cache_header!(rejects_distribution_cache_missing_flags, "<<131,68,1>>");
+rejected_distribution_cache_header!(rejects_distribution_cache_missing_index, "<<131,68,1,0>>");
+rejected_distribution_cache_header!(rejects_distribution_cache_unknown_index, "<<131,68,1,0,0>>");
+rejected_distribution_cache_header!(
+    rejects_distribution_cache_missing_short_length,
+    "<<131,68,1,8,0>>"
+);
+rejected_distribution_cache_header!(
+    rejects_distribution_cache_missing_long_length,
+    "<<131,68,1,24,0,0>>"
+);
+rejected_distribution_cache_header!(
+    rejects_distribution_cache_truncated_name,
+    "<<131,68,1,8,0,2,97>>"
+);
+rejected_distribution_cache_header!(
+    rejects_distribution_cache_invalid_utf8,
+    "<<131,68,1,8,0,1,255>>"
+);
+rejected_distribution_cache_header!(
+    rejects_distribution_cache_oversized_name,
+    "<<131,68,1,24,0,1,0,(binary:copy(<<97>>,256))/binary>>"
+);
+
 #[test]
 fn exchanges_cached_identifier_nodes_with_pinned_erts() {
     let epmd = Epmd::start();
