@@ -14,7 +14,7 @@
 //! assert_eq!(bytes, [97, 1]);
 //! ```
 
-use std::{cmp::Ordering, io::Write, ops::Range, sync::Arc};
+use std::{cmp::Ordering, collections::HashMap, io::Write, ops::Range, sync::Arc};
 
 use flate2::{Compression, Decompress, FlushDecompress, Status, write::ZlibEncoder};
 use num_bigint::{BigInt, Sign};
@@ -371,6 +371,7 @@ pub(in crate::runtime) fn encode_dist(
         &Options::default(),
         &mut refs,
         &alias_owner(scheduler),
+        None,
     )?;
     let bytes = compress_term(&body, 0);
     let refs = refs
@@ -417,6 +418,7 @@ fn external_term(
         &options,
         refs,
         &alias_owner(scheduler),
+        None,
     )?;
     let unprefixed = body.len();
     if options.local {
@@ -547,7 +549,7 @@ fn encode(
     options: &Options,
     owner: &dyn Fn(Reference) -> Option<ProcessId>,
 ) -> Result<Vec<u8>, BeamError> {
-    encode_parts(term, atoms, options, &mut Vec::new(), owner)
+    encode_parts(term, atoms, options, &mut Vec::new(), owner, None)
 }
 
 /// Return the owner lookup of the pid references of [`encode_parts`]: the
@@ -579,6 +581,7 @@ fn encode_parts(
     options: &Options,
     refs: &mut Vec<(Range<usize>, Binary)>,
     owner: &dyn Fn(Reference) -> Option<ProcessId>,
+    mut cache: Option<&mut DistAtomEncoder>,
 ) -> Result<Vec<u8>, BeamError> {
     let mut out = Vec::new();
     let mut pending = vec![term];
@@ -601,7 +604,13 @@ fn encode_parts(
         };
         match term {
             Term::Nil => out.push(106),
-            Term::Atom(atom) => encode_atom(atoms.name_of(atom), options, &mut out),
+            Term::Atom(atom) => encode_dist_atom(
+                atoms.name_of(atom),
+                atoms,
+                options,
+                &mut out,
+                cache.as_deref_mut(),
+            ),
             Term::Integer(value) => encode_integer(*value, &mut out),
             Term::BigInt(value) => encode_big(value, &mut out),
             Term::Float(value) if options.minor == 0 => {
@@ -692,14 +701,14 @@ fn encode_parts(
             }
             Term::Pid(ProcessId(data)) => {
                 out.push(88);
-                let creation = encode_sysname(atoms, options, &mut out);
+                let creation = encode_sysname(atoms, options, &mut out, cache.as_deref_mut());
                 out.extend_from_slice(&low_u32(data & u64::from(MAX_PID_NUMBER)).to_be_bytes());
                 out.extend_from_slice(&low_u32(data >> PID_NUMBER_BITS).to_be_bytes());
                 out.extend_from_slice(&creation.to_be_bytes());
             }
             Term::Port(port) => {
                 out.push(120);
-                let creation = encode_sysname(atoms, options, &mut out);
+                let creation = encode_sysname(atoms, options, &mut out, cache.as_deref_mut());
                 out.extend_from_slice(&port.0.to_be_bytes());
                 out.extend_from_slice(&creation.to_be_bytes());
             }
@@ -711,13 +720,13 @@ fn encode_parts(
                 match &id.data {
                     ExternalData::Pid { number, serial } => {
                         out.push(88);
-                        encode_atom(node, options, &mut out);
+                        encode_dist_atom(node, atoms, options, &mut out, cache.as_deref_mut());
                         out.extend_from_slice(&number.to_be_bytes());
                         out.extend_from_slice(&serial.to_be_bytes());
                     }
                     ExternalData::Port(number) => {
                         out.push(120);
-                        encode_atom(node, options, &mut out);
+                        encode_dist_atom(node, atoms, options, &mut out, cache.as_deref_mut());
                         out.extend_from_slice(&number.to_be_bytes());
                     }
                     ExternalData::Reference(numbers) => {
@@ -725,7 +734,7 @@ fn encode_parts(
                         let count = u16::try_from(numbers.len())
                             .expect("a reference has at most 5 numbers");
                         out.extend_from_slice(&count.to_be_bytes());
-                        encode_atom(node, options, &mut out);
+                        encode_dist_atom(node, atoms, options, &mut out, cache.as_deref_mut());
                     }
                 }
                 out.extend_from_slice(&id.creation.to_be_bytes());
@@ -758,7 +767,7 @@ fn encode_parts(
                 }
                 out.push(90);
                 out.extend_from_slice(&be16(numbers.len()));
-                let creation = encode_sysname(atoms, options, &mut out);
+                let creation = encode_sysname(atoms, options, &mut out, cache.as_deref_mut());
                 out.extend_from_slice(&creation.to_be_bytes());
                 for number in numbers {
                     out.extend_from_slice(&number.to_be_bytes());
@@ -771,8 +780,20 @@ fn encode_parts(
                     arity,
                 } => {
                     out.push(113);
-                    encode_atom(atoms.name_of(module), options, &mut out);
-                    encode_atom(atoms.name_of(function), options, &mut out);
+                    encode_dist_atom(
+                        atoms.name_of(module),
+                        atoms,
+                        options,
+                        &mut out,
+                        cache.as_deref_mut(),
+                    );
+                    encode_dist_atom(
+                        atoms.name_of(function),
+                        atoms,
+                        options,
+                        &mut out,
+                        cache.as_deref_mut(),
+                    );
                     encode_integer(i64::from(*arity), &mut out);
                 }
                 // The size, the arity, the module MD5, the index, the free
@@ -787,11 +808,17 @@ fn encode_parts(
                     out.extend_from_slice(lambda.uniq());
                     out.extend_from_slice(&lambda.index().to_be_bytes());
                     out.extend_from_slice(&be32(fun.free().len()));
-                    encode_atom(atoms.name_of(lambda.module()), options, &mut out);
+                    encode_dist_atom(
+                        atoms.name_of(lambda.module()),
+                        atoms,
+                        options,
+                        &mut out,
+                        cache.as_deref_mut(),
+                    );
                     encode_integer(i64::from(lambda.old_index()), &mut out);
                     encode_integer(i64::from(lambda.old_unique()), &mut out);
                     out.push(88);
-                    let creation = encode_sysname(atoms, options, &mut out);
+                    let creation = encode_sysname(atoms, options, &mut out, cache.as_deref_mut());
                     out.extend_from_slice(&[0; 8]);
                     out.extend_from_slice(&creation.to_be_bytes());
                     pending.extend(fun.free().iter().rev());
@@ -805,10 +832,28 @@ fn encode_parts(
                 out.push(67);
                 out.extend_from_slice(&be32(def.order.len()));
                 out.push(u8::from(def.is_exported));
-                encode_atom(atoms.name_of(&def.module), options, &mut out);
-                encode_atom(atoms.name_of(&def.name), options, &mut out);
+                encode_dist_atom(
+                    atoms.name_of(&def.module),
+                    atoms,
+                    options,
+                    &mut out,
+                    cache.as_deref_mut(),
+                );
+                encode_dist_atom(
+                    atoms.name_of(&def.name),
+                    atoms,
+                    options,
+                    &mut out,
+                    cache.as_deref_mut(),
+                );
                 for &index in &def.order {
-                    encode_atom(atoms.name_of(&def.keys[index]), options, &mut out);
+                    encode_dist_atom(
+                        atoms.name_of(&def.keys[index]),
+                        atoms,
+                        options,
+                        &mut out,
+                        cache.as_deref_mut(),
+                    );
                 }
                 pending.extend(def.order.iter().rev().map(|&index| &record.values()[index]));
             }
@@ -849,15 +894,127 @@ fn exact_map_key_order(left: &Term, right: &Term, atoms: &AtomTable) -> Ordering
 /// assert_eq!(encode_sysname(&atoms, &options, &mut out), 4);
 /// assert_eq!(out, [119, 6, b'a', b'@', b'h', b'o', b's', b't']);
 /// ```
-fn encode_sysname(atoms: &AtomTable, options: &Options, out: &mut Vec<u8>) -> u32 {
+fn encode_sysname(
+    atoms: &AtomTable,
+    options: &Options,
+    out: &mut Vec<u8>,
+    cache: Option<&mut DistAtomEncoder>,
+) -> u32 {
     if options.local {
         out.push(106);
         0
     } else {
         let (name, creation) = atoms.this_node();
-        encode_atom(atoms.name_of(&name), options, out);
+        encode_dist_atom(atoms.name_of(&name), atoms, options, out, cache);
         creation
     }
+}
+
+/// The atoms and cache slots used by one outgoing packet.
+struct DistAtomEncoder {
+    slots: HashMap<u16, crate::term::Atom>,
+    entries: Vec<(u16, crate::term::Atom, bool)>,
+}
+
+/// Write a cache reference when the packet can name the atom.
+fn encode_dist_atom(
+    name: &str,
+    atoms: &AtomTable,
+    options: &Options,
+    out: &mut Vec<u8>,
+    cache: Option<&mut DistAtomEncoder>,
+) {
+    if let Some(cache) = cache {
+        let atom = atoms.get(name).expect("encoded atoms exist");
+        let slot = u16::try_from(atom.index() % 2048).expect("cache index fits");
+        if let Some(index) = cache
+            .entries
+            .iter()
+            .position(|(used, existing, _)| *used == slot && *existing == atom)
+        {
+            out.extend_from_slice(&[82, u8::try_from(index).expect("header index fits")]);
+            return;
+        }
+        if cache.entries.len() < 255 && !cache.entries.iter().any(|(used, _, _)| *used == slot) {
+            let new = cache.slots.get(&slot) != Some(&atom);
+            cache.slots.insert(slot, atom.clone());
+            let index = u8::try_from(cache.entries.len()).expect("header index fits");
+            cache.entries.push((slot, atom, new));
+            out.extend_from_slice(&[82, index]);
+            return;
+        }
+    }
+    encode_atom(name, options, out);
+}
+
+/// Encode a packet with one translation table for its control and message.
+pub(in crate::runtime) fn encode_dist_cached(
+    scheduler: &crate::runtime::scheduler::Scheduler,
+    control: &Term,
+    message: Option<&Term>,
+    slots: &mut HashMap<u16, crate::term::Atom>,
+) -> Result<Vec<Binary>, BeamError> {
+    let mut cache = DistAtomEncoder {
+        slots: slots.clone(),
+        entries: Vec::new(),
+    };
+    let options = Options::default();
+    let owner = alias_owner(scheduler);
+    let mut body = encode_parts(
+        control,
+        &scheduler.atoms,
+        &options,
+        &mut Vec::new(),
+        &owner,
+        Some(&mut cache),
+    )?;
+    if let Some(message) = message {
+        body.extend(encode_parts(
+            message,
+            &scheduler.atoms,
+            &options,
+            &mut Vec::new(),
+            &owner,
+            Some(&mut cache),
+        )?);
+    }
+    let count = cache.entries.len();
+    let mut packet = vec![
+        VERSION_MAGIC,
+        b'D',
+        u8::try_from(count).expect("header count fits"),
+    ];
+    // Every control message sent by PBeam has a pid, reference, or name,
+    // and its first atom always enters the translation table.
+    let long = cache
+        .entries
+        .iter()
+        .any(|(_, atom, new)| *new && scheduler.atoms.name_of(atom).len() > 255);
+    let mut flags = vec![0u8; count / 2 + 1];
+    if long {
+        flags[count / 2] |= 1 << ((count % 2) * 4);
+    }
+    for (index, (slot, _, new)) in cache.entries.iter().enumerate() {
+        let nibble =
+            u8::try_from(slot >> 8).expect("cache segment fits") | if *new { 8 } else { 0 };
+        flags[index / 2] |= nibble << ((index % 2) * 4);
+    }
+    packet.extend(flags);
+    for (slot, atom, new) in &cache.entries {
+        packet.push(u8::try_from(slot & 255).expect("low byte fits"));
+        if *new {
+            let name = scheduler.atoms.name_of(atom).as_bytes();
+            if long {
+                packet.extend(be16(name.len()));
+            } else {
+                packet.push(u8::try_from(name.len()).expect("short atom fits"));
+            }
+            packet.extend(name);
+        }
+    }
+    packet.extend(body);
+    *slots = cache.slots;
+    Ok(vec![Binary::from(packet)])
 }
 
 /// Return the term of the pid, port, or reference `data` of the node `node`
@@ -1030,6 +1187,7 @@ pub(super) fn binary_to_term(
         overrun: 0,
         safe,
         local: false,
+        cache: None,
         atoms: &context.scheduler.atoms,
         code: &context.scheduler.code,
         ets: &context.scheduler.ets,
@@ -1065,6 +1223,7 @@ pub(super) fn binary_to_term(
 pub(in crate::runtime) fn decode_dist(
     scheduler: &crate::runtime::scheduler::Scheduler,
     input: &[u8],
+    cache: Option<&[crate::term::Atom]>,
 ) -> Result<Option<(Term, usize)>, BeamError> {
     let seed = scheduler.local_node_hash();
     let mut decoder = Decoder {
@@ -1073,11 +1232,21 @@ pub(in crate::runtime) fn decode_dist(
         overrun: 0,
         safe: false,
         local: false,
+        cache,
         atoms: &scheduler.atoms,
         code: &scheduler.code,
         ets: &scheduler.ets,
     };
-    match decoder.decode_input(seed) {
+    let result = if cache.is_some() {
+        validate(input, seed, cache.map_or(0, <[crate::term::Atom]>::len)).and_then(|()| {
+            decoder
+                .term()
+                .map(|term| (term, decoder.pos + decoder.overrun))
+        })
+    } else {
+        decoder.decode_input(seed)
+    };
+    match result {
         Ok(term_and_size) => Ok(Some(term_and_size)),
         Err(failure) => failure
             .into_error("distribution message")
@@ -1154,6 +1323,8 @@ struct Decoder<'a> {
     safe: bool,
     /// True inside `LOCAL_EXT`: `NIL_EXT` stands for the local node.
     local: bool,
+    /// Atom translation table of the distribution header.
+    cache: Option<&'a [crate::term::Atom]>,
     /// The atom table of the run.
     atoms: &'a AtomTable,
     /// The code table of the run, which holds the fun entries of the loaded
@@ -1296,7 +1467,12 @@ enum NodeScope {
 }
 
 /// Take the node atom of a pid, port, or reference at `index`.
-fn check_sysname(input: &[u8], index: &mut usize, scope: NodeScope) -> Result<(), DecodeError> {
+fn check_sysname(
+    input: &[u8],
+    index: &mut usize,
+    scope: NodeScope,
+    cache_len: usize,
+) -> Result<(), DecodeError> {
     match *input.get(*index).ok_or(DecodeError::Badarg)? {
         106 => {
             if scope == NodeScope::Remote {
@@ -1304,6 +1480,13 @@ fn check_sysname(input: &[u8], index: &mut usize, scope: NodeScope) -> Result<()
             }
             *index += 1;
             Ok(())
+        }
+        82 => {
+            *index += 1;
+            let reference = check_length(input, index, 1)?;
+            (reference < cache_len)
+                .then_some(())
+                .ok_or(DecodeError::Badarg)
         }
         100 | 118 => {
             *index += 1;
@@ -1329,7 +1512,7 @@ fn check_sysname(input: &[u8], index: &mut usize, scope: NodeScope) -> Result<()
     clippy::too_many_lines,
     reason = "mirrors the size walk `decoded_size` of `external.c`: one arm for each external term tag with the check of the node scope; each arm is short"
 )]
-fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
+fn validate(input: &[u8], seed: u32, cache_len: usize) -> Result<(), DecodeError> {
     let mut index = 0usize;
     let mut scope = NodeScope::Remote;
     let mut frames: Vec<CheckFrame> = Vec::new();
@@ -1342,6 +1525,12 @@ fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
             reason = "tag 117 is the old local fun tag, which the decoder names as its own case, so the size check keeps an arm for it apart from the wildcard"
         )]
         match tag {
+            82 => {
+                let reference = check_length(input, &mut index, 1)?;
+                if reference >= cache_len {
+                    return Err(DecodeError::Badarg);
+                }
+            }
             97 => check_skip(input, &mut index, 1)?,
             98 => check_skip(input, &mut index, 4)?,
             99 => check_skip(input, &mut index, FLOAT_TEXT_SIZE)?,
@@ -1426,20 +1615,20 @@ fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
                 check_skip(input, &mut index, 1 + length)?;
             }
             88 | 120 => {
-                check_sysname(input, &mut index, scope)?;
+                check_sysname(input, &mut index, scope, cache_len)?;
                 check_skip(input, &mut index, 12)?;
             }
             103 => {
-                check_sysname(input, &mut index, scope)?;
+                check_sysname(input, &mut index, scope, cache_len)?;
                 check_skip(input, &mut index, 8)?;
                 check_tiny_creation(input, &mut index)?;
             }
             89 => {
-                check_sysname(input, &mut index, scope)?;
+                check_sysname(input, &mut index, scope, cache_len)?;
                 check_skip(input, &mut index, 8)?;
             }
             102 | 101 => {
-                check_sysname(input, &mut index, scope)?;
+                check_sysname(input, &mut index, scope, cache_len)?;
                 check_skip(input, &mut index, 4)?;
                 check_tiny_creation(input, &mut index)?;
             }
@@ -1448,7 +1637,7 @@ fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
                 if count > MAX_REFERENCE_NUMBERS {
                     return Err(DecodeError::Badarg);
                 }
-                check_sysname(input, &mut index, scope)?;
+                check_sysname(input, &mut index, scope, cache_len)?;
                 check_skip(input, &mut index, 4 + 4 * count)?;
             }
             114 => {
@@ -1456,7 +1645,7 @@ fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
                 if count > MAX_REFERENCE_NUMBERS {
                     return Err(DecodeError::Badarg);
                 }
-                check_sysname(input, &mut index, scope)?;
+                check_sysname(input, &mut index, scope, cache_len)?;
                 check_tiny_creation(input, &mut index)?;
                 check_skip(input, &mut index, 4 * count)?;
             }
@@ -1576,13 +1765,14 @@ impl Decoder<'_> {
             Some(plain) => plain,
             None => &self.input[start..],
         };
-        validate(body, seed)?;
+        validate(body, seed, self.cache.map_or(0, <[crate::term::Atom]>::len))?;
         let mut decoder = Decoder {
             input: body,
             pos: 0,
             overrun: 0,
             safe: self.safe,
             local: false,
+            cache: self.cache,
             atoms: self.atoms,
             code: self.code,
             ets: self.ets,
@@ -1737,6 +1927,7 @@ impl Decoder<'_> {
                 record_term(record, Vec::new())
             } else {
                 match tag {
+                    82 => Term::Atom(self.cached_atom()?),
                     97 => Term::Integer(i64::from(self.u8()?)),
                     98 => Term::Integer(i64::from(i32::from_be_bytes(
                         self.take(4)?.try_into().expect("four bytes"),
@@ -2092,6 +2283,7 @@ impl Decoder<'_> {
     /// (`dec_atom`, `external.c:5300-5318`).
     fn header_atom(&mut self, tag: u8) -> Result<crate::term::Atom, DecodeError> {
         match tag {
+            82 => self.cached_atom(),
             100 | 118 => {
                 let length = usize::from(self.u16()?);
                 self.atom(length, CharEncoding::from(tag == 100))
@@ -2102,6 +2294,15 @@ impl Decoder<'_> {
             }
             _ => Err(DecodeError::Badarg),
         }
+    }
+
+    /// Resolve a distribution header atom reference.
+    fn cached_atom(&mut self) -> Result<crate::term::Atom, DecodeError> {
+        let index = usize::from(self.u8()?);
+        self.cache
+            .and_then(|cache| cache.get(index))
+            .cloned()
+            .ok_or(DecodeError::Badarg)
     }
 
     /// Decode an atom of `length` bytes in Latin-1 or UTF-8, as
@@ -2186,6 +2387,7 @@ impl Decoder<'_> {
             return Ok(None);
         }
         let atom = match self.u8()? {
+            82 => self.cached_atom()?,
             100 => {
                 let length = usize::from(self.u16()?);
                 self.atom(length, CharEncoding::Latin1)?

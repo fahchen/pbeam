@@ -40,7 +40,7 @@ use crate::{
     beam::ModuleId,
     error::{BeamError, error},
     term::{
-        Atom, AtomTable, Binary, Group, LiveBytes, MapDrain, PortId, ProcessId, Reference,
+        Atom, AtomTable, Group, LiveBytes, MapDrain, PortId, ProcessId, Reference,
         SMALL_INTEGER_MIN, Term, external::block_hash, print_term,
     },
 };
@@ -485,13 +485,11 @@ pub(super) struct Scheduler {
     /// The port whose lock the scheduler holds in a step of its driver, as
     /// [`Self::tcp_step`] holds it: the write of a distribution packet of
     /// the port takes that lock, which the step holds already, so the
-    /// packet waits in [`Self::deferred_dist`] for the end of the step
+    /// packet waits in the connection queue until the step ends
     /// (`Scheduler::dist_port_send`).
     locked_port: Option<PortId>,
-    /// The distribution packets that wait for the end of the step of
-    /// [`Self::locked_port`], each as the binaries of its iovec, in the
-    /// order of `Scheduler::dist_port_send`.
-    deferred_dist: Vec<Vec<Binary>>,
+    /// Whether the distribution queue needs a drain after the port step.
+    deferred_dist: bool,
 }
 
 /// Whether a spawn links the child to its parent.
@@ -574,7 +572,7 @@ impl Scheduler {
             index: 0,
             wake: Some(wake),
             locked_port: None,
-            deferred_dist: Vec::new(),
+            deferred_dist: false,
         }
     }
 
