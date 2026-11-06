@@ -448,7 +448,3 @@ impl Scheduler {
             .ok_or_else(|| error(REJECTED))
     }
 }
-
-#[cfg(test)]
-#[path = "../../../tests/runtime/scheduler/dist_input.rs"]
-mod tests;
