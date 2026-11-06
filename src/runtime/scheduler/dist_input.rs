@@ -252,10 +252,14 @@ impl Scheduler {
                 };
                 let _ = self.send_signal(Some(crate::term::ProcessId(0)), process, kill);
             }
-            Controller::Port(port) if self.locked_port == Some(port) => {
+            Controller::Port(port) => {
+                assert_eq!(
+                    self.locked_port,
+                    Some(port),
+                    "distribution input holds the port lock"
+                );
                 self.bad_dist_port = Some(port);
             }
-            Controller::Port(port) => self.fail_port(port, Term::static_atom("killed")),
         }
     }
 

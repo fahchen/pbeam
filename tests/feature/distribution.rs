@@ -713,6 +713,46 @@ fn closes_a_port_controller_for_a_fragment_with_an_unknown_sequence() {
     );
 }
 
+#[test]
+fn checks_fragment_layout_when_a_port_is_activated() {
+    // The first packet makes active-once passive. The second packet is
+    // delivered by the control that activates the port again.
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let expression = "process_flag(trap_exit,true), \
+        {ok,L}=gen_tcp:listen(0,[binary,{active,false}]), \
+        {ok,Port}=inet:port(L), \
+        {ok,C}=gen_tcp:connect({127,0,0,1},Port,[binary,{active,false}]), \
+        {ok,A}=gen_tcp:accept(L), Ref=erlang:monitor(port,A), \
+        Node=activation_fragment_peer@nohost, erts_internal:new_connection(Node), \
+        Flags=element(3,erts_internal:get_dflags()) bor 16#800000, \
+        {ok,_}=erts_internal:create_dist_channel(Node,A,{Flags,1}), \
+        ok=inet:setopts(A,[{active,once},{deliver,port},{packet,4}]), \
+        <<131,Control/binary>>=term_to_binary({2,empty,self()}), \
+        <<131,Message/binary>>=term_to_binary(ready), \
+        First= <<131,68,0,Control/binary,Message/binary>>, \
+        Second= <<131,70,3:64,1:64>>, \
+        ok=gen_tcp:send(C,<<(byte_size(First)):32,First/binary,(byte_size(Second)):32,Second/binary>>), \
+        receive ready -> ok after 5000 -> exit(first_timeout) end, \
+        ok=inet:setopts(A,[{active,true}]), \
+        Reason=receive {'DOWN',Ref,port,A,R} -> R after 5000 -> timeout end, \
+        io:format(\"~p~n\",[{Reason,erlang:port_info(A),nodes(connected),gen_tcp:recv(C,0,5000)}]), halt().";
+    let erts_name = format!("dfactiveerts{id}");
+    let pbeam_name = format!("dfactivepb{id}");
+    let erts = ErtsNode::start(
+        &epmd,
+        &["-sname", &erts_name, "-kernel", "logger_level", "none"],
+        expression,
+    );
+    assert_eq!(erts.line(), "{killed,undefined,[],{error,closed}}");
+    let pbeam = pbeam_node(
+        &epmd,
+        &["-sname", &pbeam_name, "-kernel", "logger_level", "none"],
+        expression,
+    );
+    assert_eq!(pbeam.line(), "{killed,undefined,[],{error,closed}}");
+}
+
 // Pinned OTP 29.1.1 exits 139 for sequence 0, fragment 2 with complete
 // control and message. PBeam follows the non-fragmented source path instead.
 #[test]

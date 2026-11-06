@@ -296,7 +296,7 @@ impl Scheduler {
     /// # Errors
     ///
     /// The errors of [`Self::dist_port_send`].
-    pub(super) fn dist_port_flush(&mut self, port: PortId) -> Result<(), BeamError> {
+    pub(in crate::runtime) fn dist_port_flush(&mut self, port: PortId) -> Result<(), BeamError> {
         if std::mem::take(&mut self.deferred_dist) {
             self.dist_port_send(port)?;
         }
