@@ -714,6 +714,40 @@ fn closes_a_port_controller_for_a_fragment_with_an_unknown_sequence() {
 }
 
 #[test]
+fn checks_fragment_layout_from_a_process_input_handler_for_a_port_controller() {
+    // A fragment sequence that does not follow the documented layout closes
+    // the port controller when its input handler is a process.
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let expression = "process_flag(trap_exit,true), \
+        {ok,L}=gen_tcp:listen(0,[binary,{active,false}]), \
+        {ok,Port}=inet:port(L), \
+        {ok,C}=gen_tcp:connect({127,0,0,1},Port,[binary,{active,false},{packet,4}]), \
+        {ok,A}=gen_tcp:accept(L), Ref=erlang:monitor(port,A), \
+        Node=fragment_handler_peer@nohost, erts_internal:new_connection(Node), \
+        Flags=element(3,erts_internal:get_dflags()) bor 16#800000, \
+        {ok,Handle}=erts_internal:create_dist_channel(Node,A,{Flags,1}), \
+        ok=erlang:dist_ctrl_input_handler(Handle,self()), \
+        ok=erlang:dist_ctrl_put_data(Handle,<<131,70,3:64,1:64>>), \
+        Reason=receive {'DOWN',Ref,port,A,R} -> R after 5000 -> timeout end, \
+        io:format(\"~p~n\",[{Reason,erlang:port_info(A),nodes(connected),gen_tcp:recv(C,0,5000)}]), halt().";
+    let erts_name = format!("dfhandlererts{id}");
+    let pbeam_name = format!("dfhandlerpb{id}");
+    let erts = ErtsNode::start(
+        &epmd,
+        &["-sname", &erts_name, "-kernel", "logger_level", "none"],
+        expression,
+    );
+    assert_eq!(erts.line(), "{killed,undefined,[],{error,closed}}");
+    let pbeam = pbeam_node(
+        &epmd,
+        &["-sname", &pbeam_name, "-kernel", "logger_level", "none"],
+        expression,
+    );
+    assert_eq!(pbeam.line(), "{killed,undefined,[],{error,closed}}");
+}
+
+#[test]
 fn checks_fragment_layout_when_a_port_is_activated() {
     // The first packet makes active-once passive. The second packet is
     // delivered by the control that activates the port again.

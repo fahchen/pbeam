@@ -252,14 +252,15 @@ impl Scheduler {
                 };
                 let _ = self.send_signal(Some(crate::term::ProcessId(0)), process, kill);
             }
-            Controller::Port(port) => {
-                assert_eq!(
-                    self.locked_port,
-                    Some(port),
-                    "distribution input holds the port lock"
-                );
+            // A port controller delivers through the port step, which holds
+            // the port lock, so its failure waits for the step to end. A
+            // process input handler (`dist_ctrl_input_handler/2`) delivers
+            // through `dist_ctrl_put_data/2` and holds no port lock, so it
+            // fails the port at once.
+            Controller::Port(port) if self.locked_port == Some(port) => {
                 self.bad_dist_port = Some(port);
             }
+            Controller::Port(port) => self.fail_port(port, Term::static_atom("killed")),
         }
     }
 
