@@ -547,16 +547,18 @@ fragment_reconnect() ->
               end,
     <<131, Control/binary>> = term_to_binary({2, '', self()}),
     {Old, OldRef, OldHandle} = Connect(),
+    RemoteRef = monitor(process, {fragment_remote, Node}),
     ok = erlang:dist_ctrl_put_data(OldHandle, <<131, 69, 7:64, 3:64, 0, Control/binary>>),
     ok = erlang:dist_ctrl_put_data(OldHandle, <<131, 70, 7:64, 1:64>>),
     Reason = receive {'DOWN', OldRef, process, Old, Why} -> Why after 5000 -> timeout end,
+    RemoteReason = receive {'DOWN', RemoteRef, process, _, R} -> R after 5000 -> timeout end,
     Nodes = nodes(connected),
     {New, _NewRef, NewHandle} = Connect(),
     ok = erlang:dist_ctrl_put_data(NewHandle, <<131, 69, 7:64, 2:64, 0, Control/binary, 97>>),
     ok = erlang:dist_ctrl_put_data(NewHandle, <<131, 70, 7:64, 1:64, 42>>),
     Value = receive 42 -> 42 after 5000 -> timeout end,
     New ! stop,
-    show(fragment_reconnect, [Reason, Nodes, Value]).
+    show(fragment_reconnect, [Reason, RemoteReason, Nodes, Value]).
 
 %% Inspect the headers that a process distribution controller takes.
 fragment_output() ->

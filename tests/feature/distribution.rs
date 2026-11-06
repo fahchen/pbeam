@@ -642,10 +642,12 @@ fn kills_the_fragment_controller_on_sequence_errors_as_pinned_erts() {
         case Case of missing -> erlang:dist_ctrl_put_data(H,Last); \
         duplicate -> erlang:dist_ctrl_put_data(H,First), erlang:dist_ctrl_put_data(H,First); \
         wrong -> erlang:dist_ctrl_put_data(H,First), erlang:dist_ctrl_put_data(H,Last); \
-        split -> erlang:dist_ctrl_put_data(H,<<131,69,3:64,2:64,0,97>>) end, \
+        split -> erlang:dist_ctrl_put_data(H,<<131,69,3:64,2:64,0,97>>); \
+        short -> erlang:dist_ctrl_put_data(H,<<131,70>>); \
+        version -> erlang:dist_ctrl_put_data(H,<<130,70,3:64,1:64>>) end, \
         Parent ! survived, receive after 1000 -> ok end end), \
         receive {'DOWN',Ref,process,Pid,R} -> {Case,R,nodes(connected)} after 5000 -> timeout end end, \
-        io:format(\"~w~n\",[[F(1,missing),F(2,duplicate),F(3,wrong),F(4,split)]]), halt().";
+        io:format(\"~w~n\",[[F(1,missing),F(2,duplicate),F(3,wrong),F(4,split),F(5,short),F(6,version)]]), halt().";
     let run = |name: &str| {
         vec![
             "-sname".to_owned(),
@@ -664,7 +666,7 @@ fn kills_the_fragment_controller_on_sequence_errors_as_pinned_erts() {
     ] {
         assert_eq!(
             stdout(&output),
-            "[{missing,killed,[]},{duplicate,killed,[]},{wrong,killed,[]},{split,killed,[]}]\n",
+            "[{missing,killed,[]},{duplicate,killed,[]},{wrong,killed,[]},{split,killed,[]},{short,killed,[]},{version,killed,[]}]\n",
             "{label}: {output:?}"
         );
     }
@@ -705,7 +707,7 @@ fn clears_fragment_sequences_when_a_connection_is_replaced_as_pinned_erts() {
         &["-sname", &pbeam_name, "-kernel", "logger_level", "none"],
         expression,
     );
-    let expected = "fragment_reconnect: [killed,[],42]\n";
+    let expected = "fragment_reconnect: [killed,noconnection,[],42]\n";
     assert_eq!(stdout(&erts_erl(&epmd, &erts)), expected);
     assert_eq!(stdout(&pbeam_erl(&epmd, &pbeam)), expected);
 }
@@ -814,18 +816,21 @@ fn checks_fragment_layout_from_a_process_input_handler_for_a_port_controller() {
         io:format(\"~p~n\",[{Reason,erlang:port_info(A),nodes(connected),gen_tcp:recv(C,0,5000)}]), halt().";
     let erts_name = format!("dfhandlererts{id}");
     let pbeam_name = format!("dfhandlerpb{id}");
-    let erts = ErtsNode::start(
-        &epmd,
-        &["-sname", &erts_name, "-kernel", "logger_level", "none"],
-        expression,
-    );
-    assert_eq!(erts.line(), "{killed,undefined,[],{error,closed}}");
-    let pbeam = pbeam_node(
-        &epmd,
-        &["-sname", &pbeam_name, "-kernel", "logger_level", "none"],
-        expression,
-    );
-    assert_eq!(pbeam.line(), "{killed,undefined,[],{error,closed}}");
+    let run = |name: &str| {
+        vec![
+            "-sname".to_owned(),
+            name.to_owned(),
+            "-kernel".to_owned(),
+            "logger_level".to_owned(),
+            "none".to_owned(),
+            "-noshell".to_owned(),
+            "-eval".to_owned(),
+            expression.to_owned(),
+        ]
+    };
+    let expected = "{killed,undefined,[],{error,closed}}\n";
+    assert_eq!(stdout(&erts_erl(&epmd, &run(&erts_name))), expected);
+    assert_eq!(stdout(&pbeam_erl(&epmd, &run(&pbeam_name))), expected);
 }
 
 #[test]

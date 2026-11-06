@@ -42,6 +42,10 @@ type AtomHeader<'a> = (&'a [u8], Vec<Atom>);
 /// The bytes and atom table of a complete fragment sequence.
 type Reassembled = (Vec<u8>, Vec<Atom>);
 
+#[cfg(test)]
+#[path = "../../../tests/runtime/scheduler/dist_input.rs"]
+mod tests;
+
 impl Scheduler {
     /// Give the packet `packet` with data of a connection with the flags
     /// `flags` to its target, as
