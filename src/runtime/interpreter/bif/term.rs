@@ -14,7 +14,7 @@
 //! assert_eq!(bytes, [97, 1]);
 //! ```
 
-use std::{cmp::Ordering, io::Write, ops::Range, sync::Arc};
+use std::{cmp::Ordering, collections::HashMap, io::Write, ops::Range, sync::Arc};
 
 use flate2::{Compression, Decompress, FlushDecompress, Status, write::ZlibEncoder};
 use num_bigint::{BigInt, Sign};
@@ -371,6 +371,7 @@ pub(in crate::runtime) fn encode_dist(
         &Options::default(),
         &mut refs,
         &alias_owner(scheduler),
+        None,
     )?;
     let bytes = compress_term(&body, 0);
     let refs = refs
@@ -417,6 +418,7 @@ fn external_term(
         &options,
         refs,
         &alias_owner(scheduler),
+        None,
     )?;
     let unprefixed = body.len();
     if options.local {
@@ -547,7 +549,7 @@ fn encode(
     options: &Options,
     owner: &dyn Fn(Reference) -> Option<ProcessId>,
 ) -> Result<Vec<u8>, BeamError> {
-    encode_parts(term, atoms, options, &mut Vec::new(), owner)
+    encode_parts(term, atoms, options, &mut Vec::new(), owner, None)
 }
 
 /// Return the owner lookup of the pid references of [`encode_parts`]: the
@@ -579,6 +581,7 @@ fn encode_parts(
     options: &Options,
     refs: &mut Vec<(Range<usize>, Binary)>,
     owner: &dyn Fn(Reference) -> Option<ProcessId>,
+    mut cache: Option<&mut DistAtomEncoder>,
 ) -> Result<Vec<u8>, BeamError> {
     let mut out = Vec::new();
     let mut pending = vec![term];
@@ -601,7 +604,13 @@ fn encode_parts(
         };
         match term {
             Term::Nil => out.push(106),
-            Term::Atom(atom) => encode_atom(atoms.name_of(atom), options, &mut out),
+            Term::Atom(atom) => encode_dist_atom(
+                atoms.name_of(atom),
+                atoms,
+                options,
+                &mut out,
+                cache.as_deref_mut(),
+            ),
             Term::Integer(value) => encode_integer(*value, &mut out),
             Term::BigInt(value) => encode_big(value, &mut out),
             Term::Float(value) if options.minor == 0 => {
@@ -692,14 +701,14 @@ fn encode_parts(
             }
             Term::Pid(ProcessId(data)) => {
                 out.push(88);
-                let creation = encode_sysname(atoms, options, &mut out);
+                let creation = encode_sysname(atoms, options, &mut out, cache.as_deref_mut());
                 out.extend_from_slice(&low_u32(data & u64::from(MAX_PID_NUMBER)).to_be_bytes());
                 out.extend_from_slice(&low_u32(data >> PID_NUMBER_BITS).to_be_bytes());
                 out.extend_from_slice(&creation.to_be_bytes());
             }
             Term::Port(port) => {
                 out.push(120);
-                let creation = encode_sysname(atoms, options, &mut out);
+                let creation = encode_sysname(atoms, options, &mut out, cache.as_deref_mut());
                 out.extend_from_slice(&port.0.to_be_bytes());
                 out.extend_from_slice(&creation.to_be_bytes());
             }
@@ -711,13 +720,13 @@ fn encode_parts(
                 match &id.data {
                     ExternalData::Pid { number, serial } => {
                         out.push(88);
-                        encode_atom(node, options, &mut out);
+                        encode_dist_atom(node, atoms, options, &mut out, cache.as_deref_mut());
                         out.extend_from_slice(&number.to_be_bytes());
                         out.extend_from_slice(&serial.to_be_bytes());
                     }
                     ExternalData::Port(number) => {
                         out.push(120);
-                        encode_atom(node, options, &mut out);
+                        encode_dist_atom(node, atoms, options, &mut out, cache.as_deref_mut());
                         out.extend_from_slice(&number.to_be_bytes());
                     }
                     ExternalData::Reference(numbers) => {
@@ -725,7 +734,7 @@ fn encode_parts(
                         let count = u16::try_from(numbers.len())
                             .expect("a reference has at most 5 numbers");
                         out.extend_from_slice(&count.to_be_bytes());
-                        encode_atom(node, options, &mut out);
+                        encode_dist_atom(node, atoms, options, &mut out, cache.as_deref_mut());
                     }
                 }
                 out.extend_from_slice(&id.creation.to_be_bytes());
@@ -758,7 +767,7 @@ fn encode_parts(
                 }
                 out.push(90);
                 out.extend_from_slice(&be16(numbers.len()));
-                let creation = encode_sysname(atoms, options, &mut out);
+                let creation = encode_sysname(atoms, options, &mut out, cache.as_deref_mut());
                 out.extend_from_slice(&creation.to_be_bytes());
                 for number in numbers {
                     out.extend_from_slice(&number.to_be_bytes());
@@ -771,8 +780,20 @@ fn encode_parts(
                     arity,
                 } => {
                     out.push(113);
-                    encode_atom(atoms.name_of(module), options, &mut out);
-                    encode_atom(atoms.name_of(function), options, &mut out);
+                    encode_dist_atom(
+                        atoms.name_of(module),
+                        atoms,
+                        options,
+                        &mut out,
+                        cache.as_deref_mut(),
+                    );
+                    encode_dist_atom(
+                        atoms.name_of(function),
+                        atoms,
+                        options,
+                        &mut out,
+                        cache.as_deref_mut(),
+                    );
                     encode_integer(i64::from(*arity), &mut out);
                 }
                 // The size, the arity, the module MD5, the index, the free
@@ -787,11 +808,17 @@ fn encode_parts(
                     out.extend_from_slice(lambda.uniq());
                     out.extend_from_slice(&lambda.index().to_be_bytes());
                     out.extend_from_slice(&be32(fun.free().len()));
-                    encode_atom(atoms.name_of(lambda.module()), options, &mut out);
+                    encode_dist_atom(
+                        atoms.name_of(lambda.module()),
+                        atoms,
+                        options,
+                        &mut out,
+                        cache.as_deref_mut(),
+                    );
                     encode_integer(i64::from(lambda.old_index()), &mut out);
                     encode_integer(i64::from(lambda.old_unique()), &mut out);
                     out.push(88);
-                    let creation = encode_sysname(atoms, options, &mut out);
+                    let creation = encode_sysname(atoms, options, &mut out, cache.as_deref_mut());
                     out.extend_from_slice(&[0; 8]);
                     out.extend_from_slice(&creation.to_be_bytes());
                     pending.extend(fun.free().iter().rev());
@@ -805,10 +832,28 @@ fn encode_parts(
                 out.push(67);
                 out.extend_from_slice(&be32(def.order.len()));
                 out.push(u8::from(def.is_exported));
-                encode_atom(atoms.name_of(&def.module), options, &mut out);
-                encode_atom(atoms.name_of(&def.name), options, &mut out);
+                encode_dist_atom(
+                    atoms.name_of(&def.module),
+                    atoms,
+                    options,
+                    &mut out,
+                    cache.as_deref_mut(),
+                );
+                encode_dist_atom(
+                    atoms.name_of(&def.name),
+                    atoms,
+                    options,
+                    &mut out,
+                    cache.as_deref_mut(),
+                );
                 for &index in &def.order {
-                    encode_atom(atoms.name_of(&def.keys[index]), options, &mut out);
+                    encode_dist_atom(
+                        atoms.name_of(&def.keys[index]),
+                        atoms,
+                        options,
+                        &mut out,
+                        cache.as_deref_mut(),
+                    );
                 }
                 pending.extend(def.order.iter().rev().map(|&index| &record.values()[index]));
             }
@@ -849,15 +894,127 @@ fn exact_map_key_order(left: &Term, right: &Term, atoms: &AtomTable) -> Ordering
 /// assert_eq!(encode_sysname(&atoms, &options, &mut out), 4);
 /// assert_eq!(out, [119, 6, b'a', b'@', b'h', b'o', b's', b't']);
 /// ```
-fn encode_sysname(atoms: &AtomTable, options: &Options, out: &mut Vec<u8>) -> u32 {
+fn encode_sysname(
+    atoms: &AtomTable,
+    options: &Options,
+    out: &mut Vec<u8>,
+    cache: Option<&mut DistAtomEncoder>,
+) -> u32 {
     if options.local {
         out.push(106);
         0
     } else {
         let (name, creation) = atoms.this_node();
-        encode_atom(atoms.name_of(&name), options, out);
+        encode_dist_atom(atoms.name_of(&name), atoms, options, out, cache);
         creation
     }
+}
+
+/// The atoms and cache slots used by one outgoing packet.
+struct DistAtomEncoder {
+    slots: HashMap<u16, crate::term::Atom>,
+    entries: Vec<(u16, crate::term::Atom, bool)>,
+}
+
+/// Write a cache reference when the packet can name the atom.
+fn encode_dist_atom(
+    name: &str,
+    atoms: &AtomTable,
+    options: &Options,
+    out: &mut Vec<u8>,
+    cache: Option<&mut DistAtomEncoder>,
+) {
+    if let Some(cache) = cache {
+        let atom = atoms.get(name).expect("encoded atoms exist");
+        let slot = u16::try_from(atom.index() % 2048).expect("cache index fits");
+        if let Some(index) = cache
+            .entries
+            .iter()
+            .position(|(used, existing, _)| *used == slot && *existing == atom)
+        {
+            out.extend_from_slice(&[82, u8::try_from(index).expect("header index fits")]);
+            return;
+        }
+        if cache.entries.len() < 255 && !cache.entries.iter().any(|(used, _, _)| *used == slot) {
+            let new = cache.slots.get(&slot) != Some(&atom);
+            cache.slots.insert(slot, atom.clone());
+            let index = u8::try_from(cache.entries.len()).expect("header index fits");
+            cache.entries.push((slot, atom, new));
+            out.extend_from_slice(&[82, index]);
+            return;
+        }
+    }
+    encode_atom(name, options, out);
+}
+
+/// Encode a packet with one translation table for its control and message.
+pub(in crate::runtime) fn encode_dist_cached(
+    scheduler: &crate::runtime::scheduler::Scheduler,
+    control: &Term,
+    message: Option<&Term>,
+    slots: &mut HashMap<u16, crate::term::Atom>,
+) -> Result<Vec<Binary>, BeamError> {
+    let mut cache = DistAtomEncoder {
+        slots: slots.clone(),
+        entries: Vec::new(),
+    };
+    let options = Options::default();
+    let owner = alias_owner(scheduler);
+    let mut body = encode_parts(
+        control,
+        &scheduler.atoms,
+        &options,
+        &mut Vec::new(),
+        &owner,
+        Some(&mut cache),
+    )?;
+    if let Some(message) = message {
+        body.extend(encode_parts(
+            message,
+            &scheduler.atoms,
+            &options,
+            &mut Vec::new(),
+            &owner,
+            Some(&mut cache),
+        )?);
+    }
+    let count = cache.entries.len();
+    let mut packet = vec![
+        VERSION_MAGIC,
+        b'D',
+        u8::try_from(count).expect("header count fits"),
+    ];
+    if count != 0 {
+        let long = cache
+            .entries
+            .iter()
+            .any(|(_, atom, new)| *new && scheduler.atoms.name_of(atom).len() > 255);
+        let mut flags = vec![0u8; count / 2 + 1];
+        if long {
+            flags[count / 2] |= 1 << ((count % 2) * 4);
+        }
+        for (index, (slot, _, new)) in cache.entries.iter().enumerate() {
+            let nibble =
+                u8::try_from(slot >> 8).expect("cache segment fits") | if *new { 8 } else { 0 };
+            flags[index / 2] |= nibble << ((index % 2) * 4);
+        }
+        packet.extend(flags);
+        for (slot, atom, new) in &cache.entries {
+            packet.push(u8::try_from(slot & 255).expect("low byte fits"));
+            if *new {
+                let name = scheduler.atoms.name_of(atom).as_bytes();
+                if long {
+                    packet.extend(be16(name.len()));
+                } else {
+                    packet.push(u8::try_from(name.len()).expect("short atom fits"));
+                }
+                packet.extend(name);
+            }
+        }
+    }
+    packet.extend(body);
+    *slots = cache.slots;
+    Ok(vec![Binary::from(packet)])
 }
 
 /// Return the term of the pid, port, or reference `data` of the node `node`

@@ -453,6 +453,11 @@ impl DistTable {
         )
     }
 
+    /// Return the output cache of the connected entry.
+    pub(super) fn atom_cache_out(&mut self, name: &Atom) -> &mut HashMap<u16, Atom> {
+        &mut self.entry_mut(name).atom_cache_out
+    }
+
     /// Return the input cache of the named connection when it is current.
     pub(super) fn atom_cache_in(
         &mut self,

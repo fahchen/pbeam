@@ -9,7 +9,7 @@ use std::sync::Arc;
 use super::{Scheduler, dist_table::Controller};
 use crate::{
     error::BeamError,
-    runtime::interpreter::bif::encode_dist,
+    runtime::interpreter::bif::{encode_dist, encode_dist_cached},
     term::{Atom, Binary, PortId, ProcessId, Term, external_id::ExternalData},
 };
 
@@ -202,11 +202,16 @@ impl Scheduler {
         if let Some(monitor) = monitor {
             dist.insert_monitor_now(node, monitor);
         }
-        let mut elements = vec![Binary::from(vec![PASS_THROUGH])];
-        elements.extend(encode_dist(self, &control)?);
-        if let Some(message) = message {
-            elements.extend(encode_dist(self, &message)?);
-        }
+        let elements = if flags & 0x2000 != 0 {
+            encode_dist_cached(self, &control, message.as_ref(), dist.atom_cache_out(node))?
+        } else {
+            let mut elements = vec![Binary::from(vec![PASS_THROUGH])];
+            elements.extend(encode_dist(self, &control)?);
+            if let Some(message) = message {
+                elements.extend(encode_dist(self, &message)?);
+            }
+            elements
+        };
         match controller {
             Controller::Process(process) => {
                 if dist.enqueue(node, elements) {
