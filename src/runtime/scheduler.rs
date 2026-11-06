@@ -3011,18 +3011,18 @@ impl Scheduler {
     }
 
     /// Return the scheduler of the live process `target` when it is another
-    /// scheduler of the node.
+    /// scheduler, or when its transfer to this scheduler is not yet adopted.
     pub(super) fn remote_owner(&self, target: ProcessId) -> Option<usize> {
         let owner = self.node.owner(target)?;
-        (owner != self.index).then_some(owner)
+        (owner != self.index || !self.processes.contains_key(target)).then_some(owner)
     }
 
     /// Return the scheduler of the process `target` when it is another
-    /// scheduler of the node and the process does not exit (see
-    /// [`Node::live_owner`]).
+    /// scheduler or is not yet adopted here, and the process does not exit
+    /// (see [`Node::live_owner`]).
     pub(super) fn remote_live_owner(&self, target: ProcessId) -> Option<usize> {
         let owner = self.node.live_owner(target)?;
-        (owner != self.index).then_some(owner)
+        (owner != self.index || !self.processes.contains_key(target)).then_some(owner)
     }
 
     /// Return true when the process `target` of the node is alive and does
