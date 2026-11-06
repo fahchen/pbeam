@@ -629,6 +629,47 @@ fn exchanges_large_messages_with_pinned_erts() {
 }
 
 #[test]
+fn kills_the_fragment_controller_on_sequence_errors_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let expression = "F = fun(N, Case) -> Parent=self(), \
+        {Pid,Ref}=spawn_monitor(fun() -> \
+        Node=list_to_atom(\"frag_peer_\"++integer_to_list(N)++\"@nohost\"), \
+        erts_internal:new_connection(Node), Flags=element(3,erts_internal:get_dflags()) bor 16#800000, \
+        {ok,H}=erts_internal:create_dist_channel(Node,self(),{Flags,1}), \
+        <<131,C/binary>>=term_to_binary({2,empty,self()}), \
+        First= <<131,69,3:64,3:64,0,C/binary>>, Last= <<131,70,3:64,1:64>>, \
+        case Case of missing -> erlang:dist_ctrl_put_data(H,Last); \
+        duplicate -> erlang:dist_ctrl_put_data(H,First), erlang:dist_ctrl_put_data(H,First); \
+        wrong -> erlang:dist_ctrl_put_data(H,First), erlang:dist_ctrl_put_data(H,Last) end, \
+        Parent ! survived, receive after 1000 -> ok end end), \
+        receive {'DOWN',Ref,process,Pid,R} -> {Case,R} after 5000 -> timeout end end, \
+        io:format(\"~p~n\",[[F(1,missing),F(2,duplicate),F(3,wrong)]]), halt().";
+    let run = |name: &str| {
+        vec![
+            "-sname".to_owned(),
+            name.to_owned(),
+            "-kernel".to_owned(),
+            "logger_level".to_owned(),
+            "none".to_owned(),
+            "-noshell".to_owned(),
+            "-eval".to_owned(),
+            expression.to_owned(),
+        ]
+    };
+    for (label, output) in [
+        ("ERTS", erts_erl(&epmd, &run(&format!("fser{id}")))),
+        ("PBeam", pbeam_erl(&epmd, &run(&format!("fspb{id}")))),
+    ] {
+        assert_eq!(
+            stdout(&output),
+            "[{missing,killed},{duplicate,killed},{wrong,killed}]\n",
+            "{label}: {output:?}"
+        );
+    }
+}
+
+#[test]
 fn accepts_a_large_control_term_in_the_first_fragment_as_pinned_erts() {
     let epmd = Epmd::start();
     let id = std::process::id();

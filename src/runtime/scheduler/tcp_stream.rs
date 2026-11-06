@@ -384,6 +384,9 @@ impl Scheduler {
                 }
                 Event::Data(bytes) if tcp.delivers_to_port() => {
                     self.port_data(port, &bytes)?;
+                    if self.bad_dist_port.take() == Some(port) {
+                        return Ok(Some(Term::static_atom("killed")));
+                    }
                     Vec::new()
                 }
                 Event::Data(bytes) => {

@@ -3,10 +3,14 @@
 //! `erts_net_message` gives them (`dist.c:2017-2600`). A connection can
 //! use an atom-cache header and fragment sequences.
 
-use super::{Scheduler, dist_table::DistFragment, node::Named};
+use super::{
+    Scheduler,
+    dist_table::{Controller, DistFragment},
+    node::Named,
+};
 use crate::{
     error::{BeamError, error},
-    runtime::{interpreter::bif::decode_dist, signal::Signal},
+    runtime::{interpreter::bif::decode_dist, process::LinkId, signal::Signal},
     term::{
         Atom, Term,
         external_id::{self, ExternalData},
@@ -88,7 +92,15 @@ impl Scheduler {
         packet: &[u8],
     ) -> Result<(), BeamError> {
         let reassembled = if flags & FRAGMENTS != 0 && matches!(packet.get(1), Some(b'E' | b'F')) {
-            let Some(message) = self.dist_fragment(node, connection, packet)? else {
+            let result = self.dist_fragment(node, connection, packet);
+            let result = match result {
+                Err(err) if err == error(REJECTED) => {
+                    self.reject_fragment_connection(node, connection);
+                    return Ok(());
+                }
+                other => other?,
+            };
+            let Some(message) = result else {
                 return Ok(());
             };
             Some(message)
@@ -210,6 +222,40 @@ impl Scheduler {
             (Some(operation), _) => Err(error(format!(
                 "unsupported distribution operation {operation}: see \"Distribution\" in docs/erts-differences.md"
             ))),
+        }
+    }
+
+    /// End the current connection and kill its controller on a data error.
+    fn reject_fragment_connection(&mut self, node: &Atom, connection: u32) {
+        let node_ref = std::sync::Arc::clone(&self.node);
+        let mut dist = node_ref.dist();
+        let Some((_, controller, current)) = dist.connected(node) else {
+            return;
+        };
+        if current != connection {
+            return;
+        }
+        let ended = dist.controller_exits(controller);
+        drop(dist);
+        if let Some(ended) = ended {
+            self.dist_connection_down(&ended);
+            self.dist_monitor_down(&ended);
+        }
+        match controller {
+            Controller::Process(process) => {
+                let kill = Signal::Exit {
+                    from: LinkId::Process(crate::term::ProcessId(0)),
+                    reason: Term::static_atom("kill"),
+                    linked: false,
+                    normal_kills: false,
+                    alias: None,
+                };
+                let _ = self.send_signal(Some(crate::term::ProcessId(0)), process, kill);
+            }
+            Controller::Port(port) if self.locked_port == Some(port) => {
+                self.bad_dist_port = Some(port)
+            }
+            Controller::Port(port) => self.fail_port(port, Term::static_atom("killed")),
         }
     }
 

@@ -493,6 +493,8 @@ pub(super) struct Scheduler {
     locked_port: Option<PortId>,
     /// Whether the distribution queue needs a drain after the port step.
     deferred_dist: bool,
+    /// The locked distribution port that must close after a data error.
+    bad_dist_port: Option<PortId>,
 }
 
 /// Whether a spawn links the child to its parent.
@@ -577,6 +579,7 @@ impl Scheduler {
             wake: Some(wake),
             locked_port: None,
             deferred_dist: false,
+            bad_dist_port: None,
         }
     }
 
