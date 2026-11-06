@@ -3,6 +3,7 @@
          priority_down_order/0, priority_down_selective/0, priority_marker_hit/0, priority_watcher/1,
          priority_immediate/0, priority_immediate_remote/0, priority_large_tag/0, priority_tag_reference/0,
          priority_unrelated_marker/0, priority_unrelated_watcher/1, priority_info_wait/0,
+         priority_tag_shapes/0, priority_tag_shapes_watcher/1,
          idle/0, relay/0, owner/2, server/0, id/1]).
 
 id(X) -> X.
@@ -124,6 +125,34 @@ priority_tag_reference() ->
     erlang:demonitor(Ref, [flush]),
     Held ! stop,
     {Result, length(flush())}.
+
+%% The tag holds an improper list, a map, and a fun with a free reference.
+%% The watcher leaves the priority DOWN in its mailbox when it exits.
+priority_tag_shapes() ->
+    Watcher = spawn(?MODULE, priority_tag_shapes_watcher, [self()]),
+    Monitor = erlang:monitor(process, Watcher),
+    receive {ready, Watcher, ok} -> ok end,
+    Watcher ! stop,
+    receive {'DOWN', Monitor, process, Watcher, normal} -> ok end.
+
+priority_tag_shapes_watcher(Parent) ->
+    self() ! unmatched,
+    Held = spawn(?MODULE, idle, []),
+    Ref = erlang:monitor(process, Held),
+    Target = spawn(?MODULE, idle, []),
+    Fun = fun() -> Ref end,
+    Tag = #{a => [one | tail], b => Fun, c => [Ref | last]},
+    Priority = erlang:monitor(process, Target, [priority, {tag, Tag}]),
+    Sync = erlang:monitor(process, Target),
+    Target ! stop,
+    receive {'DOWN', Sync, process, Target, normal} -> ok end,
+    {messages, [{Tag, Priority, process, Target, normal}, unmatched]} = process_info(self(), messages),
+    #{a := [one | tail], b := F, c := [Ref | last]} = Tag,
+    Ref = F(),
+    Parent ! {ready, self(), ok},
+    receive stop -> ok end,
+    Held ! stop,
+    receive {'DOWN', Ref, process, Held, normal} -> ok end.
 
 %% The process-info request waits for another process while the priority
 %% DOWN is delivered. The unmatched normal message remains in the queue.

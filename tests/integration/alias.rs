@@ -288,6 +288,22 @@ fn receives_a_priority_down_while_waiting_selectively_as_pinned_erts() {
 }
 
 #[test]
+fn samples_priority_tag_shapes_in_live_and_released_mailboxes() {
+    // Both runtimes return ok after the watcher exits with its priority DOWN.
+    // The live-byte sampler is a PBeam API, so ERTS has no matching sample.
+    let program = BeamProgram::load(&[ALIAS_PROBE]).unwrap();
+    let mut samples = Vec::new();
+    let result = program
+        .execute_sampled("alias_probe", "priority_tag_shapes", &[], &mut |bytes| {
+            samples.push(bytes);
+        })
+        .unwrap();
+    assert_eq!(result.term, Term::Atom(program.atom("ok").unwrap()));
+    assert!(samples.iter().any(|bytes| *bytes > 0));
+    assert_eq!(erl_reference("priority_tag_shapes()"), "ok\n");
+}
+
+#[test]
 fn keeps_priority_down_during_a_process_info_wait_as_pinned_erts() {
     let erts_internal = pinned_beam("erts_internal");
     let program = BeamProgram::load(&[&erts_internal, ALIAS_PROBE]).unwrap();
