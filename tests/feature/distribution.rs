@@ -1343,6 +1343,83 @@ fn monitors_the_local_node_as_pinned_erts() {
 }
 
 #[test]
+fn expires_send_only_known_nodes_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let erts_name = format!("nexpireerts{id}");
+    let pbeam_name = format!("nexpirepb{id}");
+    let expression = "dist_lost_probe:nodes_expiry(), halt().";
+    let erts_args = probe(&["-sname", &erts_name, "-setcookie", "ck"], expression);
+    let pbeam_args = probe(&["-sname", &pbeam_name, "-setcookie", "ck"], expression);
+    std::thread::scope(|scope| {
+        let erts = scope.spawn(|| erts_erl(&epmd, &erts_args));
+        let pbeam = scope.spawn(|| pbeam_erl(&epmd, &pbeam_args));
+        assert_eq!(stdout(&erts.join().unwrap()), "[nmekeep@host]\n");
+        assert_eq!(stdout(&pbeam.join().unwrap()), "[nmekeep@host]\n");
+    });
+}
+
+#[test]
+fn lists_node_types_and_mixed_known_order_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let visible_name = format!("nvisible{id}");
+    let hidden_name = format!("nhidden{id}");
+    let visible = ErtsNode::start(
+        &epmd,
+        &[
+            "-sname",
+            &visible_name,
+            "-setcookie",
+            "ck",
+            "-pa",
+            "fixtures/dist",
+        ],
+        "dist_lost_probe:server().",
+    );
+    let hidden = ErtsNode::start(
+        &epmd,
+        &[
+            "-sname",
+            &hidden_name,
+            "-setcookie",
+            "ck",
+            "-hidden",
+            "-pa",
+            "fixtures/dist",
+        ],
+        "dist_lost_probe:server().",
+    );
+    let expression = format!(
+        "dist_lost_probe:nodes_forms('{}','{}'), halt().",
+        visible.line(),
+        hidden.line()
+    );
+    let client = format!("nforms{id}");
+    let arguments = probe(
+        &["+S", "2", "-sname", &client, "-setcookie", "ck"],
+        &expression,
+    );
+    let expected = stdout(&erts_erl(&epmd, &arguments));
+    assert!(
+        expected.contains("{connected,[hidden_peer,visible_peer]"),
+        "{expected}"
+    );
+    assert!(
+        expected.contains("{this,[local],[{local,this,undefined}]}"),
+        "{expected}"
+    );
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), expected);
+    let arguments = probe(
+        &["+S", "2", "-sname", &client, "-setcookie", "ck"],
+        "dist_lost_probe:nodes_order(), halt().",
+    );
+    let expected = "[[nmea@host,nmeb@host,nmec@host],[nmeb@host,nmec@host,nmea@host]]\n";
+    assert_eq!(stdout(&erts_erl(&epmd, &arguments)), expected);
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), expected);
+}
+
+#[test]
 fn reports_node_events_as_pinned_erts() {
     let epmd = Epmd::start();
     let id = std::process::id();

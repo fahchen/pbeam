@@ -79,10 +79,11 @@ pub(super) fn setnode(
     let nonode = Atom::from_static("nonode@nohost").expect("nonode@nohost is a static atom");
     let (nonode_handle, handle) = (scheduler.make_magic_ref()?, scheduler.make_magic_ref()?);
     let start = connection_start(scheduler);
-    scheduler
-        .node()
-        .dist()
-        .set_local(&nonode, nonode_handle, name, handle, start);
+    let now = scheduler.timers.now();
+    let mut dist = scheduler.node().dist();
+    dist.expire_known(now);
+    dist.set_local(&nonode, nonode_handle, name, handle, start);
+    drop(dist);
     let watchers = scheduler.node().dist().nodes_monitors();
     scheduler.nodes_event(name, true, None, None, &watchers);
     Ok(BifResult::Value(Term::static_atom("true")))
@@ -283,9 +284,11 @@ pub(super) fn new_connection(
     }
     let handle = scheduler.make_magic_ref()?;
     let start = connection_start(scheduler);
+    let now = scheduler.timers.now();
     let node = Arc::clone(scheduler.node());
     let event_lock = {
         let mut dist = node.dist();
+        dist.expire_known(now);
         dist.insert(name, handle, start);
         dist.event_lock(name)
     };
@@ -429,9 +432,11 @@ pub(super) fn create_dist_channel(
     };
     let start = connection_start(scheduler);
     let node = Arc::clone(scheduler.node());
+    let now = scheduler.timers.now();
     let reference = scheduler.make_magic_ref()?;
     let event_lock = {
         let mut dist = node.dist();
+        dist.expire_known(now);
         dist.insert(name, reference, start);
         dist.event_lock(name)
     };
@@ -495,10 +500,12 @@ fn port_channel(
     net_kernel: ProcessId,
 ) -> Result<BifResult, BeamError> {
     let start = connection_start(scheduler);
+    let now = scheduler.timers.now();
     let reference = scheduler.make_magic_ref()?;
     let node = Arc::clone(scheduler.node());
     let event_lock = {
         let mut dist = node.dist();
+        dist.expire_known(now);
         dist.insert(name, reference, start);
         dist.event_lock(name)
     };

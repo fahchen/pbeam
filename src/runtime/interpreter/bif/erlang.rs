@@ -163,18 +163,16 @@ pub(super) fn monitor_node(
 }
 
 /// Run `erlang:nodes(NodeTypes)` and `erlang:nodes(NodeTypes, Options)` as
-/// ERTS `nodes` does (`dist.c:6261-6476`) on a node with no connection.
-/// `NodeTypes` is one node type or a proper list of them: `visible`,
-/// `hidden`, `connected`, `this`, and `known`. PBeam has no connection, so
-/// `visible`, `hidden`, and `connected` give no node. `this` and `known`
-/// give the local node last. Before it, `known` gives the
-/// not connected entry of each node that a send used, from the oldest to
-/// the newest (see `Scheduler::known_nodes`). `Options` (`None` for
-/// `nodes/1`) is a map of the keys `connection_id` and `node_type`, each
-/// `true` or `false`. With options, the result holds `{Node, Info}`, and
-/// `Info` maps `connection_id` to `undefined` and `node_type` to `known`
-/// or `this` for each key that is `true`. Each other term raises `badarg`.
-/// A result of more than 10 nodes costs one reduction for each 10 nodes.
+/// ERTS `nodes` does (`dist.c:6261-6476`). `NodeTypes` is one node type or
+/// a proper list of them: `visible`, `hidden`, `connected`, `this`, and
+/// `known`. Pending and not-connected entries precede hidden and visible
+/// connections, and `this` adds the local node last. The shared dist table
+/// keeps the not-connected entries in the order of each state change.
+/// `Options` (`None` for `nodes/1`) is a map of the keys `connection_id`
+/// and `node_type`, each `true` or `false`. With options, the result holds
+/// `{Node, Info}` and `Info` has each requested key. A not-connected or
+/// local node has the connection id `undefined`. Each other term raises
+/// `badarg`. A result of more than 10 nodes costs one reduction per 10 nodes.
 ///
 /// # Examples
 ///
@@ -278,10 +276,9 @@ pub(super) fn nodes(
 /// Return the other nodes of the node types `kinds` (`known`, `hidden`,
 /// `visible`) in the order of ERTS (`dist.c:6356-6411`): the pending
 /// entries, the not connected entries, the hidden entries, and the visible
-/// entries, each with its node type and its connection id. PBeam gives the
-/// not connected entries of the dist table before those of a send. ERTS
-/// keeps the entry of the local node in its list of not connected entries
-/// and skips it (`dist.c:6384-6392`).
+/// entries, each with its node type and its connection id. ERTS keeps the
+/// entry of the local node in its list of not connected entries and skips it
+/// (`dist.c:6384-6392`).
 ///
 /// # Examples
 ///
@@ -294,13 +291,15 @@ fn remote_nodes(
     kinds: &[&str],
 ) -> Vec<(Term, &'static str, Option<u32>)> {
     let local = scheduler.atoms.this_node().0;
-    let connections: Vec<NodeInfo> = scheduler
-        .node()
-        .dist()
-        .nodes()
-        .into_iter()
-        .filter(|info| info.name != local)
-        .collect();
+    let now = scheduler.timers.now();
+    let connections: Vec<NodeInfo> = {
+        let mut dist = scheduler.node().dist();
+        dist.expire_known(now);
+        dist.nodes()
+    }
+    .into_iter()
+    .filter(|info| info.name != local)
+    .collect();
     let connection =
         |info: &NodeInfo| (Term::Atom(info.name.clone()), info.kind, info.connection_id);
     let mut names: Vec<_> = connections
@@ -308,17 +307,6 @@ fn remote_nodes(
         .filter(|info| info.kind == "known" && kinds.contains(&"known"))
         .map(connection)
         .collect();
-    if kinds.contains(&"known") {
-        // A send makes the other entries of the not connected list.
-        let dist_names: Vec<&Atom> = connections.iter().map(|info| &info.name).collect();
-        names.extend(
-            scheduler
-                .known_nodes()
-                .into_iter()
-                .filter(|name| !dist_names.contains(&name))
-                .map(|name| (Term::Atom(name), "known", None)),
-        );
-    }
     names.extend(
         connections
             .iter()

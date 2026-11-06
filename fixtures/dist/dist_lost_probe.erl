@@ -8,7 +8,39 @@
          monitor_remote/0, monitor_connected/1, monitor_events/1, monitor_forms/1,
          monitor_hidden/1, monitor_local_events/0, ordering_server/0, ordering_client/1,
          local_order/1, local_race/0, local_multi/0, controller_reasons/0, no_network/0,
-         self_signal/1, monitor_disable_signal/1]).
+         self_signal/1, monitor_disable_signal/1, nodes_forms/2, nodes_order/0, nodes_expiry/0]).
+
+nodes_forms(Visible, Hidden) ->
+    true = net_kernel:connect_node(Visible),
+    true = net_kernel:connect_node(Hidden),
+    Local = node(),
+    Names = fun(L) -> [case N of Visible -> visible_peer; Hidden -> hidden_peer; Local -> local; 'nonode@nohost' -> nonode end || N <- L, N =:= Visible orelse N =:= Hidden orelse N =:= Local orelse N =:= 'nonode@nohost'] end,
+    Info = fun(L) -> [{hd(Names([N])), maps:get(node_type, I), case maps:get(connection_id, I) of undefined -> undefined; C when is_integer(C) -> integer end} || {N, I} <- L, N =:= Visible orelse N =:= Hidden orelse N =:= Local orelse N =:= 'nonode@nohost'] end,
+    Types = [visible, connected, hidden, this, known, [], [this, connected], [known, hidden]],
+    Result = [{T, Names(erlang:nodes(T)), Info(erlang:nodes(T, #{node_type => true, connection_id => true}))} || T <- Types],
+    io:format("~w~n", [Result]).
+
+nodes_order() ->
+    A = 'nmea@host', B = 'nmeb@host', C = 'nmec@host',
+    noconnect = erlang:send({reg, A}, msg, [noconnect]),
+    Handle = erts_internal:new_connection(B),
+    true = erts_internal:abort_pending_connection(B, Handle),
+    noconnect = erlang:send({reg, B}, msg, [noconnect]),
+    noconnect = erlang:send({reg, C}, msg, [noconnect]),
+    Filter = fun() -> [N || N <- erlang:nodes(known), N =:= A orelse N =:= B orelse N =:= C] end,
+    Before = Filter(),
+    HA = erts_internal:new_connection(A),
+    true = erts_internal:abort_pending_connection(A, HA),
+    io:format("~w~n", [[Before, Filter()]]).
+
+nodes_expiry() ->
+    A = 'nmeexpire@host', B = 'nmekeep@host',
+    noconnect = erlang:send({reg, A}, msg, [noconnect]),
+    Handle = erts_internal:new_connection(B),
+    true = erts_internal:abort_pending_connection(B, Handle),
+    put(handle, Handle),
+    timer:sleep(62000),
+    io:format("~w~n", [[N || N <- erlang:nodes(known), N =:= A orelse N =:= B]]).
 
 monitor_disable_signal(Disabled) ->
     logger:set_primary_config(level, none),

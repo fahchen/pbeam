@@ -420,9 +420,6 @@ pub(super) struct Scheduler {
     /// The timers of the run and the run clock. All processes of the run
     /// share them.
     pub(super) timers: Timers,
-    /// The not connected dist entries of the run, which `erlang:nodes/1,2`
-    /// gives with the node type `known`.
-    known_nodes: KnownNodes,
     /// The owner of each reference that `erlang:monitor/3` made with an
     /// alias option: an ERTS pid reference holds the pid of its owner
     /// (`erts_get_pid_of_ref`, `erl_bif_unique.h:279`). The owner keeps the
@@ -562,7 +559,6 @@ impl Scheduler {
             shared_libraries: HashMap::new(),
             code_generation: 0,
             timers: Timers::new(),
-            known_nodes: KnownNodes::default(),
             pending_monitor: None,
             held: Vec::new(),
             virtual_reductions: 0,
@@ -4651,7 +4647,6 @@ pub(in crate::runtime) use tcp_inet::Accept;
 mod tcp_stream;
 
 pub(super) use code::check_process_code_reply;
-use known_nodes::KnownNodes;
 use node::{Delivery, Named, Node};
 pub(super) use policy::PolicyEnd;
 use policy::PolicyProcess;

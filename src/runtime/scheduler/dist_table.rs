@@ -9,14 +9,14 @@
 //! make the entry idle again. A dist handle `{ConnId, MagicRef}` names an
 //! entry and one of its connections (`erl_node_tables.c:381-416`).
 //!
-//! The entries of other nodes that ERTS makes for a send stay in
-//! [`super::known_nodes`]. PBeam keeps each entry of this table until the
+//! The dist table also holds send-only entries and their expiry timers
+//! ([`super::known_nodes`]). PBeam keeps each connection entry until the
 //! run ends, where ERTS deletes an entry that no term refers to after
 //! `node_tab_delete_delay` (`erl_node_tables.c:429-537`): see row
 //! "Distribution" of `docs/erts-differences.md`.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     sync::{Arc, Mutex},
 };
 
@@ -206,6 +206,10 @@ pub(in crate::runtime) struct DistTable {
     handles: HashMap<Reference, u32>,
     /// Counts of node event monitors by process and option bits.
     nodes_monitors: Vec<(ProcessId, u8, u64)>,
+    /// The shared not-connected list, from oldest to newest.
+    idle: BTreeMap<u64, Atom>,
+    /// Expiry timers for send-only entries in the not-connected list.
+    known: super::known_nodes::KnownNodes,
     /// The order number of the next entry that changes its list. The
     /// entry of `nonode@nohost` has the order 0 (see [`Self::set_local`]).
     next_order: u64,
@@ -217,12 +221,44 @@ impl Default for DistTable {
             entries: HashMap::new(),
             handles: HashMap::new(),
             nodes_monitors: Vec::new(),
+            idle: BTreeMap::new(),
+            known: super::known_nodes::KnownNodes::default(),
             next_order: 1,
         }
     }
 }
 
 impl DistTable {
+    /// Expire send-only entries whose timers ended by `now`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// table.expire_known(now);
+    /// ```
+    pub(in crate::runtime) fn expire_known(&mut self, now: i64) {
+        for order in self.known.expire(now) {
+            self.idle.remove(&order);
+        }
+    }
+
+    /// Add or refresh a send-only entry in the shared not-connected list.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// table.send_known(&name, now);
+    /// ```
+    pub(in crate::runtime) fn send_known(&mut self, name: &Atom, now: i64) {
+        self.expire_known(now);
+        if !self.entries.contains_key(&name.index())
+            && self.known.send_ordered(name, self.next_order, now)
+        {
+            self.idle.insert(self.next_order, name.clone());
+            self.next_order += 1;
+        }
+    }
+
     /// Make the idle entry of `name` when it has no entry, as
     /// `erts_find_or_insert_dist_entry` does (`erl_node_tables.c:352-371`):
     /// `handle` is its magic reference, and the low 24 bits of `start` its
@@ -236,10 +272,20 @@ impl DistTable {
     /// assert_eq!(table.connection_id(&a), 5);
     /// ```
     pub(in crate::runtime) fn insert(&mut self, name: &Atom, handle: Reference, start: u32) {
-        let order = self.next_order;
-        self.entries.entry(name.index()).or_insert_with(|| {
+        if self.entries.contains_key(&name.index()) {
+            return;
+        }
+        let order = if let Some(order) = self.known.take(name) {
+            order
+        } else {
+            let order = self.next_order;
             self.next_order += 1;
-            self.handles.insert(handle, name.index());
+            self.idle.insert(order, name.clone());
+            order
+        };
+        self.handles.insert(handle, name.index());
+        self.entries.insert(
+            name.index(),
             Entry {
                 event_lock: Arc::new(Mutex::new(())),
                 name: name.clone(),
@@ -259,8 +305,8 @@ impl DistTable {
                 links: Vec::new(),
                 monitors: Vec::new(),
                 node_monitors: HashMap::new(),
-            }
-        });
+            },
+        );
     }
 
     /// Make the entries of `erlang:setnode/2`, which gives the local node
@@ -286,7 +332,10 @@ impl DistTable {
     ) {
         if !self.entries.contains_key(&nonode.index()) {
             self.insert(nonode, nonode_handle, start);
+            let old_order = self.entry_mut(nonode).order;
+            self.idle.remove(&old_order);
             self.entry_mut(nonode).order = 0;
+            self.idle.insert(0, nonode.clone());
         }
         self.insert(name, handle, start);
     }
@@ -307,9 +356,11 @@ impl DistTable {
         let order = self.next_order;
         let entry = self.entry_mut(name);
         if entry.state == State::Idle {
+            let old_order = entry.order;
             entry.state = State::Pending;
             entry.connection_id = (entry.connection_id + 1) & CONNECTION_ID_MASK;
             entry.order = order;
+            self.idle.remove(&old_order);
             self.next_order += 1;
         }
     }
@@ -378,6 +429,7 @@ impl DistTable {
         match entry.state {
             State::Pending => {
                 entry.set_idle(order);
+                self.idle.insert(order, name.clone());
                 self.next_order += 1;
                 false
             }
@@ -714,6 +766,7 @@ impl DistTable {
         // dist.c:1081.
         entry.out = 0;
         entry.input_handler = None;
+        self.idle.insert(self.next_order, entry.name.clone());
         self.next_order += 1;
         Some(EndedConnection {
             connection,
@@ -961,6 +1014,7 @@ impl DistTable {
             State::Pending => {
                 let order = self.next_order;
                 self.entry_mut(name).set_idle(order);
+                self.idle.insert(order, name.clone());
                 self.next_order += 1;
                 (None, None)
             }
@@ -983,19 +1037,33 @@ impl DistTable {
     /// assert_eq!(table.nodes()[0].kind, "known");
     /// ```
     pub(in crate::runtime) fn nodes(&self) -> Vec<NodeInfo> {
-        let mut entries: Vec<&Entry> = self.entries.values().collect();
+        let mut entries: Vec<&Entry> = self
+            .entries
+            .values()
+            .filter(|entry| entry.state != State::Idle)
+            .collect();
         entries.sort_by_key(|entry| {
-            let rank = match (entry.state, entry.flags & PUBLISHED) {
-                (State::Pending, _) => 0,
-                (State::Idle, _) => 1,
-                (State::Connected, 0) => 2,
-                (State::Connected, _) => 3,
+            let rank = if entry.state == State::Pending {
+                0
+            } else if entry.flags & PUBLISHED == 0 {
+                2
+            } else {
+                3
             };
             (rank, entry.order)
         });
-        entries
-            .into_iter()
-            .map(|entry| NodeInfo {
+        let mut result = Vec::new();
+        let mut idle_added = false;
+        for entry in entries {
+            if entry.state != State::Pending && !idle_added {
+                result.extend(self.idle.values().map(|name| NodeInfo {
+                    name: name.clone(),
+                    kind: "known",
+                    connection_id: None,
+                }));
+                idle_added = true;
+            }
+            result.push(NodeInfo {
                 name: entry.name.clone(),
                 kind: match (entry.state, entry.flags & PUBLISHED) {
                     (State::Connected, 0) => "hidden",
@@ -1003,8 +1071,16 @@ impl DistTable {
                     _ => "known",
                 },
                 connection_id: (entry.state == State::Connected).then_some(entry.connection_id),
-            })
-            .collect()
+            });
+        }
+        if !idle_added {
+            result.extend(self.idle.values().map(|name| NodeInfo {
+                name: name.clone(),
+                kind: "known",
+                connection_id: None,
+            }));
+        }
+        result
     }
 }
 
