@@ -671,6 +671,26 @@ fn kills_the_fragment_controller_on_sequence_errors_as_pinned_erts() {
 }
 
 #[test]
+fn reassembles_interleaved_fragments_with_their_own_atom_tables_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let erts_name = format!("dfintererts{id}");
+    let pbeam_name = format!("dfinterpb{id}");
+    let expression = "dist_channel_probe:fragment_interleaving(), halt().";
+    let erts = probe(
+        &["-sname", &erts_name, "-kernel", "logger_level", "none"],
+        expression,
+    );
+    let pbeam = probe(
+        &["-sname", &pbeam_name, "-kernel", "logger_level", "none"],
+        expression,
+    );
+    let expected = "fragment_interleaving: [[alpha,beta],[beta,alpha]]\n";
+    assert_eq!(stdout(&erts_erl(&epmd, &erts)), expected);
+    assert_eq!(stdout(&pbeam_erl(&epmd, &pbeam)), expected);
+}
+
+#[test]
 fn closes_a_port_controller_for_a_fragment_with_an_unknown_sequence() {
     // The accepted tcp_inet port receives the packet under its port lock.
     // A distribution payload that does not follow the documented layout
