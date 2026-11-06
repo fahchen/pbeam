@@ -228,6 +228,18 @@ fn offers_the_mandatory_distribution_flags_the_monitor_flags_exit_payload_and_al
     // (dist.h:33, 34, 52, 67, 113-123), with the rejectable and the strict
     // order flags of ERTS (dist.h:129-135).
     let epmd = Epmd::start();
+    let erts = erts_erl(
+        &epmd,
+        &[
+            "-noshell",
+            "-eval",
+            "io:format(\"~p~n\", [erts_internal:get_dflags()]), halt().",
+        ],
+    );
+    assert_eq!(
+        stdout(&erts),
+        "{erts_dflags,468283523004,17230663572,468283523004,8396866,8192}\n"
+    );
     let output = pbeam_erl(
         &epmd,
         &[
