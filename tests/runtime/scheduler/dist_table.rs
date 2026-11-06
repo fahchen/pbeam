@@ -297,10 +297,19 @@ fn removes_the_last_node_monitor_of_a_connected_entry() {
     );
     table.unmonitor_node(&name, watcher, connection);
     assert!(table.entries[&name.index()].node_monitors.is_empty());
-    // A disable for a process that holds no monitor changes nothing, as the
-    // `if let Some(count)` path of `unmonitor_node` gives.
-    table.unmonitor_node(&name, ProcessId(3), connection);
-    assert!(table.entries[&name.index()].node_monitors.is_empty());
+    // A disable for a process that holds no monitor leaves another watcher
+    // untouched, as the `if let Some(count)` path of `unmonitor_node` gives.
+    let other = ProcessId(3);
+    assert_eq!(table.monitor_node(&name, other), Some(connection));
+    table.unmonitor_node(&name, ProcessId(4), connection);
+    assert_eq!(
+        table.entries[&name.index()].node_monitors.get(&other),
+        Some(&1)
+    );
     // A disable for a connection that was replaced also changes nothing.
-    table.unmonitor_node(&name, watcher, connection.wrapping_add(1));
+    table.unmonitor_node(&name, other, connection.wrapping_add(1));
+    assert_eq!(
+        table.entries[&name.index()].node_monitors.get(&other),
+        Some(&1)
+    );
 }
