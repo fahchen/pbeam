@@ -571,6 +571,58 @@ fn exchanges_many_cached_atoms_with_pinned_erts() {
 }
 
 #[test]
+fn exchanges_cached_identifier_nodes_with_pinned_erts() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let name = format!("dcids{id}");
+    let server = ErtsNode::start(
+        &epmd,
+        &["-sname", &name, "-setcookie", "ck"],
+        "register(cache_ids, self()), io:format(\"~s~n\", [node()]), \
+         Name = <<\"cache_foreign_identifier_node@host\">>, N = byte_size(Name), \
+         Node = <<119,N,Name/binary>>, \
+         Pid = binary_to_term(<<131,88,Node/binary,1:32,0:32,4:32>>), \
+         Port = binary_to_term(<<131,120,Node/binary,2:64,4:32>>), \
+         Ref = binary_to_term(<<131,90,1:16,Node/binary,4:32,3:32>>), \
+         Ids = {Pid,Port,Ref}, \
+         F = fun F() -> receive {From, get_ids} -> From ! {ids,Ids}, F(); \
+         {From, {check,Got}} -> From ! {same,Got =:= Ids}, F() \
+         after 30000 -> halt(2) end end, F().",
+    );
+    let node = server.line();
+    let expression = format!(
+        "true = net_kernel:connect_node('{node}'), \
+         {{cache_ids, '{node}'}} ! {{self(), get_ids}}, \
+         receive {{ids, {{Pid,Port,Ref}} = Ids}} -> \
+         {{cache_ids, '{node}'}} ! {{self(), {{check,Ids}}}}, \
+         receive {{same,Same}} -> io:format(\"~0p~n\", \
+         [{{is_pid(Pid),is_port(Port),is_reference(Ref), \
+         node(Pid),node(Port),node(Ref),Same}}]) after 5000 -> halt(2) end \
+         after 5000 -> halt(3) end, halt()."
+    );
+    let run = |name: &str| {
+        vec![
+            "-sname".to_owned(),
+            name.to_owned(),
+            "-setcookie".to_owned(),
+            "ck".to_owned(),
+            "-noshell".to_owned(),
+            "-eval".to_owned(),
+            expression.clone(),
+        ]
+    };
+    let expected = "{true,true,true,cache_foreign_identifier_node@host,cache_foreign_identifier_node@host,cache_foreign_identifier_node@host,true}\n";
+    assert_eq!(
+        stdout(&erts_erl(&epmd, &run(&format!("dcierts{id}")))),
+        expected
+    );
+    assert_eq!(
+        stdout(&pbeam_erl(&epmd, &run(&format!("dcipbeam{id}")))),
+        expected
+    );
+}
+
+#[test]
 fn sends_messages_between_erts_and_pbeam_nodes_in_order() {
     // A client sends 100 REG_SEND messages to the name decho of a server
     // node, and then 100 SEND messages to the pid of the server, which
