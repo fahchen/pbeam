@@ -500,35 +500,49 @@ impl DistTable {
         self.entries[&name.index()].input
     }
 
-    /// Register or remove a node monitor for a process on a connection.
+    /// Register a node monitor and return its connected entry id.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert!(table.monitor_node(&name, process, true));
+    /// assert_eq!(table.monitor_node(&name, process), Some(1));
     /// ```
-    #[expect(clippy::fn_params_excessive_bools, reason = "the BIF takes a boolean")]
     pub(in crate::runtime) fn monitor_node(
         &mut self,
         name: &Atom,
         process: ProcessId,
-        enabled: bool,
-    ) -> bool {
-        let Some(entry) = self.entries.get_mut(&name.index()) else {
-            return !enabled;
-        };
-        if enabled {
-            if entry.state != State::Connected {
-                return false;
-            }
-            *entry.node_monitors.entry(process).or_default() += 1;
-        } else if let Some(count) = entry.node_monitors.get_mut(&process) {
+    ) -> Option<u32> {
+        let entry = self.entries.get_mut(&name.index())?;
+        if entry.state != State::Connected {
+            return None;
+        }
+        *entry.node_monitors.entry(process).or_default() += 1;
+        Some(entry.connection_id)
+    }
+
+    /// Remove one node monitor from its connection when it is still active.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// table.unmonitor_node(&name, process, 1);
+    /// ```
+    pub(in crate::runtime) fn unmonitor_node(
+        &mut self,
+        name: &Atom,
+        process: ProcessId,
+        connection: u32,
+    ) {
+        let entry = self.entry_mut(name);
+        if entry.connection_id != connection {
+            return;
+        }
+        if let Some(count) = entry.node_monitors.get_mut(&process) {
             *count -= 1;
             if *count == 0 {
                 entry.node_monitors.remove(&process);
             }
         }
-        true
     }
 
     /// Set or clear a process node-event monitor and return its old count.

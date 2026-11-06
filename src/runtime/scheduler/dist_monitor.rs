@@ -275,17 +275,15 @@ impl Scheduler {
             Some(reason),
             &ended.node_events.1,
         );
-        for (&watcher, &count) in watchers {
-            for _ in 0..count {
-                self.send_message(
-                    ProcessId(0),
-                    watcher,
-                    Term::tuple(vec![
-                        Term::static_atom("nodedown"),
-                        Term::Atom(name.clone()),
-                    ]),
-                );
-            }
+        for &watcher in watchers.keys() {
+            let _ = self.send_signal(
+                None,
+                watcher,
+                Signal::NodeMonitorDown {
+                    node: name.clone(),
+                    connection: ended.connection,
+                },
+            );
         }
         for &monitor in &ended.monitors {
             let signal = if monitor.side == MonitorSide::Watcher {

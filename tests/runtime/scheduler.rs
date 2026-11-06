@@ -2994,6 +2994,141 @@ fn keeps_a_monitor_of_another_node_of_the_target_of_a_packet() {
 }
 
 #[test]
+fn resolves_queued_node_monitor_down_after_disable() {
+    use super::signals::HandlingPoint;
+    // A compiled fixture cannot disable between the port controller close
+    // and handling the signal: OTP 29.1.1 handles it before port_close
+    // returns and gives 2 messages for 0, 1, or 2 later disables. A local
+    // persistent monitor gives 0 after disable, 2 after an extra enable,
+    // and 1 after disable and re-enable before handling its signal.
+    for disabled in 0..=2 {
+        let mut scheduler = test_scheduler();
+        scheduler.start(frame(), vec![], allow_all());
+        scheduler.schedule_next().unwrap();
+        let id = current(&mut scheduler);
+        let name = scheduler.atoms.put("other@host").unwrap();
+        scheduler
+            .current_process_mut()
+            .add_node_monitor(name.index(), 1);
+        scheduler
+            .current_process_mut()
+            .add_node_monitor(name.index(), 1);
+        scheduler
+            .send_signal(
+                None,
+                id,
+                Signal::NodeMonitorDown {
+                    node: name.clone(),
+                    connection: 1,
+                },
+            )
+            .unwrap();
+        for _ in 0..disabled {
+            assert_eq!(
+                scheduler
+                    .current_process_mut()
+                    .remove_node_monitor(name.index()),
+                Some(1)
+            );
+        }
+        scheduler
+            .handle_signals(id, 100, 100, HandlingPoint::ScheduleIn)
+            .unwrap();
+        let down = Term::tuple(vec![atom("nodedown"), Term::Atom(name)]);
+        assert_eq!(messages(&scheduler, 0), vec![down; 2 - disabled]);
+    }
+
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let id = current(&mut scheduler);
+    let name = scheduler.atoms.put("other@host").unwrap();
+    scheduler
+        .current_process_mut()
+        .add_node_monitor(name.index(), 1);
+    scheduler
+        .send_signal(
+            None,
+            id,
+            Signal::NodeMonitorDown {
+                node: name.clone(),
+                connection: 1,
+            },
+        )
+        .unwrap();
+    scheduler
+        .current_process_mut()
+        .add_node_monitor(name.index(), 2);
+    scheduler
+        .handle_signals(id, 100, 100, HandlingPoint::ScheduleIn)
+        .unwrap();
+    assert_eq!(
+        messages(&scheduler, 0),
+        vec![Term::tuple(vec![
+            atom("nodedown"),
+            Term::Atom(name.clone())
+        ])]
+    );
+    assert_eq!(
+        scheduler
+            .current_process_mut()
+            .remove_node_monitor(name.index()),
+        Some(2)
+    );
+
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let id = current(&mut scheduler);
+    let name = scheduler.atoms.put("old@host").unwrap();
+    let first = super::dist_table::Controller::Process(ProcessId(90));
+    let second = super::dist_table::Controller::Process(ProcessId(91));
+    let node = Arc::clone(&scheduler.node);
+    {
+        let mut dist = node.dist();
+        dist.insert(&name, Reference(7), 0);
+        dist.new_connection(&name);
+        assert!(dist.connect(&name, first, 0).is_some());
+        assert_eq!(dist.monitor_node(&name, id), Some(1));
+    }
+    scheduler
+        .current_process_mut()
+        .add_node_monitor(name.index(), 1);
+    let ended = node.dist().controller_exits(first).unwrap();
+    scheduler.dist_monitor_down(&ended, &atom("normal"));
+    {
+        let mut dist = node.dist();
+        dist.new_connection(&name);
+        assert!(dist.connect(&name, second, 0).is_some());
+        assert_eq!(dist.monitor_node(&name, id), Some(2));
+    }
+    scheduler
+        .current_process_mut()
+        .add_node_monitor(name.index(), 2);
+    {
+        let mut dist = node.dist();
+        assert_eq!(
+            scheduler
+                .current_process_mut()
+                .remove_node_monitor(name.index()),
+            Some(2)
+        );
+        dist.unmonitor_node(&name, id, 2);
+        assert_eq!(
+            scheduler
+                .current_process_mut()
+                .remove_node_monitor(name.index()),
+            Some(1)
+        );
+        dist.unmonitor_node(&name, id, 1);
+    }
+    scheduler
+        .handle_signals(id, 100, 100, HandlingPoint::ScheduleIn)
+        .unwrap();
+    assert!(messages(&scheduler, 0).is_empty());
+}
+
+#[test]
 fn removes_a_monitor_of_another_node_at_the_end_of_the_connection() {
     use super::{dist_table::Controller, signals::HandlingPoint};
     use crate::runtime::process::{RemotePid, RemoteReference};

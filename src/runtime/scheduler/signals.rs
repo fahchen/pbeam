@@ -679,6 +679,23 @@ impl Scheduler {
                 };
                 return Ok(self.handle_exit_signal(id, walk, node, exit));
             }
+            Signal::NodeMonitorDown {
+                node: name,
+                connection,
+            } => {
+                let process = self.processes.get_mut(id).expect("the process is alive");
+                let count = process.take_node_monitor(name.index(), connection);
+                if count > 0 {
+                    let message =
+                        Term::tuple(vec![Term::static_atom("nodedown"), Term::Atom(name)]);
+                    process.mailbox.convert_many(walk, node, &message, count);
+                    self.activate(id);
+                    1
+                } else {
+                    process.mailbox.remove(node);
+                    1
+                }
+            }
             Signal::NodesMonitor { options, message } => {
                 let count = self.node.dist().nodes_monitor_count(id, options);
                 if count == 0 {

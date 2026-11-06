@@ -1382,6 +1382,22 @@ fn reports_node_events_as_pinned_erts() {
 }
 
 #[test]
+fn resolves_remote_node_monitor_counts_at_receipt_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let name = format!("nmedisable{}", std::process::id());
+    for (disabled, expected) in [(0, "2\n"), (1, "2\n"), (2, "2\n")] {
+        let expression = format!("dist_lost_probe:monitor_disable_signal({disabled}), halt().");
+        let arguments = probe(&["-sname", &name], &expression);
+        assert_eq!(stdout(&erts_erl(&epmd, &arguments)), expected, "{disabled}");
+        assert_eq!(
+            stdout(&pbeam_erl(&epmd, &arguments)),
+            expected,
+            "{disabled}"
+        );
+    }
+}
+
+#[test]
 fn resolves_node_monitor_signals_at_receipt_as_pinned_erts() {
     let epmd = Epmd::start();
     for (mode, expected) in [("disable", "0\n"), ("increase", "2\n"), ("recreate", "1\n")] {
@@ -1562,11 +1578,11 @@ fn monitors_a_connected_node_as_pinned_erts() {
         let arguments = probe(&prefix, &expression);
         assert_eq!(
             stdout(&erts_erl(&epmd, &arguments)),
-            "[nodedown,none,nodedown,nodedown]\n"
+            "[nodedown,none,nodedown,nodedown,none]\n"
         );
         assert_eq!(
             stdout(&pbeam_erl(&epmd, &arguments)),
-            "[nodedown,none,nodedown,nodedown]\n"
+            "[nodedown,none,nodedown,nodedown,none]\n"
         );
     }
 }

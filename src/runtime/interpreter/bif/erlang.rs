@@ -142,12 +142,24 @@ pub(super) fn monitor_node(
     }
     let enabled = matches!(enabled, Term::Atom(atom) if atom.is_static("true"));
     let process = scheduler.current_process().id;
-    if scheduler.node().dist().monitor_node(name, process, enabled) {
-        return Ok(Value(Term::static_atom("true")));
+    let node = Arc::clone(scheduler.node());
+    let mut dist = node.dist();
+    if enabled {
+        let Some(connection) = dist.monitor_node(name, process) else {
+            return Err(error(
+                "unsupported erlang:monitor_node/2,3 of a node without a connection: see Distribution in docs/erts-differences.md",
+            ));
+        };
+        scheduler
+            .current_process_mut()
+            .add_node_monitor(name.index(), connection);
+    } else if let Some(connection) = scheduler
+        .current_process_mut()
+        .remove_node_monitor(name.index())
+    {
+        dist.unmonitor_node(name, process, connection);
     }
-    Err(error(
-        "unsupported erlang:monitor_node/2,3 of a node without a connection: see Distribution in docs/erts-differences.md",
-    ))
+    Ok(Value(Term::static_atom("true")))
 }
 
 /// Run `erlang:nodes(NodeTypes)` and `erlang:nodes(NodeTypes, Options)` as

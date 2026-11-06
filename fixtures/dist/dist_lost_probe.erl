@@ -8,7 +8,21 @@
          monitor_remote/0, monitor_connected/1, monitor_events/1, monitor_forms/1,
          monitor_hidden/1, monitor_local_events/0, ordering_server/0, ordering_client/1,
          local_order/1, local_race/0, local_multi/0, controller_reasons/0, no_network/0,
-         self_signal/1]).
+         self_signal/1, monitor_disable_signal/1]).
+
+monitor_disable_signal(Disabled) ->
+    logger:set_primary_config(level, none),
+    Node = 'nmetarget@localhost',
+    Flags = element(3, erts_internal:get_dflags()),
+    _ = erts_internal:new_connection(Node),
+    {ok, Port} = gen_tcp:listen(0, []),
+    {ok, _} = erts_internal:create_dist_channel(Node, Port, {Flags, 1}),
+    true = erlang:monitor_node(Node, true),
+    true = erlang:monitor_node(Node, true),
+    true = erlang:port_close(Port),
+    [true = erlang:monitor_node(Node, false) || _ <- lists:seq(1, Disabled)],
+    Count = fun F(N) -> receive {nodedown, Node} -> F(N + 1) after 100 -> N end end,
+    io:format("~p~n", [Count(0)]).
 
 self_signal(Mode) ->
     true = register(net_kernel, self()),
@@ -200,7 +214,12 @@ monitor_connected(Server) ->
     true = erlang:disconnect_node(Server),
     Third = receive {nodedown, Server} -> nodedown after 5000 -> timeout end,
     Fourth = receive {nodedown, Server} -> nodedown after 5000 -> timeout end,
-    io:format("~p~n", [[First, Second, Third, Fourth]]).
+    true = net_kernel:connect_node(Server),
+    true = erlang:monitor_node(Server, true),
+    true = erlang:monitor_node(Server, false),
+    true = erlang:disconnect_node(Server),
+    Fifth = receive {nodedown, Server} -> nodedown after 100 -> none end,
+    io:format("~p~n", [[First, Second, Third, Fourth, Fifth]]).
 
 monitor_remote() -> erlang:monitor_node(foo, true).
 

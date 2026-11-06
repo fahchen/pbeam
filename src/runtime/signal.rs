@@ -80,6 +80,13 @@ pub(super) enum Signal {
         /// The new group leader: a pid of this node or of another node.
         leader: Term,
     },
+    /// A nodedown signal for the registrations on one connection.
+    NodeMonitorDown {
+        /// The node whose connection ended.
+        node: Atom,
+        /// The ended connection id.
+        connection: u32,
+    },
     /// A persistent node-monitor signal. The receiver uses the current
     /// count of `options` when it handles the signal.
     NodesMonitor {
@@ -428,6 +435,7 @@ impl Signal {
             Signal::Exit { reason, .. }
             | Signal::DistExit { reason, .. }
             | Signal::MonitorDown { reason, .. } => visit(reason),
+            Signal::NodeMonitorDown { node, .. } => visit(&Term::Atom(node.clone())),
             Signal::ProcessInfo { item, .. } => visit(item),
             Signal::AliasMessage { message, .. } | Signal::NodesMonitor { message, .. } => {
                 visit(message);
@@ -456,6 +464,7 @@ impl Signal {
     /// ```
     pub(super) fn take_terms(&mut self, pending: &mut Vec<Term>) {
         match self {
+            Signal::NodeMonitorDown { node, connection: _ } => pending.push(Term::Atom(node.clone())),
             Signal::SpawnReply { node, result, .. } => {
                 pending.push(Term::Atom(node.clone()));
                 pending.push(result.clone());
