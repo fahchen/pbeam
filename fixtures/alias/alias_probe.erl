@@ -115,11 +115,11 @@ priority_tag_reference() ->
     Held = spawn(?MODULE, idle, []),
     Ref = erlang:monitor(process, Held),
     Target = spawn(?MODULE, idle, []),
-    _Priority = erlang:monitor(process, Target, [priority, {tag, {tag, Ref}}]),
+    _Priority = erlang:monitor(process, Target, [priority, {tag, {tag, Ref, large_tag(5000)}}]),
     Sync = erlang:monitor(process, Target),
     Target ! stop,
     receive {'DOWN', Sync, process, Target, normal} -> ok end,
-    Result = receive {{tag, Ref}, _, process, Target, normal} -> found after 0 -> missed end,
+    Result = receive {{tag, Ref, _}, _, process, Target, normal} -> found after 0 -> missed end,
     erlang:demonitor(Ref, [flush]),
     Held ! stop,
     {Result, length(flush())}.
