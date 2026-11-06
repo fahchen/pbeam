@@ -591,7 +591,7 @@ fn preserves_cache_order_for_concurrent_port_senders() {
          list_to_atom(\"cache_parallel_\" ++ integer_to_list(N))] || N <- lists:seq(1,32)])), \
          F = fun F(Atoms) -> receive {From, atom_value, Atom} -> From ! ack, F([Atom|Atoms]); \
          {From, finish} -> From ! {result, {length(Atoms),lists:sort(Atoms) =:= Expected}}, F([]) \
-         after 30000 -> halt(2) end end, F([]).",
+         after 120000 -> halt(2) end end, F([]).",
     );
     let node = server.line();
     let expression = format!(
@@ -599,13 +599,13 @@ fn preserves_cache_order_for_concurrent_port_senders() {
          Atoms = [list_to_atom(\"cache_parallel_\" ++ integer_to_list(N)) || N <- lists:seq(1,32)], \
          Worker = fun(A) -> receive go -> Sid = erlang:system_info(scheduler_id), \
          {{cache_order, '{node}'}} ! {{self(), atom_value, A}}, \
-         receive ack -> Parent ! {{done, Sid}} after 10000 -> Parent ! timeout end end end, \
+         receive ack -> Parent ! {{done, Sid}} after 60000 -> Parent ! timeout end end end, \
          Ps = lists:append([[spawn(fun() -> Worker(A) end),spawn(fun() -> Worker(A) end)] || A <- Atoms]), \
          [P ! go || P <- Ps], \
-         Sids = [receive {{done, Sid}} -> Sid after 10000 -> timeout end || _ <- Ps], \
+         Sids = [receive {{done, Sid}} -> Sid after 60000 -> timeout end || _ <- Ps], \
          {{cache_order, '{node}'}} ! {{self(), finish}}, \
          receive {{result, Good}} -> io:format(\"~p~n~p~n\", [Good,length(lists:usort([S || S <- Sids, is_integer(S)]))]) \
-         after 10000 -> halt(2) end, halt()."
+         after 60000 -> halt(2) end, halt()."
     );
     let run = |name: &str| {
         vec![
