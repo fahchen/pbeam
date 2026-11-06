@@ -595,10 +595,13 @@ fn exchanges_large_messages_with_pinned_erts() {
          Exchange = fun() -> {{fragment_echo, '{node}'}} ! {{self(), Data}}, \
          receive {{echo, Result}} -> Result =:= Data after 10000 -> timeout end end, \
          Single = Exchange(), \
+         Atoms = [list_to_atom(lists:duplicate(200, 2048) ++ integer_to_list(N)) || N <- lists:seq(1,160)], \
+         Wide = {{Atoms, Data}}, {{fragment_echo, '{node}'}} ! {{self(), Wide}}, \
+         WideResult = receive {{echo, Reply}} -> Reply =:= Wide after 10000 -> timeout end, \
          Ps = [spawn(fun() -> receive go -> Parent ! {{done, Exchange()}} end end) || _ <- lists:seq(1,4)], \
          [P ! go || P <- Ps], \
          Results = [receive {{done, R}} -> R after 10000 -> timeout end || _ <- Ps], \
-         io:format(\"~p~n\", [{{Single, Results}}]), halt()."
+         io:format(\"~p~n\", [{{Single, WideResult, Results}}]), halt()."
     );
     let run = |name: &str| {
         vec![
@@ -619,9 +622,42 @@ fn exchanges_large_messages_with_pinned_erts() {
     ] {
         assert_eq!(
             stdout(&output),
-            "{true,[true,true,true,true]}\n",
+            "{true,true,[true,true,true,true]}\n",
             "{label}: {output:?}"
         );
+    }
+}
+
+#[test]
+fn accepts_a_large_control_term_in_the_first_fragment_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let expression = "register(fragment_control_target, self()), \
+        Node = fragment_control_peer@nohost, erts_internal:new_connection(Node), \
+        Flags = element(3, erts_internal:get_dflags()) bor 16#800000, \
+        {ok, Handle} = erts_internal:create_dist_channel(Node, self(), {Flags, 1}), \
+        <<131, Control/binary>> = term_to_binary({6, self(), binary:copy(<<42>>, 70000), fragment_control_target}), \
+        <<131, Message/binary>> = term_to_binary(ok), \
+        erlang:dist_ctrl_put_data(Handle, <<131,69,3:64,2:64,0,Control/binary>>), \
+        erlang:dist_ctrl_put_data(Handle, <<131,70,3:64,1:64,Message/binary>>), \
+        receive ok -> io:format(\"ok~n\") after 5000 -> io:format(\"timeout~n\") end, halt().";
+    let run = |name: &str| {
+        vec![
+            "-sname".to_owned(),
+            name.to_owned(),
+            "-kernel".to_owned(),
+            "logger_level".to_owned(),
+            "none".to_owned(),
+            "-noshell".to_owned(),
+            "-eval".to_owned(),
+            expression.to_owned(),
+        ]
+    };
+    for (label, output) in [
+        ("ERTS", erts_erl(&epmd, &run(&format!("dfcerts{id}")))),
+        ("PBeam", pbeam_erl(&epmd, &run(&format!("dfcpbeam{id}")))),
+    ] {
+        assert_eq!(stdout(&output), "ok\n", "{label}: {output:?}");
     }
 }
 
