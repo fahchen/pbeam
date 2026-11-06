@@ -3076,6 +3076,12 @@ fn resolves_queued_node_monitor_down_after_disable() {
         Some(2)
     );
 
+    check_node_monitor_disable_after_reconnect();
+}
+
+/// Check that disabling the new and old monitors leaves no queued message.
+fn check_node_monitor_disable_after_reconnect() {
+    use super::signals::HandlingPoint;
     let mut scheduler = test_scheduler();
     scheduler.start(frame(), vec![], allow_all());
     scheduler.schedule_next().unwrap();
@@ -3125,7 +3131,7 @@ fn resolves_queued_node_monitor_down_after_disable() {
     scheduler
         .handle_signals(id, 100, 100, HandlingPoint::ScheduleIn)
         .unwrap();
-    assert!(messages(&scheduler, 0).is_empty());
+    assert_eq!(messages(&scheduler, 0), Vec::<Term>::new());
 }
 
 #[test]

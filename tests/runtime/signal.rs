@@ -93,11 +93,11 @@ fn visits_the_terms_of_a_signal() {
         terms(&node_monitor),
         vec![Term::static_atom("nonode@nohost")]
     );
-    let nodes_monitor = Signal::NodesMonitor {
+    let persistent_monitor = Signal::NodesMonitor {
         options: 0,
         message: Term::Integer(7),
     };
-    assert_eq!(terms(&nodes_monitor), vec![Term::Integer(7)]);
+    assert_eq!(terms(&persistent_monitor), vec![Term::Integer(7)]);
     let check = Signal::CheckProcessCode {
         requester: ProcessId(1),
         tag: Term::Integer(5),

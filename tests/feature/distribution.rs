@@ -1488,7 +1488,7 @@ fn reports_node_events_as_pinned_erts() {
         "dist_lost_probe:server().",
     );
     let server_node = server.line();
-    let expression = format!("dist_lost_probe:monitor_events('{}'), halt().", server_node);
+    let expression = format!("dist_lost_probe:monitor_events('{server_node}'), halt().");
     let client_name = format!("neclient{id}");
     let arguments = probe(&["-sname", &client_name, "-setcookie", "ck"], &expression);
     let reference = stdout(&erts_erl(&epmd, &arguments));
@@ -1499,7 +1499,7 @@ fn reports_node_events_as_pinned_erts() {
         "{reference}"
     );
     assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), reference);
-    let expression = format!("dist_lost_probe:monitor_forms('{}'), halt().", server_node);
+    let expression = format!("dist_lost_probe:monitor_forms('{server_node}'), halt().");
     let arguments = probe(&["-sname", &client_name, "-setcookie", "ck"], &expression);
     let reference = stdout(&erts_erl(&epmd, &arguments));
     assert_eq!(
