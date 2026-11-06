@@ -473,37 +473,65 @@ fn accepts_connections_over_both_carriers() {
     let epmd = Epmd::start();
     let id = std::process::id();
     for socket in [false, true] {
-        let name = format!("inbound{socket}{id}");
-        let mut arguments = vec!["-sname", name.as_str(), "-setcookie", "ck"];
-        if socket {
-            arguments.extend(SOCKET_CARRIER);
+        for pbeam_server in [false, true] {
+            let name = format!("inbound{socket}{pbeam_server}{id}");
+            let mut arguments = vec![
+                "-sname",
+                name.as_str(),
+                "-setcookie",
+                "ck",
+                "-kernel",
+                "net_ticktime",
+                "2",
+            ];
+            if socket {
+                arguments.extend(SOCKET_CARRIER);
+            }
+            let server_expression = "register(inbound_probe, self()), io:format(\"~s~n\", [node()]), \
+             F = fun F() -> receive {From, Peer} -> \
+             From ! {net_adm:ping(Peer), lists:member(Peer, nodes(hidden)), \
+             rpc:call(Peer, erlang, node, []), erpc:call(Peer, erlang, node, [])}, F() \
+             after 30000 -> ok end end, F().";
+            let server = if pbeam_server {
+                pbeam_node(&epmd, &arguments, server_expression)
+            } else {
+                ErtsNode::start(&epmd, &arguments, server_expression)
+            };
+            let node = server.line();
+            let expression = format!(
+                "spawn(fun() -> timer:sleep(12000), halt(2) end), \
+             N = '{node}', true = net_kernel:connect_node(N), \
+             timer:sleep(5000), Ping = net_adm:ping(N), \
+             {{inbound_probe, N}} ! {{self(), node()}}, \
+             receive Reply -> io:format(\"~w~n\", [{{Ping, lists:member(N, nodes(hidden)), \
+             rpc:call(N, erlang, node, []), erpc:call(N, erlang, node, []), Reply}}]) end, halt()."
+            );
+            let client = format!("inclient{socket}{id}");
+            let mut client_arguments = vec![
+                "-sname",
+                client.as_str(),
+                "-setcookie",
+                "ck",
+                "-hidden",
+                "-kernel",
+                "net_ticktime",
+                "2",
+            ];
+            if socket {
+                client_arguments.extend(SOCKET_CARRIER);
+            }
+            let peer = format!("{}@{}", client, node.split_once('@').unwrap().1);
+            let expected = format!(
+                "{{pong,true,{0},{0},{{pong,true,{1},{1}}}}}",
+                atom_text(&node),
+                atom_text(&peer)
+            );
+            let erts = ErtsNode::start(&epmd, &client_arguments, &expression);
+            assert_eq!(erts.line(), expected);
+            drop(erts);
+            let pbeam = pbeam_node(&epmd, &client_arguments, &expression);
+            assert_eq!(pbeam.line(), expected);
         }
-        let server = pbeam_node(
-            &epmd,
-            &arguments,
-            "io:format(\"~s~n\", [node()]), receive stop -> ok after 30000 -> ok end.",
-        );
-        let node = server.line();
-        let expression = format!(
-            "spawn(fun() -> timer:sleep(10000), halt(2) end), \
-             N = '{node}', true = net_kernel:connect_node(N), Ping = net_adm:ping(N), \
-             io:format(\"~p~n\", [{{Ping, lists:member(N, nodes(hidden)), \
-             rpc:call(N, erlang, node, []), erpc:call(N, erlang, node, [])}}]), halt()."
-        );
-        let client = format!("inclient{socket}{id}");
-        let client_arguments = [
-            "-sname",
-            client.as_str(),
-            "-setcookie",
-            "ck",
-            "-hidden",
-            "-noshell",
-            "-eval",
-            &expression,
-        ];
-        let expected = format!("{{pong,true,{0},{0}}}\n", atom_text(&node));
-        assert_eq!(stdout(&erts_erl(&epmd, &client_arguments)), expected);
-        assert_eq!(stdout(&pbeam_erl(&epmd, &client_arguments)), expected);
     }
 }
 
