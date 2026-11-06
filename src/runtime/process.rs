@@ -4,7 +4,7 @@ mod tree;
 pub(super) use dictionary::Dictionary;
 pub(super) use tree::{MonitorLinkTree, TimerReference, WalkPosition};
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
 use super::{
     capability::SecurityContext,
@@ -740,11 +740,6 @@ pub(super) struct ProcessState {
     /// the spawn options (`erl_process.c:12242-12247`, `12568-12572`). PBeam has no garbage
     /// collector, so the flags only change what the BIFs report.
     pub(super) heap_flags: HeapFlags,
-    /// The node monitors of the process (`ERTS_MON_TYPE_NODES`): the count
-    /// of each by the bits of its options (`erts_monitor_nodes`,
-    /// `dist.c:6731-6845`). PBeam has no distribution, so a node monitor
-    /// never gets a message.
-    pub(super) node_monitors: BTreeMap<u8, u64>,
     /// The priority of the process (`ERTS_PSFLGS_USR_PRIO`). The scheduler
     /// puts the process into the run queue of this priority.
     pub(super) priority: Priority,
@@ -1092,7 +1087,6 @@ impl ProcessState {
             off_heap_message_queue: false,
             async_dist: false,
             heap_flags: HeapFlags::default(),
-            node_monitors: BTreeMap::new(),
             priority: Priority::Normal,
             links: MonitorLinkTree::default(),
             dist_links: MonitorLinkTree::default(),

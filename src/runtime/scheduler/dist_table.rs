@@ -15,7 +15,10 @@
 //! `node_tab_delete_delay` (`erl_node_tables.c:429-537`): see row
 //! "Distribution" of `docs/erts-differences.md`.
 
-use std::collections::{HashMap, VecDeque};
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::{Arc, Mutex},
+};
 
 use crate::{
     runtime::process::{MonitorKey, RemotePid},
@@ -65,6 +68,9 @@ enum State {
 /// The dist entry of one other node.
 #[derive(Debug)]
 struct Entry {
+    /// Serialize event enqueue with connection transitions. Take this lock
+    /// before the port and dist locks; mailbox locks are leaves.
+    event_lock: Arc<Mutex<()>>,
     /// The name of the other node.
     name: Atom,
     /// The magic reference of the entry, which each dist handle of the
@@ -175,6 +181,8 @@ pub(in crate::runtime) struct EndedConnection {
     pub(in crate::runtime) monitors: Vec<DistMonitor>,
     /// Node name and the counts of the detached node monitors.
     pub(in crate::runtime) node_monitors: (Atom, HashMap<ProcessId, u64>),
+    /// Node-event monitor snapshot, node type, and connection identifier.
+    pub(in crate::runtime) node_events: (bool, Vec<(ProcessId, u8, u64)>),
 }
 
 /// The node type and the connection id of a node that `erlang:nodes/1,2`
@@ -196,6 +204,8 @@ pub(in crate::runtime) struct DistTable {
     entries: HashMap<u32, Entry>,
     /// The atom index of the entry of each magic reference.
     handles: HashMap<Reference, u32>,
+    /// Counts of node event monitors by process and option bits.
+    nodes_monitors: Vec<(ProcessId, u8, u64)>,
     /// The order number of the next entry that changes its list. The
     /// entry of `nonode@nohost` has the order 0 (see [`Self::set_local`]).
     next_order: u64,
@@ -206,6 +216,7 @@ impl Default for DistTable {
         DistTable {
             entries: HashMap::new(),
             handles: HashMap::new(),
+            nodes_monitors: Vec::new(),
             next_order: 1,
         }
     }
@@ -230,6 +241,7 @@ impl DistTable {
             self.next_order += 1;
             self.handles.insert(handle, name.index());
             Entry {
+                event_lock: Arc::new(Mutex::new(())),
                 name: name.clone(),
                 handle,
                 state: State::Idle,
@@ -420,6 +432,17 @@ impl DistTable {
         Some(self.dhandle(name, connection_id))
     }
 
+    /// Return the event lock of an existing dist entry.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let event_lock = table.event_lock(&name);
+    /// ```
+    pub(in crate::runtime) fn event_lock(&self, name: &Atom) -> Arc<Mutex<()>> {
+        Arc::clone(&self.entries[&name.index()].event_lock)
+    }
+
     /// Return the name of the entry that `controller` controls
     /// (`ERTS_PROC_GET_DIST_ENTRY`, `ERTS_PRTSD_DIST_ENTRY`).
     pub(in crate::runtime) fn controlled_by(&self, controller: Controller) -> Option<Atom> {
@@ -484,6 +507,7 @@ impl DistTable {
     /// ```rust,ignore
     /// assert!(table.monitor_node(&name, process, true));
     /// ```
+    #[expect(clippy::fn_params_excessive_bools, reason = "the BIF takes a boolean")]
     pub(in crate::runtime) fn monitor_node(
         &mut self,
         name: &Atom,
@@ -507,6 +531,69 @@ impl DistTable {
         true
     }
 
+    /// Set or clear a process node-event monitor and return its old count.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(table.monitor_nodes(process, 0, true), 0);
+    /// ```
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "the process flag takes a boolean"
+    )]
+    pub(in crate::runtime) fn monitor_nodes(
+        &mut self,
+        process: ProcessId,
+        key: u8,
+        enabled: bool,
+    ) -> u64 {
+        let position = self
+            .nodes_monitors
+            .iter()
+            .position(|&(owner, options, _)| owner == process && options == key);
+        if enabled {
+            if let Some(position) = position {
+                let count = &mut self.nodes_monitors[position].2;
+                let old = *count;
+                *count += 1;
+                old
+            } else {
+                self.nodes_monitors.push((process, key, 1));
+                0
+            }
+        } else if let Some(position) = position {
+            self.nodes_monitors.remove(position).2
+        } else {
+            0
+        }
+    }
+
+    /// Snapshot node-event monitors under the distribution lock.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let watchers = table.nodes_monitors();
+    /// ```
+    pub(in crate::runtime) fn nodes_monitors(&self) -> Vec<(ProcessId, u8, u64)> {
+        self.nodes_monitors.clone()
+    }
+
+    /// Return the current count of a node-event monitor.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(table.nodes_monitor_count(process, 0), 0);
+    /// ```
+    pub(in crate::runtime) fn nodes_monitor_count(&self, process: ProcessId, key: u8) -> u64 {
+        self.nodes_monitors
+            .iter()
+            .find(|&&(owner, options, _)| owner == process && options == key)
+            .map_or(0, |entry| entry.2)
+    }
+
     /// Remove each node monitor held by an exiting process.
     ///
     /// # Examples
@@ -515,6 +602,8 @@ impl DistTable {
     /// table.remove_node_monitors(process);
     /// ```
     pub(in crate::runtime) fn remove_node_monitors(&mut self, process: ProcessId) {
+        self.nodes_monitors
+            .retain(|(owner, _, _)| *owner != process);
         for entry in self.entries.values_mut() {
             entry.node_monitors.remove(&process);
         }
@@ -596,6 +685,7 @@ impl DistTable {
         &mut self,
         controller: Controller,
     ) -> Option<EndedConnection> {
+        let watchers = self.nodes_monitors();
         let entry = self
             .entries
             .values_mut()
@@ -603,6 +693,7 @@ impl DistTable {
         let connection = entry.connection_id;
         let links = std::mem::take(&mut entry.links);
         let monitors = std::mem::take(&mut entry.monitors);
+        let visible = entry.flags & PUBLISHED != 0;
         let node_monitors = (entry.name.clone(), std::mem::take(&mut entry.node_monitors));
         entry.set_idle(self.next_order);
         entry.input = 0;
@@ -610,14 +701,13 @@ impl DistTable {
         entry.out = 0;
         entry.input_handler = None;
         self.next_order += 1;
-        (!links.is_empty() || !monitors.is_empty() || !node_monitors.1.is_empty()).then_some(
-            EndedConnection {
-                connection,
-                links,
-                monitors,
-                node_monitors,
-            },
-        )
+        Some(EndedConnection {
+            connection,
+            links,
+            monitors,
+            node_monitors,
+            node_events: (visible, watchers),
+        })
     }
 
     /// Add the link of `process` to `remote` to the connection `connection`
@@ -831,39 +921,38 @@ impl DistTable {
             .retain(|monitor| monitor.process != process || monitor.key != key);
     }
 
-    /// Make each pending entry idle and return the links of each connection
-    /// that ended and the controller of each connected entry, as
-    /// `erts_do_net_exits` does at the exit of `net_kernel` (`dist.c:926-1001`).
-    pub(in crate::runtime) fn net_kernel_exits(
+    /// Snapshot the entries at the exit of `net_kernel`. The caller takes
+    /// each entry event lock before it cancels or stops that connection.
+    /// `erts_do_net_exits` does the controller cleanup at `dist.c:926-1001`.
+    pub(in crate::runtime) fn net_kernel_exits(&self) -> Vec<(Atom, Arc<Mutex<()>>)> {
+        self.entries
+            .values()
+            .map(|entry| (entry.name.clone(), Arc::clone(&entry.event_lock)))
+            .collect()
+    }
+
+    /// Detach one entry during local node shutdown under its event lock.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let (ended, controller) = table.shutdown_entry(&name);
+    /// ```
+    pub(in crate::runtime) fn shutdown_entry(
         &mut self,
-    ) -> (Vec<EndedConnection>, Vec<Controller>) {
-        let mut ended = Vec::new();
-        let mut controllers = Vec::new();
-        for entry in self.entries.values_mut() {
-            match entry.state {
-                State::Pending => {
-                    entry.set_idle(self.next_order);
-                    self.next_order += 1;
-                }
-                State::Connected => {
-                    let links = std::mem::take(&mut entry.links);
-                    let monitors = std::mem::take(&mut entry.monitors);
-                    let node_monitors =
-                        (entry.name.clone(), std::mem::take(&mut entry.node_monitors));
-                    if !links.is_empty() || !monitors.is_empty() || !node_monitors.1.is_empty() {
-                        ended.push(EndedConnection {
-                            connection: entry.connection_id,
-                            links,
-                            monitors,
-                            node_monitors,
-                        });
-                    }
-                    controllers.extend(entry.controller);
-                }
-                State::Idle => {}
+        name: &Atom,
+    ) -> (Option<EndedConnection>, Option<Controller>) {
+        let entry = self.entry_mut(name);
+        match entry.state {
+            State::Pending => {
+                let order = self.next_order;
+                self.entry_mut(name).set_idle(order);
+                self.next_order += 1;
+                (None, None)
             }
+            State::Connected => (None, entry.controller),
+            State::Idle => (None, None),
         }
-        (ended, controllers)
     }
 
     /// Return the node of each entry in the order of `erlang:nodes/1,2`

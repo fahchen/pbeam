@@ -3035,7 +3035,7 @@ fn removes_a_monitor_of_another_node_at_the_end_of_the_connection() {
     };
     assert_eq!(ended.connection, 1);
     assert_eq!(ended.monitors.len(), 1, "the entry keeps one monitor");
-    scheduler.dist_monitor_down(&ended);
+    scheduler.dist_monitor_down(&ended, &Term::static_atom("normal"));
     scheduler
         .handle_signals(id, 100, 100, HandlingPoint::ScheduleIn)
         .unwrap();

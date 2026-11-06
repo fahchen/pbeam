@@ -95,8 +95,15 @@ fn returns_the_links_of_each_connection_at_the_exit_of_net_kernel() {
     };
     assert!(table.insert_link(ProcessId(3), remote(&a, 4), 1));
     assert!(table.insert_link(ProcessId(5), remote(&b, 6), 1));
-    let (ended, controllers) = table.net_kernel_exits();
-    assert_eq!(controllers.len(), 2);
+    let entries = table.net_kernel_exits();
+    let controllers: Vec<_> = entries
+        .iter()
+        .filter_map(|(name, _)| table.shutdown_entry(name).1)
+        .collect();
+    let ended: Vec<_> = controllers
+        .iter()
+        .filter_map(|controller| table.controller_exits(*controller))
+        .collect();
     assert!(ended.iter().all(|connection| connection.connection == 1));
     let links: Vec<_> = ended
         .iter()
@@ -189,8 +196,11 @@ fn orders_the_nodes_by_state_and_by_the_time_of_each_change() {
     assert_eq!(nodes[4].connection_id, Some(1));
     // The exit of net_kernel gives each controller and makes the pending
     // entry `a` idle (dist.c:926-1001).
-    let (ended, mut controllers) = table.net_kernel_exits();
-    assert!(ended.is_empty());
+    let entries = table.net_kernel_exits();
+    let mut controllers: Vec<_> = entries
+        .iter()
+        .filter_map(|(name, _)| table.shutdown_entry(name).1)
+        .collect();
     controllers.sort_by_key(|controller| match controller {
         Controller::Process(id) => id.0,
         Controller::Port(_) => u64::MAX,

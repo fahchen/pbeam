@@ -387,21 +387,19 @@ fn nodes_monitor_key(options: &Term) -> Option<u8> {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(matches!(monitor_nodes(process, &Term::nil(), Some("true")), BifResult::Value(Term::Integer(0))));
-/// assert!(matches!(monitor_nodes(process, &Term::nil(), Some("true")), BifResult::Value(Term::Integer(1))));
-/// assert!(matches!(monitor_nodes(process, &Term::nil(), Some("false")), BifResult::Value(Term::Integer(2))));
+/// assert!(matches!(monitor_nodes(scheduler, &Term::nil(), Some("true")), BifResult::Value(Term::Integer(0))));
+/// assert!(matches!(monitor_nodes(scheduler, &Term::nil(), Some("true")), BifResult::Value(Term::Integer(1))));
+/// assert!(matches!(monitor_nodes(scheduler, &Term::nil(), Some("false")), BifResult::Value(Term::Integer(2))));
 /// ```
-fn monitor_nodes(process: &mut ProcessState, options: &Term, value: Option<&str>) -> BifResult {
+fn monitor_nodes(scheduler: &mut Scheduler, options: &Term, value: Option<&str>) -> BifResult {
     let (Some(on @ ("true" | "false")), Some(key)) = (value, nodes_monitor_key(options)) else {
         return BifResult::badarg();
     };
-    let old = if on == "true" {
-        let count = process.node_monitors.entry(key).or_default();
-        *count += 1;
-        *count - 1
-    } else {
-        process.node_monitors.remove(&key).unwrap_or(0)
-    };
+    let process = scheduler.current_process().id;
+    let old = scheduler
+        .node()
+        .dist()
+        .monitor_nodes(process, key, on == "true");
     Value(Term::from_bigint(BigInt::from(old)))
 }
 
@@ -447,8 +445,8 @@ fn boolean_flag(flag: &mut bool, value: Option<&str>) -> BifResult {
 /// scheduler reads the new priority when the process next goes into the
 /// run queue. Each other value raises `badarg`. A
 /// flag that ERTS does not know raises `badarg`, also a tuple that is not
-/// `{monitor_nodes, Options}`. PBeam has no distribution, so `async_dist`
-/// has no other effect and a node monitor never gets a message.
+/// `{monitor_nodes, Options}`. PBeam has no asynchronous distribution sender,
+/// so `async_dist` has no other effect.
 ///
 /// The heap flags `fullsweep_after`, `min_heap_size`,
 /// `min_bin_vheap_size`, and `max_heap_size` go to [`process_heap_flag`].
@@ -493,6 +491,16 @@ pub(super) fn process_flag(
         _ => None,
     };
     let value = value.as_deref();
+    match flag {
+        Term::Atom(flag) if flag.is_static("monitor_nodes") => {
+            return Ok(monitor_nodes(context.scheduler, &Term::nil(), value));
+        }
+        Term::Tuple(elements) if matches!(elements.as_ref(), [Term::Atom(tag), _] if tag.is_static("monitor_nodes")) =>
+        {
+            return Ok(monitor_nodes(context.scheduler, &elements[1], value));
+        }
+        _ => {}
+    }
     let process = context.scheduler.current_process_mut();
     Ok(match flag {
         Term::Atom(flag) if flag.is_static("trap_exit") => {
@@ -500,12 +508,6 @@ pub(super) fn process_flag(
         }
         Term::Atom(flag) if flag.is_static("async_dist") => {
             boolean_flag(&mut process.async_dist, value)
-        }
-        Term::Atom(flag) if flag.is_static("monitor_nodes") => {
-            monitor_nodes(process, &Term::nil(), value)
-        }
-        Term::Tuple(elements) if matches!(elements.as_ref(), [Term::Atom(tag), _] if tag.is_static("monitor_nodes")) => {
-            monitor_nodes(process, &elements[1], value)
         }
         Term::Atom(flag) if flag.is_static("message_queue_data") => {
             let old = Term::static_atom(if process.off_heap_message_queue {

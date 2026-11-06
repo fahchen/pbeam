@@ -679,6 +679,18 @@ impl Scheduler {
                 };
                 return Ok(self.handle_exit_signal(id, walk, node, exit));
             }
+            Signal::NodesMonitor { options, message } => {
+                let count = self.node.dist().nodes_monitor_count(id, options);
+                if count == 0 {
+                    self.handled(id, node);
+                    1
+                } else {
+                    let process = self.processes.get_mut(id).expect("the process is alive");
+                    process.mailbox.convert_many(walk, node, &message, count);
+                    self.activate(id);
+                    1
+                }
+            }
             Signal::MonitorDown { reference, reason } => {
                 self.handle_monitor_down(id, walk, node, reference, reason)
             }

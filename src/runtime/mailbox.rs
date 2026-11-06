@@ -755,6 +755,44 @@ impl Mailbox {
         walk.at = Link::After(node);
     }
 
+    /// Convert a signal to `count` consecutive copies of a message.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// mailbox.convert_many(&mut walk, node, message, 2);
+    /// ```
+    pub(super) fn convert_many(&mut self, walk: &mut Walk, node: NodeId, term: &Term, count: u64) {
+        self.convert(walk, node, term.clone());
+        let mut previous = node;
+        for _ in 1..count {
+            let next = self.nodes[previous].next;
+            let entry = Node {
+                entry: Entry::Message(term.clone()),
+                prev: Link::After(previous),
+                next,
+            };
+            let added = if let Some(added) = self.free.pop() {
+                self.nodes[added] = entry;
+                added
+            } else {
+                self.nodes.push(entry);
+                self.nodes.len() - 1
+            };
+            self.nodes[previous].next = Some(added);
+            if let Some(next) = next {
+                self.nodes[next].prev = Link::After(added);
+            } else {
+                self.last = Link::After(added);
+            }
+            if self.received == Link::After(previous) {
+                self.received = Link::After(added);
+            }
+            previous = added;
+        }
+        walk.at = Link::After(previous);
+    }
+
     /// Remove the node of a signal that [`Mailbox::next_signal`] took, as
     /// `remove_nm_sig` does.
     ///
