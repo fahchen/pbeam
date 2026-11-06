@@ -530,6 +530,47 @@ fn connects_over_a_tcp_inet_port_as_pinned_erts() {
 }
 
 #[test]
+fn exchanges_many_cached_atoms_with_pinned_erts() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let server_name = format!("dacache{id}");
+    let server = ErtsNode::start(
+        &epmd,
+        &["-sname", &server_name, "-setcookie", "ck"],
+        "register(cache_echo, self()), io:format(\"~s~n\", [node()]), \
+         F = fun F() -> receive {From, Atoms} -> From ! {atoms, Atoms}, F() \
+         after 30000 -> halt(2) end end, F().",
+    );
+    let node = server.line();
+    let expression = format!(
+        "true = net_kernel:connect_node('{node}'), \
+         Atoms = [list_to_atom(\"cache_atom_\" ++ integer_to_list(N)) || N <- lists:seq(1,300)], \
+         Exchange = fun() -> {{cache_echo, '{node}'}} ! {{self(), Atoms}}, \
+         receive {{atoms, Result}} -> Result =:= Atoms after 5000 -> timeout end end, \
+         A = Exchange(), B = Exchange(), io:format(\"~p~n\", [{{A,B,length(Atoms)}}]), halt()."
+    );
+    let run = |name: &str| {
+        vec![
+            "-sname".to_owned(),
+            name.to_owned(),
+            "-setcookie".to_owned(),
+            "ck".to_owned(),
+            "-noshell".to_owned(),
+            "-eval".to_owned(),
+            expression.clone(),
+        ]
+    };
+    assert_eq!(
+        stdout(&erts_erl(&epmd, &run(&format!("dacerts{id}")))),
+        "{true,true,300}\n"
+    );
+    assert_eq!(
+        stdout(&pbeam_erl(&epmd, &run(&format!("dacpbeam{id}")))),
+        "{true,true,300}\n"
+    );
+}
+
+#[test]
 fn sends_messages_between_erts_and_pbeam_nodes_in_order() {
     // A client sends 100 REG_SEND messages to the name decho of a server
     // node, and then 100 SEND messages to the pid of the server, which
