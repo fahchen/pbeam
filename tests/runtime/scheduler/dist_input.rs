@@ -67,3 +67,32 @@ fn reassembles_interleaved_fragments_with_their_own_atom_tables() {
         }
     }
 }
+
+// ERTS decodes the control before it stores a sequence (dist.c:2084-2093).
+#[test]
+fn rejects_a_control_term_split_between_fragments() {
+    let (node, mut readers) = Node::new(1).unwrap();
+    let scheduler = Scheduler::with_shared(Arc::new(AtomTable::new()), node, 0, readers.remove(0));
+    let name = scheduler.atoms.put("split_control@host").unwrap();
+    let connection = {
+        let mut dist = scheduler.node.dist();
+        dist.insert(&name, Reference(8), 0);
+        dist.new_connection(&name);
+        dist.connect(&name, Controller::Process(ProcessId(0)), 0)
+            .unwrap();
+        dist.connected(&name).unwrap().2
+    };
+    let mut first = vec![131, b'E'];
+    first.extend(3_u64.to_be_bytes());
+    first.extend(2_u64.to_be_bytes());
+    first.extend([0, 97]); // Empty atom table and an incomplete small integer.
+    assert!(scheduler.dist_fragment(&name, connection, &first).is_err());
+    assert!(
+        scheduler
+            .node
+            .dist()
+            .fragments_in(&name, connection)
+            .unwrap()
+            .is_empty()
+    );
+}

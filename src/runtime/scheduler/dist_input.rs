@@ -234,6 +234,11 @@ impl Scheduler {
             let Some((body, atoms)) = self.dist_atom_header(node, connection, &header)? else {
                 return Ok(None);
             };
+            // ERTS validates the complete control term before storing the
+            // sequence (dist.c:2084-2093, 2117-2129).
+            if decode_dist(self, body, Some(&atoms))?.is_none() {
+                return Err(error(REJECTED));
+            }
             let bytes = body.to_vec();
             let mut dist = self.node.dist();
             let Some(sequences) = dist.fragments_in(node, connection) else {
