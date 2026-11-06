@@ -1029,11 +1029,23 @@ fn preserves_cache_order_for_concurrent_port_senders() {
             expression.clone(),
         ]
     };
-    for (label, output) in [
-        ("ERTS", erts_erl(&epmd, &run(&format!("dcoerts{id}")))),
-        ("PBeam", pbeam_erl(&epmd, &run(&format!("dcopbeam{id}")))),
+    for (label, node, output) in [
+        ("ERTS", format!("dcoerts{id}"), None),
+        ("PBeam", format!("dcopbeam{id}"), None),
     ] {
-        let text = stdout(&output);
+        let arguments = run(&node);
+        let output = match output {
+            Some(output) => output,
+            None if label == "ERTS" => erts_erl(&epmd, &arguments),
+            None => pbeam_erl(&epmd, &arguments),
+        };
+        // Name the arguments in the failure, because a node that another test
+        // disturbs reports its own error, which does not name this test.
+        assert!(
+            output.status.success() && output.stderr.is_empty(),
+            "{label} {node}: {output:?}"
+        );
+        let text = String::from_utf8(output.stdout).unwrap();
         let (result, schedulers) = text.split_once('\n').unwrap();
         assert_eq!(result, "{64,true}", "{label}: {text}");
         println!("{label} scheduler count: {}", schedulers.trim());
