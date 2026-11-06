@@ -577,6 +577,55 @@ fn exchanges_many_cached_atoms_with_pinned_erts() {
 }
 
 #[test]
+fn exchanges_large_messages_with_pinned_erts() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let server_name = format!("dfrag{id}");
+    let server = ErtsNode::start(
+        &epmd,
+        &["+S", "4", "-sname", &server_name, "-setcookie", "ck"],
+        "register(fragment_echo, self()), io:format(\"~s~n\", [node()]), \
+         F = fun F() -> receive {From, Data} -> spawn(fun() -> From ! {echo, Data} end), F() \
+         after 30000 -> halt(2) end end, F().",
+    );
+    let node = server.line();
+    let expression = format!(
+        "true = net_kernel:connect_node('{node}'), Parent = self(), \
+         Data = binary:copy(<<42>>, 131073), \
+         Exchange = fun() -> {{fragment_echo, '{node}'}} ! {{self(), Data}}, \
+         receive {{echo, Result}} -> Result =:= Data after 10000 -> timeout end end, \
+         Single = Exchange(), \
+         Ps = [spawn(fun() -> receive go -> Parent ! {{done, Exchange()}} end end) || _ <- lists:seq(1,4)], \
+         [P ! go || P <- Ps], \
+         Results = [receive {{done, R}} -> R after 10000 -> timeout end || _ <- Ps], \
+         io:format(\"~p~n\", [{{Single, Results}}]), halt()."
+    );
+    let run = |name: &str| {
+        vec![
+            "+S".to_owned(),
+            "4".to_owned(),
+            "-sname".to_owned(),
+            name.to_owned(),
+            "-setcookie".to_owned(),
+            "ck".to_owned(),
+            "-noshell".to_owned(),
+            "-eval".to_owned(),
+            expression.clone(),
+        ]
+    };
+    for (label, output) in [
+        ("ERTS", erts_erl(&epmd, &run(&format!("dfrerts{id}")))),
+        ("PBeam", pbeam_erl(&epmd, &run(&format!("dfrpbeam{id}")))),
+    ] {
+        assert_eq!(
+            stdout(&output),
+            "{true,[true,true,true,true]}\n",
+            "{label}: {output:?}"
+        );
+    }
+}
+
+#[test]
 fn preserves_cache_order_for_concurrent_port_senders() {
     // The 64 processes interleave sends. Their scheduler assignment is not
     // deterministic, so the scheduler count is diagnostic only.
