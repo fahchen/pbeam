@@ -623,6 +623,55 @@ fn exchanges_cached_identifier_nodes_with_pinned_erts() {
 }
 
 #[test]
+fn exchanges_cached_record_headers_with_pinned_erts() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let name = format!("dcrecord{id}");
+    let server = ErtsNode::start(
+        &epmd,
+        &["-sname", &name, "-setcookie", "ck"],
+        "register(cache_record, self()), io:format(\"~s~n\", [node()]), \
+         Record = records:create(cache_record_module, cache_record_name, \
+         [{cache_field_one,17},{cache_field_two,23}], #{is_exported => true}), \
+         F = fun F() -> receive {From, get_record} -> From ! {record,Record}, F(); \
+         {From, {check,Got}} -> From ! {same,Got =:= Record}, F() \
+         after 30000 -> halt(2) end end, F().",
+    );
+    let node = server.line();
+    let expression = format!(
+        "true = net_kernel:connect_node('{node}'), \
+         {{cache_record, '{node}'}} ! {{self(), get_record}}, \
+         receive {{record, Record}} -> \
+         {{cache_record, '{node}'}} ! {{self(), {{check,Record}}}}, \
+         receive {{same,Same}} -> io:format(\"~0p~n\", \
+         [{{records:get_module(Record), records:get_name(Record), \
+         records:get_field_names(Record),Same}}]) after 5000 -> halt(2) end \
+         after 5000 -> halt(3) end, halt()."
+    );
+    let run = |name: &str| {
+        vec![
+            "-sname".to_owned(),
+            name.to_owned(),
+            "-setcookie".to_owned(),
+            "ck".to_owned(),
+            "-noshell".to_owned(),
+            "-eval".to_owned(),
+            expression.clone(),
+        ]
+    };
+    let expected =
+        "{cache_record_module,cache_record_name,[cache_field_one,cache_field_two],true}\n";
+    assert_eq!(
+        stdout(&erts_erl(&epmd, &run(&format!("dcrerts{id}")))),
+        expected
+    );
+    assert_eq!(
+        stdout(&pbeam_erl(&epmd, &run(&format!("dcrpbeam{id}")))),
+        expected
+    );
+}
+
+#[test]
 fn sends_messages_between_erts_and_pbeam_nodes_in_order() {
     // A client sends 100 REG_SEND messages to the name decho of a server
     // node, and then 100 SEND messages to the pid of the server, which
