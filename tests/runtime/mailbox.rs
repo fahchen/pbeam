@@ -46,6 +46,19 @@ fn priority_segment_keeps_arrival_order_before_normal_messages() {
 }
 
 #[test]
+fn caches_marker_references_when_priority_messages_arrive() {
+    let mut mailbox = mailbox(&[1]);
+    let marker = mailbox.reserve_marker();
+    let reference = Term::Reference(Reference(7));
+    mailbox.bind_marker(&marker, &reference);
+    let message = Term::tuple(vec![int(2), reference.clone()]);
+    assert_eq!(mailbox.push_priority(message.clone()), 4);
+    assert_eq!(mailbox.push_priority(message), 0);
+    mailbox.use_marker(&reference);
+    assert!(mailbox.current().is_some());
+}
+
+#[test]
 fn walks_and_removes_messages() {
     let mut mailbox = mailbox(&[1, 2, 3]);
     assert!(mailbox.save_next());
