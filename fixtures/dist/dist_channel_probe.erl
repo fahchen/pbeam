@@ -5,7 +5,8 @@
 -export([main/0, net_kernel_exit/0, port_channel/0, no_mandatory/0, message/0,
          port_message/0, deliver_port/0, deliver_udp/0, input/0, reject/1,
          trace_token/1, monitor_op/0, demonitor_name/0, demonitor_ref/0,
-         atom_cache/0, output/0, port_output/0,
+         atom_cache/0, fragment_interleaving/0, fragment_reconnect/0,
+         fragment_output/0, fragment_large_control/0, output/0, port_output/0,
          alias_ext/0, dead_alias/1, exit_input/0, link_input/0,
          link_noconnection/0, altact_op/0, spawn_bad_ref/0, spawn_bad_from/0,
          spawn_bad_from_local/0,
@@ -498,6 +499,124 @@ atom_cache() ->
     erts_internal:new_connection(zz@nohost),
     {ok, DH} = erts_internal:create_dist_channel(zz@nohost, self(), {mandatory() bor 16#2000, 1}),
     erlang:dist_ctrl_put_data(DH, packet_only({2, '', self()})).
+
+%% Two sequences use the same cache slot for different atoms. Their
+%% continuation packets arrive in both orders (dist.c:2117-2163).
+fragment_interleaving() ->
+    logger:set_primary_config(level, none),
+    Node = fragment_interleaving_peer@nohost,
+    erts_internal:new_connection(Node),
+    Flags = mandatory() bor 16#2000 bor 16#800000,
+    {ok, Handle} = erts_internal:create_dist_channel(Node, self(), {Flags, 1}),
+    <<131, Control/binary>> = term_to_binary({2, '', self()}),
+    First = fun(Sequence, Atom) ->
+                    <<131, 69, Sequence:64, 2:64, 1, 8, 0, (byte_size(Atom)),
+                      Atom/binary, Control/binary, 82>>
+            end,
+    Last = fun(Sequence) -> <<131, 70, Sequence:64, 1:64, 0>> end,
+    Run = fun(Order) ->
+                  ok = erlang:dist_ctrl_put_data(Handle, First(1, <<"alpha">>)),
+                  ok = erlang:dist_ctrl_put_data(Handle, First(2, <<"beta">>)),
+                  [ok = erlang:dist_ctrl_put_data(Handle, Last(Sequence)) || Sequence <- Order],
+                  [receive Item when Item =:= alpha; Item =:= beta -> Item
+                   after 5000 -> timeout end || _ <- Order]
+          end,
+    show(fragment_interleaving, [Run([1, 2]), Run([2, 1])]).
+
+%% Reuse a sequence id after the connection that held it ends.
+fragment_reconnect() ->
+    logger:set_primary_config(level, none),
+    Node = fragment_reconnect_peer@nohost,
+    Flags = mandatory() bor 16#800000,
+    Connect = fun() ->
+                      Parent = self(),
+                      Ctrl = spawn(fun() ->
+                                           receive {setup, H} ->
+                                                       ok = erlang:dist_ctrl_input_handler(H, Parent),
+                                                       Parent ! {self(), ready},
+                                                       receive stop -> ok end
+                                           end
+                                   end),
+                      Ref = monitor(process, Ctrl),
+                      erts_internal:new_connection(Node),
+                      {message, Reply} = erts_internal:create_dist_channel(Node, Ctrl, {Flags, 1}),
+                      Handle = receive {Reply, Value} -> Value end,
+                      Ctrl ! {setup, Handle},
+                      receive {Ctrl, ready} -> ok end,
+                      {Ctrl, Ref, Handle}
+              end,
+    <<131, Control/binary>> = term_to_binary({2, '', self()}),
+    {Old, OldRef, OldHandle} = Connect(),
+    RemoteRef = monitor(process, {fragment_remote, Node}),
+    ok = erlang:dist_ctrl_put_data(OldHandle, <<131, 69, 7:64, 3:64, 0, Control/binary>>),
+    ok = erlang:dist_ctrl_put_data(OldHandle, <<131, 70, 7:64, 1:64>>),
+    Reason = receive {'DOWN', OldRef, process, Old, Why} -> Why after 5000 -> timeout end,
+    RemoteReason = receive {'DOWN', RemoteRef, process, _, R} -> R after 5000 -> timeout end,
+    Nodes = nodes(connected),
+    {New, _NewRef, NewHandle} = Connect(),
+    ok = erlang:dist_ctrl_put_data(NewHandle, <<131, 69, 7:64, 2:64, 0, Control/binary, 97>>),
+    ok = erlang:dist_ctrl_put_data(NewHandle, <<131, 70, 7:64, 1:64, 42>>),
+    Value = receive 42 -> 42 after 5000 -> timeout end,
+    New ! stop,
+    show(fragment_reconnect, [Reason, RemoteReason, Nodes, Value]).
+
+%% Inspect the headers that a process distribution controller takes.
+fragment_output() ->
+    logger:set_primary_config(level, none),
+    Flags = mandatory() bor 16#800000,
+    Node = fragment_output_peer@nohost,
+    {Ctrl, Handle} = fragment_output_controller(Node, Flags),
+    remote_pid(Node) ! binary:copy(<<42>>, 131073),
+    Ctrl ! {take, Handle, 3},
+    {Packets, Empty} = receive {Ctrl, Data} -> Data end,
+    [<<131, 69, Sequence:64, 3:64, _/binary>>,
+     <<131, 70, Sequence:64, 2:64, _/binary>>,
+     <<131, 70, Sequence:64, 1:64, _/binary>>] = Packets,
+    Ctrl ! stop,
+    WideNode = fragment_wide_peer@nohost,
+    {WideCtrl, WideHandle} = fragment_output_controller(WideNode, Flags bor 16#2000),
+    Atoms = [list_to_atom(lists:duplicate(200, 2048) ++ integer_to_list(N)) || N <- lists:seq(1,160)],
+    remote_pid(WideNode) ! {Atoms, binary:copy(<<42>>, 70000)},
+    WideCtrl ! {take, WideHandle, 2},
+    {[WideFirst, WideLast], WideEmpty} = receive {WideCtrl, WideData} -> WideData end,
+    <<131, 69, WideSequence:64, 2:64, _/binary>> = WideFirst,
+    <<131, 70, WideSequence:64, 1:64, _/binary>> = WideLast,
+    WideCtrl ! stop,
+    show(fragment_output, [length(Packets), Empty, byte_size(WideFirst) > 131072, WideEmpty]).
+
+%% ERTS starts a fragment sequence for a large control term. PBeam keeps
+%% the packet whole until issue #1562 adds support for a split control term.
+fragment_large_control() ->
+    logger:set_primary_config(level, none),
+    Flags = mandatory() bor 16#800000,
+    Node = fragment_control_peer@nohost,
+    {Ctrl, Handle} = fragment_output_controller(Node, Flags),
+    true = exit(remote_pid(Node), binary:copy(<<42>>, 70000)),
+    Ctrl ! {take, Handle, 1},
+    {[Packet], Next} = receive {Ctrl, Data} -> Data end,
+    <<131, Tag, _/binary>> = Packet,
+    case Tag of
+        69 -> <<131, 69, _:64, 2:64, _/binary>> = Packet;
+        68 -> ok
+    end,
+    Ctrl ! stop,
+    show(fragment_large_control, [Tag, Next =:= none]).
+
+%% A spawn request carries its option list in the control term.
+fragment_output_controller(Node, Flags) ->
+    Parent = self(),
+    Ctrl = spawn(fun() ->
+                         receive {take, Handle, Count} ->
+                                     Packets = [iolist_to_binary(erlang:dist_ctrl_get_data(Handle))
+                                                || _ <- lists:seq(1, Count)],
+                                     Parent ! {self(), {Packets, erlang:dist_ctrl_get_data(Handle)}},
+                                     receive stop -> ok end
+                         end
+                 end),
+    erts_internal:new_connection(Node),
+    {message, Reply} = erts_internal:create_dist_channel(Node, Ctrl, {Flags, 1}),
+    Handle = receive {Reply, Value} -> Value end,
+    {Ctrl, Handle}.
 
 %% A control message with a trace token. `EXIT2_TT` (18) reads the token at
 %% tuple[4], before the reason, and `PAYLOAD_EXIT2_TT` (27) at tuple[4]

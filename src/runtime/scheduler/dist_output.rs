@@ -1,7 +1,7 @@
 //! The output of a distribution connection: the messages that a local
 //! process sends to a pid, a name, or an alias of another node, as
 //! `erts_dsig_send_msg` builds them (`dist.c:1592-1712`). A connection can
-//! use the normal atom-cache header. Fragments remain unsupported.
+//! use the atom-cache header and fragments.
 
 use std::sync::Arc;
 
@@ -9,12 +9,16 @@ use super::{Scheduler, dist_table::Controller};
 use crate::{
     error::BeamError,
     runtime::interpreter::bif::{encode_dist, encode_dist_cached},
-    term::{Atom, Binary, PortId, ProcessId, Term, external_id::ExternalData},
+    term::{Atom, Binary, PortId, ProcessId, Term, external_id::ExternalData, pid_word},
 };
 
 /// `PASS_THROUGH` (`external.h`): the first byte of a packet without a
 /// distribution header.
 const PASS_THROUGH: u8 = 112;
+
+/// `DFLAG_FRAGMENTS` and `ERTS_DIST_FRAGMENT_SIZE` (`dist.h:53`, `208`).
+const FRAGMENTS: u64 = 0x80_0000;
+const FRAGMENT_SIZE: usize = 64 * 1024;
 
 /// `DFLAG_SEND_SENDER` (`dist.h:49`).
 const SEND_SENDER: u64 = 0x80000;
@@ -201,25 +205,47 @@ impl Scheduler {
         if let Some(monitor) = monitor {
             dist.insert_monitor_now(node, monitor);
         }
-        let elements = if flags & 0x2000 != 0 {
+        let (elements, header_len, control_len) = if flags & 0x2000 != 0 {
             encode_dist_cached(self, &control, message.as_ref(), dist.atom_cache_out(node))?
+        } else if flags & FRAGMENTS != 0 {
+            let mut packet = vec![131, b'D', 0];
+            let mut control_len = 0;
+            for term in std::iter::once(&control).chain(message.iter()) {
+                let bytes: Vec<u8> = encode_dist(self, term)?
+                    .iter()
+                    .flat_map(Binary::to_bytes)
+                    .collect();
+                if control_len == 0 {
+                    control_len = bytes.len() - 1;
+                }
+                packet.extend_from_slice(&bytes[1..]);
+            }
+            (vec![Binary::from(packet)], 3, control_len)
         } else {
             let mut elements = vec![Binary::from(vec![PASS_THROUGH])];
             elements.extend(encode_dist(self, &control)?);
             if let Some(message) = message {
                 elements.extend(encode_dist(self, &message)?);
             }
-            elements
+            (elements, 0, 0)
         };
+        let packets = if flags & FRAGMENTS != 0 {
+            fragment_packet(elements, sender, header_len, control_len)
+        } else {
+            vec![elements]
+        };
+        let mut notify = false;
+        for packet in packets {
+            notify |= dist.enqueue(node, packet);
+        }
         match controller {
             Controller::Process(process) => {
-                if dist.enqueue(node, elements) {
+                if notify {
                     drop(dist);
                     self.send_message(sender, process, Term::static_atom("dist_data"));
                 }
             }
             Controller::Port(port) => {
-                dist.enqueue(node, elements);
                 drop(dist);
                 self.dist_port_send(port)?;
             }
@@ -270,7 +296,7 @@ impl Scheduler {
     /// # Errors
     ///
     /// The errors of [`Self::dist_port_send`].
-    pub(super) fn dist_port_flush(&mut self, port: PortId) -> Result<(), BeamError> {
+    pub(in crate::runtime) fn dist_port_flush(&mut self, port: PortId) -> Result<(), BeamError> {
         if std::mem::take(&mut self.deferred_dist) {
             self.dist_port_send(port)?;
         }
@@ -320,3 +346,37 @@ fn is_remote_reference(to: &Term) -> bool {
 #[cfg(test)]
 #[path = "../../../tests/runtime/scheduler/dist_output.rs"]
 mod tests;
+
+/// Split a distribution packet into fragments with the sender's ERTS pid word.
+fn fragment_packet(
+    elements: Vec<Binary>,
+    sender: ProcessId,
+    header_len: usize,
+    control_len: usize,
+) -> Vec<Vec<Binary>> {
+    let bytes: Vec<u8> = elements.iter().flat_map(Binary::to_bytes).collect();
+    if bytes.len() - header_len <= FRAGMENT_SIZE {
+        return vec![elements];
+    }
+    let first_end = header_len + control_len.max(FRAGMENT_SIZE).min(bytes.len() - header_len);
+    let remaining = &bytes[first_end..];
+    if remaining.is_empty() {
+        return vec![elements];
+    }
+    let count = 1 + remaining.len().div_ceil(FRAGMENT_SIZE);
+    std::iter::once(&bytes[2..first_end])
+        .chain(remaining.chunks(FRAGMENT_SIZE))
+        .enumerate()
+        .map(|(index, chunk)| {
+            let mut packet = vec![131, if index == 0 { b'E' } else { b'F' }];
+            packet.extend_from_slice(&pid_word(sender).to_be_bytes());
+            packet.extend_from_slice(
+                &u64::try_from(count - index)
+                    .expect("fragment count fits u64")
+                    .to_be_bytes(),
+            );
+            packet.extend_from_slice(chunk);
+            vec![Binary::from(packet)]
+        })
+        .collect()
+}

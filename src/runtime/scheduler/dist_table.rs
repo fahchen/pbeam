@@ -80,6 +80,8 @@ struct Entry {
     atom_cache_out: HashMap<u16, Atom>,
     /// The cache entries that the peer has sent on this connection.
     atom_cache_in: HashMap<u16, Atom>,
+    /// Incomplete fragment sequences of this connection.
+    fragments: HashMap<u64, DistFragment>,
     /// The distribution controller of a connected entry (`dep->cid`).
     controller: Option<Controller>,
     /// The process that gives the data of the connection to
@@ -119,6 +121,14 @@ struct Entry {
     /// the monitor or a process of the other node holds it on the local
     /// process (`dist.c:2387-2400`, `bif.c:853`).
     monitors: Vec<DistMonitor>,
+}
+
+/// An incomplete distribution message and its own atom translation table.
+#[derive(Debug)]
+pub(super) struct DistFragment {
+    pub(super) next: u64,
+    pub(super) bytes: Vec<u8>,
+    pub(super) atoms: Vec<Atom>,
 }
 
 /// One monitor of a connection: the local process, the pid or the name of
@@ -237,6 +247,7 @@ impl DistTable {
                 flags: 0,
                 atom_cache_out: HashMap::new(),
                 atom_cache_in: HashMap::new(),
+                fragments: HashMap::new(),
                 controller: None,
                 input_handler: None,
                 input: 0,
@@ -467,6 +478,17 @@ impl DistTable {
         let entry = self.entries.get_mut(&name.index())?;
         (entry.state == State::Connected && entry.connection_id == connection)
             .then_some(&mut entry.atom_cache_in)
+    }
+
+    /// Return the sequences of the current connection.
+    pub(super) fn fragments_in(
+        &mut self,
+        name: &Atom,
+        connection: u32,
+    ) -> Option<&mut HashMap<u64, DistFragment>> {
+        let entry = self.entries.get_mut(&name.index())?;
+        (entry.state == State::Connected && entry.connection_id == connection)
+            .then_some(&mut entry.fragments)
     }
 
     /// Return the distribution flags of the entry of `name` (`dep->dflags`).
@@ -876,6 +898,7 @@ impl Entry {
         self.flags = 0;
         self.atom_cache_out.clear();
         self.atom_cache_in.clear();
+        self.fragments.clear();
         self.get_size = false;
         self.output.clear();
         self.queue_size = 0;

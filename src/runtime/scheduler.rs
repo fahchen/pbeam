@@ -490,9 +490,11 @@ pub(super) struct Scheduler {
     /// the port takes that lock, which the step holds already, so the
     /// packet waits in the connection queue until the step ends
     /// (`Scheduler::dist_port_send`).
-    locked_port: Option<PortId>,
+    pub(in crate::runtime) locked_port: Option<PortId>,
     /// Whether the distribution queue needs a drain after the port step.
     deferred_dist: bool,
+    /// The locked distribution port that must close after a data error.
+    bad_dist_port: Option<PortId>,
 }
 
 /// Whether a spawn links the child to its parent.
@@ -577,6 +579,7 @@ impl Scheduler {
             wake: Some(wake),
             locked_port: None,
             deferred_dist: false,
+            bad_dist_port: None,
         }
     }
 

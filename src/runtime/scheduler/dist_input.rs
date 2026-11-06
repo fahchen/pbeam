@@ -1,12 +1,16 @@
 //! The input of a distribution connection: the messages that another node
 //! sends to a local process or to a registered name, as
 //! `erts_net_message` gives them (`dist.c:2017-2600`). A connection can
-//! use the normal atom-cache header. Fragments remain unsupported.
+//! use an atom-cache header and fragment sequences.
 
-use super::{Scheduler, node::Named};
+use super::{
+    Scheduler,
+    dist_table::{Controller, DistFragment},
+    node::Named,
+};
 use crate::{
     error::{BeamError, error},
-    runtime::{interpreter::bif::decode_dist, signal::Signal},
+    runtime::{interpreter::bif::decode_dist, process::LinkId, signal::Signal},
     term::{
         Atom, Term,
         external_id::{self, ExternalData},
@@ -34,6 +38,13 @@ pub(super) const REJECTED: &str = "unsupported distribution message that ERTS re
 
 /// The body and atom translation table of a distribution header.
 type AtomHeader<'a> = (&'a [u8], Vec<Atom>);
+
+/// The bytes and atom table of a complete fragment sequence.
+type Reassembled = (Vec<u8>, Vec<Atom>);
+
+#[cfg(test)]
+#[path = "../../../tests/runtime/scheduler/dist_input.rs"]
+mod tests;
 
 impl Scheduler {
     /// Give the packet `packet` with data of a connection with the flags
@@ -67,8 +78,7 @@ impl Scheduler {
     ///
     /// # Errors
     ///
-    /// A connection with fragments (see [`FRAGMENTS`]),
-    /// a packet that ERTS rejects (see [`REJECTED`]), a control message
+    /// A packet that ERTS rejects (see [`REJECTED`]), a control message
     /// with a trace token, another operation, and a term that PBeam cannot
     /// hold.
     // `watched` and `watcher` are the names of the ERTS control message of a
@@ -85,12 +95,25 @@ impl Scheduler {
         flags: u64,
         packet: &[u8],
     ) -> Result<(), BeamError> {
-        if flags & FRAGMENTS != 0 {
-            return Err(error(
-                "unsupported distribution message on a connection with the atom cache or fragments: see \"Distribution\" in docs/erts-differences.md",
-            ));
-        }
-        let (ext, cache) = if flags & ATOM_CACHE != 0 {
+        let reassembled = if flags & FRAGMENTS != 0 && matches!(packet.get(1), Some(b'E' | b'F')) {
+            let result = self.dist_fragment(node, connection, packet);
+            let result = match result {
+                Err(err) if err == error(REJECTED) => {
+                    self.reject_fragment_connection(node, connection);
+                    return Ok(());
+                }
+                other => other?,
+            };
+            let Some(message) = result else {
+                return Ok(());
+            };
+            Some(message)
+        } else {
+            None
+        };
+        let (ext, cache) = if let Some((bytes, atoms)) = &reassembled {
+            (bytes.as_slice(), Some(atoms.clone()))
+        } else if flags & (ATOM_CACHE | FRAGMENTS) != 0 {
             let Some((ext, cache)) = self.dist_atom_header(node, connection, packet)? else {
                 return Ok(());
             };
@@ -204,6 +227,127 @@ impl Scheduler {
                 "unsupported distribution operation {operation}: see \"Distribution\" in docs/erts-differences.md"
             ))),
         }
+    }
+
+    /// End the current connection and kill its controller on a data error.
+    fn reject_fragment_connection(&mut self, node: &Atom, connection: u32) {
+        let node_ref = std::sync::Arc::clone(&self.node);
+        let mut dist = node_ref.dist();
+        let Some((_, controller, current)) = dist.connected(node) else {
+            return;
+        };
+        if current != connection {
+            return;
+        }
+        let ended = dist.controller_exits(controller);
+        drop(dist);
+        if let Some(ended) = ended {
+            self.dist_connection_down(&ended);
+            self.dist_monitor_down(&ended);
+        }
+        match controller {
+            Controller::Process(process) => {
+                let kill = Signal::Exit {
+                    from: LinkId::Process(crate::term::ProcessId(0)),
+                    reason: Term::static_atom("kill"),
+                    linked: false,
+                    normal_kills: false,
+                    alias: None,
+                };
+                let _ = self.send_signal(Some(crate::term::ProcessId(0)), process, kill);
+            }
+            // A port controller delivers through the port step, which holds
+            // the port lock, so its failure waits for the step to end. A
+            // process input handler (`dist_ctrl_input_handler/2`) delivers
+            // through `dist_ctrl_put_data/2` and holds no port lock, so it
+            // fails the port at once.
+            Controller::Port(port) if self.locked_port == Some(port) => {
+                self.bad_dist_port = Some(port);
+            }
+            Controller::Port(port) => self.fail_port(port, Term::static_atom("killed")),
+        }
+    }
+
+    /// Retain each sequence with the atom table from its first fragment.
+    fn dist_fragment(
+        &self,
+        node: &Atom,
+        connection: u32,
+        packet: &[u8],
+    ) -> Result<Option<Reassembled>, BeamError> {
+        if packet.len() < 18 || packet[0] != VERSION_MAGIC {
+            return Err(error(REJECTED));
+        }
+        let sequence = u64::from_be_bytes(packet[2..10].try_into().expect("sequence length"));
+        let id = u64::from_be_bytes(packet[10..18].try_into().expect("fragment id length"));
+        if id == 0 {
+            return Err(error(REJECTED));
+        }
+        if packet[1] == b'E' {
+            let mut header = vec![VERSION_MAGIC, b'D'];
+            header.extend_from_slice(&packet[18..]);
+            let Some((body, atoms)) = self.dist_atom_header(node, connection, &header)? else {
+                return Ok(None);
+            };
+            // ERTS validates the complete control term before storing the
+            // sequence (dist.c:2084-2093, 2117-2129).
+            if decode_dist(self, body, Some(&atoms))?.is_none() {
+                return Err(error(REJECTED));
+            }
+            self.store_first_fragment(node, connection, sequence, id, body.to_vec(), atoms)
+        } else {
+            let mut dist = self.node.dist();
+            let Some(sequences) = dist.fragments_in(node, connection) else {
+                return Ok(None);
+            };
+            let Some(fragment) = sequences.get_mut(&sequence) else {
+                return Err(error(REJECTED));
+            };
+            if fragment.next != id {
+                return Err(error(REJECTED));
+            }
+            fragment.bytes.extend_from_slice(&packet[18..]);
+            fragment.next -= 1;
+            if id > 1 {
+                return Ok(None);
+            }
+            let fragment = sequences.remove(&sequence).expect("fragment exists");
+            Ok(Some((fragment.bytes, fragment.atoms)))
+        }
+    }
+
+    /// Store a first fragment after its control term has been decoded.
+    fn store_first_fragment(
+        &self,
+        node: &Atom,
+        connection: u32,
+        sequence: u64,
+        id: u64,
+        bytes: Vec<u8>,
+        atoms: Vec<Atom>,
+    ) -> Result<Option<Reassembled>, BeamError> {
+        if sequence == 0 {
+            return Ok(Some((bytes, atoms)));
+        }
+        let mut dist = self.node.dist();
+        let Some(sequences) = dist.fragments_in(node, connection) else {
+            return Ok(None);
+        };
+        if sequences.contains_key(&sequence) {
+            return Err(error(REJECTED));
+        }
+        if id == 1 {
+            return Ok(Some((bytes, atoms)));
+        }
+        sequences.insert(
+            sequence,
+            DistFragment {
+                next: id - 1,
+                bytes,
+                atoms,
+            },
+        );
+        Ok(None)
     }
 
     /// Read the normal distribution header and update the connection's input cache.

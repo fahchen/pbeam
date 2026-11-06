@@ -1554,13 +1554,18 @@ pub(super) fn port_control(
             return Ok(signals_return(scheduler, port, Term::static_atom("badarg")));
         }
     };
+    // The control holds the port lock while it delivers buffered input.
+    scheduler.locked_port = Some(id);
     let exit = events
         .map(|events| scheduler.send_events(id, port_state, events))
-        .transpose()?;
+        .transpose();
+    scheduler.locked_port = None;
     drop(slot);
-    if let Some(exit) = exit {
+    let written = scheduler.dist_port_flush(id);
+    if let Some(exit) = exit? {
         scheduler.end_step(id, exit);
     }
+    written?;
     let reply = match reply {
         Accept::Queued(reply) => reply,
         Accept::Now(accepted) => scheduler.tcp_accepted(id, accepted)?,
