@@ -4,7 +4,23 @@
 %% process the exit signal `noconnection` (erts_do_net_exits,
 %% dist.c:1021-1117; erl_proc_sig_queue.c:4632-4815).
 -module(dist_lost_probe).
--export([server/0, client/1, client_disconnect/1]).
+-export([server/0, client/1, client_disconnect/1, monitor_local/0, monitor_notalive/0,
+         monitor_remote/0]).
+
+monitor_remote() -> erlang:monitor_node(foo, true).
+
+monitor_notalive() ->
+    Result = try erlang:monitor_node(foo, true) catch error:R -> {error, R} end,
+    io:format("~p~n", [Result]).
+
+monitor_local() ->
+    Call = fun(N, B, O) ->
+                   try erlang:monitor_node(N, B, O) catch error:R -> {error, R} end
+           end,
+    io:format("~p~n", [[erlang:monitor_node(node(), true),
+                        Call(node(), false, [allow_passive_connect]),
+                        Call(node(), invalid, []), Call(1, true, []),
+                        Call(node(), true, [invalid]), Call(node(), true, invalid)]]).
 
 %% Print the node name, and make a process for each request of a client.
 server() ->

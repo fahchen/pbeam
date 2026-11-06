@@ -102,6 +102,49 @@ pub(super) fn node(term: &Term, atoms: &AtomTable) -> BifResult {
     }
 }
 
+/// Run the local-node cases of `erlang:monitor_node/2,3` (`dist.c:6479-6667`).
+/// A remote monitor needs connection event delivery, which is not available yet.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(monitor_node(scheduler, &local_node, &Term::static_atom("true"), &Term::nil()), Ok(Value(_))));
+/// ```
+pub(super) fn monitor_node(
+    scheduler: &mut Scheduler,
+    node: &Term,
+    enabled: &Term,
+    options: &Term,
+) -> Result<BifResult, BeamError> {
+    let Some(mut options) = options.proper_list() else {
+        return Ok(BifResult::badarg());
+    };
+    if options.any(
+        |option| !matches!(option, Term::Atom(atom) if atom.is_static("allow_passive_connect")),
+    ) {
+        return Ok(BifResult::badarg());
+    }
+    let Term::Atom(name) = node else {
+        return Ok(BifResult::badarg());
+    };
+    let local = scheduler.atoms.this_node().0;
+    if !name.is_static("nonode@nohost") && local.is_static("nonode@nohost") {
+        return Ok(Raise {
+            class: ExceptionClass::Error,
+            reason: Term::static_atom("notalive"),
+        });
+    }
+    if !matches!(enabled, Term::Atom(atom) if atom.is_one_of(&["true", "false"])) {
+        return Ok(BifResult::badarg());
+    }
+    if *name == local {
+        return Ok(Value(Term::static_atom("true")));
+    }
+    Err(error(
+        "unsupported erlang:monitor_node/2,3 of another node: see Distribution in docs/erts-differences.md",
+    ))
+}
+
 /// Run `erlang:nodes(NodeTypes)` and `erlang:nodes(NodeTypes, Options)` as
 /// ERTS `nodes` does (`dist.c:6261-6476`) on a node with no connection.
 /// `NodeTypes` is one node type or a proper list of them: `visible`,
