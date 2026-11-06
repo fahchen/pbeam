@@ -219,45 +219,45 @@ impl Scheduler {
                 }
             }
             Controller::Port(port) => {
+                dist.enqueue(node, elements);
                 drop(dist);
-                self.dist_port_send(port, &elements)?;
+                self.dist_port_send(port)?;
             }
         }
         Ok(true)
     }
 
-    /// Write the packet `elements` with the port controller `port`, as
-    /// `erts_dist_command` and `dist_port_commandv` do
-    /// (`dist.c:4051-4060`, `4132-4133`, `3844-3921`), and count it. The port lock
-    /// comes before the lock of the dist table. A port that exited after
-    /// the lookup of the connection drops the packet, as ERTS drops it for
-    /// an exiting connection.
-    ///
-    /// A packet that the step of the input of the port itself causes waits
-    /// for the end of that step: the step holds the lock of the port, which
-    /// is not reentrant, so the write cannot take it again. ERTS needs no
-    /// such step, because a driver callback queues the bytes of
-    /// `driver_outputv` in the port and the write of the queue runs after
-    /// the callback returns (`inet_drv.c:12600-12610`).
+    /// Drain the connection queue under the port lock. The queue takes each
+    /// packet under the same distribution lock as its atom-cache update, so
+    /// no later packet can reach the port before an earlier cache update.
+    /// The port lock comes before the distribution lock. A port step that
+    /// already holds the port lock defers the drain until the step ends.
     ///
     /// # Errors
     ///
     /// The errors of [`Self::send_events`].
-    fn dist_port_send(&mut self, port: PortId, elements: &[Binary]) -> Result<(), BeamError> {
+    fn dist_port_send(&mut self, port: PortId) -> Result<(), BeamError> {
         if self.locked_port == Some(port) {
-            self.deferred_dist.push(elements.to_vec());
+            self.deferred_dist = true;
             return Ok(());
         }
-        let bytes: Vec<u8> = elements.iter().flat_map(Binary::to_bytes).collect();
         let node = Arc::clone(&self.node);
-        let exit = node.with_port(port, |item| {
-            let mut dist = node.dist();
-            if let Some(name) = dist.controlled_by(Controller::Port(port)) {
-                dist.count_output(&name);
+        let exit = node.with_port(port, |item| -> Result<Option<Term>, BeamError> {
+            loop {
+                let mut dist = node.dist();
+                let Some(name) = dist.controlled_by(Controller::Port(port)) else {
+                    return Ok(None);
+                };
+                let Some(elements) = dist.dequeue(&name) else {
+                    return Ok(None);
+                };
+                drop(dist);
+                let bytes: Vec<u8> = elements.iter().flat_map(Binary::to_bytes).collect();
+                let events = item.inet_mut().map(|tcp| tcp.send_dist(&bytes));
+                if let Some(exit) = self.send_events(port, item, events.unwrap_or_default())? {
+                    return Ok(Some(exit));
+                }
             }
-            drop(dist);
-            let events = item.inet_mut().map(|tcp| tcp.send_dist(&bytes));
-            self.send_events(port, item, events.unwrap_or_default())
         });
         if let Some(exit) = exit.transpose()? {
             self.end_step(port, exit);
@@ -265,16 +265,14 @@ impl Scheduler {
         Ok(())
     }
 
-    /// Write the packets that [`Self::dist_port_send`] held back for the end
-    /// of the step of the port `port`, as the controller of a connection
-    /// takes each packet of the output queue of its entry.
+    /// Drain packets queued during the input step of `port`.
     ///
     /// # Errors
     ///
     /// The errors of [`Self::dist_port_send`].
     pub(super) fn dist_port_flush(&mut self, port: PortId) -> Result<(), BeamError> {
-        for elements in std::mem::take(&mut self.deferred_dist) {
-            self.dist_port_send(port, &elements)?;
+        if std::mem::take(&mut self.deferred_dist) {
+            self.dist_port_send(port)?;
         }
         Ok(())
     }

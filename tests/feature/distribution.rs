@@ -572,6 +572,58 @@ fn exchanges_many_cached_atoms_with_pinned_erts() {
 }
 
 #[test]
+fn preserves_cache_order_for_concurrent_port_senders() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let name = format!("dcorder{id}");
+    let server = ErtsNode::start(
+        &epmd,
+        &["+S", "4", "-sname", &name, "-setcookie", "ck"],
+        "register(cache_order, self()), io:format(\"~s~n\", [node()]), \
+         Expected = lists:sort(lists:append([[list_to_atom(\"cache_parallel_\" ++ integer_to_list(N)), \
+         list_to_atom(\"cache_parallel_\" ++ integer_to_list(N))] || N <- lists:seq(1,32)])), \
+         F = fun F(Atoms) -> receive {From, atom_value, Atom} -> From ! ack, F([Atom|Atoms]); \
+         {From, finish} -> From ! {result, {length(Atoms),lists:sort(Atoms) =:= Expected}}, F([]) \
+         after 30000 -> halt(2) end end, F([]).",
+    );
+    let node = server.line();
+    let expression = format!(
+        "true = net_kernel:connect_node('{node}'), Parent = self(), \
+         Atoms = [list_to_atom(\"cache_parallel_\" ++ integer_to_list(N)) || N <- lists:seq(1,32)], \
+         Worker = fun(A) -> receive go -> Sid = erlang:system_info(scheduler_id), \
+         {{cache_order, '{node}'}} ! {{self(), atom_value, A}}, \
+         receive ack -> Parent ! {{done, Sid}} after 10000 -> Parent ! timeout end end end, \
+         Ps = lists:append([[spawn(fun() -> Worker(A) end),spawn(fun() -> Worker(A) end)] || A <- Atoms]), \
+         [P ! go || P <- Ps], \
+         Sids = [receive {{done, Sid}} -> Sid after 10000 -> timeout end || _ <- Ps], \
+         {{cache_order, '{node}'}} ! {{self(), finish}}, \
+         receive {{result, Good}} -> io:format(\"~p~n\", [{{Good,length(lists:usort([S || S <- Sids, is_integer(S)])) > 1}}]) \
+         after 10000 -> halt(2) end, halt()."
+    );
+    let run = |name: &str| {
+        vec![
+            "+S".to_owned(),
+            "4".to_owned(),
+            "-sname".to_owned(),
+            name.to_owned(),
+            "-setcookie".to_owned(),
+            "ck".to_owned(),
+            "-noshell".to_owned(),
+            "-eval".to_owned(),
+            expression.clone(),
+        ]
+    };
+    assert_eq!(
+        stdout(&erts_erl(&epmd, &run(&format!("dcoerts{id}")))),
+        "{{64,true},true}\n"
+    );
+    assert_eq!(
+        stdout(&pbeam_erl(&epmd, &run(&format!("dcopbeam{id}")))),
+        "{{64,true},true}\n"
+    );
+}
+
+#[test]
 fn accepts_an_empty_distribution_atom_cache_header_as_pinned_erts() {
     let epmd = Epmd::start();
     let id = std::process::id();

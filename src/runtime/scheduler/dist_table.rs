@@ -529,12 +529,6 @@ impl DistTable {
         Some(elements)
     }
 
-    /// Count a packet that the port controller of the entry of `name`
-    /// wrote, as `erts_dist_command` does (`dist.c:4058`, `4133`).
-    pub(in crate::runtime) fn count_output(&mut self, name: &Atom) {
-        self.entry_mut(name).out += 1;
-    }
-
     /// Ask for the `dist_data` message of the next packet of the entry of
     /// `name`, as `erlang:dist_ctrl_get_data_notification/1` does
     /// (`dist.c:4301-4322`), and return whether the queue has a packet, so
