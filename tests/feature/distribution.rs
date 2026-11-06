@@ -670,6 +670,49 @@ fn kills_the_fragment_controller_on_sequence_errors_as_pinned_erts() {
     }
 }
 
+#[test]
+fn closes_a_port_controller_for_a_fragment_with_an_unknown_sequence() {
+    // The accepted tcp_inet port receives the packet under its port lock.
+    // A distribution payload that does not follow the documented layout
+    // makes ERTS close the controller with killed
+    // (dist.c:2147-2150, 3161-3165, 4015-4018).
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let expression = "process_flag(trap_exit,true), \
+        {ok,L}=gen_tcp:listen(0,[binary,{active,false}]), \
+        {ok,Port}=inet:port(L), \
+        {ok,C}=gen_tcp:connect({127,0,0,1},Port,[binary,{active,false},{packet,4}]), \
+        {ok,A}=gen_tcp:accept(L), Ref=erlang:monitor(port,A), \
+        Node=fragment_port_peer@nohost, erts_internal:new_connection(Node), \
+        Flags=element(3,erts_internal:get_dflags()) bor 16#800000, \
+        {ok,_}=erts_internal:create_dist_channel(Node,A,{Flags,1}), \
+        ok=inet:setopts(A,[{active,true},{deliver,port},{packet,4}]), \
+        ok=gen_tcp:send(C,<<131,70,3:64,1:64>>), \
+        Reason=receive {'DOWN',Ref,port,A,R} -> R after 5000 -> timeout end, \
+        io:format(\"~p~n\",[{Reason,erlang:port_info(A),nodes(connected),gen_tcp:recv(C,0,5000)}]), halt().";
+    let run = |name: &str| {
+        vec![
+            "-sname".to_owned(),
+            name.to_owned(),
+            "-kernel".to_owned(),
+            "logger_level".to_owned(),
+            "none".to_owned(),
+            "-noshell".to_owned(),
+            "-eval".to_owned(),
+            expression.to_owned(),
+        ]
+    };
+    let expected = "{killed,undefined,[],{error,closed}}\n";
+    assert_eq!(
+        stdout(&erts_erl(&epmd, &run(&format!("dfporterts{id}")))),
+        expected
+    );
+    assert_eq!(
+        stdout(&pbeam_erl(&epmd, &run(&format!("dfportpb{id}")))),
+        expected
+    );
+}
+
 // Pinned OTP 29.1.1 exits 139 for sequence 0, fragment 2 with complete
 // control and message. PBeam follows the non-fragmented source path instead.
 #[test]
