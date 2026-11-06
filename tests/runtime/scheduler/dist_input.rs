@@ -56,6 +56,16 @@ fn ignores_fragments_from_a_detached_or_replaced_connection() {
             .unwrap()
             .is_none()
     );
+    // A guard that only returns `None` would also pass the assertion above, so
+    // check that the stale call stored nothing on the active connection.
+    assert!(
+        scheduler
+            .node
+            .dist()
+            .fragments_in(&name, connection)
+            .expect("the active connection still exists")
+            .is_empty()
+    );
     assert_eq!(
         scheduler.node.dist().connected(&name).unwrap().2,
         connection
