@@ -467,6 +467,47 @@ fn connects_to_an_erts_node_as_a_hidden_node_as_pinned_erts() {
 }
 
 #[test]
+fn accepts_connections_over_both_carriers() {
+    // The OTP carrier opens the listen socket and registers its port with
+    // epmd (inet_tcp_dist.erl:175-194, inet_epmd_socket.erl:49-86).
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    for socket in [false, true] {
+        let name = format!("inbound{socket}{id}");
+        let mut arguments = vec!["-sname", name.as_str(), "-setcookie", "ck"];
+        if socket {
+            arguments.extend(SOCKET_CARRIER);
+        }
+        let server = pbeam_node(
+            &epmd,
+            &arguments,
+            "io:format(\"~s~n\", [node()]), receive stop -> ok after 30000 -> ok end.",
+        );
+        let node = server.line();
+        let expression = format!(
+            "spawn(fun() -> timer:sleep(10000), halt(2) end), \
+             N = '{node}', true = net_kernel:connect_node(N), Ping = net_adm:ping(N), \
+             io:format(\"~p~n\", [{{Ping, lists:member(N, nodes(hidden)), \
+             rpc:call(N, erlang, node, []), erpc:call(N, erlang, node, [])}}]), halt()."
+        );
+        let client = format!("inclient{socket}{id}");
+        let client_arguments = [
+            "-sname",
+            client.as_str(),
+            "-setcookie",
+            "ck",
+            "-hidden",
+            "-noshell",
+            "-eval",
+            &expression,
+        ];
+        let expected = format!("{{pong,true,{0},{0}}}\n", atom_text(&node));
+        assert_eq!(stdout(&erts_erl(&epmd, &client_arguments)), expected);
+        assert_eq!(stdout(&pbeam_erl(&epmd, &client_arguments)), expected);
+    }
+}
+
+#[test]
 fn connects_over_a_tcp_inet_port_as_pinned_erts() {
     // inet_tcp_dist, the default carrier, makes the tcp_inet port the
     // controller of the connection (dist.c:5269-5336) and sets
