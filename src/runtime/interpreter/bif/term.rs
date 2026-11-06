@@ -984,32 +984,32 @@ pub(in crate::runtime) fn encode_dist_cached(
         b'D',
         u8::try_from(count).expect("header count fits"),
     ];
-    if count != 0 {
-        let long = cache
-            .entries
-            .iter()
-            .any(|(_, atom, new)| *new && scheduler.atoms.name_of(atom).len() > 255);
-        let mut flags = vec![0u8; count / 2 + 1];
-        if long {
-            flags[count / 2] |= 1 << ((count % 2) * 4);
-        }
-        for (index, (slot, _, new)) in cache.entries.iter().enumerate() {
-            let nibble =
-                u8::try_from(slot >> 8).expect("cache segment fits") | if *new { 8 } else { 0 };
-            flags[index / 2] |= nibble << ((index % 2) * 4);
-        }
-        packet.extend(flags);
-        for (slot, atom, new) in &cache.entries {
-            packet.push(u8::try_from(slot & 255).expect("low byte fits"));
-            if *new {
-                let name = scheduler.atoms.name_of(atom).as_bytes();
-                if long {
-                    packet.extend(be16(name.len()));
-                } else {
-                    packet.push(u8::try_from(name.len()).expect("short atom fits"));
-                }
-                packet.extend(name);
+    // Every control message sent by PBeam has a pid, reference, or name,
+    // and its first atom always enters the translation table.
+    let long = cache
+        .entries
+        .iter()
+        .any(|(_, atom, new)| *new && scheduler.atoms.name_of(atom).len() > 255);
+    let mut flags = vec![0u8; count / 2 + 1];
+    if long {
+        flags[count / 2] |= 1 << ((count % 2) * 4);
+    }
+    for (index, (slot, _, new)) in cache.entries.iter().enumerate() {
+        let nibble =
+            u8::try_from(slot >> 8).expect("cache segment fits") | if *new { 8 } else { 0 };
+        flags[index / 2] |= nibble << ((index % 2) * 4);
+    }
+    packet.extend(flags);
+    for (slot, atom, new) in &cache.entries {
+        packet.push(u8::try_from(slot & 255).expect("low byte fits"));
+        if *new {
+            let name = scheduler.atoms.name_of(atom).as_bytes();
+            if long {
+                packet.extend(be16(name.len()));
+            } else {
+                packet.push(u8::try_from(name.len()).expect("short atom fits"));
             }
+            packet.extend(name);
         }
     }
     packet.extend(body);

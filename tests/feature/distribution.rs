@@ -628,6 +628,87 @@ fn preserves_cache_order_for_concurrent_port_senders() {
     );
 }
 
+/// Run a cached distribution encode whose control or payload contains an
+/// alias whose owner has exited. ERTS keeps the owner in the alias, while
+/// PBeam reports the documented external-term difference.
+fn cache_encoder_rejects_dead_alias(operation: &str) {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let expression = format!(
+        "Parent = self(), {{Owner,Monitor}} = spawn_monitor(fun() -> Parent ! {{self(),alias()}} end), \
+         receive {{'DOWN',Monitor,process,Owner,_}} -> ok end, \
+         Alias = receive {{Owner,A}} -> A end, \
+         Node = cache_encode_peer@nohost, erts_internal:new_connection(Node), \
+         Flags = element(3,erts_internal:get_dflags()) bor 16#2000, \
+         {{ok,_}} = erts_internal:create_dist_channel(Node,self(),{{Flags,1}}), \
+         Name = atom_to_binary(Node), \
+         Pid = binary_to_term(<<131,88,118,(byte_size(Name)):16,Name/binary,1:32,0:32,1:32>>), \
+         {operation}, io:format(\"ok~n\"), halt()."
+    );
+    let run = |name: &str| {
+        vec![
+            "-sname".to_owned(),
+            name.to_owned(),
+            "-kernel".to_owned(),
+            "logger_level".to_owned(),
+            "none".to_owned(),
+            "-noshell".to_owned(),
+            "-eval".to_owned(),
+            expression.clone(),
+        ]
+    };
+    assert_eq!(
+        stdout(&erts_erl(&epmd, &run(&format!("dcaerts{id}")))),
+        "ok\n"
+    );
+    let output = pbeam_erl(&epmd, &run(&format!("dcapbeam{id}")));
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "pbeam: unsupported external term of a pid reference whose owner exited: ERTS writes the pid of the owner in the reference, and PBeam does not keep it: see \"External term format\" in docs/erts-differences.md\n",
+        "{output:?}"
+    );
+}
+
+#[test]
+fn reports_a_dead_alias_in_a_cached_control_term() {
+    cache_encoder_rejects_dead_alias("erlang:exit(Pid, Alias)");
+}
+
+#[test]
+fn reports_a_dead_alias_in_a_cached_message() {
+    cache_encoder_rejects_dead_alias("Pid ! Alias");
+}
+
+#[test]
+fn reports_an_unsupported_fragment_connection() {
+    let epmd = Epmd::start();
+    let name = format!("dcfrag{}", std::process::id());
+    let expression = "Node = cache_fragment_peer@nohost, erts_internal:new_connection(Node), \
+        Flags = element(3,erts_internal:get_dflags()) bor 16#800000, \
+        {ok,Handle} = erts_internal:create_dist_channel(Node,self(),{Flags,1}), \
+        erlang:dist_ctrl_put_data(Handle, <<131,68,0>>), halt().";
+    let output = pbeam_erl(
+        &epmd,
+        &[
+            "-sname",
+            &name,
+            "-kernel",
+            "logger_level",
+            "none",
+            "-noshell",
+            "-eval",
+            expression,
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "pbeam: unsupported distribution message on a connection with the atom cache or fragments: see \"Distribution\" in docs/erts-differences.md\n",
+        "{output:?}"
+    );
+}
+
 #[test]
 fn accepts_an_empty_distribution_atom_cache_header_as_pinned_erts() {
     let epmd = Epmd::start();

@@ -316,3 +316,7 @@ fn send_control(flags: u64, from: Term, to: &Term, priority: SendPriority) -> Te
 fn is_remote_reference(to: &Term) -> bool {
     matches!(to, Term::External(id) if matches!(id.data, ExternalData::Reference(_)))
 }
+
+#[cfg(test)]
+#[path = "../../../tests/runtime/scheduler/dist_output.rs"]
+mod tests;
