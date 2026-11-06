@@ -38,3 +38,18 @@ not (
   test(=compares_the_runtime_with_the_pinned_erts)
 )
 '''
+
+# Each distribution test starts real ERTS and pbeam nodes with their own epmd,
+# so two of them at once already make a node wait longer than its own timeouts
+# allow, and the failure names whichever test lost the race. One thread keeps
+# the target deterministic; it runs in about six minutes.
+[test-groups]
+distribution = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'binary(distribution)'
+test-group = 'distribution'
+
+[[profile.ci.overrides]]
+filter = 'binary(distribution)'
+test-group = 'distribution'

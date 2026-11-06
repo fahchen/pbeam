@@ -20,6 +20,11 @@ use crate::{
     term::{PortId, ProcessId, Reference, Term},
 };
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static PAUSE_BEFORE_LOCKED_DIST_PORT: std::cell::RefCell<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>> = const { std::cell::RefCell::new(None) };
+}
+
 /// What a port does at the end of file of its program.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::runtime) enum EndOfFile {
@@ -368,6 +373,10 @@ impl Scheduler {
     /// (io.c:2241-2290). With `closer`, the exit closes the port only when
     /// `closer` owns it, and the port sends `{Port, closed}` when it
     /// terminates.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the exit keeps the port lock across its cleanup steps"
+    )]
     fn exit_port(
         &mut self,
         id: PortId,
@@ -375,10 +384,36 @@ impl Scheduler {
         mode: ExitMode,
         closer: Option<ProcessId>,
     ) -> bool {
-        // The port lock comes first. The table lock is taken only after the
-        // port lock is released, to remove the port.
+        // Resolve the entry under the dist lock, then release it before the
+        // event lock. A concurrent setup can bind the port before we lock it.
+        let event_lock = {
+            let dist = self.node.dist();
+            dist.controlled_by(super::dist_table::Controller::Port(id))
+                .map(|name| dist.event_lock(&name))
+        };
+        let event_guard = event_lock
+            .as_ref()
+            .map(|lock| lock.lock().expect("the node event lock is not poisoned"));
+        // A fixture cannot control the interval between the controller lookups.
+        #[cfg(test)]
+        PAUSE_BEFORE_LOCKED_DIST_PORT.with(|pause| {
+            if let Some((ready, resume)) = pause.borrow_mut().take() {
+                ready.send(()).unwrap();
+                resume.recv().unwrap();
+            }
+        });
         let cell = self.node.port(id);
         let mut slot = cell.as_ref().map(port::lock);
+        if event_lock.is_none()
+            && self
+                .node
+                .dist()
+                .controlled_by(super::dist_table::Controller::Port(id))
+                .is_some()
+        {
+            drop(slot);
+            return self.exit_port(id, reason, mode, closer);
+        }
         // A port that closed before, also on another scheduler, sends no
         // second exit.
         let Some(port) = slot.as_mut().and_then(|slot| slot.as_mut()) else {
@@ -451,9 +486,10 @@ impl Scheduler {
             .node
             .dist()
             .controller_exits(super::dist_table::Controller::Port(id));
+        let ended_connection = ended.is_some();
         if let Some(ended) = ended {
             self.dist_connection_down(&ended);
-            self.dist_monitor_down(&ended);
+            self.dist_monitor_down(&ended, &reason);
         }
         port.closing |= queued;
         let serving = port.scheduler;
@@ -464,6 +500,13 @@ impl Scheduler {
         drop(slot);
         if !flushes {
             self.node.ports().remove(id);
+        }
+        if ended_connection {
+            self.node.complete_connection();
+        }
+        drop(event_guard);
+        if ended_connection {
+            self.finish_node_shutdown();
         }
         for process in suspended {
             self.resume(process);

@@ -2579,8 +2579,10 @@ fn deletes_the_link_of_a_new_connection_of_a_pair_that_is_linked_already() {
             .get(&LinkId::Remote(remote))
             .is_none()
     );
+    // `controller_exits` reports the ended connection so that its pending
+    // nodedown can be ordered; the new connection itself has no link to end.
     let ended = scheduler.node.dist().controller_exits(second);
-    assert!(ended.is_none(), "the new connection has no link to end");
+    assert!(ended.is_some());
     assert_eq!(
         messages(&scheduler, id.0),
         [Term::tuple(vec![
@@ -3018,6 +3020,147 @@ fn keeps_a_monitor_of_another_node_of_the_target_of_a_packet() {
 }
 
 #[test]
+fn resolves_queued_node_monitor_down_after_disable() {
+    use super::signals::HandlingPoint;
+    // A compiled fixture cannot disable between the port controller close
+    // and handling the signal: OTP 29.1.1 handles it before port_close
+    // returns and gives 2 messages for 0, 1, or 2 later disables. A local
+    // persistent monitor gives 0 after disable, 2 after an extra enable,
+    // and 1 after disable and re-enable before handling its signal.
+    for disabled in 0..=2 {
+        let mut scheduler = test_scheduler();
+        scheduler.start(frame(), vec![], allow_all());
+        scheduler.schedule_next().unwrap();
+        let id = current(&mut scheduler);
+        let name = scheduler.atoms.put("other@host").unwrap();
+        scheduler
+            .current_process_mut()
+            .add_node_monitor(name.index(), 1);
+        scheduler
+            .current_process_mut()
+            .add_node_monitor(name.index(), 1);
+        scheduler
+            .send_signal(
+                None,
+                id,
+                Signal::NodeMonitorDown {
+                    node: name.clone(),
+                    connection: 1,
+                },
+            )
+            .unwrap();
+        for _ in 0..disabled {
+            assert_eq!(
+                scheduler
+                    .current_process_mut()
+                    .remove_node_monitor(name.index()),
+                Some(1)
+            );
+        }
+        scheduler
+            .handle_signals(id, 100, 100, HandlingPoint::ScheduleIn)
+            .unwrap();
+        let down = Term::tuple(vec![atom("nodedown"), Term::Atom(name)]);
+        assert_eq!(messages(&scheduler, 0), vec![down; 2 - disabled]);
+    }
+
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let id = current(&mut scheduler);
+    let name = scheduler.atoms.put("other@host").unwrap();
+    scheduler
+        .current_process_mut()
+        .add_node_monitor(name.index(), 1);
+    scheduler
+        .send_signal(
+            None,
+            id,
+            Signal::NodeMonitorDown {
+                node: name.clone(),
+                connection: 1,
+            },
+        )
+        .unwrap();
+    scheduler
+        .current_process_mut()
+        .add_node_monitor(name.index(), 2);
+    scheduler
+        .handle_signals(id, 100, 100, HandlingPoint::ScheduleIn)
+        .unwrap();
+    assert_eq!(
+        messages(&scheduler, 0),
+        vec![Term::tuple(vec![
+            atom("nodedown"),
+            Term::Atom(name.clone())
+        ])]
+    );
+    assert_eq!(
+        scheduler
+            .current_process_mut()
+            .remove_node_monitor(name.index()),
+        Some(2)
+    );
+
+    check_node_monitor_disable_after_reconnect();
+}
+
+/// Check that disabling the new and old monitors leaves no queued message.
+fn check_node_monitor_disable_after_reconnect() {
+    use super::signals::HandlingPoint;
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let id = current(&mut scheduler);
+    let name = scheduler.atoms.put("old@host").unwrap();
+    let first = super::dist_table::Controller::Process(ProcessId(90));
+    let second = super::dist_table::Controller::Process(ProcessId(91));
+    let node = Arc::clone(&scheduler.node);
+    {
+        let mut dist = node.dist();
+        dist.insert(&name, Reference(7), 0);
+        dist.new_connection(&name);
+        assert!(dist.connect(&name, first, 0).is_some());
+        assert_eq!(dist.monitor_node(&name, id), Some(1));
+    }
+    scheduler
+        .current_process_mut()
+        .add_node_monitor(name.index(), 1);
+    let ended = node.dist().controller_exits(first).unwrap();
+    scheduler.dist_monitor_down(&ended, &atom("normal"));
+    {
+        let mut dist = node.dist();
+        dist.new_connection(&name);
+        assert!(dist.connect(&name, second, 0).is_some());
+        assert_eq!(dist.monitor_node(&name, id), Some(2));
+    }
+    scheduler
+        .current_process_mut()
+        .add_node_monitor(name.index(), 2);
+    {
+        let mut dist = node.dist();
+        assert_eq!(
+            scheduler
+                .current_process_mut()
+                .remove_node_monitor(name.index()),
+            Some(2)
+        );
+        dist.unmonitor_node(&name, id, 2);
+        assert_eq!(
+            scheduler
+                .current_process_mut()
+                .remove_node_monitor(name.index()),
+            Some(1)
+        );
+        dist.unmonitor_node(&name, id, 1);
+    }
+    scheduler
+        .handle_signals(id, 100, 100, HandlingPoint::ScheduleIn)
+        .unwrap();
+    assert_eq!(messages(&scheduler, 0), Vec::<Term>::new());
+}
+
+#[test]
 fn removes_a_monitor_of_another_node_at_the_end_of_the_connection() {
     use super::{dist_table::Controller, signals::HandlingPoint};
     use crate::runtime::process::{RemotePid, RemoteReference};
@@ -3059,7 +3202,7 @@ fn removes_a_monitor_of_another_node_at_the_end_of_the_connection() {
     };
     assert_eq!(ended.connection, 1);
     assert_eq!(ended.monitors.len(), 1, "the entry keeps one monitor");
-    scheduler.dist_monitor_down(&ended);
+    scheduler.dist_monitor_down(&ended, &Term::static_atom("normal"));
     scheduler
         .handle_signals(id, 100, 100, HandlingPoint::ScheduleIn)
         .unwrap();
@@ -4481,4 +4624,55 @@ fn abandon_of_a_remote_request_removes_the_connection_monitor() {
     }
     assert!(scheduler.abandon_spawn_request(Reference(3)));
     assert!(scheduler.processes[&id].monitors.get(&key).is_none());
+}
+
+#[test]
+fn closes_a_port_bound_as_controller_during_exit() {
+    use super::{dist_table::Controller, ports::PAUSE_BEFORE_LOCKED_DIST_PORT};
+    use crate::runtime::port::{
+        Driver,
+        inet::{Inet, SocketType},
+    };
+    use std::sync::mpsc;
+
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let port = scheduler
+        .open_port(
+            b"tcp_inet".to_vec(),
+            Driver::Inet(Inet::new(SocketType::Stream)),
+        )
+        .unwrap();
+    let name = scheduler.atoms.put("race@localhost").unwrap();
+    let node = Arc::clone(&scheduler.node);
+    {
+        let mut dist = node.dist();
+        dist.insert(&name, Reference(7), 0);
+        dist.new_connection(&name);
+    }
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel();
+    PAUSE_BEFORE_LOCKED_DIST_PORT.with(|pause| *pause.borrow_mut() = Some((ready_tx, resume_rx)));
+    let worker_node = Arc::clone(&node);
+    let worker_name = name;
+    let worker = std::thread::spawn(move || {
+        ready_rx.recv().unwrap();
+        worker_node
+            .with_port(port, |_| {
+                assert!(
+                    worker_node
+                        .dist()
+                        .connect(&worker_name, Controller::Port(port), 0)
+                        .is_some()
+                );
+                worker_node.add_connection();
+            })
+            .unwrap();
+        resume_tx.send(()).unwrap();
+    });
+    assert!(scheduler.close_port(port, atom("normal")));
+    worker.join().unwrap();
+    assert!(node.with_port(port, |_| ()).is_none());
+    assert!(node.dist().controlled_by(Controller::Port(port)).is_none());
 }

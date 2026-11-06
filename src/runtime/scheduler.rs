@@ -420,9 +420,6 @@ pub(super) struct Scheduler {
     /// The timers of the run and the run clock. All processes of the run
     /// share them.
     pub(super) timers: Timers,
-    /// The not connected dist entries of the run, which `erlang:nodes/1,2`
-    /// gives with the node type `known`.
-    known_nodes: KnownNodes,
     /// The owner of each reference that `erlang:monitor/3` made with an
     /// alias option: an ERTS pid reference holds the pid of its owner
     /// (`erts_get_pid_of_ref`, `erl_bif_unique.h:279`). The owner keeps the
@@ -562,7 +559,6 @@ impl Scheduler {
             shared_libraries: HashMap::new(),
             code_generation: 0,
             timers: Timers::new(),
-            known_nodes: KnownNodes::default(),
             pending_monitor: None,
             held: Vec::new(),
             virtual_reductions: 0,
@@ -3015,18 +3011,18 @@ impl Scheduler {
     }
 
     /// Return the scheduler of the live process `target` when it is another
-    /// scheduler of the node.
+    /// scheduler, or when its transfer to this scheduler is not yet adopted.
     pub(super) fn remote_owner(&self, target: ProcessId) -> Option<usize> {
         let owner = self.node.owner(target)?;
-        (owner != self.index).then_some(owner)
+        (owner != self.index || !self.processes.contains_key(target)).then_some(owner)
     }
 
     /// Return the scheduler of the process `target` when it is another
-    /// scheduler of the node and the process does not exit (see
-    /// [`Node::live_owner`]).
+    /// scheduler or is not yet adopted here, and the process does not exit
+    /// (see [`Node::live_owner`]).
     pub(super) fn remote_live_owner(&self, target: ProcessId) -> Option<usize> {
         let owner = self.node.live_owner(target)?;
-        (owner != self.index).then_some(owner)
+        (owner != self.index || !self.processes.contains_key(target)).then_some(owner)
     }
 
     /// Return true when the process `target` of the node is alive and does
@@ -4200,16 +4196,62 @@ impl Scheduler {
             .expect("the exiting process is alive");
         debug_assert!(!process.in_run_queue, "only the current process exits");
         self.node.remove_process(id);
+        self.node.dist().remove_node_monitors(id);
         // ERTS kills each process controller from the init process
         // `<0.0.0>` (`kill_dist_ctrl_proc`, `dist.c:896-903`), and each port
         // controller exits with `net_kernel_terminated` (`dist.c:930-932`,
         // `979-988`).
+        let kernel_exit = self.node.net_kernel() == Some(id);
+        let event_lock = if kernel_exit {
+            None
+        } else {
+            let dist = self.node.dist();
+            dist.controlled_by(dist_table::Controller::Process(id))
+                .map(|name| dist.event_lock(&name))
+        };
+        let event_guard = event_lock
+            .as_ref()
+            .map(|lock| lock.lock().expect("the node event lock is not poisoned"));
+        let local_node = Arc::clone(&self.node);
+        let net_reason = if kernel_exit {
+            if reason == Term::static_atom("no_network") {
+                Term::static_atom("no_network")
+            } else {
+                Term::static_atom("net_kernel_terminated")
+            }
+        } else if let Term::Tuple(tuple) = &reason
+            && let [tag, inner] = tuple.as_ref()
+            && *tag == Term::static_atom("shutdown")
+        {
+            inner.clone()
+        } else {
+            reason.clone()
+        };
+        let local_guard = kernel_exit.then(|| local_node.local_event());
+        if kernel_exit {
+            local_node.begin_net_exits(&net_reason);
+        }
         let (ended, controllers) = self.node.net_exits(id, &self.atoms);
+        drop(local_guard);
         for connection in &ended {
             self.dist_connection_down(connection);
-            self.dist_monitor_down(connection);
+            self.dist_monitor_down(connection, &net_reason);
+            self.node.complete_connection();
         }
-        for controller in controllers {
+        drop(event_guard);
+        if !ended.is_empty() {
+            self.finish_node_shutdown();
+        }
+        for (name, event_lock) in controllers {
+            let event_guard = event_lock
+                .lock()
+                .expect("the node event lock is not poisoned");
+            // Connected entries end when their controller exits.
+            let controller = self.node.dist().shutdown_entry(&name);
+            drop(event_guard);
+            let Some(controller) = controller else {
+                continue;
+            };
             let controller = match controller {
                 dist_table::Controller::Process(controller) => controller,
                 dist_table::Controller::Port(port) => {
@@ -4226,6 +4268,13 @@ impl Scheduler {
             };
             let _ = self.send_signal(Some(ProcessId(0)), controller, kill);
         }
+        if kernel_exit {
+            {
+                let _guard = local_node.local_event();
+                local_node.shutdown_started();
+            }
+            self.finish_node_shutdown();
+        }
         self.delegations
             .release(std::mem::take(&mut process.security));
         self.policy_exited(id, &reason);
@@ -4236,6 +4285,23 @@ impl Scheduler {
             return Ok(());
         }
         self.exit_links(process, ExitPhase::Links(None), reds)
+    }
+
+    /// Finish a local node shutdown once all connection events are enqueued.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.finish_node_shutdown();
+    /// ```
+    fn finish_node_shutdown(&mut self) {
+        let node = Arc::clone(&self.node);
+        let _guard = node.local_event();
+        let name = self.atoms.this_node().0;
+        if let Some(reason) = node.finish_net_exits(&self.atoms) {
+            let watchers = node.dist().nodes_monitors();
+            self.nodes_event(&name, true, None, Some(&reason), &watchers);
+        }
     }
 
     /// Switch out the freed process `process`, whose exit continues at
@@ -4576,7 +4642,6 @@ pub(in crate::runtime) use tcp_inet::Accept;
 mod tcp_stream;
 
 pub(super) use code::check_process_code_reply;
-use known_nodes::KnownNodes;
 use node::{Delivery, Named, Node};
 pub(super) use policy::PolicyEnd;
 use policy::PolicyProcess;

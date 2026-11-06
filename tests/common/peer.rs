@@ -7,12 +7,14 @@
 //! the daemon, also when the test fails.
 
 use std::{
+    fs::OpenOptions,
     io::{BufRead, BufReader},
     net::TcpListener,
+    path::PathBuf,
     process::{Child, Command, Stdio},
     sync::mpsc::{self, Receiver},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 /// The time that a test waits for `epmd` and for each line of a node.
@@ -22,6 +24,8 @@ const TIMEOUT: Duration = Duration::from_secs(60);
 pub(crate) struct Epmd {
     /// The port of the daemon, for `ERL_EPMD_PORT`.
     port: String,
+    /// The lock file that keeps another test process off the same port.
+    lock: PathBuf,
 }
 
 impl Epmd {
@@ -36,24 +40,68 @@ impl Epmd {
     /// command.env("ERL_EPMD_PORT", epmd.port());
     /// ```
     pub(crate) fn start() -> Epmd {
-        let port = TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port()
-            .to_string();
-        let epmd = Epmd { port };
-        let status = epmd
-            .command(&["-daemon", "-relaxed_command_check"])
-            .status()
-            .unwrap();
-        assert!(status.success(), "epmd -daemon: {status}");
         let start = Instant::now();
-        while !epmd.command(&["-names"]).output().unwrap().status.success() {
-            assert!(start.elapsed() < TIMEOUT, "epmd does not answer");
-            thread::sleep(Duration::from_millis(50));
+        loop {
+            let port = TcpListener::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port()
+                .to_string();
+            // A listener that is closed before `epmd` binds leaves the port
+            // free for another test process, and two nodes that share one
+            // daemon fail for reasons that name the wrong test. A lock file
+            // that only one process can create at a time keeps the port.
+            let lock = std::env::temp_dir().join(format!("pbeam-epmd-{port}.lock"));
+            let Ok(guard) = OpenOptions::new().create_new(true).write(true).open(&lock) else {
+                // A test process that died leaves its lock behind; reuse the
+                // port when the lock is old enough that no live test holds it.
+                if Epmd::stale(&lock) {
+                    let _ = std::fs::remove_file(&lock);
+                }
+                assert!(start.elapsed() < TIMEOUT, "no free epmd port");
+                continue;
+            };
+            drop(guard);
+            let epmd = Epmd { port, lock };
+            let started = epmd
+                .command(&["-daemon", "-relaxed_command_check"])
+                .status()
+                .unwrap();
+            if !started.success() {
+                epmd.release();
+                assert!(start.elapsed() < TIMEOUT, "epmd -daemon: {started}");
+                continue;
+            }
+            let deadline = Instant::now() + TIMEOUT;
+            while !epmd.command(&["-names"]).output().unwrap().status.success() {
+                if Instant::now() > deadline {
+                    epmd.release();
+                    break;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            if Instant::now() > deadline {
+                continue;
+            }
+            return epmd;
         }
-        epmd
+    }
+
+    /// Remove the lock file that keeps another test process off the port.
+    fn release(&self) {
+        let _ = std::fs::remove_file(&self.lock);
+    }
+
+    /// Return whether the lock file is older than the stale limit.
+    fn stale(lock: &PathBuf) -> bool {
+        std::fs::metadata(lock)
+            .and_then(|meta| meta.modified())
+            .is_ok_and(|modified| {
+                SystemTime::now()
+                    .duration_since(modified)
+                    .is_ok_and(|age| age > TIMEOUT * 10)
+            })
     }
 
     /// Return the port of the daemon.
@@ -77,6 +125,7 @@ impl Epmd {
 impl Drop for Epmd {
     fn drop(&mut self) {
         let _ = self.command(&["-kill"]).status();
+        self.release();
     }
 }
 

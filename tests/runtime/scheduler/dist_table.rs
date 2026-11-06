@@ -95,8 +95,15 @@ fn returns_the_links_of_each_connection_at_the_exit_of_net_kernel() {
     };
     assert!(table.insert_link(ProcessId(3), remote(&a, 4), 1));
     assert!(table.insert_link(ProcessId(5), remote(&b, 6), 1));
-    let (ended, controllers) = table.net_kernel_exits();
-    assert_eq!(controllers.len(), 2);
+    let entries = table.net_kernel_exits();
+    let controllers: Vec<_> = entries
+        .iter()
+        .filter_map(|(name, _)| table.shutdown_entry(name))
+        .collect();
+    let ended: Vec<_> = controllers
+        .iter()
+        .filter_map(|controller| table.controller_exits(*controller))
+        .collect();
     assert!(ended.iter().all(|connection| connection.connection == 1));
     let links: Vec<_> = ended
         .iter()
@@ -189,8 +196,11 @@ fn orders_the_nodes_by_state_and_by_the_time_of_each_change() {
     assert_eq!(nodes[4].connection_id, Some(1));
     // The exit of net_kernel gives each controller and makes the pending
     // entry `a` idle (dist.c:926-1001).
-    let (ended, mut controllers) = table.net_kernel_exits();
-    assert!(ended.is_empty());
+    let entries = table.net_kernel_exits();
+    let mut controllers: Vec<_> = entries
+        .iter()
+        .filter_map(|(name, _)| table.shutdown_entry(name))
+        .collect();
     controllers.sort_by_key(|controller| match controller {
         Controller::Process(id) => id.0,
         Controller::Port(_) => u64::MAX,
@@ -260,4 +270,46 @@ fn removes_the_monitor_of_its_own_connection_only() {
     assert_eq!(table.watched_process(remote(&a), key), Some(ProcessId(2)));
     table.remove_monitor(ProcessId(2), &a, key, 1);
     assert_eq!(table.watched_process(remote(&a), key), None);
+}
+
+#[test]
+fn removes_the_last_node_monitor_of_a_connected_entry() {
+    // `monitor_node/2,3` counts registrations, and `nodedown` uses the count
+    // that is left when the event is handled (`erl_proc_sig_queue.c:5063-5106`).
+    // Disabling the last registration removes the watcher from the entry.
+    let atoms = AtomTable::new();
+    let name = atoms.put("last_monitor@h").unwrap();
+    let watcher = ProcessId(2);
+    let mut table = DistTable::default();
+    table.insert(&name, Reference(7), 0);
+    table.new_connection(&name);
+    assert!(
+        table
+            .connect(&name, Controller::Process(ProcessId(1)), 0)
+            .is_some()
+    );
+    let connection = table.monitor_node(&name, watcher).unwrap();
+    assert_eq!(table.monitor_node(&name, watcher), Some(connection));
+    table.unmonitor_node(&name, watcher, connection);
+    assert_eq!(
+        table.entries[&name.index()].node_monitors.get(&watcher),
+        Some(&1)
+    );
+    table.unmonitor_node(&name, watcher, connection);
+    assert!(table.entries[&name.index()].node_monitors.is_empty());
+    // A disable for a process that holds no monitor leaves another watcher
+    // untouched, as the `if let Some(count)` path of `unmonitor_node` gives.
+    let other = ProcessId(3);
+    assert_eq!(table.monitor_node(&name, other), Some(connection));
+    table.unmonitor_node(&name, ProcessId(4), connection);
+    assert_eq!(
+        table.entries[&name.index()].node_monitors.get(&other),
+        Some(&1)
+    );
+    // A disable for a connection that was replaced also changes nothing.
+    table.unmonitor_node(&name, other, connection.wrapping_add(1));
+    assert_eq!(
+        table.entries[&name.index()].node_monitors.get(&other),
+        Some(&1)
+    );
 }

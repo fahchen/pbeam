@@ -276,6 +276,17 @@ pub(in crate::runtime) struct Node {
     /// the schedulers, as the thread progress block of ERTS does
     /// (`dist.c:5018-5058`).
     net_kernel: Mutex<Option<ProcessId>>,
+    /// Serializes local node state transitions and event enqueue. This lock
+    /// is never held with a connection event lock.
+    local_event: Mutex<()>,
+    /// The distribution owner has exited and its connections are closing.
+    going_down: AtomicBool,
+    /// Whether the owed local nodedown has the reason `no_network`.
+    no_network: AtomicBool,
+    /// Whether shutdown has queued each controller exit.
+    shutdown_started: AtomicBool,
+    /// Connections whose remote nodedown has not yet been enqueued.
+    connections: AtomicUsize,
     /// The dist entries of the connections of the node (see
     /// [`super::dist_table`]). ERTS keeps one dist table for the node, and
     /// a process of any scheduler sets up or uses a connection
@@ -382,6 +393,11 @@ impl Node {
                 dirty: Pools::new(count),
                 local_node_hash: OnceLock::new(),
                 net_kernel: Mutex::new(None),
+                local_event: Mutex::new(()),
+                going_down: AtomicBool::new(false),
+                no_network: AtomicBool::new(false),
+                shutdown_started: AtomicBool::new(false),
+                connections: AtomicUsize::new(0),
                 dist: Mutex::default(),
                 ets: Arc::default(),
                 code: super::code::NodeCode::default(),
@@ -455,50 +471,151 @@ impl Node {
         true
     }
 
-    /// Run the cleanup of the exit of the process `id` that ERTS runs for a
-    /// process with `F_DISTRIBUTION` (`erl_process.c:14471-14506`), and
-    /// return the distribution controllers that the exit kills.
-    ///
-    /// When `id` owns the distribution, give the local node of the run that
-    /// owns `atoms` the name `nonode@nohost` and the creation 0 again, make
-    /// each pending connection idle, and return the controller of each
-    /// connection, as `erts_do_net_exits` and `set_node_not_alive` do
-    /// (`dist.c:922-1117`, `853-872`). ERTS gives the node its new name in
-    /// the aux work of a scheduler after the exit of the last controller,
-    /// and PBeam does it in the exit. When `id` is the controller of a
-    /// connection, make its dist entry idle (`dist.c:1021-1117`). The
-    /// process must have left the process table, so that a later
-    /// `setnode/2` or `create_dist_channel/3` does not find it.
+    /// Lock the local node lifecycle and its event enqueue.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert!(node.net_exits(net_kernel, &atoms).1.is_empty());
-    /// assert_eq!(atoms.this_node(), (Atom::from_static("nonode@nohost").unwrap(), 0));
+    /// let guard = node.local_event();
     /// ```
+    pub(in crate::runtime) fn local_event(&self) -> MutexGuard<'_, ()> {
+        self.local_event
+            .lock()
+            .expect("the local node event lock is not poisoned")
+    }
+
+    /// Start a local node shutdown.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// node.begin_net_exits(&reason);
+    /// ```
+    pub(in crate::runtime) fn begin_net_exits(&self, reason: &Term) {
+        self.no_network
+            .store(*reason == Term::static_atom("no_network"), Ordering::SeqCst);
+        self.shutdown_started.store(false, Ordering::SeqCst);
+    }
+
+    /// Mark the controller cleanup iteration as complete.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// node.shutdown_started();
+    /// ```
+    pub(in crate::runtime) fn shutdown_started(&self) {
+        self.shutdown_started.store(true, Ordering::SeqCst);
+    }
+
+    /// Return whether the local node is closing its connections.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(!node.is_going_down());
+    /// ```
+    pub(in crate::runtime) fn is_going_down(&self) -> bool {
+        self.going_down.load(Ordering::SeqCst)
+    }
+
+    /// Count a connection before its nodeup enqueue.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// node.add_connection();
+    /// ```
+    pub(in crate::runtime) fn add_connection(&self) {
+        self.connections.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Count a connection down after its remote nodedown enqueue.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// node.complete_connection();
+    /// ```
+    pub(in crate::runtime) fn complete_connection(&self) {
+        let old = self.connections.fetch_sub(1, Ordering::SeqCst);
+        assert!(old > 0);
+    }
+
+    /// Complete a local node shutdown after all controllers have left.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// node.finish_net_exits(&atoms);
+    /// ```
+    pub(in crate::runtime) fn finish_net_exits(
+        &self,
+        atoms: &crate::term::AtomTable,
+    ) -> Option<Term> {
+        if !self.going_down.load(Ordering::SeqCst)
+            || !self.shutdown_started.load(Ordering::SeqCst)
+            || self.connections.load(Ordering::SeqCst) != 0
+        {
+            return None;
+        }
+        self.going_down.store(false, Ordering::SeqCst);
+        let reason = Term::static_atom(if self.no_network.load(Ordering::SeqCst) {
+            "no_network"
+        } else {
+            "net_kernel_terminated"
+        });
+        let mut owner = self
+            .net_kernel
+            .lock()
+            .expect("the net_kernel lock is not poisoned");
+        *owner = None;
+        let nonode = crate::term::Atom::from_static("nonode@nohost")
+            .expect("nonode@nohost is a static atom");
+        atoms.set_this_node(&nonode, 0);
+        Some(reason)
+    }
+
+    /// Run the cleanup of the exit of the process `id` that ERTS runs for a
+    /// process with `F_DISTRIBUTION` (`erl_process.c:14471-14506`), and
+    /// return the distribution controllers that the exit kills.
+    ///
+    /// Begin the cleanup of an exiting distribution owner, or detach the
+    /// connection controlled by another exiting process. The local node
+    /// keeps its name until its controllers finish their exit and
+    /// [`Node::finish_net_exits`] runs (`dist.c:853-865`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// node.net_exits(net_kernel, &atoms);
+    /// node.shutdown_started();
+    /// node.finish_net_exits(&atoms);
+    /// ```
+    #[expect(
+        clippy::type_complexity,
+        reason = "the exit returns connections and their entry locks"
+    )]
     pub(in crate::runtime) fn net_exits(
         &self,
         id: ProcessId,
-        atoms: &crate::term::AtomTable,
+        _atoms: &crate::term::AtomTable,
     ) -> (
         Vec<super::dist_table::EndedConnection>,
-        Vec<super::dist_table::Controller>,
+        Vec<(crate::term::Atom, Arc<Mutex<()>>)>,
     ) {
         // Each exit takes the lock: a `setnode/2` that found the process
         // live before it left the table publishes the owner first, as ERTS
         // sets `F_DISTRIBUTION` in one thread progress block with its check
         // (`dist.c:5018-5058`).
-        let mut owner = self
+        let owner = self
             .net_kernel
             .lock()
             .expect("the net_kernel lock is not poisoned");
         let mut dist = self.dist();
         if *owner == Some(id) {
-            *owner = None;
-            let nonode = crate::term::Atom::from_static("nonode@nohost")
-                .expect("nonode@nohost is a static atom");
-            atoms.set_this_node(&nonode, 0);
-            return dist.net_kernel_exits();
+            self.going_down.store(true, Ordering::SeqCst);
+            return (Vec::new(), dist.net_kernel_exits());
         }
         let ended = dist
             .controller_exits(super::dist_table::Controller::Process(id))
@@ -582,6 +699,11 @@ impl Node {
             statistics: Statistics::default(),
             local_node_hash: OnceLock::new(),
             net_kernel: Mutex::new(None),
+            local_event: Mutex::new(()),
+            going_down: AtomicBool::new(false),
+            no_network: AtomicBool::new(false),
+            shutdown_started: AtomicBool::new(false),
+            connections: AtomicUsize::new(0),
             dist: Mutex::default(),
             ets: Arc::default(),
             code: super::code::NodeCode::default(),

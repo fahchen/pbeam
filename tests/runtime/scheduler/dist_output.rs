@@ -46,9 +46,10 @@ fn drops_a_queued_drain_after_the_controller_is_detached() {
         let mut dist = scheduler.node.dist();
         dist.insert(&node, Reference(8), 0);
         dist.new_connection(&node);
+        scheduler.node.add_connection();
         let controller = Controller::Port(port);
         assert!(dist.connect(&node, controller, 0).is_some());
-        assert!(dist.controller_exits(controller).is_none());
+        assert!(dist.controller_exits(controller).is_some());
         assert!(dist.connected(&node).is_none());
     }
     scheduler.dist_port_send(port).unwrap();
@@ -72,6 +73,7 @@ fn closes_a_distribution_port_when_the_write_fails() {
         let mut dist = scheduler.node.dist();
         dist.insert(&node, Reference(7), 0);
         dist.new_connection(&node);
+        scheduler.node.add_connection();
         assert!(dist.connect(&node, Controller::Port(port), 0).is_some());
         dist.enqueue(&node, vec![Binary::from(vec![1])]);
     }

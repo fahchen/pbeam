@@ -4,7 +4,7 @@ mod tree;
 pub(super) use dictionary::Dictionary;
 pub(super) use tree::{MonitorLinkTree, TimerReference, WalkPosition};
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
 use super::{
     capability::SecurityContext,
@@ -742,11 +742,9 @@ pub(super) struct ProcessState {
     /// the spawn options (`erl_process.c:12242-12247`, `12568-12572`). PBeam has no garbage
     /// collector, so the flags only change what the BIFs report.
     pub(super) heap_flags: HeapFlags,
-    /// The node monitors of the process (`ERTS_MON_TYPE_NODES`): the count
-    /// of each by the bits of its options (`erts_monitor_nodes`,
-    /// `dist.c:6731-6845`). PBeam has no distribution, so a node monitor
-    /// never gets a message.
-    pub(super) node_monitors: BTreeMap<u8, u64>,
+    /// The node monitors held by this process, from oldest connection to newest.
+    /// Each tuple has the node atom index, connection id, and registration count.
+    pub(super) node_monitors: Vec<(u32, u32, u64)>,
     /// The priority of the process (`ERTS_PSFLGS_USR_PRIO`). The scheduler
     /// puts the process into the run queue of this priority.
     pub(super) priority: Priority,
@@ -1041,6 +1039,59 @@ pub(super) const OTHER_PROCESS_INFO_ITEMS: [&str; 23] = [
 ];
 
 impl ProcessState {
+    /// Add a node monitor for the current connection.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// process.add_node_monitor(1, 2);
+    /// ```
+    pub(super) fn add_node_monitor(&mut self, node: u32, connection: u32) {
+        if let Some((_, _, count)) = self
+            .node_monitors
+            .iter_mut()
+            .find(|(index, id, _)| *index == node && *id == connection)
+        {
+            *count += 1;
+        } else {
+            self.node_monitors.push((node, connection, 1));
+        }
+    }
+
+    /// Remove one registration from the newest monitor of a node.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(process.remove_node_monitor(1), None);
+    /// ```
+    pub(super) fn remove_node_monitor(&mut self, node: u32) -> Option<u32> {
+        let position = self
+            .node_monitors
+            .iter()
+            .rposition(|(index, _, _)| *index == node)?;
+        let connection = self.node_monitors[position].1;
+        self.node_monitors[position].2 -= 1;
+        if self.node_monitors[position].2 == 0 {
+            self.node_monitors.remove(position);
+        }
+        Some(connection)
+    }
+
+    /// Take the count of a node monitor on the connection that ended.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(process.take_node_monitor(1, 2), 0);
+    /// ```
+    pub(super) fn take_node_monitor(&mut self, node: u32, connection: u32) -> u64 {
+        self.node_monitors
+            .iter()
+            .position(|(index, id, _)| *index == node && *id == connection)
+            .map_or(0, |position| self.node_monitors.remove(position).2)
+    }
+
     /// Create a runnable process with argument registers. An entry start
     /// gives one frame. An undefined start gives no frame and keeps the
     /// module and the function in `undefined_start`. The arity of the start
@@ -1094,7 +1145,7 @@ impl ProcessState {
             off_heap_message_queue: false,
             async_dist: false,
             heap_flags: HeapFlags::default(),
-            node_monitors: BTreeMap::new(),
+            node_monitors: Vec::new(),
             priority: Priority::Normal,
             links: MonitorLinkTree::default(),
             dist_links: MonitorLinkTree::default(),

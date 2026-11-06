@@ -243,7 +243,9 @@ impl Scheduler {
         drop(dist);
         if let Some(ended) = ended {
             self.dist_connection_down(&ended);
-            self.dist_monitor_down(&ended);
+            // A data error kills the connection, so its watchers get `killed`
+            // (dist.c:3144-3165).
+            self.dist_monitor_down(&ended, &Term::static_atom("killed"));
         }
         match controller {
             Controller::Process(process) => {

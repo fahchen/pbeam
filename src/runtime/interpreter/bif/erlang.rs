@@ -102,19 +102,79 @@ pub(super) fn node(term: &Term, atoms: &AtomTable) -> BifResult {
     }
 }
 
+/// Run `erlang:monitor_node/2,3` for the local node and connected nodes
+/// (`dist.c:6479-6667`). A node with no connection needs auto-connect.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(matches!(monitor_node(scheduler, &local_node, &Term::static_atom("true"), &Term::nil()), Ok(Value(_))));
+/// ```
+pub(super) fn monitor_node(
+    scheduler: &mut Scheduler,
+    node: &Term,
+    enabled: &Term,
+    options: &Term,
+) -> Result<BifResult, BeamError> {
+    // ERTS sets the `badopt` cause before it checks the node and boolean
+    // (`dist.c:6489-6509`).
+    let Some(mut options) = options.proper_list() else {
+        return Ok(BifResult::badopt());
+    };
+    if options.any(
+        |option| !matches!(option, Term::Atom(atom) if atom.is_static("allow_passive_connect")),
+    ) {
+        return Ok(BifResult::badopt());
+    }
+    let Term::Atom(name) = node else {
+        return Ok(BifResult::badarg());
+    };
+    let local = scheduler.atoms.this_node().0;
+    if !name.is_static("nonode@nohost") && local.is_static("nonode@nohost") {
+        return Ok(Raise {
+            class: ExceptionClass::Error,
+            reason: Term::static_atom("notalive"),
+        });
+    }
+    if !matches!(enabled, Term::Atom(atom) if atom.is_one_of(&["true", "false"])) {
+        return Ok(BifResult::badarg());
+    }
+    if *name == local {
+        return Ok(Value(Term::static_atom("true")));
+    }
+    let enabled = matches!(enabled, Term::Atom(atom) if atom.is_static("true"));
+    let process = scheduler.current_process().id;
+    let node = Arc::clone(scheduler.node());
+    let mut dist = node.dist();
+    if enabled {
+        let Some(connection) = dist.monitor_node(name, process) else {
+            return Err(error(
+                "unsupported erlang:monitor_node/2,3 of a node without a connection: see Distribution in docs/erts-differences.md",
+            ));
+        };
+        scheduler
+            .current_process_mut()
+            .add_node_monitor(name.index(), connection);
+    } else if let Some(connection) = scheduler
+        .current_process_mut()
+        .remove_node_monitor(name.index())
+    {
+        dist.unmonitor_node(name, process, connection);
+    }
+    Ok(Value(Term::static_atom("true")))
+}
+
 /// Run `erlang:nodes(NodeTypes)` and `erlang:nodes(NodeTypes, Options)` as
-/// ERTS `nodes` does (`dist.c:6261-6476`) on a node with no connection.
-/// `NodeTypes` is one node type or a proper list of them: `visible`,
-/// `hidden`, `connected`, `this`, and `known`. PBeam has no connection, so
-/// `visible`, `hidden`, and `connected` give no node. `this` and `known`
-/// give the local node last. Before it, `known` gives the
-/// not connected entry of each node that a send used, from the oldest to
-/// the newest (see `Scheduler::known_nodes`). `Options` (`None` for
-/// `nodes/1`) is a map of the keys `connection_id` and `node_type`, each
-/// `true` or `false`. With options, the result holds `{Node, Info}`, and
-/// `Info` maps `connection_id` to `undefined` and `node_type` to `known`
-/// or `this` for each key that is `true`. Each other term raises `badarg`.
-/// A result of more than 10 nodes costs one reduction for each 10 nodes.
+/// ERTS `nodes` does (`dist.c:6261-6476`). `NodeTypes` is one node type or
+/// a proper list of them: `visible`, `hidden`, `connected`, `this`, and
+/// `known`. Pending and not-connected entries precede hidden and visible
+/// connections, and `this` adds the local node last. The shared dist table
+/// keeps the not-connected entries in the order of each state change.
+/// `Options` (`None` for `nodes/1`) is a map of the keys `connection_id`
+/// and `node_type`, each `true` or `false`. With options, the result holds
+/// `{Node, Info}` and `Info` has each requested key. A not-connected or
+/// local node has the connection id `undefined`. Each other term raises
+/// `badarg`. A result of more than 10 nodes costs one reduction per 10 nodes.
 ///
 /// # Examples
 ///
@@ -218,10 +278,9 @@ pub(super) fn nodes(
 /// Return the other nodes of the node types `kinds` (`known`, `hidden`,
 /// `visible`) in the order of ERTS (`dist.c:6356-6411`): the pending
 /// entries, the not connected entries, the hidden entries, and the visible
-/// entries, each with its node type and its connection id. PBeam gives the
-/// not connected entries of the dist table before those of a send. ERTS
-/// keeps the entry of the local node in its list of not connected entries
-/// and skips it (`dist.c:6384-6392`).
+/// entries, each with its node type and its connection id. ERTS keeps the
+/// entry of the local node in its list of not connected entries and skips it
+/// (`dist.c:6384-6392`).
 ///
 /// # Examples
 ///
@@ -234,13 +293,15 @@ fn remote_nodes(
     kinds: &[&str],
 ) -> Vec<(Term, &'static str, Option<u32>)> {
     let local = scheduler.atoms.this_node().0;
-    let connections: Vec<NodeInfo> = scheduler
-        .node()
-        .dist()
-        .nodes()
-        .into_iter()
-        .filter(|info| info.name != local)
-        .collect();
+    let now = scheduler.timers.now();
+    let connections: Vec<NodeInfo> = {
+        let mut dist = scheduler.node().dist();
+        dist.expire_known(now);
+        dist.nodes()
+    }
+    .into_iter()
+    .filter(|info| info.name != local)
+    .collect();
     let connection =
         |info: &NodeInfo| (Term::Atom(info.name.clone()), info.kind, info.connection_id);
     let mut names: Vec<_> = connections
@@ -248,17 +309,6 @@ fn remote_nodes(
         .filter(|info| info.kind == "known" && kinds.contains(&"known"))
         .map(connection)
         .collect();
-    if kinds.contains(&"known") {
-        // A send makes the other entries of the not connected list.
-        let dist_names: Vec<&Atom> = connections.iter().map(|info| &info.name).collect();
-        names.extend(
-            scheduler
-                .known_nodes()
-                .into_iter()
-                .filter(|name| !dist_names.contains(&name))
-                .map(|name| (Term::Atom(name), "known", None)),
-        );
-    }
     names.extend(
         connections
             .iter()
@@ -339,21 +389,19 @@ fn nodes_monitor_key(options: &Term) -> Option<u8> {
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(matches!(monitor_nodes(process, &Term::nil(), Some("true")), BifResult::Value(Term::Integer(0))));
-/// assert!(matches!(monitor_nodes(process, &Term::nil(), Some("true")), BifResult::Value(Term::Integer(1))));
-/// assert!(matches!(monitor_nodes(process, &Term::nil(), Some("false")), BifResult::Value(Term::Integer(2))));
+/// assert!(matches!(monitor_nodes(scheduler, &Term::nil(), Some("true")), BifResult::Value(Term::Integer(0))));
+/// assert!(matches!(monitor_nodes(scheduler, &Term::nil(), Some("true")), BifResult::Value(Term::Integer(1))));
+/// assert!(matches!(monitor_nodes(scheduler, &Term::nil(), Some("false")), BifResult::Value(Term::Integer(2))));
 /// ```
-fn monitor_nodes(process: &mut ProcessState, options: &Term, value: Option<&str>) -> BifResult {
+fn monitor_nodes(scheduler: &mut Scheduler, options: &Term, value: Option<&str>) -> BifResult {
     let (Some(on @ ("true" | "false")), Some(key)) = (value, nodes_monitor_key(options)) else {
         return BifResult::badarg();
     };
-    let old = if on == "true" {
-        let count = process.node_monitors.entry(key).or_default();
-        *count += 1;
-        *count - 1
-    } else {
-        process.node_monitors.remove(&key).unwrap_or(0)
-    };
+    let process = scheduler.current_process().id;
+    let old = scheduler
+        .node()
+        .dist()
+        .monitor_nodes(process, key, on == "true");
     Value(Term::from_bigint(BigInt::from(old)))
 }
 
@@ -399,8 +447,8 @@ fn boolean_flag(flag: &mut bool, value: Option<&str>) -> BifResult {
 /// scheduler reads the new priority when the process next goes into the
 /// run queue. Each other value raises `badarg`. A
 /// flag that ERTS does not know raises `badarg`, also a tuple that is not
-/// `{monitor_nodes, Options}`. PBeam has no distribution, so `async_dist`
-/// has no other effect and a node monitor never gets a message.
+/// `{monitor_nodes, Options}`. PBeam has no asynchronous distribution sender,
+/// so `async_dist` has no other effect.
 ///
 /// The heap flags `fullsweep_after`, `min_heap_size`,
 /// `min_bin_vheap_size`, and `max_heap_size` go to [`process_heap_flag`].
@@ -445,6 +493,16 @@ pub(super) fn process_flag(
         _ => None,
     };
     let value = value.as_deref();
+    match flag {
+        Term::Atom(flag) if flag.is_static("monitor_nodes") => {
+            return Ok(monitor_nodes(context.scheduler, &Term::nil(), value));
+        }
+        Term::Tuple(elements) if matches!(elements.as_ref(), [Term::Atom(tag), _] if tag.is_static("monitor_nodes")) =>
+        {
+            return Ok(monitor_nodes(context.scheduler, &elements[1], value));
+        }
+        _ => {}
+    }
     let process = context.scheduler.current_process_mut();
     Ok(match flag {
         Term::Atom(flag) if flag.is_static("trap_exit") => {
@@ -452,12 +510,6 @@ pub(super) fn process_flag(
         }
         Term::Atom(flag) if flag.is_static("async_dist") => {
             boolean_flag(&mut process.async_dist, value)
-        }
-        Term::Atom(flag) if flag.is_static("monitor_nodes") => {
-            monitor_nodes(process, &Term::nil(), value)
-        }
-        Term::Tuple(elements) if matches!(elements.as_ref(), [Term::Atom(tag), _] if tag.is_static("monitor_nodes")) => {
-            monitor_nodes(process, &elements[1], value)
         }
         Term::Atom(flag) if flag.is_static("message_queue_data") => {
             let old = Term::static_atom(if process.off_heap_message_queue {

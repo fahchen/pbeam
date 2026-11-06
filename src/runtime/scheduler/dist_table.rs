@@ -9,13 +9,16 @@
 //! make the entry idle again. A dist handle `{ConnId, MagicRef}` names an
 //! entry and one of its connections (`erl_node_tables.c:381-416`).
 //!
-//! The entries of other nodes that ERTS makes for a send stay in
-//! [`super::known_nodes`]. PBeam keeps each entry of this table until the
+//! The dist table also holds send-only entries and their expiry timers
+//! ([`super::known_nodes`]). PBeam keeps each connection entry until the
 //! run ends, where ERTS deletes an entry that no term refers to after
 //! `node_tab_delete_delay` (`erl_node_tables.c:429-537`): see row
 //! "Distribution" of `docs/erts-differences.md`.
 
-use std::collections::{HashMap, VecDeque};
+use std::{
+    collections::{BTreeMap, HashMap, VecDeque},
+    sync::{Arc, Mutex},
+};
 
 use crate::{
     runtime::process::{MonitorKey, RemotePid},
@@ -65,6 +68,9 @@ enum State {
 /// The dist entry of one other node.
 #[derive(Debug)]
 struct Entry {
+    /// Serialize event enqueue with connection transitions. Take this lock
+    /// before the port and dist locks; mailbox locks are leaves.
+    event_lock: Arc<Mutex<()>>,
     /// The name of the other node.
     name: Atom,
     /// The magic reference of the entry, which each dist handle of the
@@ -121,6 +127,8 @@ struct Entry {
     /// the monitor or a process of the other node holds it on the local
     /// process (`dist.c:2387-2400`, `bif.c:853`).
     monitors: Vec<DistMonitor>,
+    /// Counts of node monitors held by each local process on this connection.
+    node_monitors: HashMap<ProcessId, u64>,
 }
 
 /// An incomplete distribution message and its own atom translation table.
@@ -185,6 +193,10 @@ pub(in crate::runtime) struct EndedConnection {
     pub(in crate::runtime) links: Vec<(ProcessId, RemotePid)>,
     /// The monitors of the connection.
     pub(in crate::runtime) monitors: Vec<DistMonitor>,
+    /// Node name and the counts of the detached node monitors.
+    pub(in crate::runtime) node_monitors: (Atom, HashMap<ProcessId, u64>),
+    /// Node-event monitor snapshot, node type, and connection identifier.
+    pub(in crate::runtime) node_events: (bool, Vec<(ProcessId, u8, u64)>),
 }
 
 /// The node type and the connection id of a node that `erlang:nodes/1,2`
@@ -206,6 +218,12 @@ pub(in crate::runtime) struct DistTable {
     entries: HashMap<u32, Entry>,
     /// The atom index of the entry of each magic reference.
     handles: HashMap<Reference, u32>,
+    /// Counts of node event monitors by process and option bits.
+    nodes_monitors: Vec<(ProcessId, u8, u64)>,
+    /// The shared not-connected list, from oldest to newest.
+    idle: BTreeMap<u64, Atom>,
+    /// Expiry timers for send-only entries in the not-connected list.
+    known: super::known_nodes::KnownNodes,
     /// The order number of the next entry that changes its list. The
     /// entry of `nonode@nohost` has the order 0 (see [`Self::set_local`]).
     next_order: u64,
@@ -216,12 +234,45 @@ impl Default for DistTable {
         DistTable {
             entries: HashMap::new(),
             handles: HashMap::new(),
+            nodes_monitors: Vec::new(),
+            idle: BTreeMap::new(),
+            known: super::known_nodes::KnownNodes::default(),
             next_order: 1,
         }
     }
 }
 
 impl DistTable {
+    /// Expire send-only entries whose timers ended by `now`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// table.expire_known(now);
+    /// ```
+    pub(in crate::runtime) fn expire_known(&mut self, now: i64) {
+        for order in self.known.expire(now) {
+            self.idle.remove(&order);
+        }
+    }
+
+    /// Add or refresh a send-only entry in the shared not-connected list.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// table.send_known(&name, now);
+    /// ```
+    pub(in crate::runtime) fn send_known(&mut self, name: &Atom, now: i64) {
+        self.expire_known(now);
+        if !self.entries.contains_key(&name.index())
+            && self.known.send_ordered(name, self.next_order, now)
+        {
+            self.idle.insert(self.next_order, name.clone());
+            self.next_order += 1;
+        }
+    }
+
     /// Make the idle entry of `name` when it has no entry, as
     /// `erts_find_or_insert_dist_entry` does (`erl_node_tables.c:352-371`):
     /// `handle` is its magic reference, and the low 24 bits of `start` its
@@ -235,11 +286,22 @@ impl DistTable {
     /// assert_eq!(table.connection_id(&a), 5);
     /// ```
     pub(in crate::runtime) fn insert(&mut self, name: &Atom, handle: Reference, start: u32) {
-        let order = self.next_order;
-        self.entries.entry(name.index()).or_insert_with(|| {
+        if self.entries.contains_key(&name.index()) {
+            return;
+        }
+        let order = if let Some(order) = self.known.take(name) {
+            order
+        } else {
+            let order = self.next_order;
             self.next_order += 1;
-            self.handles.insert(handle, name.index());
+            self.idle.insert(order, name.clone());
+            order
+        };
+        self.handles.insert(handle, name.index());
+        self.entries.insert(
+            name.index(),
             Entry {
+                event_lock: Arc::new(Mutex::new(())),
                 name: name.clone(),
                 handle,
                 state: State::Idle,
@@ -259,8 +321,9 @@ impl DistTable {
                 order,
                 links: Vec::new(),
                 monitors: Vec::new(),
-            }
-        });
+                node_monitors: HashMap::new(),
+            },
+        );
     }
 
     /// Make the entries of `erlang:setnode/2`, which gives the local node
@@ -286,7 +349,10 @@ impl DistTable {
     ) {
         if !self.entries.contains_key(&nonode.index()) {
             self.insert(nonode, nonode_handle, start);
+            let old_order = self.entry_mut(nonode).order;
+            self.idle.remove(&old_order);
             self.entry_mut(nonode).order = 0;
+            self.idle.insert(0, nonode.clone());
         }
         self.insert(name, handle, start);
     }
@@ -307,9 +373,11 @@ impl DistTable {
         let order = self.next_order;
         let entry = self.entry_mut(name);
         if entry.state == State::Idle {
+            let old_order = entry.order;
             entry.state = State::Pending;
             entry.connection_id = (entry.connection_id + 1) & CONNECTION_ID_MASK;
             entry.order = order;
+            self.idle.remove(&old_order);
             self.next_order += 1;
         }
     }
@@ -378,6 +446,7 @@ impl DistTable {
         match entry.state {
             State::Pending => {
                 entry.set_idle(order);
+                self.idle.insert(order, name.clone());
                 self.next_order += 1;
                 false
             }
@@ -430,6 +499,17 @@ impl DistTable {
         let connection_id = entry.connection_id;
         self.next_order += 1;
         Some(self.dhandle(name, connection_id))
+    }
+
+    /// Return the event lock of an existing dist entry.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let event_lock = table.event_lock(&name);
+    /// ```
+    pub(in crate::runtime) fn event_lock(&self, name: &Atom) -> Arc<Mutex<()>> {
+        Arc::clone(&self.entries[&name.index()].event_lock)
     }
 
     /// Return the name of the entry that `controller` controls
@@ -516,6 +596,129 @@ impl DistTable {
         self.entries[&name.index()].input
     }
 
+    /// Register a node monitor and return its connected entry id.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(table.monitor_node(&name, process), Some(1));
+    /// ```
+    pub(in crate::runtime) fn monitor_node(
+        &mut self,
+        name: &Atom,
+        process: ProcessId,
+    ) -> Option<u32> {
+        let entry = self.entries.get_mut(&name.index())?;
+        if entry.state != State::Connected {
+            return None;
+        }
+        *entry.node_monitors.entry(process).or_default() += 1;
+        Some(entry.connection_id)
+    }
+
+    /// Remove one node monitor from its connection when it is still active.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// table.unmonitor_node(&name, process, 1);
+    /// ```
+    pub(in crate::runtime) fn unmonitor_node(
+        &mut self,
+        name: &Atom,
+        process: ProcessId,
+        connection: u32,
+    ) {
+        let entry = self.entry_mut(name);
+        if entry.connection_id != connection {
+            return;
+        }
+        if let Some(count) = entry.node_monitors.get_mut(&process) {
+            *count -= 1;
+            if *count == 0 {
+                entry.node_monitors.remove(&process);
+            }
+        }
+    }
+
+    /// Set or clear a process node-event monitor and return its old count.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(table.monitor_nodes(process, 0, true), 0);
+    /// ```
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "the process flag takes a boolean"
+    )]
+    pub(in crate::runtime) fn monitor_nodes(
+        &mut self,
+        process: ProcessId,
+        key: u8,
+        enabled: bool,
+    ) -> u64 {
+        let position = self
+            .nodes_monitors
+            .iter()
+            .position(|&(owner, options, _)| owner == process && options == key);
+        if enabled {
+            if let Some(position) = position {
+                let count = &mut self.nodes_monitors[position].2;
+                let old = *count;
+                *count += 1;
+                old
+            } else {
+                self.nodes_monitors.push((process, key, 1));
+                0
+            }
+        } else if let Some(position) = position {
+            self.nodes_monitors.remove(position).2
+        } else {
+            0
+        }
+    }
+
+    /// Snapshot node-event monitors under the distribution lock.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let watchers = table.nodes_monitors();
+    /// ```
+    pub(in crate::runtime) fn nodes_monitors(&self) -> Vec<(ProcessId, u8, u64)> {
+        self.nodes_monitors.clone()
+    }
+
+    /// Return the current count of a node-event monitor.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(table.nodes_monitor_count(process, 0), 0);
+    /// ```
+    pub(in crate::runtime) fn nodes_monitor_count(&self, process: ProcessId, key: u8) -> u64 {
+        self.nodes_monitors
+            .iter()
+            .find(|&&(owner, options, _)| owner == process && options == key)
+            .map_or(0, |entry| entry.2)
+    }
+
+    /// Remove each node monitor held by an exiting process.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// table.remove_node_monitors(process);
+    /// ```
+    pub(in crate::runtime) fn remove_node_monitors(&mut self, process: ProcessId) {
+        self.nodes_monitors
+            .retain(|(owner, _, _)| *owner != process);
+        for entry in self.entries.values_mut() {
+            entry.node_monitors.remove(&process);
+        }
+    }
+
     /// Return the flags, the controller, and the connection id of the entry
     /// of `name` when it is connected (`ERTS_DSIG_PREP_CONNECTED`,
     /// `dist.c:3250-3251`).
@@ -586,6 +789,7 @@ impl DistTable {
         &mut self,
         controller: Controller,
     ) -> Option<EndedConnection> {
+        let watchers = self.nodes_monitors();
         let entry = self
             .entries
             .values_mut()
@@ -593,16 +797,21 @@ impl DistTable {
         let connection = entry.connection_id;
         let links = std::mem::take(&mut entry.links);
         let monitors = std::mem::take(&mut entry.monitors);
+        let visible = entry.flags & PUBLISHED != 0;
+        let node_monitors = (entry.name.clone(), std::mem::take(&mut entry.node_monitors));
         entry.set_idle(self.next_order);
         entry.input = 0;
         // dist.c:1081.
         entry.out = 0;
         entry.input_handler = None;
+        self.idle.insert(self.next_order, entry.name.clone());
         self.next_order += 1;
-        (!links.is_empty() || !monitors.is_empty()).then_some(EndedConnection {
+        Some(EndedConnection {
             connection,
             links,
             monitors,
+            node_monitors,
+            node_events: (visible, watchers),
         })
     }
 
@@ -817,36 +1026,36 @@ impl DistTable {
             .retain(|monitor| monitor.process != process || monitor.key != key);
     }
 
-    /// Make each pending entry idle and return the links of each connection
-    /// that ended and the controller of each connected entry, as
-    /// `erts_do_net_exits` does at the exit of `net_kernel` (`dist.c:926-1001`).
-    pub(in crate::runtime) fn net_kernel_exits(
-        &mut self,
-    ) -> (Vec<EndedConnection>, Vec<Controller>) {
-        let mut ended = Vec::new();
-        let mut controllers = Vec::new();
-        for entry in self.entries.values_mut() {
-            match entry.state {
-                State::Pending => {
-                    entry.set_idle(self.next_order);
-                    self.next_order += 1;
-                }
-                State::Connected => {
-                    let links = std::mem::take(&mut entry.links);
-                    let monitors = std::mem::take(&mut entry.monitors);
-                    if !links.is_empty() || !monitors.is_empty() {
-                        ended.push(EndedConnection {
-                            connection: entry.connection_id,
-                            links,
-                            monitors,
-                        });
-                    }
-                    controllers.extend(entry.controller);
-                }
-                State::Idle => {}
+    /// Snapshot the entries at the exit of `net_kernel`. The caller takes
+    /// each entry event lock before it cancels or stops that connection.
+    /// `erts_do_net_exits` does the controller cleanup at `dist.c:926-1001`.
+    pub(in crate::runtime) fn net_kernel_exits(&self) -> Vec<(Atom, Arc<Mutex<()>>)> {
+        self.entries
+            .values()
+            .map(|entry| (entry.name.clone(), Arc::clone(&entry.event_lock)))
+            .collect()
+    }
+
+    /// Detach one entry during local node shutdown under its event lock.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let controller = table.shutdown_entry(&name);
+    /// ```
+    pub(in crate::runtime) fn shutdown_entry(&mut self, name: &Atom) -> Option<Controller> {
+        let entry = self.entry_mut(name);
+        match entry.state {
+            State::Pending => {
+                let order = self.next_order;
+                self.entry_mut(name).set_idle(order);
+                self.idle.insert(order, name.clone());
+                self.next_order += 1;
+                None
             }
+            State::Connected => entry.controller,
+            State::Idle => None,
         }
-        (ended, controllers)
     }
 
     /// Return the node of each entry in the order of `erlang:nodes/1,2`
@@ -863,19 +1072,33 @@ impl DistTable {
     /// assert_eq!(table.nodes()[0].kind, "known");
     /// ```
     pub(in crate::runtime) fn nodes(&self) -> Vec<NodeInfo> {
-        let mut entries: Vec<&Entry> = self.entries.values().collect();
+        let mut entries: Vec<&Entry> = self
+            .entries
+            .values()
+            .filter(|entry| entry.state != State::Idle)
+            .collect();
         entries.sort_by_key(|entry| {
-            let rank = match (entry.state, entry.flags & PUBLISHED) {
-                (State::Pending, _) => 0,
-                (State::Idle, _) => 1,
-                (State::Connected, 0) => 2,
-                (State::Connected, _) => 3,
+            let rank = if entry.state == State::Pending {
+                0
+            } else if entry.flags & PUBLISHED == 0 {
+                2
+            } else {
+                3
             };
             (rank, entry.order)
         });
-        entries
-            .into_iter()
-            .map(|entry| NodeInfo {
+        let mut result = Vec::new();
+        let mut idle_added = false;
+        for entry in entries {
+            if entry.state != State::Pending && !idle_added {
+                result.extend(self.idle.values().map(|name| NodeInfo {
+                    name: name.clone(),
+                    kind: "known",
+                    connection_id: None,
+                }));
+                idle_added = true;
+            }
+            result.push(NodeInfo {
                 name: entry.name.clone(),
                 kind: match (entry.state, entry.flags & PUBLISHED) {
                     (State::Connected, 0) => "hidden",
@@ -883,8 +1106,16 @@ impl DistTable {
                     _ => "known",
                 },
                 connection_id: (entry.state == State::Connected).then_some(entry.connection_id),
-            })
-            .collect()
+            });
+        }
+        if !idle_added {
+            result.extend(self.idle.values().map(|name| NodeInfo {
+                name: name.clone(),
+                kind: "known",
+                connection_id: None,
+            }));
+        }
+        result
     }
 }
 

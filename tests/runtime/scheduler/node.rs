@@ -52,8 +52,16 @@ fn a_net_kernel_that_exits_gets_no_node_name() {
     node.register(ProcessId(8), 0);
     assert!(node.set_this_node(&atoms, ProcessId(8), &name, 4));
     node.net_exits(ProcessId(7), &atoms);
-    assert_eq!(atoms.this_node(), (name, 4));
+    assert_eq!(atoms.this_node(), (name.clone(), 4));
+    node.begin_net_exits(&crate::term::Term::static_atom("net_kernel_terminated"));
     node.net_exits(ProcessId(8), &atoms);
+    assert_eq!(atoms.this_node(), (name.clone(), 4));
+    assert!(!node.set_this_node(&atoms, ProcessId(8), &name, 4));
+    node.shutdown_started();
+    assert_eq!(
+        node.finish_net_exits(&atoms),
+        Some(crate::term::Term::static_atom("net_kernel_terminated"))
+    );
     assert_eq!(atoms.this_node(), nonode);
 }
 

@@ -68,6 +68,8 @@ pub(super) fn setnode(
         return Ok(BifResult::badarg());
     };
     let creation = creation.max(MIN_CREATION);
+    let node = Arc::clone(scheduler.node());
+    let _local_event = node.local_event();
     if !scheduler
         .node()
         .set_this_node(&scheduler.atoms, net_kernel, name, creation)
@@ -77,10 +79,13 @@ pub(super) fn setnode(
     let nonode = Atom::from_static("nonode@nohost").expect("nonode@nohost is a static atom");
     let (nonode_handle, handle) = (scheduler.make_magic_ref()?, scheduler.make_magic_ref()?);
     let start = connection_start(scheduler);
-    scheduler
-        .node()
-        .dist()
-        .set_local(&nonode, nonode_handle, name, handle, start);
+    let now = scheduler.timers.now();
+    let mut dist = scheduler.node().dist();
+    dist.expire_known(now);
+    dist.set_local(&nonode, nonode_handle, name, handle, start);
+    drop(dist);
+    let watchers = scheduler.node().dist().nodes_monitors();
+    scheduler.nodes_event(name, true, None, None, &watchers);
     Ok(BifResult::Value(Term::static_atom("true")))
 }
 
@@ -280,8 +285,18 @@ pub(super) fn new_connection(
     }
     let handle = scheduler.make_magic_ref()?;
     let start = connection_start(scheduler);
-    let mut dist = scheduler.node().dist();
-    dist.insert(name, handle, start);
+    let now = scheduler.timers.now();
+    let node = Arc::clone(scheduler.node());
+    let event_lock = {
+        let mut dist = node.dist();
+        dist.expire_known(now);
+        dist.insert(name, handle, start);
+        dist.event_lock(name)
+    };
+    let _event = event_lock
+        .lock()
+        .expect("the node event lock is not poisoned");
+    let mut dist = node.dist();
     dist.new_connection(name);
     Ok(BifResult::Value(dist.current_dhandle(name)))
 }
@@ -307,14 +322,24 @@ pub(super) fn abort_pending_connection(
     let Term::Atom(name) = node else {
         return BifResult::badarg();
     };
-    let mut dist = context.scheduler.node().dist();
-    match dist.lookup(handle) {
-        Some((entry, connection_id)) if entry == *name => {
-            let connected = dist.abort_pending(name, connection_id);
-            BifResult::Value(Term::from(!connected))
+    let node = Arc::clone(context.scheduler.node());
+    let event = {
+        let dist = node.dist();
+        match dist.lookup(handle) {
+            Some((entry, connection_id)) if entry == *name => {
+                Some((dist.event_lock(name), connection_id))
+            }
+            _ => None,
         }
-        _ => BifResult::badarg(),
-    }
+    };
+    let Some((event_lock, connection_id)) = event else {
+        return BifResult::badarg();
+    };
+    let _event = event_lock
+        .lock()
+        .expect("the node event lock is not poisoned");
+    let connected = node.dist().abort_pending(name, connection_id);
+    BifResult::Value(Term::from(!connected))
 }
 
 /// Run `erts_internal:create_dist_channel(Node, Controller, {Flags,
@@ -408,25 +433,38 @@ pub(super) fn create_dist_channel(
     };
     let start = connection_start(scheduler);
     let node = Arc::clone(scheduler.node());
+    let now = scheduler.timers.now();
+    let reference = scheduler.make_magic_ref()?;
+    let event_lock = {
+        let mut dist = node.dist();
+        dist.expire_known(now);
+        dist.insert(name, reference, start);
+        dist.event_lock(name)
+    };
+    let _event = event_lock
+        .lock()
+        .expect("the node event lock is not poisoned");
     let handle = {
         let mut dist = node.dist();
-        // ERTS makes the entry first (`dist.c:5199`).
-        let reference = scheduler.make_magic_ref()?;
-        dist.insert(name, reference, start);
         // ERTS cannot send the request to a controller that does not
         // exist (`dist.c:5250-5256`). The caller itself is live.
-        if node.live_owner(controller).is_none() {
+        if node.is_going_down()
+            || node.live_owner(net_kernel).is_none()
+            || node.live_owner(controller).is_none()
+        {
             return Ok(BifResult::Value(Term::static_atom("badarg")));
         }
         dist.connect(name, Controller::Process(controller), flags)
+            .map(|handle| (handle, dist.connection_id(name), dist.nodes_monitors()))
     };
-    let Some(handle) = handle else {
+    let Some((handle, connection, watchers)) = handle else {
         return Ok(if caller == controller {
             BifResult::Value(Term::static_atom("badarg"))
         } else {
             message_reply(scheduler, caller, Term::static_atom("badarg"))?
         });
     };
+    node.add_connection();
     scheduler.send_message(
         controller,
         net_kernel,
@@ -437,6 +475,7 @@ pub(super) fn create_dist_channel(
             Term::Pid(caller),
         ]),
     );
+    scheduler.nodes_event(name, flags & 1 != 0, Some(connection), None, &watchers);
     Ok(if caller == controller {
         BifResult::Value(Term::tuple(vec![Term::static_atom("ok"), handle]))
     } else {
@@ -462,22 +501,37 @@ fn port_channel(
     net_kernel: ProcessId,
 ) -> Result<BifResult, BeamError> {
     let start = connection_start(scheduler);
+    let now = scheduler.timers.now();
     let reference = scheduler.make_magic_ref()?;
     let node = Arc::clone(scheduler.node());
+    let event_lock = {
+        let mut dist = node.dist();
+        dist.expire_known(now);
+        dist.insert(name, reference, start);
+        dist.event_lock(name)
+    };
+    let _event = event_lock
+        .lock()
+        .expect("the node event lock is not poisoned");
     let setup = |item: Option<&mut crate::runtime::port::Port>| {
         let mut dist = node.dist();
-        // ERTS makes the entry first (`dist.c:5199`).
-        dist.insert(name, reference, start);
-        item.filter(|item| !item.closing && item.soft_busy())
-            .and_then(|_| dist.connect(name, Controller::Port(port), flags))
+        item.filter(|item| {
+            !node.is_going_down()
+                && node.live_owner(net_kernel).is_some()
+                && !item.closing
+                && item.soft_busy()
+        })
+        .and_then(|_| dist.connect(name, Controller::Port(port), flags))
+        .map(|handle| (handle, dist.connection_id(name), dist.nodes_monitors()))
     };
     let handle = match node.with_port(port, |item| setup(Some(item))) {
         Some(handle) => handle,
         None => setup(None),
     };
-    let Some(handle) = handle else {
+    let Some((handle, connection, watchers)) = handle else {
         return Ok(BifResult::Value(Term::static_atom("badarg")));
     };
+    node.add_connection();
     let caller = scheduler.current_process().id;
     scheduler.send_message(
         caller,
@@ -489,6 +543,7 @@ fn port_channel(
             Term::Pid(caller),
         ]),
     );
+    scheduler.nodes_event(name, flags & 1 != 0, Some(connection), None, &watchers);
     Ok(BifResult::Value(Term::tuple(vec![
         Term::static_atom("ok"),
         handle,

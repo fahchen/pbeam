@@ -80,6 +80,21 @@ pub(super) enum Signal {
         /// The new group leader: a pid of this node or of another node.
         leader: Term,
     },
+    /// A nodedown signal for the registrations on one connection.
+    NodeMonitorDown {
+        /// The node whose connection ended.
+        node: Atom,
+        /// The ended connection id.
+        connection: u32,
+    },
+    /// A persistent node-monitor signal. The receiver uses the current
+    /// count of `options` when it handles the signal.
+    NodesMonitor {
+        /// The node-monitor option bits.
+        options: u8,
+        /// The nodeup or nodedown message.
+        message: Term,
+    },
     /// `ERTS_SIG_Q_OP_LINK`: the sender linked to the receiver. The receiver
     /// adds the link unless it has a link or an unlinking link to the
     /// sender; the cost is 0 (`erl_proc_sig_queue.c:6635-6663`). At exit it
@@ -420,8 +435,11 @@ impl Signal {
             Signal::Exit { reason, .. }
             | Signal::DistExit { reason, .. }
             | Signal::MonitorDown { reason, .. } => visit(reason),
+            Signal::NodeMonitorDown { node, .. } => visit(&Term::Atom(node.clone())),
             Signal::ProcessInfo { item, .. } => visit(item),
-            Signal::AliasMessage { message, .. } => visit(message),
+            Signal::AliasMessage { message, .. } | Signal::NodesMonitor { message, .. } => {
+                visit(message);
+            }
             Signal::CheckProcessCode { tag, .. } => visit(tag),
             _ => {}
         }
@@ -446,6 +464,7 @@ impl Signal {
     /// ```
     pub(super) fn take_terms(&mut self, pending: &mut Vec<Term>) {
         match self {
+            Signal::NodeMonitorDown { node, connection: _ } => pending.push(Term::Atom(node.clone())),
             Signal::SpawnReply { node, result, .. } => {
                 pending.push(Term::Atom(node.clone()));
                 pending.push(result.clone());
@@ -467,7 +486,7 @@ impl Signal {
                 reference: _,
                 item,
             } => pending.push(std::mem::replace(item, Term::Nil)),
-            Signal::AliasMessage { alias: _, message } => {
+            Signal::AliasMessage { alias: _, message } | Signal::NodesMonitor { options: _, message } => {
                 pending.push(std::mem::replace(message, Term::Nil));
             }
             Signal::Link { from: _ }

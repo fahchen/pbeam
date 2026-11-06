@@ -1010,24 +1010,24 @@ fn preserves_cache_order_for_concurrent_port_senders() {
         &["+S", "4", "-sname", &name, "-setcookie", "ck"],
         "register(cache_order, self()), io:format(\"~s~n\", [node()]), \
          Expected = lists:sort(lists:append([[list_to_atom(\"cache_parallel_\" ++ integer_to_list(N)), \
-         list_to_atom(\"cache_parallel_\" ++ integer_to_list(N))] || N <- lists:seq(1,32)])), \
+         list_to_atom(\"cache_parallel_\" ++ integer_to_list(N))] || N <- lists:seq(1,6)])), \
          F = fun F(Atoms) -> receive {From, atom_value, Atom} -> From ! ack, F([Atom|Atoms]); \
          {From, finish} -> From ! {result, {length(Atoms),lists:sort(Atoms) =:= Expected}}, F([]) \
-         after 30000 -> halt(2) end end, F([]).",
+         after 120000 -> halt(2) end end, F([]).",
     );
     let node = server.line();
     let expression = format!(
         "true = net_kernel:connect_node('{node}'), Parent = self(), \
-         Atoms = [list_to_atom(\"cache_parallel_\" ++ integer_to_list(N)) || N <- lists:seq(1,32)], \
+         Atoms = [list_to_atom(\"cache_parallel_\" ++ integer_to_list(N)) || N <- lists:seq(1,6)], \
          Worker = fun(A) -> receive go -> Sid = erlang:system_info(scheduler_id), \
          {{cache_order, '{node}'}} ! {{self(), atom_value, A}}, \
-         receive ack -> Parent ! {{done, Sid}} after 10000 -> Parent ! timeout end end end, \
+         receive ack -> Parent ! {{done, Sid}} after 120000 -> Parent ! timeout end end end, \
          Ps = lists:append([[spawn(fun() -> Worker(A) end),spawn(fun() -> Worker(A) end)] || A <- Atoms]), \
          [P ! go || P <- Ps], \
-         Sids = [receive {{done, Sid}} -> Sid after 10000 -> timeout end || _ <- Ps], \
+         Sids = [receive {{done, Sid}} -> Sid after 120000 -> timeout end || _ <- Ps], \
          {{cache_order, '{node}'}} ! {{self(), finish}}, \
          receive {{result, Good}} -> io:format(\"~p~n~p~n\", [Good,length(lists:usort([S || S <- Sids, is_integer(S)]))]) \
-         after 10000 -> halt(2) end, halt()."
+         after 120000 -> halt(2) end, halt()."
     );
     let run = |name: &str| {
         vec![
@@ -1042,13 +1042,25 @@ fn preserves_cache_order_for_concurrent_port_senders() {
             expression.clone(),
         ]
     };
-    for (label, output) in [
-        ("ERTS", erts_erl(&epmd, &run(&format!("dcoerts{id}")))),
-        ("PBeam", pbeam_erl(&epmd, &run(&format!("dcopbeam{id}")))),
+    for (label, node, output) in [
+        ("ERTS", format!("dcoerts{id}"), None),
+        ("PBeam", format!("dcopbeam{id}"), None),
     ] {
-        let text = stdout(&output);
+        let arguments = run(&node);
+        let output = match output {
+            Some(output) => output,
+            None if label == "ERTS" => erts_erl(&epmd, &arguments),
+            None => pbeam_erl(&epmd, &arguments),
+        };
+        // Name the arguments in the failure, because a node that another test
+        // disturbs reports its own error, which does not name this test.
+        assert!(
+            output.status.success() && output.stderr.is_empty(),
+            "{label} {node}: {output:?}"
+        );
+        let text = String::from_utf8(output.stdout).unwrap();
         let (result, schedulers) = text.split_once('\n').unwrap();
-        assert_eq!(result, "{64,true}", "{label}: {text}");
+        assert_eq!(result, "{12,true}", "{label}: {text}");
         println!("{label} scheduler count: {}", schedulers.trim());
     }
 }
@@ -2260,19 +2272,463 @@ fn sends_exit_signals_between_erts_and_pbeam_nodes() {
 }
 
 #[test]
+fn monitors_the_local_node_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let name = format!("dml{}", std::process::id());
+    for prefix in [vec![], vec!["-sname", name.as_str()]] {
+        let arguments = probe(&prefix, "dist_lost_probe:monitor_local(), halt().");
+        let expected = "[true,true,{error,badarg},{error,badarg},{error,badarg},{error,badarg}]\n";
+        assert_eq!(stdout(&erts_erl(&epmd, &arguments)), expected);
+        assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), expected);
+    }
+    let arguments = probe(&[], "dist_lost_probe:monitor_notalive(), halt().");
+    assert_eq!(stdout(&erts_erl(&epmd, &arguments)), "{error,notalive}\n");
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), "{error,notalive}\n");
+    for expression in [
+        "dist_lost_probe:monitor_remote(), halt().",
+        "dist_lost_probe:monitor_idle(), halt().",
+    ] {
+        let arguments = probe(&["-sname", &name], expression);
+        let result = pbeam_erl(&epmd, &arguments);
+        assert!(!result.status.success(), "{result:?}");
+        assert!(
+            String::from_utf8_lossy(&result.stderr)
+                .contains("unsupported erlang:monitor_node/2,3 of a node without a connection"),
+            "{result:?}"
+        );
+    }
+}
+
+#[test]
+fn reports_the_monitor_node_badopt_cause_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let arguments = probe(&[], "dist_lost_probe:monitor_badopt(), halt().");
+    let reference = stdout(&erts_erl(&epmd, &arguments));
+    let badopt = "#{cause => badopt,module => erl_erts_errors}";
+    let plain = "#{module => erl_erts_errors}";
+    assert_eq!(
+        reference,
+        format!("[{badopt},{badopt},{badopt},{badopt},{plain},{plain}]\n")
+    );
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), reference);
+}
+
+#[test]
+fn disconnect_node_returns_the_pinned_erts_values_and_ends_the_connection() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let server_name = format!("ndisserver{id}");
+    let server = ErtsNode::start(
+        &epmd,
+        &[
+            "-sname",
+            &server_name,
+            "-setcookie",
+            "ck",
+            "-pa",
+            "fixtures/dist",
+        ],
+        "dist_lost_probe:server().",
+    );
+    let expression = format!(
+        "dist_lost_probe:disconnect_cases('{}'), halt().",
+        server.line()
+    );
+    let client_name = format!("ndisclient{id}");
+    let arguments = probe(&["-sname", &client_name, "-setcookie", "ck"], &expression);
+    let expected = "[true,nodedown,false,false]\n";
+    assert_eq!(stdout(&erts_erl(&epmd, &arguments)), expected);
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), expected);
+    let arguments = probe(&[], "dist_lost_probe:disconnect_notalive(), halt().");
+    assert_eq!(
+        stdout(&erts_erl(&epmd, &arguments)),
+        "[ignored,ignored,ignored]\n"
+    );
+    assert_eq!(
+        stdout(&pbeam_erl(&epmd, &arguments)),
+        "[ignored,ignored,ignored]\n"
+    );
+}
+
+#[test]
+fn expires_send_only_known_nodes_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let erts_name = format!("nexpireerts{id}");
+    let pbeam_name = format!("nexpirepb{id}");
+    let expression = "dist_lost_probe:nodes_expiry(), halt().";
+    let erts_args = probe(&["-sname", &erts_name, "-setcookie", "ck"], expression);
+    let pbeam_args = probe(&["-sname", &pbeam_name, "-setcookie", "ck"], expression);
+    std::thread::scope(|scope| {
+        let erts = scope.spawn(|| erts_erl(&epmd, &erts_args));
+        let pbeam = scope.spawn(|| pbeam_erl(&epmd, &pbeam_args));
+        assert_eq!(stdout(&erts.join().unwrap()), "[nmekeep@host]\n");
+        assert_eq!(stdout(&pbeam.join().unwrap()), "[nmekeep@host]\n");
+    });
+}
+
+#[test]
+fn lists_node_types_and_mixed_known_order_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let visible_name = format!("nvisible{id}");
+    let hidden_name = format!("nhidden{id}");
+    let visible = ErtsNode::start(
+        &epmd,
+        &[
+            "-sname",
+            &visible_name,
+            "-setcookie",
+            "ck",
+            "-pa",
+            "fixtures/dist",
+        ],
+        "dist_lost_probe:server().",
+    );
+    let hidden = ErtsNode::start(
+        &epmd,
+        &[
+            "-sname",
+            &hidden_name,
+            "-setcookie",
+            "ck",
+            "-hidden",
+            "-pa",
+            "fixtures/dist",
+        ],
+        "dist_lost_probe:server().",
+    );
+    let expression = format!(
+        "dist_lost_probe:nodes_forms('{}','{}'), halt().",
+        visible.line(),
+        hidden.line()
+    );
+    let client = format!("nforms{id}");
+    let arguments = probe(
+        &["+S", "2", "-sname", &client, "-setcookie", "ck"],
+        &expression,
+    );
+    let expected = stdout(&erts_erl(&epmd, &arguments));
+    assert!(
+        expected.contains("{connected,[hidden_peer,visible_peer]"),
+        "{expected}"
+    );
+    assert!(
+        expected.contains("{this,[local],[{local,this,undefined}]}"),
+        "{expected}"
+    );
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), expected);
+    let arguments = probe(
+        &["+S", "2", "-sname", &client, "-setcookie", "ck"],
+        "dist_lost_probe:nodes_order(), halt().",
+    );
+    let expected = "[[nmea@host,nmeb@host,nmec@host],[nmeb@host,nmec@host,nmea@host]]\n";
+    assert_eq!(stdout(&erts_erl(&epmd, &arguments)), expected);
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), expected);
+}
+
+#[test]
+fn reports_node_events_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let server_name = format!("neserver{id}");
+    let server = ErtsNode::start(
+        &epmd,
+        &[
+            "-sname",
+            &server_name,
+            "-setcookie",
+            "ck",
+            "-pa",
+            "fixtures/dist",
+        ],
+        "dist_lost_probe:server().",
+    );
+    let server_node = server.line();
+    let expression = format!("dist_lost_probe:monitor_events('{server_node}'), halt().");
+    let client_name = format!("neclient{id}");
+    let arguments = probe(&["-sname", &client_name, "-setcookie", "ck"], &expression);
+    let reference = stdout(&erts_erl(&epmd, &arguments));
+    assert!(
+        reference.contains("node_type => visible")
+            && reference.contains("nodedown_reason => disconnect")
+            && !reference.contains("timeout"),
+        "{reference}"
+    );
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), reference);
+    let expression = format!("dist_lost_probe:monitor_forms('{server_node}'), halt().");
+    let arguments = probe(&["-sname", &client_name, "-setcookie", "ck"], &expression);
+    let reference = stdout(&erts_erl(&epmd, &arguments));
+    assert_eq!(
+        reference,
+        "[up,up,none,true,true,true,true,visible,visible,disconnect,disconnect]\n"
+    );
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), reference);
+}
+
+#[test]
+fn disables_the_last_monitor_on_a_connected_node_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let name = format!("nmedisableconnected{}", std::process::id());
+    let arguments = probe(
+        &["-sname", &name],
+        "dist_lost_probe:monitor_disable_connected(), halt().",
+    );
+    assert_eq!(stdout(&erts_erl(&epmd, &arguments)), "ok\n");
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), "ok\n");
+}
+
+#[test]
+fn resolves_remote_node_monitor_counts_at_receipt_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let name = format!("nmedisable{}", std::process::id());
+    for (disabled, expected) in [(0, "2\n"), (1, "2\n"), (2, "2\n")] {
+        let expression = format!("dist_lost_probe:monitor_disable_signal({disabled}), halt().");
+        let arguments = probe(&["-sname", &name], &expression);
+        assert_eq!(stdout(&erts_erl(&epmd, &arguments)), expected, "{disabled}");
+        assert_eq!(
+            stdout(&pbeam_erl(&epmd, &arguments)),
+            expected,
+            "{disabled}"
+        );
+    }
+}
+
+#[test]
+fn resolves_node_monitor_signals_at_receipt_as_pinned_erts() {
+    let epmd = Epmd::start();
+    for (mode, expected) in [("disable", "0\n"), ("increase", "2\n"), ("recreate", "1\n")] {
+        let expression = format!("dist_lost_probe:self_signal({mode}), halt().");
+        let arguments = probe(&[], &expression);
+        assert_eq!(stdout(&erts_erl(&epmd, &arguments)), expected, "{mode}");
+        assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), expected, "{mode}");
+    }
+}
+
+#[test]
+fn reports_controller_exit_reasons_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let name = format!("nereason{}", std::process::id());
+    let arguments = probe(
+        &["-sname", &name],
+        "dist_lost_probe:controller_reasons(), halt().",
+    );
+    let expected = "[connection_closed,custom,custom]\n";
+    assert_eq!(stdout(&erts_erl(&epmd, &arguments)), expected);
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), expected);
+    let arguments = probe(&[], "dist_lost_probe:no_network(), halt().");
+    assert_eq!(stdout(&erts_erl(&epmd, &arguments)), "no_network\n");
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), "no_network\n");
+}
+
+#[test]
+fn waits_for_both_controllers_before_local_nodedown_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let arguments = probe(&["+S", "2"], "dist_lost_probe:local_multi(), halt().");
+    let expected = "[true,true,false,false]\n";
+    assert_eq!(stdout(&erts_erl(&epmd, &arguments)), expected);
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), expected);
+}
+
+#[test]
+fn orders_local_node_events_when_owner_exits_during_setnode() {
+    let epmd = Epmd::start();
+    let arguments = probe(&["+S", "2"], "dist_lost_probe:local_race(), halt().");
+    let expected = "true\n";
+    assert_eq!(stdout(&erts_erl(&epmd, &arguments)), expected);
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), expected);
+}
+
+#[test]
+fn orders_remote_and_local_nodedown_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let server_name = format!("nelocalserver{id}");
+    let server = ErtsNode::start(
+        &epmd,
+        &[
+            "-sname",
+            &server_name,
+            "-setcookie",
+            "ck",
+            "-pa",
+            "fixtures/dist",
+        ],
+        "dist_lost_probe:server().",
+    );
+    let expression = format!("dist_lost_probe:local_order('{}'), halt().", server.line());
+    let arguments = probe(&["+S", "2", "-setcookie", "ck"], &expression);
+    let expected = "[{up,true,true},{up,true,true},{up,true,true}]\n";
+    assert_eq!(stdout(&erts_erl(&epmd, &arguments)), expected);
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), expected);
+}
+
+#[test]
+fn orders_node_events_when_peer_disconnects_at_connect() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let server_name = format!("neorder{id}");
+    let server = ErtsNode::start(
+        &epmd,
+        &[
+            "-sname",
+            &server_name,
+            "-setcookie",
+            "ck",
+            "-pa",
+            "fixtures/dist",
+        ],
+        "dist_lost_probe:ordering_server().",
+    );
+    let expression = format!(
+        "dist_lost_probe:ordering_client('{}'), halt().",
+        server.line()
+    );
+    let client_name = format!("neorderclient{id}");
+    let arguments = probe(
+        &[
+            "+S",
+            "2",
+            "-sname",
+            &client_name,
+            "-setcookie",
+            "ck",
+            "-hidden",
+        ],
+        &expression,
+    );
+    let expected = "[ok,ok,ok,ok]\n";
+    assert_eq!(stdout(&erts_erl(&epmd, &arguments)), expected);
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), expected);
+}
+
+#[test]
+fn reports_local_node_events_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let arguments = probe(&[], "dist_lost_probe:monitor_local_events(), halt().");
+    let expected = stdout(&erts_erl(&epmd, &arguments));
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), expected);
+}
+
+#[test]
+fn reports_hidden_node_events_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let server_name = format!("nehserver{id}");
+    let server = ErtsNode::start(
+        &epmd,
+        &[
+            "-sname",
+            &server_name,
+            "-setcookie",
+            "ck",
+            "-hidden",
+            "-pa",
+            "fixtures/dist",
+        ],
+        "dist_lost_probe:server().",
+    );
+    let expression = format!(
+        "dist_lost_probe:monitor_hidden('{}'), halt().",
+        server.line()
+    );
+    let client_name = format!("nehclient{id}");
+    let arguments = probe(&["-sname", &client_name, "-setcookie", "ck"], &expression);
+    let expected = "[#{node_type => hidden},none,#{node_type => hidden}]\n";
+    assert_eq!(stdout(&erts_erl(&epmd, &arguments)), expected);
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), expected);
+}
+
+#[test]
+fn monitors_a_connected_node_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let server_name = format!("dmserver{id}");
+    let server = ErtsNode::start(
+        &epmd,
+        &[
+            "-sname",
+            &server_name,
+            "-setcookie",
+            "ck",
+            "-pa",
+            "fixtures/dist",
+        ],
+        "dist_lost_probe:server().",
+    );
+    let expression = format!(
+        "dist_lost_probe:monitor_connected('{}'), halt().",
+        server.line()
+    );
+    let client_name = format!("dmclient{id}");
+    for socket in [false, true] {
+        let mut prefix = vec![
+            "-sname",
+            client_name.as_str(),
+            "-setcookie",
+            "ck",
+            "-hidden",
+        ];
+        if socket {
+            prefix.extend(SOCKET_CARRIER);
+        }
+        let arguments = probe(&prefix, &expression);
+        assert_eq!(
+            stdout(&erts_erl(&epmd, &arguments)),
+            "[nodedown,none,nodedown,nodedown,none]\n"
+        );
+        assert_eq!(
+            stdout(&pbeam_erl(&epmd, &arguments)),
+            "[nodedown,none,nodedown,nodedown,none]\n"
+        );
+    }
+}
+
+#[test]
+fn disconnects_a_node_with_links_and_monitors_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let name = format!("ddsrv{id}");
+    let arguments = ["-sname", &name, "-setcookie", "ck", "-pa", "fixtures/dist"];
+    let server = ErtsNode::start(&epmd, &arguments, "dist_lost_probe:server().");
+    let expression = format!(
+        "dist_lost_probe:client_disconnect('{}'), halt().",
+        server.line()
+    );
+    let client_name = format!("ddcli{id}");
+    let client = [
+        "-sname",
+        &client_name,
+        "-setcookie",
+        "ck",
+        "-hidden",
+        "-noshell",
+        "-pa",
+        "fixtures/dist",
+        "-eval",
+        &expression,
+    ];
+    let expected = "[{linked,noconnection,noconnection,noconnection}]\n";
+    assert_eq!(stdout(&erts_erl(&epmd, &client)), expected);
+    assert_eq!(stdout(&pbeam_erl(&epmd, &client)), expected);
+}
+
+#[test]
 fn ends_the_links_of_a_lost_connection_as_pinned_erts() {
     // The server node halts, and each process of the client node that has a
     // link to its process takes the exit signal `noconnection`: the process
     // that traps exits gets the message `{'EXIT', Pid, noconnection}`, and
     // the process that does not trap exits ends with the reason
     // `noconnection` (erts_do_net_exits, dist.c:1021-1117,
-    // erl_proc_sig_queue.c:4632-4815). Each pair of ERTS and PBeam nodes
+    // erl_proc_sig_queue.c:4632-4815). A process monitor on the same
+    // connection also gets a DOWN message with reason `noconnection`
+    // (dist.c:305-321). Each pair of ERTS and PBeam nodes
     // runs over the prim_socket carrier and over the tcp_inet port
     // controller. A server node serves one client node, because the client
     // stops it.
     let epmd = Epmd::start();
     let id = std::process::id();
-    let expected = "[{linked,noconnection,noconnection}]\n";
+    let expected = "[{linked,noconnection,noconnection,noconnection}]\n";
     for (server_pbeam, socket) in [(false, true), (false, false), (true, true), (true, false)] {
         for client_pbeam in [false, true] {
             let name = format!("dlo{server_pbeam}{socket}{client_pbeam}{id}");

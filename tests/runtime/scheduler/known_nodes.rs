@@ -2,6 +2,44 @@ use super::{DELETE_DELAY, KnownNodes};
 use crate::term::AtomTable;
 
 #[test]
+fn shares_mixed_node_order_and_expiry_between_schedulers() {
+    use super::super::{Scheduler, node::Node};
+    use crate::term::Reference;
+    use std::sync::Arc;
+
+    // A compiled fixture cannot bind a process to a scheduler on PBeam.
+    // Two scheduler instances give the send path two distinct owners here.
+    let atoms = Arc::new(AtomTable::new());
+    let [a, b, c] = ["a@h", "b@h", "c@h"].map(|name| atoms.put(name).unwrap());
+    let (node, mut readers) = Node::new(2).unwrap();
+    let mut first =
+        Scheduler::with_shared(Arc::clone(&atoms), Arc::clone(&node), 0, readers.remove(0));
+    let mut second =
+        Scheduler::with_shared(Arc::clone(&atoms), Arc::clone(&node), 1, readers.remove(0));
+    first.send_to_remote_node(&a);
+    {
+        let mut dist = node.dist();
+        dist.insert(&b, Reference(7), 0);
+        dist.new_connection(&b);
+        assert!(!dist.abort_pending(&b, 1));
+    }
+    second.send_to_remote_node(&c);
+    let names = |dist: &super::super::dist_table::DistTable| {
+        dist.nodes()
+            .into_iter()
+            .map(|info| info.name)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(names(&node.dist()), vec![a, b.clone(), c]);
+    let promoted = atoms.put("promoted@h").unwrap();
+    first.send_to_remote_node(&promoted);
+    node.dist().insert(&promoted, Reference(8), 0);
+    node.dist()
+        .expire_known(first.timers.now() + DELETE_DELAY + 1);
+    assert_eq!(names(&node.dist()), vec![b, promoted]);
+}
+
+#[test]
 fn keeps_the_first_send_order_and_deletes_an_entry_after_the_delay() {
     let atoms = AtomTable::new();
     let a = atoms.put("a@h").unwrap();

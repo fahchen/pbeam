@@ -36,7 +36,7 @@ use crate::{
         process::{MonitorKey, RemotePid, RemoteReference, RemoteTarget},
         signal::Signal,
     },
-    term::{Atom, ProcessId, Term, external_id},
+    term::{Atom, Map, ProcessId, Term, external_id},
 };
 
 /// `DOP_MONITOR_P` (`dist.h:157`).
@@ -172,6 +172,82 @@ impl Scheduler {
         let _ = self.send_signal(None, process, down);
     }
 
+    /// Send node events to the monitor snapshot with the ERTS option forms.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.nodes_event(&name, true, Some(1), None, &watchers);
+    /// ```
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "the flag selects visible or hidden nodes"
+    )]
+    pub(in crate::runtime) fn nodes_event(
+        &mut self,
+        name: &Atom,
+        visible: bool,
+        connection: Option<u32>,
+        reason: Option<&Term>,
+        watchers: &[(ProcessId, u8, u64)],
+    ) {
+        let kind = Term::static_atom(if visible { "visible" } else { "hidden" });
+        for &(watcher, options, _) in watchers {
+            let types = options & 3;
+            if (!visible && types & 2 == 0) || (visible && types != 0 && types & 1 == 0) {
+                continue;
+            }
+            let mut fields = Vec::new();
+            if options & 16 != 0 {
+                fields.push((
+                    Term::static_atom("connection_id"),
+                    connection.map_or(Term::static_atom("undefined"), |id| {
+                        Term::Integer(i64::from(id))
+                    }),
+                ));
+            }
+            if options & 4 != 0
+                && let Some(reason) = reason
+            {
+                fields.push((
+                    Term::static_atom("nodedown_reason"),
+                    if *reason == Term::static_atom("normal") {
+                        Term::static_atom("connection_closed")
+                    } else {
+                        reason.clone()
+                    },
+                ));
+            }
+            if types != 0 {
+                fields.push((Term::static_atom("node_type"), kind.clone()));
+            }
+            let mut tuple = vec![
+                Term::static_atom(if reason.is_some() {
+                    "nodedown"
+                } else {
+                    "nodeup"
+                }),
+                Term::Atom(name.clone()),
+            ];
+            if options != 0 {
+                let info = if options & 8 != 0 {
+                    Term::Map(
+                        Map::from_pairs(fields, &self.atoms).expect("node event keys are atoms"),
+                    )
+                } else {
+                    Term::list_from(
+                        fields
+                            .into_iter()
+                            .map(|(key, value)| Term::tuple(vec![key, value])),
+                    )
+                };
+                tuple.push(info);
+            }
+            let message = Term::tuple(tuple);
+            let _ = self.send_signal(None, watcher, Signal::NodesMonitor { options, message });
+        }
+    }
+
     /// Give each local process of `ended`, from the newest monitor to the
     /// oldest, the monitor down signal `noconnection` for a monitor that it
     /// holds, or the removal of a monitor that a process of the other node
@@ -183,13 +259,32 @@ impl Scheduler {
     ///
     /// ```rust,ignore
     /// if let Some(ended) = node.dist().controller_exits(controller) {
-    ///     scheduler.dist_monitor_down(&ended);
+    ///     scheduler.dist_monitor_down(&ended, &reason);
     /// }
     /// ```
     pub(in crate::runtime) fn dist_monitor_down(
         &mut self,
         ended: &super::dist_table::EndedConnection,
+        reason: &Term,
     ) {
+        let (name, watchers) = &ended.node_monitors;
+        self.nodes_event(
+            name,
+            ended.node_events.0,
+            Some(ended.connection),
+            Some(reason),
+            &ended.node_events.1,
+        );
+        for &watcher in watchers.keys() {
+            let _ = self.send_signal(
+                None,
+                watcher,
+                Signal::NodeMonitorDown {
+                    node: name.clone(),
+                    connection: ended.connection,
+                },
+            );
+        }
         for &monitor in &ended.monitors {
             let signal = if monitor.side == MonitorSide::Watcher {
                 // The local process holds the monitor, so the end of the

@@ -89,6 +89,50 @@ fn gives_half_of_the_queue_to_a_hungry_scheduler() {
     assert!(thief.processes.contains_key(ProcessId(3)));
 }
 
+/// A compiled fixture cannot pause a transfer between publishing its owner
+/// and adopting its process. Force that interval here and send a node event
+/// and a message from the destination scheduler.
+#[test]
+fn deliveries_to_a_process_awaiting_adoption_reach_its_mailbox() {
+    let (node, mut victim, mut thief) = two_schedulers();
+    insert(&mut victim, &[1, 2]);
+    node.set_hungry(1);
+    victim.serve_steal();
+    assert_eq!(node.owner(ProcessId(1)), Some(1));
+    assert!(!thief.processes.contains_key(ProcessId(1)));
+    assert_eq!(thief.remote_live_owner(ProcessId(1)), Some(1));
+
+    let name = crate::term::Atom::from_static("nonode@nohost").unwrap();
+    thief.nodes_event(
+        &name,
+        true,
+        Some(1),
+        Some(&Term::static_atom("normal")),
+        &[(ProcessId(1), 0, 1)],
+    );
+    thief.send_message(ProcessId(9), ProcessId(1), Term::Integer(42));
+    assert!(thief.drain_inbox());
+    let mailbox = &mut process(&mut thief, 1).mailbox;
+    mailbox.fetch();
+    let mut walk = mailbox.walk();
+    let Some(crate::runtime::mailbox::Step::Signal(signal, Signal::NodesMonitor { message, .. })) =
+        mailbox.next_signal(&mut walk)
+    else {
+        panic!("the node event reached the mailbox");
+    };
+    mailbox.convert(&mut walk, signal, message);
+    mailbox.end_walk(walk);
+    assert_eq!(
+        mailbox.current(),
+        Some(&Term::tuple(vec![
+            Term::static_atom("nodedown"),
+            Term::Atom(name)
+        ]))
+    );
+    assert!(mailbox.remove_current());
+    assert_eq!(mailbox.current(), Some(&Term::Integer(42)));
+}
+
 /// A scheduler with one runnable process keeps it, and the mark of the
 /// hungry scheduler stays.
 #[test]

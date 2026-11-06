@@ -85,6 +85,19 @@ fn visits_the_terms_of_a_signal() {
         message: Term::Integer(4),
     };
     assert_eq!(terms(&message), vec![Term::Integer(4)]);
+    let node_monitor = Signal::NodeMonitorDown {
+        node: Atom::from_static("nonode@nohost").unwrap(),
+        connection: 1,
+    };
+    assert_eq!(
+        terms(&node_monitor),
+        vec![Term::static_atom("nonode@nohost")]
+    );
+    let persistent_monitor = Signal::NodesMonitor {
+        options: 0,
+        message: Term::Integer(7),
+    };
+    assert_eq!(terms(&persistent_monitor), vec![Term::Integer(7)]);
     let check = Signal::CheckProcessCode {
         requester: ProcessId(1),
         tag: Term::Integer(5),
@@ -140,6 +153,20 @@ fn takes_the_term_of_each_signal_that_holds_one() {
                 message: marker(4),
             },
             vec![marker(4)],
+        ),
+        (
+            Signal::NodeMonitorDown {
+                node: node.clone(),
+                connection: 1,
+            },
+            vec![Term::Atom(node.clone())],
+        ),
+        (
+            Signal::NodesMonitor {
+                options: 0,
+                message: marker(7),
+            },
+            vec![marker(7)],
         ),
         // A spawn reply holds the node atom of the request and the pid or
         // the error atom of the result, in that order
