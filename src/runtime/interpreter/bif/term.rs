@@ -1237,7 +1237,7 @@ pub(in crate::runtime) fn decode_dist(
         code: &scheduler.code,
         ets: &scheduler.ets,
     };
-    let decoded = if cache.is_some() {
+    let result = if cache.is_some() {
         validate(input, seed, cache.map_or(0, <[crate::term::Atom]>::len)).and_then(|()| {
             decoder
                 .term()
@@ -1246,7 +1246,7 @@ pub(in crate::runtime) fn decode_dist(
     } else {
         decoder.decode_input(seed)
     };
-    match decoded {
+    match result {
         Ok(term_and_size) => Ok(Some(term_and_size)),
         Err(failure) => failure
             .into_error("distribution message")
