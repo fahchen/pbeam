@@ -49,11 +49,18 @@ fn priority_segment_keeps_arrival_order_before_normal_messages() {
 fn caches_marker_references_when_priority_messages_arrive() {
     let mut mailbox = mailbox(&[1]);
     let marker = mailbox.reserve_marker();
+    let other_marker = mailbox.reserve_marker();
     let reference = Term::Reference(Reference(7));
+    let other_reference = Term::Reference(Reference(8));
     mailbox.bind_marker(&marker, &reference);
+    mailbox.bind_marker(&other_marker, &other_reference);
     let message = Term::tuple(vec![int(2), reference.clone()]);
     assert_eq!(mailbox.push_priority(message.clone()), 4);
+    assert!(mailbox.markers[0].in_priority);
+    assert!(!mailbox.markers[1].in_priority);
     assert_eq!(mailbox.push_priority(message), 0);
+    assert_eq!(mailbox.push_priority(other_reference), 4);
+    assert!(mailbox.markers[1].in_priority);
     mailbox.use_marker(&reference);
     assert!(mailbox.current().is_some());
 }

@@ -218,19 +218,12 @@ impl Mailbox {
     /// ```
     pub(super) fn push_priority(&mut self, term: Term) -> i32 {
         let empty = self.priority_messages.is_empty();
-        let mut extra = 0;
         for marker in &mut self.markers {
             if empty {
                 marker.in_priority = false;
             }
-            if !marker.in_priority
-                && let Some(reference @ Term::Reference(_)) = &marker.id
-                && contains_reference(&term, reference)
-            {
-                marker.in_priority = true;
-                extra += 4;
-            }
         }
+        let extra = mark_priority_references(&term, &mut self.markers);
         self.priority_messages.push_back(term);
         extra
     }
@@ -1149,19 +1142,36 @@ impl Mailbox {
     }
 }
 
-/// Return whether a term contains the receive marker reference, as the
-/// priority queue reference scan does (`erl_proc_sig_queue.c:9138-9287`).
+/// Mark the receive references in `term` in one walk, as
+/// `prio_queue_check_recv_marks` does (`erl_proc_sig_queue.c:9138-9296`).
+/// Return four signal counts for each newly marked reference
+/// (`erl_proc_sig_queue.c:9347-9353`).
 ///
 /// # Examples
 ///
 /// ```rust,ignore
-/// assert!(contains_reference(&Term::tuple(vec![reference.clone()]), &reference));
+/// assert_eq!(mark_priority_references(&message, &mut markers), 4);
 /// ```
-fn contains_reference(term: &Term, reference: &Term) -> bool {
+fn mark_priority_references(term: &Term, markers: &mut VecDeque<Marker>) -> i32 {
+    let mut remaining = markers
+        .iter()
+        .filter(|marker| !marker.in_priority && matches!(marker.id, Some(Term::Reference(_))))
+        .count();
+    let mut extra = 0;
     let mut pending = vec![term];
-    while let Some(term) = pending.pop() {
+    while remaining > 0
+        && let Some(term) = pending.pop()
+    {
         match term {
-            Term::Reference(_) if term == reference => return true,
+            Term::Reference(_) => {
+                for marker in markers.iter_mut() {
+                    if !marker.in_priority && marker.id.as_ref() == Some(term) {
+                        marker.in_priority = true;
+                        remaining -= 1;
+                        extra += 4;
+                    }
+                }
+            }
             Term::Tuple(tuple) => pending.extend(tuple.iter()),
             Term::Cons(_) => {
                 let (head, tail) = term.cons_cell().expect("a cons cell has a head and tail");
@@ -1178,7 +1188,7 @@ fn contains_reference(term: &Term, reference: &Term) -> bool {
             _ => {}
         }
     }
-    false
+    extra
 }
 
 #[cfg(test)]
