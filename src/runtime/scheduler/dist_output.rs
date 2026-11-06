@@ -1,8 +1,7 @@
 //! The output of a distribution connection: the messages that a local
 //! process sends to a pid, a name, or an alias of another node, as
-//! `erts_dsig_send_msg` builds them (`dist.c:1592-1712`). A connection has
-//! no atom cache and no fragments, so each packet is the pass-through byte,
-//! the control message, and the message (`external.c:496-512`).
+//! `erts_dsig_send_msg` builds them (`dist.c:1592-1712`). A connection can
+//! use the normal atom-cache header. Fragments remain unsupported.
 
 use std::sync::Arc;
 

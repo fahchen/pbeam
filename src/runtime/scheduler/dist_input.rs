@@ -1,8 +1,7 @@
 //! The input of a distribution connection: the messages that another node
 //! sends to a local process or to a registered name, as
-//! `erts_net_message` gives them (`dist.c:2017-2600`). A connection has no
-//! atom cache and no fragments, so each packet is the pass-through byte,
-//! the control message, and the message (`external.c:496-512`, `902-961`).
+//! `erts_net_message` gives them (`dist.c:2017-2600`). A connection can
+//! use the normal atom-cache header. Fragments remain unsupported.
 
 use super::{Scheduler, node::Named};
 use crate::{
@@ -65,7 +64,7 @@ impl Scheduler {
     ///
     /// # Errors
     ///
-    /// A connection with the atom cache or fragments (see [`ATOM_CACHE`] or [`FRAGMENTS`]),
+    /// A connection with fragments (see [`FRAGMENTS`]),
     /// a packet that ERTS rejects (see [`REJECTED`]), a control message
     /// with a trace token, another operation, and a term that PBeam cannot
     /// hold.

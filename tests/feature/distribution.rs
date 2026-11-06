@@ -224,8 +224,8 @@ fn queues_and_writes_the_messages_to_a_connection_as_pinned_erts() {
 #[test]
 fn offers_the_mandatory_distribution_flags_the_monitor_flags_exit_payload_and_alias() {
     // PBeam offers DFLAG_DIST_MANDATORY (dist.h:80-98), DFLAG_DIST_MONITOR,
-    // DFLAG_DIST_MONITOR_NAME, DFLAG_EXIT_PAYLOAD, and DFLAG_ALIAS
-    // (dist.h:33, 34, 52, 67, 113-123), with the rejectable and the strict
+    // DFLAG_DIST_MONITOR_NAME, DFLAG_DIST_HDR_ATOM_CACHE, DFLAG_EXIT_PAYLOAD,
+    // and DFLAG_ALIAS (dist.h:33, 34, 43, 52, 67, 113-123), with the rejectable and the strict
     // order flags of ERTS (dist.h:129-135).
     let epmd = Epmd::start();
     let erts = erts_erl(
