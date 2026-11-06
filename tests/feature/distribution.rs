@@ -1879,17 +1879,19 @@ fn monitors_the_local_node_as_pinned_erts() {
     let arguments = probe(&[], "dist_lost_probe:monitor_notalive(), halt().");
     assert_eq!(stdout(&erts_erl(&epmd, &arguments)), "{error,notalive}\n");
     assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), "{error,notalive}\n");
-    let arguments = probe(
-        &["-sname", &name],
+    for expression in [
         "dist_lost_probe:monitor_remote(), halt().",
-    );
-    let result = pbeam_erl(&epmd, &arguments);
-    assert!(!result.status.success(), "{result:?}");
-    assert!(
-        String::from_utf8_lossy(&result.stderr)
-            .contains("unsupported erlang:monitor_node/2,3 of a node without a connection"),
-        "{result:?}"
-    );
+        "dist_lost_probe:monitor_idle(), halt().",
+    ] {
+        let arguments = probe(&["-sname", &name], expression);
+        let result = pbeam_erl(&epmd, &arguments);
+        assert!(!result.status.success(), "{result:?}");
+        assert!(
+            String::from_utf8_lossy(&result.stderr)
+                .contains("unsupported erlang:monitor_node/2,3 of a node without a connection"),
+            "{result:?}"
+        );
+    }
 }
 
 #[test]
@@ -2057,6 +2059,18 @@ fn reports_node_events_as_pinned_erts() {
         "[up,up,none,true,true,true,true,visible,visible,disconnect,disconnect]\n"
     );
     assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), reference);
+}
+
+#[test]
+fn disables_the_last_monitor_on_a_connected_node_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let name = format!("nmedisableconnected{}", std::process::id());
+    let arguments = probe(
+        &["-sname", &name],
+        "dist_lost_probe:monitor_disable_connected(), halt().",
+    );
+    assert_eq!(stdout(&erts_erl(&epmd, &arguments)), "ok\n");
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), "ok\n");
 }
 
 #[test]

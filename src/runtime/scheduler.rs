@@ -4246,11 +4246,8 @@ impl Scheduler {
             let event_guard = event_lock
                 .lock()
                 .expect("the node event lock is not poisoned");
-            let (ended, controller) = self.node.dist().shutdown_entry(&name);
-            if let Some(connection) = ended {
-                self.dist_connection_down(&connection);
-                self.dist_monitor_down(&connection, &net_reason);
-            }
+            // Connected entries end when their controller exits.
+            let controller = self.node.dist().shutdown_entry(&name);
             drop(event_guard);
             let Some(controller) = controller else {
                 continue;

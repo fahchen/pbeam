@@ -4596,3 +4596,54 @@ fn abandon_of_a_remote_request_removes_the_connection_monitor() {
     assert!(scheduler.abandon_spawn_request(Reference(3)));
     assert!(scheduler.processes[&id].monitors.get(&key).is_none());
 }
+
+#[test]
+fn closes_a_port_bound_as_controller_during_exit() {
+    use super::{dist_table::Controller, ports::PAUSE_BEFORE_LOCKED_DIST_PORT};
+    use crate::runtime::port::{
+        Driver,
+        inet::{Inet, SocketType},
+    };
+    use std::sync::mpsc;
+
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let port = scheduler
+        .open_port(
+            b"tcp_inet".to_vec(),
+            Driver::Inet(Inet::new(SocketType::Stream)),
+        )
+        .unwrap();
+    let name = scheduler.atoms.put("race@localhost").unwrap();
+    let node = Arc::clone(&scheduler.node);
+    {
+        let mut dist = node.dist();
+        dist.insert(&name, Reference(7), 0);
+        dist.new_connection(&name);
+    }
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel();
+    PAUSE_BEFORE_LOCKED_DIST_PORT.with(|pause| *pause.borrow_mut() = Some((ready_tx, resume_rx)));
+    let worker_node = Arc::clone(&node);
+    let worker_name = name;
+    let worker = std::thread::spawn(move || {
+        ready_rx.recv().unwrap();
+        worker_node
+            .with_port(port, |_| {
+                assert!(
+                    worker_node
+                        .dist()
+                        .connect(&worker_name, Controller::Port(port), 0)
+                        .is_some()
+                );
+                worker_node.add_connection();
+            })
+            .unwrap();
+        resume_tx.send(()).unwrap();
+    });
+    assert!(scheduler.close_port(port, atom("normal")));
+    worker.join().unwrap();
+    assert!(node.with_port(port, |_| ()).is_none());
+    assert!(node.dist().controlled_by(Controller::Port(port)).is_none());
+}

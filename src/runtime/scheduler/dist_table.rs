@@ -1019,12 +1019,9 @@ impl DistTable {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let (ended, controller) = table.shutdown_entry(&name);
+    /// let controller = table.shutdown_entry(&name);
     /// ```
-    pub(in crate::runtime) fn shutdown_entry(
-        &mut self,
-        name: &Atom,
-    ) -> (Option<EndedConnection>, Option<Controller>) {
+    pub(in crate::runtime) fn shutdown_entry(&mut self, name: &Atom) -> Option<Controller> {
         let entry = self.entry_mut(name);
         match entry.state {
             State::Pending => {
@@ -1032,10 +1029,10 @@ impl DistTable {
                 self.entry_mut(name).set_idle(order);
                 self.idle.insert(order, name.clone());
                 self.next_order += 1;
-                (None, None)
+                None
             }
-            State::Connected => (None, entry.controller),
-            State::Idle => (None, None),
+            State::Connected => entry.controller,
+            State::Idle => None,
         }
     }
 

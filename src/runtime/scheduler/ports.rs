@@ -20,6 +20,11 @@ use crate::{
     term::{PortId, ProcessId, Reference, Term},
 };
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static PAUSE_BEFORE_LOCKED_DIST_PORT: std::cell::RefCell<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>> = const { std::cell::RefCell::new(None) };
+}
+
 /// What a port does at the end of file of its program.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::runtime) enum EndOfFile {
@@ -389,6 +394,14 @@ impl Scheduler {
         let event_guard = event_lock
             .as_ref()
             .map(|lock| lock.lock().expect("the node event lock is not poisoned"));
+        // A fixture cannot control the interval between the controller lookups.
+        #[cfg(test)]
+        PAUSE_BEFORE_LOCKED_DIST_PORT.with(|pause| {
+            if let Some((ready, resume)) = pause.borrow_mut().take() {
+                ready.send(()).unwrap();
+                resume.recv().unwrap();
+            }
+        });
         let cell = self.node.port(id);
         let mut slot = cell.as_ref().map(port::lock);
         if event_lock.is_none()

@@ -9,7 +9,8 @@
          monitor_hidden/1, monitor_local_events/0, ordering_server/0, ordering_client/1,
          local_order/1, local_race/0, local_multi/0, controller_reasons/0, no_network/0,
          self_signal/1, monitor_disable_signal/1, nodes_forms/2, nodes_order/0, nodes_expiry/0,
-         disconnect_cases/1, disconnect_notalive/0, monitor_badopt/0]).
+         disconnect_cases/1, disconnect_notalive/0, monitor_badopt/0,
+         monitor_idle/0, monitor_disable_connected/0]).
 
 monitor_badopt() ->
     Call = fun(Node, Enabled, Options) ->
@@ -357,3 +358,22 @@ client(Server, Action) ->
                  _ -> {Exit, Down, RemoteDown}
              end,
     io:format("~p~n", [[Result]]).
+
+monitor_idle() ->
+    Node = 'nmeidle@localhost',
+    Handle = erts_internal:new_connection(Node),
+    true = erts_internal:abort_pending_connection(Node, Handle),
+    erlang:monitor_node(Node, true).
+
+monitor_disable_connected() ->
+    logger:set_primary_config(level, none),
+    Node = 'nmedisable@localhost',
+    Flags = element(3, erts_internal:get_dflags()),
+    _ = erts_internal:new_connection(Node),
+    {ok, Port} = gen_tcp:listen(0, []),
+    {ok, _} = erts_internal:create_dist_channel(Node, Port, {Flags, 1}),
+    true = erlang:monitor_node(Node, true),
+    true = erlang:monitor_node(Node, false),
+    true = erlang:port_close(Port),
+    Result = receive {nodedown, Node} -> unexpected after 100 -> ok end,
+    io:format("~p~n", [Result]).
