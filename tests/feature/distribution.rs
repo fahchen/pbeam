@@ -7,8 +7,13 @@
 
 use std::{
     ffi::OsStr,
+    io::{Read, Write},
+    net::{TcpListener, TcpStream},
     path::PathBuf,
     process::{Command, Output, Stdio},
+    sync::{Arc, Mutex, mpsc},
+    thread,
+    time::Duration,
 };
 
 #[expect(
@@ -690,9 +695,11 @@ fn drops_a_cache_header_on_a_stale_distribution_handle() {
     assert_eq!(stdout(&pbeam), "no_message\n");
 }
 
-// ERTS rejects a malformed header or an absent input cache entry and ends
-// the connection (external.c:991-1009, 1069-1107; dist.c:3144-3165).
-// PBeam reports that rejection as a runtime error (row "Distribution").
+// A compiled fixture cannot make the ERTS encoder emit these malformed
+// packets. These direct controller tests act as unit probes for the PBeam
+// decoder (external.c:922-977, dist.c:3144-3165). The raw proxy probe below
+// checks the same bytes against a real ERTS peer. PBeam reports a runtime
+// error (row "Distribution").
 fn assert_rejected_distribution_cache_header(packet: &str) {
     let epmd = Epmd::start();
     let name = format!("dcbad{}", std::process::id());
@@ -721,6 +728,118 @@ fn assert_rejected_distribution_cache_header(packet: &str) {
         "pbeam: unsupported distribution message that ERTS rejects: ERTS ends the connection: see \"Distribution\" in docs/erts-differences.md\n",
         "{output:?}"
     );
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the probe owns the peer, proxy, and each malformed packet"
+)]
+fn pinned_erts_closes_connections_for_malformed_cache_packets() {
+    // A TCP proxy forwards the real handshake, then injects a framed packet
+    // from the PBeam side. ERTS rejects the bytes and ends the connection
+    // (external.c:922-977, dist.c:3144-3165).
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let listen = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let server_name = format!("dcreject{id}");
+    let listen_text = listen.to_string();
+    let server = ErtsNode::start(
+        &epmd,
+        &[
+            "-sname",
+            &server_name,
+            "-setcookie",
+            "ck",
+            "-kernel",
+            "logger_level",
+            "none",
+            "-kernel",
+            "inet_dist_listen_min",
+            &listen_text,
+            "-kernel",
+            "inet_dist_listen_max",
+            &listen_text,
+        ],
+        "ok = net_kernel:monitor_nodes(true), io:format(\"~s~n\", [node()]), \
+         F = fun F() -> receive {nodeup,_} -> io:format(\"up~n\"), F(); \
+         {nodedown,_} -> io:format(\"down~n\"), F() after 60000 -> halt(2) end end, F().",
+    );
+    let node = server.line();
+    let mut long_name = vec![131, 68, 1, 24, 0, 1, 0];
+    long_name.extend([97; 256]);
+    let mut bad_node = vec![131, 68, 0, 104, 3, 97, 2, 97, 0, 88, 82, 0];
+    bad_node.extend([0; 12]);
+    let packets = [
+        vec![131, 68],
+        vec![131, 68, 0, 82, 0],
+        bad_node,
+        vec![131, 88, 0],
+        vec![131, 68, 1],
+        vec![131, 68, 1, 0],
+        vec![131, 68, 1, 0, 0],
+        vec![131, 68, 1, 8, 0],
+        vec![131, 68, 1, 24, 0, 0],
+        vec![131, 68, 1, 8, 0, 2, 97],
+        vec![131, 68, 1, 8, 0, 1, 255],
+        long_name,
+    ];
+    for (index, packet) in packets.iter().enumerate() {
+        let proxy = TcpListener::bind("0.0.0.0:0").unwrap();
+        let proxy_port = proxy.local_addr().unwrap().port().to_string();
+        let (sender, receiver) = mpsc::channel();
+        let forward = thread::spawn(move || {
+            let (client, _) = proxy.accept().unwrap();
+            let peer = TcpStream::connect(("127.0.0.1", listen)).unwrap();
+            let writer = Arc::new(Mutex::new(peer.try_clone().unwrap()));
+            sender.send(Arc::clone(&writer)).unwrap();
+            let mut from_client = client.try_clone().unwrap();
+            let send_to_peer = thread::spawn(move || {
+                let mut bytes = [0; 8192];
+                while let Ok(count @ 1..) = from_client.read(&mut bytes) {
+                    if writer.lock().unwrap().write_all(&bytes[..count]).is_err() {
+                        break;
+                    }
+                }
+            });
+            let mut from_peer = peer;
+            let mut to_client = client;
+            let _ = std::io::copy(&mut from_peer, &mut to_client);
+            let _ = send_to_peer.join();
+        });
+        let client_name = format!("dcbad{id}x{index}");
+        let client = pbeam_node(
+            &epmd,
+            &[
+                "-sname",
+                &client_name,
+                "-setcookie",
+                "ck",
+                "-pa",
+                "fixtures/dist",
+                "-epmd_module",
+                "dist_epmd",
+                "-dist_epmd_port",
+                &proxy_port,
+            ],
+            &format!(
+                "io:format(\"~p~n\", [net_kernel:connect_node('{node}')]), receive after 20000 -> halt(2) end."
+            ),
+        );
+        let writer = receiver.recv_timeout(Duration::from_secs(20)).unwrap();
+        assert_eq!(client.line(), "true", "packet {index}");
+        assert_eq!(server.line(), "up", "packet {index}");
+        let mut framed = u32::try_from(packet.len()).unwrap().to_be_bytes().to_vec();
+        framed.extend(packet);
+        writer.lock().unwrap().write_all(&framed).unwrap();
+        assert_eq!(server.line(), "down", "packet {index}");
+        drop(client);
+        forward.join().unwrap();
+    }
 }
 
 macro_rules! rejected_distribution_cache_header {
