@@ -2555,8 +2555,10 @@ fn deletes_the_link_of_a_new_connection_of_a_pair_that_is_linked_already() {
             .get(&LinkId::Remote(remote))
             .is_none()
     );
+    // `controller_exits` reports the ended connection so that its pending
+    // nodedown can be ordered; the new connection itself has no link to end.
     let ended = scheduler.node.dist().controller_exits(second);
-    assert!(ended.is_none(), "the new connection has no link to end");
+    assert!(ended.is_some());
     assert_eq!(
         messages(&scheduler, id.0),
         [Term::tuple(vec![
