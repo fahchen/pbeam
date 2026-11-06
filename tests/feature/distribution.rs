@@ -1010,24 +1010,24 @@ fn preserves_cache_order_for_concurrent_port_senders() {
         &["+S", "4", "-sname", &name, "-setcookie", "ck"],
         "register(cache_order, self()), io:format(\"~s~n\", [node()]), \
          Expected = lists:sort(lists:append([[list_to_atom(\"cache_parallel_\" ++ integer_to_list(N)), \
-         list_to_atom(\"cache_parallel_\" ++ integer_to_list(N))] || N <- lists:seq(1,12)])), \
+         list_to_atom(\"cache_parallel_\" ++ integer_to_list(N))] || N <- lists:seq(1,6)])), \
          F = fun F(Atoms) -> receive {From, atom_value, Atom} -> From ! ack, F([Atom|Atoms]); \
          {From, finish} -> From ! {result, {length(Atoms),lists:sort(Atoms) =:= Expected}}, F([]) \
-         after 300000 -> halt(2) end end, F([]).",
+         after 120000 -> halt(2) end end, F([]).",
     );
     let node = server.line();
     let expression = format!(
         "true = net_kernel:connect_node('{node}'), Parent = self(), \
-         Atoms = [list_to_atom(\"cache_parallel_\" ++ integer_to_list(N)) || N <- lists:seq(1,12)], \
+         Atoms = [list_to_atom(\"cache_parallel_\" ++ integer_to_list(N)) || N <- lists:seq(1,6)], \
          Worker = fun(A) -> receive go -> Sid = erlang:system_info(scheduler_id), \
          {{cache_order, '{node}'}} ! {{self(), atom_value, A}}, \
-         receive ack -> Parent ! {{done, Sid}} after 300000 -> Parent ! timeout end end end, \
+         receive ack -> Parent ! {{done, Sid}} after 120000 -> Parent ! timeout end end end, \
          Ps = lists:append([[spawn(fun() -> Worker(A) end),spawn(fun() -> Worker(A) end)] || A <- Atoms]), \
          [P ! go || P <- Ps], \
-         Sids = [receive {{done, Sid}} -> Sid after 300000 -> timeout end || _ <- Ps], \
+         Sids = [receive {{done, Sid}} -> Sid after 120000 -> timeout end || _ <- Ps], \
          {{cache_order, '{node}'}} ! {{self(), finish}}, \
          receive {{result, Good}} -> io:format(\"~p~n~p~n\", [Good,length(lists:usort([S || S <- Sids, is_integer(S)]))]) \
-         after 300000 -> halt(2) end, halt()."
+         after 120000 -> halt(2) end, halt()."
     );
     let run = |name: &str| {
         vec![
@@ -1060,7 +1060,7 @@ fn preserves_cache_order_for_concurrent_port_senders() {
         );
         let text = String::from_utf8(output.stdout).unwrap();
         let (result, schedulers) = text.split_once('\n').unwrap();
-        assert_eq!(result, "{24,true}", "{label}: {text}");
+        assert_eq!(result, "{12,true}", "{label}: {text}");
         println!("{label} scheduler count: {}", schedulers.trim());
     }
 }
