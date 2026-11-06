@@ -572,6 +572,39 @@ fn exchanges_many_cached_atoms_with_pinned_erts() {
 }
 
 #[test]
+fn accepts_an_empty_distribution_atom_cache_header_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let expression = "erts_internal:new_connection(empty_cache_peer@nohost), \
+        Flags = element(3, erts_internal:get_dflags()) bor 16#2000, \
+        {ok, Handle} = erts_internal:create_dist_channel(empty_cache_peer@nohost, self(), {Flags,1}), \
+        <<131,Control/binary>> = term_to_binary({2,'',self()}), \
+        <<131,Message/binary>> = term_to_binary(123), \
+        ok = erlang:dist_ctrl_put_data(Handle, <<131,68,0,Control/binary,Message/binary>>), \
+        receive 123 -> io:format(\"ok~n\") after 5000 -> halt(2) end, halt().";
+    let run = |name: &str| {
+        vec![
+            "-sname".to_owned(),
+            name.to_owned(),
+            "-kernel".to_owned(),
+            "logger_level".to_owned(),
+            "none".to_owned(),
+            "-noshell".to_owned(),
+            "-eval".to_owned(),
+            expression.to_owned(),
+        ]
+    };
+    assert_eq!(
+        stdout(&erts_erl(&epmd, &run(&format!("dceerts{id}")))),
+        "ok\n"
+    );
+    assert_eq!(
+        stdout(&pbeam_erl(&epmd, &run(&format!("dcepbeam{id}")))),
+        "ok\n"
+    );
+}
+
+#[test]
 fn exchanges_cached_identifier_nodes_with_pinned_erts() {
     let epmd = Epmd::start();
     let id = std::process::id();
