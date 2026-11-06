@@ -35,6 +35,9 @@ pub(super) const REJECTED: &str = "unsupported distribution message that ERTS re
 /// The body and atom translation table of a distribution header.
 type AtomHeader<'a> = (&'a [u8], Vec<Atom>);
 
+/// The bytes and atom table of a complete fragment sequence.
+type Reassembled = (Vec<u8>, Vec<Atom>);
+
 impl Scheduler {
     /// Give the packet `packet` with data of a connection with the flags
     /// `flags` to its target, as
@@ -216,7 +219,7 @@ impl Scheduler {
         node: &Atom,
         connection: u32,
         packet: &[u8],
-    ) -> Result<Option<(Vec<u8>, Vec<Atom>)>, BeamError> {
+    ) -> Result<Option<Reassembled>, BeamError> {
         if packet.len() < 18 || packet[0] != VERSION_MAGIC {
             return Err(error(REJECTED));
         }

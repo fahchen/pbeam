@@ -8,6 +8,7 @@ use crate::{
     term::{AtomTable, ProcessId, Reference, Term},
 };
 
+// A compiled fixture cannot force the fragment order at the input boundary.
 #[test]
 fn reassembles_interleaved_fragments_with_their_own_atom_tables() {
     let (node, mut readers) = Node::new(1).unwrap();
@@ -25,7 +26,7 @@ fn reassembles_interleaved_fragments_with_their_own_atom_tables() {
         let mut packet = vec![131, b'E'];
         packet.extend(sequence.to_be_bytes());
         packet.extend(2_u64.to_be_bytes());
-        packet.extend([1, 8, 0, atom.len() as u8]);
+        packet.extend([1, 8, 0, u8::try_from(atom.len()).unwrap()]);
         packet.extend(atom);
         packet.extend([97, 1, 82]);
         packet
@@ -37,30 +38,32 @@ fn reassembles_interleaved_fragments_with_their_own_atom_tables() {
         packet.push(0);
         packet
     };
-    assert!(
-        scheduler
-            .dist_fragment(&name, connection, &first(1, b"alpha"))
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        scheduler
-            .dist_fragment(&name, connection, &first(2, b"beta"))
-            .unwrap()
-            .is_none()
-    );
-    for (sequence, expected) in [(1, "alpha"), (2, "beta")] {
-        let (bytes, atoms) = scheduler
-            .dist_fragment(&name, connection, &last(sequence))
-            .unwrap()
-            .unwrap();
-        let (control, used) = decode_dist(&scheduler, &bytes, Some(&atoms))
-            .unwrap()
-            .unwrap();
-        assert_eq!(control, Term::Integer(1));
-        let (term, _) = decode_dist(&scheduler, &bytes[used..], Some(&atoms))
-            .unwrap()
-            .unwrap();
-        assert_eq!(term, Term::Atom(scheduler.atoms.put(expected).unwrap()));
+    for order in [[(1, "alpha"), (2, "beta")], [(2, "beta"), (1, "alpha")]] {
+        assert!(
+            scheduler
+                .dist_fragment(&name, connection, &first(1, b"alpha"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            scheduler
+                .dist_fragment(&name, connection, &first(2, b"beta"))
+                .unwrap()
+                .is_none()
+        );
+        for (sequence, expected) in order {
+            let (bytes, atoms) = scheduler
+                .dist_fragment(&name, connection, &last(sequence))
+                .unwrap()
+                .unwrap();
+            let (control, used) = decode_dist(&scheduler, &bytes, Some(&atoms))
+                .unwrap()
+                .unwrap();
+            assert_eq!(control, Term::Integer(1));
+            let (term, _) = decode_dist(&scheduler, &bytes[used..], Some(&atoms))
+                .unwrap()
+                .unwrap();
+            assert_eq!(term, Term::Atom(scheduler.atoms.put(expected).unwrap()));
+        }
     }
 }
