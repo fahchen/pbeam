@@ -7,8 +7,13 @@
 
 use std::{
     ffi::OsStr,
+    io::{Read, Write},
+    net::{TcpListener, TcpStream},
     path::PathBuf,
     process::{Command, Output, Stdio},
+    sync::{Arc, Mutex, mpsc},
+    thread,
+    time::Duration,
 };
 
 #[expect(
@@ -224,10 +229,22 @@ fn queues_and_writes_the_messages_to_a_connection_as_pinned_erts() {
 #[test]
 fn offers_the_mandatory_distribution_flags_the_monitor_flags_exit_payload_and_alias() {
     // PBeam offers DFLAG_DIST_MANDATORY (dist.h:80-98), DFLAG_DIST_MONITOR,
-    // DFLAG_DIST_MONITOR_NAME, DFLAG_EXIT_PAYLOAD, and DFLAG_ALIAS
-    // (dist.h:33, 34, 52, 67, 113-123), with the rejectable and the strict
+    // DFLAG_DIST_MONITOR_NAME, DFLAG_DIST_HDR_ATOM_CACHE, DFLAG_EXIT_PAYLOAD,
+    // and DFLAG_ALIAS (dist.h:33, 34, 43, 52, 67, 113-123), with the rejectable and the strict
     // order flags of ERTS (dist.h:129-135).
     let epmd = Epmd::start();
+    let erts = erts_erl(
+        &epmd,
+        &[
+            "-noshell",
+            "-eval",
+            "io:format(\"~p~n\", [erts_internal:get_dflags()]), halt().",
+        ],
+    );
+    assert_eq!(
+        stdout(&erts),
+        "{erts_dflags,468283523004,17230663572,468283523004,8396866,8192}\n"
+    );
     let output = pbeam_erl(
         &epmd,
         &[
@@ -238,7 +255,7 @@ fn offers_the_mandatory_distribution_flags_the_monitor_flags_exit_payload_and_al
     );
     assert_eq!(
         stdout(&output),
-        "{erts_dflags,55889563580,17230663572,55889563580,8396866,8192}\n"
+        "{erts_dflags,55889571772,17230663572,55889571772,8396866,8192}\n"
     );
 }
 
@@ -349,10 +366,7 @@ fn stops_at_a_part_of_a_channel_that_pbeam_does_not_have() {
         ]
         .map(|n| (format!("reject({n})"), rejected)),
     );
-    cases.push((
-        "atom_cache()".to_owned(),
-        "unsupported distribution message on a connection with the atom cache or fragments",
-    ));
+    cases.push(("atom_cache()".to_owned(), rejected));
     cases.push((
         "reject(9)".to_owned(),
         "unsupported distribution message of a pid reference that is not of five numbers",
@@ -518,6 +532,542 @@ fn connects_over_a_tcp_inet_port_as_pinned_erts() {
         );
         assert_eq!(node.line(), "[]");
     }
+}
+
+#[test]
+fn exchanges_many_cached_atoms_with_pinned_erts() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let server_name = format!("dacache{id}");
+    let server = ErtsNode::start(
+        &epmd,
+        &["-sname", &server_name, "-setcookie", "ck"],
+        "register(cache_echo, self()), io:format(\"~s~n\", [node()]), \
+         F = fun F() -> receive {From, Atoms} -> From ! {atoms, Atoms}, F() \
+         after 30000 -> halt(2) end end, F().",
+    );
+    let node = server.line();
+    let expression = format!(
+        "true = net_kernel:connect_node('{node}'), \
+         Atoms = [list_to_atom(lists:duplicate(150, 228)) | \
+         [list_to_atom(\"cache_atom_\" ++ integer_to_list(N)) || N <- lists:seq(1,300)]], \
+         Exchange = fun() -> {{cache_echo, '{node}'}} ! {{self(), Atoms}}, \
+         receive {{atoms, Result}} -> Result =:= Atoms after 5000 -> timeout end end, \
+         A = Exchange(), B = Exchange(), io:format(\"~p~n\", [{{A,B,length(Atoms)}}]), halt()."
+    );
+    let run = |name: &str| {
+        vec![
+            "-sname".to_owned(),
+            name.to_owned(),
+            "-setcookie".to_owned(),
+            "ck".to_owned(),
+            "-noshell".to_owned(),
+            "-eval".to_owned(),
+            expression.clone(),
+        ]
+    };
+    assert_eq!(
+        stdout(&erts_erl(&epmd, &run(&format!("dacerts{id}")))),
+        "{true,true,301}\n"
+    );
+    assert_eq!(
+        stdout(&pbeam_erl(&epmd, &run(&format!("dacpbeam{id}")))),
+        "{true,true,301}\n"
+    );
+}
+
+#[test]
+fn preserves_cache_order_for_concurrent_port_senders() {
+    // The 64 processes interleave sends. Their scheduler assignment is not
+    // deterministic, so the scheduler count is diagnostic only.
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let name = format!("dcorder{id}");
+    let server = ErtsNode::start(
+        &epmd,
+        &["+S", "4", "-sname", &name, "-setcookie", "ck"],
+        "register(cache_order, self()), io:format(\"~s~n\", [node()]), \
+         Expected = lists:sort(lists:append([[list_to_atom(\"cache_parallel_\" ++ integer_to_list(N)), \
+         list_to_atom(\"cache_parallel_\" ++ integer_to_list(N))] || N <- lists:seq(1,32)])), \
+         F = fun F(Atoms) -> receive {From, atom_value, Atom} -> From ! ack, F([Atom|Atoms]); \
+         {From, finish} -> From ! {result, {length(Atoms),lists:sort(Atoms) =:= Expected}}, F([]) \
+         after 30000 -> halt(2) end end, F([]).",
+    );
+    let node = server.line();
+    let expression = format!(
+        "true = net_kernel:connect_node('{node}'), Parent = self(), \
+         Atoms = [list_to_atom(\"cache_parallel_\" ++ integer_to_list(N)) || N <- lists:seq(1,32)], \
+         Worker = fun(A) -> receive go -> Sid = erlang:system_info(scheduler_id), \
+         {{cache_order, '{node}'}} ! {{self(), atom_value, A}}, \
+         receive ack -> Parent ! {{done, Sid}} after 10000 -> Parent ! timeout end end end, \
+         Ps = lists:append([[spawn(fun() -> Worker(A) end),spawn(fun() -> Worker(A) end)] || A <- Atoms]), \
+         [P ! go || P <- Ps], \
+         Sids = [receive {{done, Sid}} -> Sid after 10000 -> timeout end || _ <- Ps], \
+         {{cache_order, '{node}'}} ! {{self(), finish}}, \
+         receive {{result, Good}} -> io:format(\"~p~n~p~n\", [Good,length(lists:usort([S || S <- Sids, is_integer(S)]))]) \
+         after 10000 -> halt(2) end, halt()."
+    );
+    let run = |name: &str| {
+        vec![
+            "+S".to_owned(),
+            "4".to_owned(),
+            "-sname".to_owned(),
+            name.to_owned(),
+            "-setcookie".to_owned(),
+            "ck".to_owned(),
+            "-noshell".to_owned(),
+            "-eval".to_owned(),
+            expression.clone(),
+        ]
+    };
+    for (label, output) in [
+        ("ERTS", erts_erl(&epmd, &run(&format!("dcoerts{id}")))),
+        ("PBeam", pbeam_erl(&epmd, &run(&format!("dcopbeam{id}")))),
+    ] {
+        let text = stdout(&output);
+        let (result, schedulers) = text.split_once('\n').unwrap();
+        assert_eq!(result, "{64,true}", "{label}: {text}");
+        println!("{label} scheduler count: {}", schedulers.trim());
+    }
+}
+
+/// Run a cached distribution encode whose control or payload contains an
+/// alias whose owner has exited. ERTS keeps the owner in the alias, while
+/// PBeam reports the documented external-term difference.
+fn cache_encoder_rejects_dead_alias(operation: &str) {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let expression = format!(
+        "Parent = self(), {{Owner,Monitor}} = spawn_monitor(fun() -> Parent ! {{self(),alias()}} end), \
+         receive {{'DOWN',Monitor,process,Owner,_}} -> ok end, \
+         Alias = receive {{Owner,A}} -> A end, \
+         Node = cache_encode_peer@nohost, erts_internal:new_connection(Node), \
+         Flags = element(3,erts_internal:get_dflags()) bor 16#2000, \
+         {{ok,_}} = erts_internal:create_dist_channel(Node,self(),{{Flags,1}}), \
+         Name = atom_to_binary(Node), \
+         Pid = binary_to_term(<<131,88,118,(byte_size(Name)):16,Name/binary,1:32,0:32,1:32>>), \
+         {operation}, io:format(\"ok~n\"), halt()."
+    );
+    let run = |name: &str| {
+        vec![
+            "-sname".to_owned(),
+            name.to_owned(),
+            "-kernel".to_owned(),
+            "logger_level".to_owned(),
+            "none".to_owned(),
+            "-noshell".to_owned(),
+            "-eval".to_owned(),
+            expression.clone(),
+        ]
+    };
+    assert_eq!(
+        stdout(&erts_erl(&epmd, &run(&format!("dcaerts{id}")))),
+        "ok\n"
+    );
+    let output = pbeam_erl(&epmd, &run(&format!("dcapbeam{id}")));
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "pbeam: unsupported external term of a pid reference whose owner exited: ERTS writes the pid of the owner in the reference, and PBeam does not keep it: see \"External term format\" in docs/erts-differences.md\n",
+        "{output:?}"
+    );
+}
+
+#[test]
+fn reports_a_dead_alias_in_a_cached_control_term() {
+    cache_encoder_rejects_dead_alias("erlang:exit(Pid, Alias)");
+}
+
+#[test]
+fn reports_a_dead_alias_in_a_cached_message() {
+    cache_encoder_rejects_dead_alias("Pid ! Alias");
+}
+
+#[test]
+fn reports_an_unsupported_fragment_connection() {
+    let epmd = Epmd::start();
+    let name = format!("dcfrag{}", std::process::id());
+    let expression = "Node = cache_fragment_peer@nohost, erts_internal:new_connection(Node), \
+        Flags = element(3,erts_internal:get_dflags()) bor 16#800000, \
+        {ok,Handle} = erts_internal:create_dist_channel(Node,self(),{Flags,1}), \
+        erlang:dist_ctrl_put_data(Handle, <<131,68,0>>), halt().";
+    let output = pbeam_erl(
+        &epmd,
+        &[
+            "-sname",
+            &name,
+            "-kernel",
+            "logger_level",
+            "none",
+            "-noshell",
+            "-eval",
+            expression,
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "pbeam: unsupported distribution message on a connection with the atom cache or fragments: see \"Distribution\" in docs/erts-differences.md\n",
+        "{output:?}"
+    );
+}
+
+#[test]
+fn accepts_an_empty_distribution_atom_cache_header_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let expression = "erts_internal:new_connection(empty_cache_peer@nohost), \
+        Flags = element(3, erts_internal:get_dflags()) bor 16#2000, \
+        {ok, Handle} = erts_internal:create_dist_channel(empty_cache_peer@nohost, self(), {Flags,1}), \
+        <<131,Control/binary>> = term_to_binary({2,'',self()}), \
+        <<131,Message/binary>> = term_to_binary(123), \
+        ok = erlang:dist_ctrl_put_data(Handle, <<131,68,0,Control/binary,Message/binary>>), \
+        receive 123 -> io:format(\"ok~n\") after 5000 -> halt(2) end, halt().";
+    let run = |name: &str| {
+        vec![
+            "-sname".to_owned(),
+            name.to_owned(),
+            "-kernel".to_owned(),
+            "logger_level".to_owned(),
+            "none".to_owned(),
+            "-noshell".to_owned(),
+            "-eval".to_owned(),
+            expression.to_owned(),
+        ]
+    };
+    assert_eq!(
+        stdout(&erts_erl(&epmd, &run(&format!("dceerts{id}")))),
+        "ok\n"
+    );
+    assert_eq!(
+        stdout(&pbeam_erl(&epmd, &run(&format!("dcepbeam{id}")))),
+        "ok\n"
+    );
+}
+
+#[test]
+fn drops_a_cache_header_on_a_stale_distribution_handle() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let expression = "Old = erts_internal:new_connection(stale_cache_peer@nohost), \
+        erts_internal:abort_pending_connection(stale_cache_peer@nohost, Old), \
+        New = erts_internal:new_connection(stale_cache_peer@nohost), \
+        true = Old =/= New, \
+        Flags = element(3, erts_internal:get_dflags()) bor 16#2000, \
+        {ok, _} = erts_internal:create_dist_channel(stale_cache_peer@nohost, self(), {Flags,1}), \
+        <<131,Control/binary>> = term_to_binary({2,'',self()}), \
+        <<131,Message/binary>> = term_to_binary(123), \
+        ok = erlang:dist_ctrl_put_data(Old, <<131,68,1,8,0,1,97,Control/binary,Message/binary>>), \
+        ok = erlang:dist_ctrl_put_data(Old, <<131,68,0,Control/binary,Message/binary>>), \
+        ok = erlang:dist_ctrl_put_data(Old, <<131,68>>), \
+        receive 123 -> io:format(\"ok~n\") after 2000 -> io:format(\"no_message~n\") end, halt().";
+    let run = |name: &str| {
+        vec![
+            "-sname".to_owned(),
+            name.to_owned(),
+            "-kernel".to_owned(),
+            "logger_level".to_owned(),
+            "none".to_owned(),
+            "-noshell".to_owned(),
+            "-eval".to_owned(),
+            expression.to_owned(),
+        ]
+    };
+    let erts = erts_erl(&epmd, &run(&format!("dsterts{id}")));
+    assert_eq!(stdout(&erts), "no_message\n");
+    let pbeam = pbeam_erl(&epmd, &run(&format!("dstpbeam{id}")));
+    assert_eq!(stdout(&pbeam), "no_message\n");
+}
+
+// A compiled fixture cannot make the ERTS encoder emit these malformed
+// packets. These direct controller tests act as unit probes for the PBeam
+// decoder (external.c:922-977, dist.c:3144-3165). The raw proxy probe below
+// checks the same bytes against a real ERTS peer. PBeam reports a runtime
+// error (row "Distribution").
+fn assert_rejected_distribution_cache_header(packet: &str) {
+    let epmd = Epmd::start();
+    let name = format!("dcbad{}", std::process::id());
+    let expression = format!(
+        "erts_internal:new_connection(cache_reject_peer@nohost), \
+         Flags = element(3, erts_internal:get_dflags()) bor 16#2000, \
+         {{ok, Handle}} = erts_internal:create_dist_channel(cache_reject_peer@nohost, self(), {{Flags,1}}), \
+         erlang:dist_ctrl_put_data(Handle, {packet}), halt()."
+    );
+    let output = pbeam_erl(
+        &epmd,
+        &[
+            "-sname",
+            &name,
+            "-kernel",
+            "logger_level",
+            "none",
+            "-noshell",
+            "-eval",
+            &expression,
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "pbeam: unsupported distribution message that ERTS rejects: ERTS ends the connection: see \"Distribution\" in docs/erts-differences.md\n",
+        "{output:?}"
+    );
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the probe owns the peer, proxy, and each malformed packet"
+)]
+fn pinned_erts_closes_connections_for_malformed_cache_packets() {
+    // A TCP proxy forwards the real handshake, then injects a framed packet
+    // from the PBeam side. ERTS rejects the bytes and ends the connection
+    // (external.c:922-977, dist.c:3144-3165).
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let listen = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let server_name = format!("dcreject{id}");
+    let listen_text = listen.to_string();
+    let server = ErtsNode::start(
+        &epmd,
+        &[
+            "-sname",
+            &server_name,
+            "-setcookie",
+            "ck",
+            "-kernel",
+            "logger_level",
+            "none",
+            "-kernel",
+            "inet_dist_listen_min",
+            &listen_text,
+            "-kernel",
+            "inet_dist_listen_max",
+            &listen_text,
+        ],
+        "ok = net_kernel:monitor_nodes(true), io:format(\"~s~n\", [node()]), \
+         F = fun F() -> receive {nodeup,_} -> io:format(\"up~n\"), F(); \
+         {nodedown,_} -> io:format(\"down~n\"), F() after 60000 -> halt(2) end end, F().",
+    );
+    let node = server.line();
+    let mut long_name = vec![131, 68, 1, 24, 0, 1, 0];
+    long_name.extend([97; 256]);
+    let mut bad_node = vec![131, 68, 0, 104, 3, 97, 2, 97, 0, 88, 82, 0];
+    bad_node.extend([0; 12]);
+    let packets = [
+        vec![131, 68],
+        vec![131, 68, 0, 82, 0],
+        bad_node,
+        vec![131, 88, 0],
+        vec![131, 68, 1],
+        vec![131, 68, 1, 0],
+        vec![131, 68, 1, 0, 0],
+        vec![131, 68, 1, 8, 0],
+        vec![131, 68, 1, 24, 0, 0],
+        vec![131, 68, 1, 8, 0, 2, 97],
+        vec![131, 68, 1, 8, 0, 1, 255],
+        long_name,
+    ];
+    for (index, packet) in packets.iter().enumerate() {
+        let proxy = TcpListener::bind("0.0.0.0:0").unwrap();
+        let proxy_port = proxy.local_addr().unwrap().port().to_string();
+        let (sender, receiver) = mpsc::channel();
+        let forward = thread::spawn(move || {
+            let (client, _) = proxy.accept().unwrap();
+            let peer = TcpStream::connect(("127.0.0.1", listen)).unwrap();
+            let writer = Arc::new(Mutex::new(peer.try_clone().unwrap()));
+            sender.send(Arc::clone(&writer)).unwrap();
+            let mut from_client = client.try_clone().unwrap();
+            let send_to_peer = thread::spawn(move || {
+                let mut bytes = [0; 8192];
+                while let Ok(count @ 1..) = from_client.read(&mut bytes) {
+                    if writer.lock().unwrap().write_all(&bytes[..count]).is_err() {
+                        break;
+                    }
+                }
+            });
+            let mut from_peer = peer;
+            let mut to_client = client;
+            let _ = std::io::copy(&mut from_peer, &mut to_client);
+            let _ = send_to_peer.join();
+        });
+        let client_name = format!("dcbad{id}x{index}");
+        let client = pbeam_node(
+            &epmd,
+            &[
+                "-sname",
+                &client_name,
+                "-setcookie",
+                "ck",
+                "-pa",
+                "fixtures/dist",
+                "-epmd_module",
+                "dist_epmd",
+                "-dist_epmd_port",
+                &proxy_port,
+            ],
+            &format!(
+                "io:format(\"~p~n\", [net_kernel:connect_node('{node}')]), receive after 20000 -> halt(2) end."
+            ),
+        );
+        let writer = receiver.recv_timeout(Duration::from_secs(20)).unwrap();
+        assert_eq!(client.line(), "true", "packet {index}");
+        assert_eq!(server.line(), "up", "packet {index}");
+        let mut framed = u32::try_from(packet.len()).unwrap().to_be_bytes().to_vec();
+        framed.extend(packet);
+        writer.lock().unwrap().write_all(&framed).unwrap();
+        assert_eq!(server.line(), "down", "packet {index}");
+        drop(client);
+        forward.join().unwrap();
+    }
+}
+
+macro_rules! rejected_distribution_cache_header {
+    ($name:ident, $packet:expr) => {
+        #[test]
+        fn $name() {
+            assert_rejected_distribution_cache_header($packet);
+        }
+    };
+}
+
+rejected_distribution_cache_header!(rejects_distribution_cache_short_header, "<<131,68>>");
+rejected_distribution_cache_header!(
+    rejects_distribution_cache_unknown_term_reference,
+    "<<131,68,0,82,0>>"
+);
+rejected_distribution_cache_header!(
+    rejects_distribution_cache_unknown_node_reference,
+    "<<131,68,0,104,3,97,2,97,0,88,82,0,0:96>>"
+);
+rejected_distribution_cache_header!(rejects_distribution_cache_bad_header, "<<131,88,0>>");
+rejected_distribution_cache_header!(rejects_distribution_cache_missing_flags, "<<131,68,1>>");
+rejected_distribution_cache_header!(rejects_distribution_cache_missing_index, "<<131,68,1,0>>");
+rejected_distribution_cache_header!(rejects_distribution_cache_unknown_index, "<<131,68,1,0,0>>");
+rejected_distribution_cache_header!(
+    rejects_distribution_cache_missing_short_length,
+    "<<131,68,1,8,0>>"
+);
+rejected_distribution_cache_header!(
+    rejects_distribution_cache_missing_long_length,
+    "<<131,68,1,24,0,0>>"
+);
+rejected_distribution_cache_header!(
+    rejects_distribution_cache_truncated_name,
+    "<<131,68,1,8,0,2,97>>"
+);
+rejected_distribution_cache_header!(
+    rejects_distribution_cache_invalid_utf8,
+    "<<131,68,1,8,0,1,255>>"
+);
+rejected_distribution_cache_header!(
+    rejects_distribution_cache_oversized_name,
+    "<<131,68,1,24,0,1,0,(binary:copy(<<97>>,256))/binary>>"
+);
+
+#[test]
+fn exchanges_cached_identifier_nodes_with_pinned_erts() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let name = format!("dcids{id}");
+    let server = ErtsNode::start(
+        &epmd,
+        &["-sname", &name, "-setcookie", "ck"],
+        "register(cache_ids, self()), io:format(\"~s~n\", [node()]), \
+         Name = <<\"cache_foreign_identifier_node@host\">>, N = byte_size(Name), \
+         Node = <<119,N,Name/binary>>, \
+         Pid = binary_to_term(<<131,88,Node/binary,1:32,0:32,4:32>>), \
+         Port = binary_to_term(<<131,120,Node/binary,2:64,4:32>>), \
+         Ref = binary_to_term(<<131,90,1:16,Node/binary,4:32,3:32>>), \
+         Ids = {Pid,Port,Ref}, \
+         F = fun F() -> receive {From, get_ids} -> From ! {ids,Ids}, F(); \
+         {From, {check,Got}} -> From ! {same,Got =:= Ids}, F() \
+         after 30000 -> halt(2) end end, F().",
+    );
+    let node = server.line();
+    let expression = format!(
+        "true = net_kernel:connect_node('{node}'), \
+         {{cache_ids, '{node}'}} ! {{self(), get_ids}}, \
+         receive {{ids, {{Pid,Port,Ref}} = Ids}} -> \
+         {{cache_ids, '{node}'}} ! {{self(), {{check,Ids}}}}, \
+         receive {{same,Same}} -> io:format(\"~0p~n\", \
+         [{{is_pid(Pid),is_port(Port),is_reference(Ref), \
+         node(Pid),node(Port),node(Ref),Same}}]) after 5000 -> halt(2) end \
+         after 5000 -> halt(3) end, halt()."
+    );
+    let run = |name: &str| {
+        vec![
+            "-sname".to_owned(),
+            name.to_owned(),
+            "-setcookie".to_owned(),
+            "ck".to_owned(),
+            "-noshell".to_owned(),
+            "-eval".to_owned(),
+            expression.clone(),
+        ]
+    };
+    let expected = "{true,true,true,cache_foreign_identifier_node@host,cache_foreign_identifier_node@host,cache_foreign_identifier_node@host,true}\n";
+    assert_eq!(
+        stdout(&erts_erl(&epmd, &run(&format!("dcierts{id}")))),
+        expected
+    );
+    assert_eq!(
+        stdout(&pbeam_erl(&epmd, &run(&format!("dcipbeam{id}")))),
+        expected
+    );
+}
+
+#[test]
+fn exchanges_cached_record_headers_with_pinned_erts() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let name = format!("dcrecord{id}");
+    let server = ErtsNode::start(
+        &epmd,
+        &["-sname", &name, "-setcookie", "ck"],
+        "register(cache_record, self()), io:format(\"~s~n\", [node()]), \
+         Record = records:create(cache_record_module, cache_record_name, \
+         [{cache_field_one,17},{cache_field_two,23}], #{is_exported => true}), \
+         F = fun F() -> receive {From, get_record} -> From ! {record,Record}, F(); \
+         {From, {check,Got}} -> From ! {same,Got =:= Record}, F() \
+         after 30000 -> halt(2) end end, F().",
+    );
+    let node = server.line();
+    let expression = format!(
+        "true = net_kernel:connect_node('{node}'), \
+         {{cache_record, '{node}'}} ! {{self(), get_record}}, \
+         receive {{record, Record}} -> \
+         {{cache_record, '{node}'}} ! {{self(), {{check,Record}}}}, \
+         receive {{same,Same}} -> io:format(\"~0p~n\", \
+         [{{records:get_module(Record), records:get_name(Record), \
+         records:get_field_names(Record),Same}}]) after 5000 -> halt(2) end \
+         after 5000 -> halt(3) end, halt()."
+    );
+    let run = |name: &str| {
+        vec![
+            "-sname".to_owned(),
+            name.to_owned(),
+            "-setcookie".to_owned(),
+            "ck".to_owned(),
+            "-noshell".to_owned(),
+            "-eval".to_owned(),
+            expression.clone(),
+        ]
+    };
+    let expected =
+        "{cache_record_module,cache_record_name,[cache_field_one,cache_field_two],true}\n";
+    assert_eq!(
+        stdout(&erts_erl(&epmd, &run(&format!("dcrerts{id}")))),
+        expected
+    );
+    assert_eq!(
+        stdout(&pbeam_erl(&epmd, &run(&format!("dcrpbeam{id}")))),
+        expected
+    );
 }
 
 #[test]

@@ -76,6 +76,10 @@ struct Entry {
     connection_id: u32,
     /// The distribution flags of the connection (`dep->dflags`).
     flags: u64,
+    /// The peer's cache entries that this connection has sent.
+    atom_cache_out: HashMap<u16, Atom>,
+    /// The cache entries that the peer has sent on this connection.
+    atom_cache_in: HashMap<u16, Atom>,
     /// The distribution controller of a connected entry (`dep->cid`).
     controller: Option<Controller>,
     /// The process that gives the data of the connection to
@@ -231,6 +235,8 @@ impl DistTable {
                 state: State::Idle,
                 connection_id: start & CONNECTION_ID_MASK,
                 flags: 0,
+                atom_cache_out: HashMap::new(),
+                atom_cache_in: HashMap::new(),
                 controller: None,
                 input_handler: None,
                 input: 0,
@@ -447,6 +453,22 @@ impl DistTable {
         )
     }
 
+    /// Return the output cache of the connected entry.
+    pub(super) fn atom_cache_out(&mut self, name: &Atom) -> &mut HashMap<u16, Atom> {
+        &mut self.entry_mut(name).atom_cache_out
+    }
+
+    /// Return the input cache of the named connection when it is current.
+    pub(super) fn atom_cache_in(
+        &mut self,
+        name: &Atom,
+        connection: u32,
+    ) -> Option<&mut HashMap<u16, Atom>> {
+        let entry = self.entries.get_mut(&name.index())?;
+        (entry.state == State::Connected && entry.connection_id == connection)
+            .then_some(&mut entry.atom_cache_in)
+    }
+
     /// Return the distribution flags of the entry of `name` (`dep->dflags`).
     pub(in crate::runtime) fn flags(&self, name: &Atom) -> u64 {
         self.entries[&name.index()].flags
@@ -505,12 +527,6 @@ impl DistTable {
         entry.queue_size -= queue_size(&elements);
         entry.out += 1;
         Some(elements)
-    }
-
-    /// Count a packet that the port controller of the entry of `name`
-    /// wrote, as `erts_dist_command` does (`dist.c:4058`, `4133`).
-    pub(in crate::runtime) fn count_output(&mut self, name: &Atom) {
-        self.entry_mut(name).out += 1;
     }
 
     /// Ask for the `dist_data` message of the next packet of the entry of
@@ -858,6 +874,8 @@ impl Entry {
     fn set_idle(&mut self, order: u64) {
         self.state = State::Idle;
         self.flags = 0;
+        self.atom_cache_out.clear();
+        self.atom_cache_in.clear();
         self.get_size = false;
         self.output.clear();
         self.queue_size = 0;
