@@ -100,17 +100,14 @@ impl Scheduler {
     ) -> Result<bool, BeamError> {
         let caller = self.current_process().id;
         let from = Term::Pid(caller);
-        // A pending connection accepts an ordinary registered-name send even
-        // with noconnect (bif.c:2391-2417). Keep it until the negotiated
-        // flags are known, then encode it before publishing the connection.
-        if matches!(to, Term::Tuple(_))
-            && priority == SendPriority::Normal
-            && self.node.net_kernel().is_some()
-        {
+        // A pending connection accepts sends even with noconnect
+        // (bif.c:2391-2417). Keep them until the negotiated flags are known,
+        // then encode them before publishing the connection.
+        if self.node.net_kernel().is_some() {
             let node_ref = Arc::clone(&self.node);
             let mut dist = node_ref.dist();
             if dist.pending(node) {
-                dist.enqueue_pending_send(node, caller, to.clone(), message.clone());
+                dist.enqueue_pending_send(node, caller, to.clone(), message.clone(), priority);
                 return Ok(true);
             }
             let idle = dist.connected(node).is_none();
@@ -119,7 +116,13 @@ impl Scheduler {
                 && connect == ConnectMode::Allow
                 && self
                     .dist_auto_connect(node, |dist, _| {
-                        dist.enqueue_pending_send(node, caller, to.clone(), message.clone());
+                        dist.enqueue_pending_send(
+                            node,
+                            caller,
+                            to.clone(),
+                            message.clone(),
+                            priority,
+                        );
                     })?
                     .is_some()
             {
@@ -317,7 +320,7 @@ impl Scheduler {
         Ok(true)
     }
 
-    /// Encode pending sends before releasing the lock that publishes a connection.
+    /// Encode pending signals before releasing the lock that publishes a connection.
     pub(in crate::runtime) fn dist_flush_pending(
         &mut self,
         dist: &mut super::dist_table::DistTable,
@@ -326,11 +329,14 @@ impl Scheduler {
     ) -> Result<(), BeamError> {
         for signal in dist.take_pending_signals(node) {
             let (sender, control, message) = match signal {
-                super::dist_table::PendingSignal::Send(sender, to, message) => (
+                super::dist_table::PendingSignal::Send(sender, to, message, priority) => (
                     sender,
-                    send_control(flags, Term::Pid(sender), &to, SendPriority::Normal),
+                    send_control(flags, Term::Pid(sender), &to, priority),
                     Some(message),
                 ),
+                super::dist_table::PendingSignal::Spawn(sender, control, arguments) => {
+                    (sender, control, Some(arguments))
+                }
                 super::dist_table::PendingSignal::Monitor(sender, control)
                 | super::dist_table::PendingSignal::Link(sender, control) => {
                     (sender, control, None)

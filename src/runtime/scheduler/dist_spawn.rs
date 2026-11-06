@@ -148,6 +148,17 @@ impl Scheduler {
             key,
             side: super::dist_table::MonitorSide::Watcher,
         };
+        let already_connected = self.node.dist().connected(node).is_some();
+        if !already_connected
+            && self
+                .dist_auto_connect(node, |dist, _| {
+                    dist.insert_monitor_now(node, monitor);
+                    dist.enqueue_pending_spawn(node, sender, control.clone(), arguments.clone());
+                })?
+                .is_some()
+        {
+            return Ok(SpawnSend::Sent);
+        }
         let mut connection = None;
         let sent = self.dist_output_monitor(sender, node, Some(monitor), |flags, current| {
             if flags & DIST_SPAWN == 0 {

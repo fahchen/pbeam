@@ -136,9 +136,10 @@ struct Entry {
 /// A signal queued while the connection flags are not yet known.
 #[derive(Debug)]
 pub(super) enum PendingSignal {
-    Send(ProcessId, Term, Term),
+    Send(ProcessId, Term, Term, super::dist_output::SendPriority),
     Monitor(ProcessId, Term),
     Link(ProcessId, Term),
+    Spawn(ProcessId, Term, Term),
 }
 
 /// An incomplete distribution message and its own atom translation table.
@@ -760,17 +761,18 @@ impl DistTable {
         Some((entry.flags, entry.controller?, entry.connection_id))
     }
 
-    /// Queue an ordinary registered-name send while the entry is pending.
+    /// Queue a send while the entry is pending.
     pub(super) fn enqueue_pending_send(
         &mut self,
         name: &Atom,
         sender: ProcessId,
         to: Term,
         message: Term,
+        priority: super::dist_output::SendPriority,
     ) {
         self.entry_mut(name)
             .pending_signals
-            .push_back(PendingSignal::Send(sender, to, message));
+            .push_back(PendingSignal::Send(sender, to, message, priority));
     }
 
     /// Queue a monitor on the pending connection.
@@ -790,6 +792,19 @@ impl DistTable {
         self.entry_mut(name)
             .pending_signals
             .push_back(PendingSignal::Link(sender, control));
+    }
+
+    /// Queue a spawn request on the pending connection.
+    pub(super) fn enqueue_pending_spawn(
+        &mut self,
+        name: &Atom,
+        sender: ProcessId,
+        control: Term,
+        arguments: Term,
+    ) {
+        self.entry_mut(name)
+            .pending_signals
+            .push_back(PendingSignal::Spawn(sender, control, arguments));
     }
 
     /// Take pending signals while the entry lock is held.
