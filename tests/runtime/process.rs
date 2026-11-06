@@ -153,6 +153,7 @@ fn walks_the_terms_of_the_monitors_the_pending_bif_and_the_length_trap() {
         MonitorKey::Local(Reference(1)),
         Origin {
             monitor: Some(OriginMonitor {
+                priority: false,
                 kind: "process",
                 target: Some(ProcessId(1)),
                 item: Term::tuple(vec![Term::Integer(1)]),

@@ -24,6 +24,80 @@ fn link(from: u64) -> Signal {
 }
 
 #[test]
+fn priority_segment_keeps_arrival_order_before_normal_messages() {
+    let mut mailbox = mailbox(&[1, 2]);
+    mailbox.push_priority(int(3));
+    mailbox.push_priority(int(4));
+    assert_eq!(mailbox.messages(), vec![int(3), int(4), int(1), int(2)]);
+    assert_eq!(mailbox.message_count(), 4);
+    assert_eq!(mailbox.current(), Some(&int(3)));
+    assert!(mailbox.save_next());
+    assert_eq!(mailbox.current(), Some(&int(4)));
+    assert!(mailbox.remove_current());
+    assert_eq!(mailbox.current(), Some(&int(3)));
+    assert!(mailbox.save_next());
+    assert_eq!(mailbox.current(), Some(&int(1)));
+    mailbox.set_save_end();
+    assert_eq!(mailbox.current(), None);
+    mailbox.set_save_first();
+    let mut pending = Vec::new();
+    assert_eq!(mailbox.take_terms_bounded(&mut pending, 1), 1);
+    assert_eq!(pending, vec![int(3)]);
+}
+
+#[test]
+fn caches_marker_references_when_priority_messages_arrive() {
+    let mut mailbox = mailbox(&[1]);
+    let marker = mailbox.reserve_marker();
+    let other_marker = mailbox.reserve_marker();
+    let reference = Term::Reference(Reference(7));
+    let other_reference = Term::Reference(Reference(8));
+    mailbox.bind_marker(&marker, &reference);
+    mailbox.bind_marker(&other_marker, &other_reference);
+    let message = Term::tuple(vec![int(2), reference.clone()]);
+    assert_eq!(mailbox.push_priority(message.clone()), 4);
+    assert!(mailbox.markers[0].in_priority);
+    assert!(!mailbox.markers[1].in_priority);
+    assert_eq!(mailbox.push_priority(message), 0);
+    assert_eq!(mailbox.push_priority(other_reference), 4);
+    assert!(mailbox.markers[1].in_priority);
+    mailbox.use_marker(&reference);
+    assert!(mailbox.current().is_some());
+}
+
+#[test]
+fn priority_insertion_respects_save_end_and_receive_marker() {
+    let mut mailbox = mailbox(&[1]);
+    mailbox.set_save_end();
+    mailbox.push_priority(int(2));
+    assert_eq!(mailbox.current(), None);
+    mailbox.set_save_first();
+    assert_eq!(mailbox.current(), Some(&int(2)));
+
+    let marker = mailbox.reserve_marker();
+    let reference = Term::Reference(Reference(9));
+    mailbox.bind_marker(&marker, &reference);
+    mailbox.use_marker(&reference);
+    mailbox.push_priority(int(3));
+    assert_eq!(mailbox.current(), None);
+    let message = Term::tuple(vec![int(4), reference]);
+    mailbox.push_priority(message.clone());
+    assert_eq!(mailbox.current(), Some(&message));
+}
+
+#[test]
+fn priority_message_stops_stretching_signal_handling() {
+    let mut mailbox = mailbox_with_signal();
+    assert!(mailbox.save_next());
+    let walk = mailbox.walk();
+    assert!(mailbox.can_stretch(&walk));
+    mailbox.push_priority(int(2));
+    assert!(!mailbox.can_stretch(&walk));
+    assert!(mailbox.save_next());
+    assert!(mailbox.can_stretch(&walk));
+}
+
+#[test]
 fn walks_and_removes_messages() {
     let mut mailbox = mailbox(&[1, 2, 3]);
     assert!(mailbox.save_next());
