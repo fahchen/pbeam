@@ -227,10 +227,10 @@ fn queues_and_writes_the_messages_to_a_connection_as_pinned_erts() {
 }
 
 #[test]
-fn offers_the_mandatory_distribution_flags_the_monitor_flags_exit_payload_and_alias() {
+fn offers_the_mandatory_distribution_flags_the_monitor_flags_exit_payload_fragments_and_alias() {
     // PBeam offers DFLAG_DIST_MANDATORY (dist.h:80-98), DFLAG_DIST_MONITOR,
     // DFLAG_DIST_MONITOR_NAME, DFLAG_DIST_HDR_ATOM_CACHE, DFLAG_EXIT_PAYLOAD,
-    // and DFLAG_ALIAS (dist.h:33, 34, 43, 52, 67, 113-123), with the rejectable and the strict
+    // DFLAG_FRAGMENTS, and DFLAG_ALIAS (dist.h:33, 34, 43, 52, 53, 67, 113-123), with the rejectable and the strict
     // order flags of ERTS (dist.h:129-135).
     let epmd = Epmd::start();
     let erts = erts_erl(
@@ -255,7 +255,7 @@ fn offers_the_mandatory_distribution_flags_the_monitor_flags_exit_payload_and_al
     );
     assert_eq!(
         stdout(&output),
-        "{erts_dflags,55889571772,17230663572,55889571772,8396866,8192}\n"
+        "{erts_dflags,55897960380,17230663572,55897960380,8396866,8192}\n"
     );
 }
 
@@ -681,35 +681,6 @@ fn reports_a_dead_alias_in_a_cached_control_term() {
 #[test]
 fn reports_a_dead_alias_in_a_cached_message() {
     cache_encoder_rejects_dead_alias("Pid ! Alias");
-}
-
-#[test]
-fn reports_an_unsupported_fragment_connection() {
-    let epmd = Epmd::start();
-    let name = format!("dcfrag{}", std::process::id());
-    let expression = "Node = cache_fragment_peer@nohost, erts_internal:new_connection(Node), \
-        Flags = element(3,erts_internal:get_dflags()) bor 16#800000, \
-        {ok,Handle} = erts_internal:create_dist_channel(Node,self(),{Flags,1}), \
-        erlang:dist_ctrl_put_data(Handle, <<131,68,0>>), halt().";
-    let output = pbeam_erl(
-        &epmd,
-        &[
-            "-sname",
-            &name,
-            "-kernel",
-            "logger_level",
-            "none",
-            "-noshell",
-            "-eval",
-            expression,
-        ],
-    );
-    assert_eq!(output.status.code(), Some(1), "{output:?}");
-    assert_eq!(
-        String::from_utf8_lossy(&output.stderr),
-        "pbeam: unsupported distribution message on a connection with the atom cache or fragments: see \"Distribution\" in docs/erts-differences.md\n",
-        "{output:?}"
-    );
 }
 
 #[test]
