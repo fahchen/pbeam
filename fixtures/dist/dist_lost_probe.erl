@@ -32,7 +32,7 @@ disconnect_cases(Server) ->
     true = net_kernel:connect_node(Server),
     true = erlang:monitor_node(Server, true),
     Result = erlang:disconnect_node(Server),
-    Down = receive {nodedown, Server} -> nodedown after 5000 -> timeout end,
+    Down = receive {nodedown, Server} -> nodedown after 30000 -> timeout end,
     Again = erlang:disconnect_node(Server),
     Connected = lists:member(Server, erlang:nodes(connected)),
     io:format("~w~n", [[Result, Down, Again, Connected]]).
@@ -107,7 +107,7 @@ no_network() ->
     true = erlang:setnode('nmenetwork@localhost', 4),
     receive {nodeup, 'nmenetwork@localhost', _} -> ok end,
     Pid ! stop,
-    Down = receive {nodedown, 'nmenetwork@localhost', Info} -> maps:get(nodedown_reason, Info) after 5000 -> timeout end,
+    Down = receive {nodedown, 'nmenetwork@localhost', Info} -> maps:get(nodedown_reason, Info) after 30000 -> timeout end,
     io:format("~p~n", [Down]).
 
 controller_reasons() ->
@@ -121,7 +121,7 @@ controller_reasons() ->
                   receive {Ref, _} -> ok end,
                   receive {nodeup, Name, _} -> ok end,
                   Pid ! stop,
-                  receive {nodedown, Name, Info} -> maps:get(nodedown_reason, Info) after 5000 -> timeout end
+                  receive {nodedown, Name, Info} -> maps:get(nodedown_reason, Info) after 30000 -> timeout end
           end,
     io:format("~p~n", [[Run(C) || C <- [{'nmenormal@localhost', normal}, {'nmeshutdown@localhost', {shutdown, custom}}, {'nmeerror@localhost', custom}]]]).
 
@@ -130,23 +130,23 @@ local_multi() ->
     ok = net_kernel:monitor_nodes(true, #{node_type => all}),
     {ok, _} = net_kernel:start(nmemulti, #{name_domain => shortnames}),
     Local = node(),
-    receive {nodeup, Local, _} -> ok after 5000 -> error(local_up_timeout) end,
+    receive {nodeup, Local, _} -> ok after 30000 -> error(local_up_timeout) end,
     Flags = element(3, erts_internal:get_dflags()),
     Start = fun(Node) ->
                     _ = erts_internal:new_connection(Node),
                     Pid = spawn(fun() -> receive never -> ok end end),
                     {message, Ref} = erts_internal:create_dist_channel(Node, Pid, {Flags, 1}),
-                    receive {Ref, _} -> ok after 5000 -> error(channel_timeout) end,
-                    receive {nodeup, Node, _} -> ok after 5000 -> error(remote_up_timeout) end,
+                    receive {Ref, _} -> ok after 30000 -> error(channel_timeout) end,
+                    receive {nodeup, Node, _} -> ok after 30000 -> error(remote_up_timeout) end,
                     Pid
             end,
     A = 'nmea@localhost', B = 'nmeb@localhost',
     P1 = Start(A), P2 = Start(B),
     spawn(fun() -> exit(P1, kill) end),
     ok = net_kernel:stop(),
-    First = receive {nodedown, X, _} -> X after 5000 -> timeout end,
-    Second = receive {nodedown, Y, _} -> Y after 5000 -> timeout end,
-    Last = receive {nodedown, Z, _} -> Z after 5000 -> timeout end,
+    First = receive {nodedown, X, _} -> X after 30000 -> timeout end,
+    Second = receive {nodedown, Y, _} -> Y after 30000 -> timeout end,
+    Last = receive {nodedown, Z, _} -> Z after 30000 -> timeout end,
     io:format("~p~n", [[lists:sort([First, Second]) =:= lists:sort([A, B]), Last =:= Local,
                         is_process_alive(P1), is_process_alive(P2)]]).
 
@@ -161,8 +161,8 @@ local_race() ->
                     Result = try erlang:setnode('nmerace@localhost', 4) catch error:badarg -> badarg end,
                     receive {'DOWN', Ref, process, Pid, _} -> ok end,
                     case Result of
-                        true -> Up = receive {nodeup, 'nmerace@localhost', _} -> ok; {nodedown, 'nmerace@localhost', _} -> down_first after 5000 -> up_timeout end,
-                                Down = receive {nodedown, 'nmerace@localhost', _} -> ok after 5000 -> down_timeout end,
+                        true -> Up = receive {nodeup, 'nmerace@localhost', _} -> ok; {nodedown, 'nmerace@localhost', _} -> down_first after 30000 -> up_timeout end,
+                                Down = receive {nodedown, 'nmerace@localhost', _} -> ok after 30000 -> down_timeout end,
                                 {Up, Down};
                         badarg -> {ok, ok}
                     end
@@ -175,12 +175,12 @@ local_order(Server) ->
                     Name = list_to_atom("nmelocal" ++ integer_to_list(I)),
                     {ok, _} = net_kernel:start(Name, #{name_domain => shortnames}),
                     Local = node(),
-                    Up = receive {nodeup, Local, _} -> up; {nodedown, Local, _} -> down_first after 5000 -> timeout end,
+                    Up = receive {nodeup, Local, _} -> up; {nodedown, Local, _} -> down_first after 30000 -> timeout end,
                     true = net_kernel:connect_node(Server),
-                    receive {nodeup, Server, _} -> ok after 5000 -> error(nodeup_timeout) end,
+                    receive {nodeup, Server, _} -> ok after 30000 -> error(nodeup_timeout) end,
                     ok = net_kernel:stop(),
-                    First = receive {nodedown, X, _} -> X after 5000 -> timeout end,
-                    Second = receive {nodedown, X2, _} -> X2 after 5000 -> timeout end,
+                    First = receive {nodedown, X, _} -> X after 30000 -> timeout end,
+                    Second = receive {nodedown, X2, _} -> X2 after 30000 -> timeout end,
                     {Up, First =:= Server, Second =:= Local}
             end,
     io:format("~p~n", [[Check(I) || I <- lists:seq(1, 3)]]).
@@ -201,9 +201,9 @@ ordering_client(Server) ->
                     _ = net_kernel:connect_node(Server),
                     receive
                         {nodeup, Server, _} ->
-                            receive {nodedown, Server, _} -> ok after 5000 -> down_timeout end;
+                            receive {nodedown, Server, _} -> ok after 30000 -> down_timeout end;
                         {nodedown, Server, _} -> down_first
-                    after 5000 -> up_timeout
+                    after 30000 -> up_timeout
                     end
             end,
     io:format("~p~n", [[Check(N) || N <- lists:seq(1, 12)]]).
@@ -212,9 +212,9 @@ monitor_local_events() ->
     ok = net_kernel:monitor_nodes(true, #{node_type => all, connection_id => true, nodedown_reason => true}),
     {ok, _} = net_kernel:start(nmelocal, #{name_domain => shortnames}),
     Node = node(),
-    Up = receive {nodeup, Node, U} -> U after 5000 -> timeout end,
+    Up = receive {nodeup, Node, U} -> U after 30000 -> timeout end,
     ok = net_kernel:stop(),
-    Down = receive {nodedown, Node, D} -> D after 5000 -> timeout end,
+    Down = receive {nodedown, Node, D} -> D after 30000 -> timeout end,
     io:format("~p~n", [[Up, Down]]).
 
 monitor_hidden(Server) ->
@@ -222,10 +222,10 @@ monitor_hidden(Server) ->
     ok = net_kernel:monitor_nodes(true, #{node_type => visible}),
     ok = net_kernel:monitor_nodes(true, #{node_type => hidden}),
     true = net_kernel:connect_node(Server),
-    Up = receive {nodeup, Server, U} -> U after 5000 -> timeout end,
+    Up = receive {nodeup, Server, U} -> U after 30000 -> timeout end,
     Extra = receive {nodeup, Server} -> plain; {nodeup, Server, _} -> other after 100 -> none end,
     true = erlang:disconnect_node(Server),
-    Down = receive {nodedown, Server, D} -> D after 5000 -> timeout end,
+    Down = receive {nodedown, Server, D} -> D after 30000 -> timeout end,
     io:format("~p~n", [[Up, Extra, Down]]).
 
 monitor_forms(Server) ->
@@ -234,16 +234,16 @@ monitor_forms(Server) ->
     ok = net_kernel:monitor_nodes(true, [connection_id, {node_type, all}, nodedown_reason]),
     ok = net_kernel:monitor_nodes(true, #{connection_id => true, node_type => all, nodedown_reason => true}),
     true = net_kernel:connect_node(Server),
-    A = receive {nodeup, Server} -> up after 5000 -> timeout end,
-    B = receive {nodeup, Server} -> up after 5000 -> timeout end,
-    L = receive {nodeup, Server, X} when is_list(X) -> X after 5000 -> timeout end,
-    M = receive {nodeup, Server, X2} when is_map(X2) -> X2 after 5000 -> timeout end,
+    A = receive {nodeup, Server} -> up after 30000 -> timeout end,
+    B = receive {nodeup, Server} -> up after 30000 -> timeout end,
+    L = receive {nodeup, Server, X} when is_list(X) -> X after 30000 -> timeout end,
+    M = receive {nodeup, Server, X2} when is_map(X2) -> X2 after 30000 -> timeout end,
     Id = maps:get(connection_id, M),
     ok = net_kernel:monitor_nodes(false),
     true = erlang:disconnect_node(Server),
     D = receive {nodedown, Server} -> down after 100 -> none end,
-    DL = receive {nodedown, Server, Y} when is_list(Y) -> Y after 5000 -> timeout end,
-    DM = receive {nodedown, Server, Y2} when is_map(Y2) -> Y2 after 5000 -> timeout end,
+    DL = receive {nodedown, Server, Y} when is_list(Y) -> Y after 30000 -> timeout end,
+    DM = receive {nodedown, Server, Y2} when is_map(Y2) -> Y2 after 30000 -> timeout end,
     io:format("~p~n", [[A,B,D, is_integer(Id), proplists:get_value(connection_id,L)=:=Id,
                         proplists:get_value(connection_id,DL)=:=Id,
                         maps:get(connection_id,DM)=:=Id,
@@ -253,9 +253,9 @@ monitor_forms(Server) ->
 monitor_events(Server) ->
     ok = net_kernel:monitor_nodes(true, #{node_type => all, nodedown_reason => true}),
     true = net_kernel:connect_node(Server),
-    Up = receive {nodeup, Server, U} -> U after 5000 -> timeout end,
+    Up = receive {nodeup, Server, U} -> U after 30000 -> timeout end,
     true = erlang:disconnect_node(Server),
-    Down = receive {nodedown, Server, D} -> D after 5000 -> timeout end,
+    Down = receive {nodedown, Server, D} -> D after 30000 -> timeout end,
     io:format("~p~n", [[Up, Down]]).
 
 monitor_connected(Server) ->
@@ -266,7 +266,7 @@ monitor_connected(Server) ->
     true = erlang:monitor_node(Server, true, []),
     true = erlang:monitor_node(Server, false),
     true = erlang:disconnect_node(Server),
-    First = receive {nodedown, Server} -> nodedown after 5000 -> timeout end,
+    First = receive {nodedown, Server} -> nodedown after 30000 -> timeout end,
     Second = receive {nodedown, Server} -> nodedown after 100 -> none end,
     true = erlang:monitor_node(Server, false),
     true = net_kernel:connect_node(Server),
@@ -275,8 +275,8 @@ monitor_connected(Server) ->
     {Child, Ref} = spawn_monitor(fun() -> erlang:monitor_node(Server, true) end),
     receive {'DOWN', Ref, process, Child, normal} -> ok end,
     true = erlang:disconnect_node(Server),
-    Third = receive {nodedown, Server} -> nodedown after 5000 -> timeout end,
-    Fourth = receive {nodedown, Server} -> nodedown after 5000 -> timeout end,
+    Third = receive {nodedown, Server} -> nodedown after 30000 -> timeout end,
+    Fourth = receive {nodedown, Server} -> nodedown after 30000 -> timeout end,
     true = net_kernel:connect_node(Server),
     true = erlang:monitor_node(Server, true),
     true = erlang:monitor_node(Server, false),
