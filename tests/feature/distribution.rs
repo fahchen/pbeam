@@ -508,6 +508,50 @@ fn accepts_connections_over_both_carriers() {
 }
 
 #[test]
+fn registers_the_listen_range_and_honours_dist_listen_false() {
+    // inet_tcp_dist.erl:175-207 registers the selected port and reads the
+    // configured range. net_kernel owns startup when listening is disabled.
+    let epmd = Epmd::start();
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+        .to_string();
+    let name = format!("inrange{}", std::process::id());
+    let expression = "[Name, Host] = string:split(atom_to_list(node()), \"@\"), \
+                      io:format(\"~p~n\", [erl_epmd:port_please(Name, Host)]), halt().";
+    for socket in [false, true] {
+        for listen in [true, false] {
+            let mut arguments = vec![
+                "-sname",
+                name.as_str(),
+                "-kernel",
+                "inet_dist_listen_min",
+                port.as_str(),
+                "-kernel",
+                "inet_dist_listen_max",
+                port.as_str(),
+            ];
+            if socket {
+                arguments.extend(SOCKET_CARRIER);
+            }
+            if !listen {
+                arguments.extend(["-dist_listen", "false"]);
+            }
+            arguments.extend(["-noshell", "-eval", expression]);
+            let expected = if listen {
+                format!("{{port,{port},6}}\n")
+            } else {
+                "noport\n".to_owned()
+            };
+            assert_eq!(stdout(&erts_erl(&epmd, &arguments)), expected);
+            assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), expected);
+        }
+    }
+}
+
+#[test]
 fn connects_over_a_tcp_inet_port_as_pinned_erts() {
     // inet_tcp_dist, the default carrier, makes the tcp_inet port the
     // controller of the connection (dist.c:5269-5336) and sets
