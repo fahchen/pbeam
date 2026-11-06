@@ -1218,9 +1218,15 @@ impl Scheduler {
             reason,
         ]);
         let process = self.processes.get_mut(id).expect("the process is alive");
-        process.mailbox.convert(walk, node, down);
+        let priority_extra = if monitor.priority {
+            process.mailbox.remove(node);
+            process.mailbox.push_priority(down)
+        } else {
+            process.mailbox.convert(walk, node, down);
+            0
+        };
         self.activate(id);
-        extra
+        extra + priority_extra
     }
 
     /// Handle the reply of a spawn request of `id` (`dist.c:3033-3130`):

@@ -1566,9 +1566,10 @@ pub(super) fn exit(
 /// `priority` marks the signal as a priority signal. A receiver handles a
 /// priority exit signal that is not of a link as a priority signal only
 /// through an active priority alias (`erl_proc_sig_queue.c:4642`,
-/// `4659-4672`). PBeam makes no priority alias (`erlang:alias/1` and
-/// `erlang:monitor/3` reject the `priority` option), so the option has no
-/// effect (row "Monitors" of `docs/erts-differences.md`).
+/// `4659-4672`). PBeam makes no priority alias: `erlang:alias/1` rejects
+/// the `priority` option, and a priority monitor does not make a priority
+/// alias. Thus the option has no effect (row "Monitors" of
+/// `docs/erts-differences.md`).
 ///
 /// # Examples
 ///
@@ -1782,10 +1783,9 @@ pub(super) fn demonitor(
 ///
 /// # Errors
 ///
-/// A `time_offset` monitor of `clock_service`, a monitor of the type `port`
-/// with a port, and the `priority` option of a monitor that is not of the
-/// caller, are not supported. A new `capability_denied` atom in a full atom
-/// table gives the error of `AtomTable::put`.
+/// A `time_offset` monitor of `clock_service` and a monitor of the type
+/// `port` with a port are not supported. A new `capability_denied` atom in a
+/// full atom table gives the error of `AtomTable::put`.
 pub(super) fn monitor(
     context: &mut BifContext<'_>,
     kind: &Term,

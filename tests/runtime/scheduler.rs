@@ -58,6 +58,26 @@ fn current(scheduler: &mut Scheduler) -> ProcessId {
 }
 
 #[test]
+fn stops_a_signal_handling_pass_when_priority_message_waits() {
+    use super::signals::HandlingPoint;
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let id = current(&mut scheduler);
+    let process = scheduler.processes.get_mut(id).unwrap();
+    process.mailbox.push_priority(Term::Integer(1));
+    for _ in 0..500 {
+        process.mailbox.push_signal(Signal::Resume);
+    }
+    process.mailbox.fetch();
+    let reductions = scheduler
+        .handle_signals(id, 1, 100, HandlingPoint::Running)
+        .unwrap();
+    assert_eq!(reductions, 2);
+    assert!(scheduler.processes[&id].mailbox.has_middle());
+}
+
+#[test]
 fn adds_the_reductions_of_an_ended_turn_and_starts_the_next() {
     // A BIF that runs several turns in one call adds each ended turn to the
     // process total and starts the next with a full budget, as the switch
@@ -1182,6 +1202,7 @@ fn moves_the_containers_of_an_exiting_process_to_the_release_work_list() {
             MonitorKey::Local(Reference(1)),
             Origin {
                 monitor: Some(OriginMonitor {
+                    priority: false,
                     kind: "process",
                     target: None,
                     item: marker(8),
@@ -1254,6 +1275,7 @@ fn releases_the_terms_of_every_container_of_an_exiting_process() {
             MonitorKey::Local(Reference(1)),
             Origin {
                 monitor: Some(OriginMonitor {
+                    priority: false,
                     kind: "process",
                     target: None,
                     item: item.clone(),
@@ -1534,6 +1556,7 @@ fn moves_the_monitors_of_an_exiting_process_in_batches() {
                 MonitorKey::Local(Reference(reference)),
                 Origin {
                     monitor: Some(OriginMonitor {
+                        priority: false,
                         kind: "process",
                         target: None,
                         item: marker(i64::try_from(reference).unwrap()),
@@ -1725,6 +1748,7 @@ fn counts_the_bytes_of_the_release_work_list() {
             MonitorKey::Local(Reference(1)),
             Origin {
                 monitor: Some(OriginMonitor {
+                    priority: false,
                     kind: "process",
                     target: None,
                     item: marker(6),
@@ -4324,6 +4348,7 @@ fn second_abandon_of_a_linked_spawn_request_keeps_its_monitor() {
             key,
             Origin {
                 monitor: Some(OriginMonitor {
+                    priority: false,
                     kind: "process",
                     target: None,
                     item: atom("spawn_reply"),
@@ -4359,6 +4384,7 @@ fn second_abandon_of_a_linked_spawn_request_keeps_its_monitor() {
             plain,
             Origin {
                 monitor: Some(OriginMonitor {
+                    priority: false,
                     kind: "process",
                     target: None,
                     item: atom("spawn_reply"),
@@ -4411,6 +4437,7 @@ fn an_abandoned_spawn_request_error_sends_no_reply() {
             key,
             Origin {
                 monitor: Some(OriginMonitor {
+                    priority: false,
                     kind: "process",
                     target: None,
                     item: atom("spawn_reply"),
@@ -4489,6 +4516,7 @@ fn an_abandoned_spawn_request_success_installs_no_link_and_sends_abandoned() {
             key,
             Origin {
                 monitor: Some(OriginMonitor {
+                    priority: false,
                     kind: "process",
                     target: None,
                     item: atom("spawn_reply"),
@@ -4575,6 +4603,7 @@ fn abandon_of_a_remote_request_removes_the_connection_monitor() {
             key,
             Origin {
                 monitor: Some(OriginMonitor {
+                    priority: false,
                     kind: "process",
                     target: None,
                     item: atom("spawn_reply"),

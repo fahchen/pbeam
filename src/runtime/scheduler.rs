@@ -3227,6 +3227,7 @@ impl Scheduler {
             }));
             let origin = Origin {
                 monitor: Some(OriginMonitor {
+                    priority: false,
                     kind: "process",
                     target: Some(child.id),
                     item: Term::Pid(child.id),
@@ -3464,8 +3465,7 @@ impl Scheduler {
     ///
     /// # Errors
     ///
-    /// The `priority` option of a monitor that is not of the current process
-    /// is not supported, and the errors of the distribution layer.
+    /// The errors of the distribution layer.
     pub(super) fn monitor(
         &mut self,
         target: &MonitorTarget,
@@ -3518,12 +3518,9 @@ impl Scheduler {
         if id == Some(watcher) {
             return Ok(reference);
         }
-        if options.priority {
-            // ponytail: no priority messages yet; add them when a measured path uses the option.
-            return Err(error("unsupported monitor option priority"));
-        }
         let origin = Origin {
             monitor: Some(OriginMonitor {
+                priority: options.priority,
                 kind,
                 target: id,
                 item,

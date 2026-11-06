@@ -51,6 +51,7 @@ impl Scheduler {
         let key = MonitorKey::Local(reference);
         let pending = Origin {
             monitor: Some(OriginMonitor {
+                priority: false,
                 kind: "process",
                 target: None,
                 item: reply_tag.clone(),
