@@ -54,6 +54,15 @@ pub(in crate::runtime) enum SendPriority {
     Priority,
 }
 
+/// Whether a send may start an idle connection (`bif.c:2384`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::runtime) enum ConnectMode {
+    /// Start a connection when necessary.
+    Allow,
+    /// Do not start an idle connection.
+    NoConnect,
+}
+
 impl Scheduler {
     /// Send `message` from the current process to `to`, a pid, a reference,
     /// or `{Name, Node}` of the node `node`, as `remote_send` does for a
@@ -87,7 +96,7 @@ impl Scheduler {
         to: &Term,
         message: &Term,
         priority: SendPriority,
-        connect: bool,
+        connect: ConnectMode,
     ) -> Result<bool, BeamError> {
         let caller = self.current_process().id;
         let from = Term::Pid(caller);
@@ -106,7 +115,10 @@ impl Scheduler {
             }
             let idle = dist.connected(node).is_none();
             drop(dist);
-            if idle && connect && self.dist_auto_connect_send(node, to, message)? {
+            if idle
+                && connect == ConnectMode::Allow
+                && self.dist_auto_connect_send(node, to, message)?
+            {
                 return Ok(true);
             }
         }

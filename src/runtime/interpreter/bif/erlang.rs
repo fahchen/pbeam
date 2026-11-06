@@ -29,7 +29,7 @@ use crate::runtime::process::{Flush, MonitorKey, Origin, Priority, SpawnReply};
 use crate::runtime::process::{InitialCall, OTHER_PROCESS_INFO_ITEMS};
 use crate::runtime::process::{LinkId, ProcessState, RemotePid};
 use crate::runtime::scheduler::PTAB_SIZE;
-use crate::runtime::scheduler::dist_output::SendPriority;
+use crate::runtime::scheduler::dist_output::{ConnectMode, SendPriority};
 use crate::runtime::scheduler::dist_table::NodeInfo;
 use crate::runtime::scheduler::node::Named;
 use crate::runtime::scheduler::{
@@ -5364,7 +5364,13 @@ pub(in crate::runtime::interpreter) fn send(
     message: Term,
 ) -> Result<BifResult, BeamError> {
     Ok(
-        match deliver_to(scheduler, to, message.clone(), SendPriority::Normal, true)? {
+        match deliver_to(
+            scheduler,
+            to,
+            message.clone(),
+            SendPriority::Normal,
+            ConnectMode::Allow,
+        )? {
             Ok(Sent::Local) => local_send_result(scheduler, message),
             Ok(Sent::NoConnect) => Value(message),
             Err(raise) => raise,
@@ -5419,10 +5425,10 @@ pub(super) fn send3(
     let Some(options) = options.proper_list() else {
         return Ok(BifResult::badopt());
     };
-    let (mut connect, mut priority) = (true, SendPriority::Normal);
+    let (mut connect, mut priority) = (ConnectMode::Allow, SendPriority::Normal);
     for option in options {
         match option {
-            Term::Atom(option) if option.is_static("noconnect") => connect = false,
+            Term::Atom(option) if option.is_static("noconnect") => connect = ConnectMode::NoConnect,
             Term::Atom(option) if option.is_static("priority") => priority = SendPriority::Priority,
             Term::Atom(option) if option.is_static("nosuspend") => {}
             _ => return Ok(BifResult::badopt()),
@@ -5431,7 +5437,9 @@ pub(super) fn send3(
     Ok(
         match deliver_to(scheduler, to, message.clone(), priority, connect)? {
             Ok(Sent::Local) => local_send_result(scheduler, Term::static_atom("ok")),
-            Ok(Sent::NoConnect) if !connect => Value(Term::static_atom("noconnect")),
+            Ok(Sent::NoConnect) if connect == ConnectMode::NoConnect => {
+                Value(Term::static_atom("noconnect"))
+            }
             Ok(Sent::NoConnect) => Value(Term::static_atom("ok")),
             Err(raise) => raise,
         },
@@ -5621,7 +5629,7 @@ fn deliver_to(
     to: &Term,
     message: Term,
     priority: SendPriority,
-    connect: bool,
+    connect: ConnectMode,
 ) -> Result<Result<Sent, BifResult>, BeamError> {
     let Some(destination) = destination(to, &scheduler.atoms) else {
         return Ok(Err(BifResult::badarg()));
