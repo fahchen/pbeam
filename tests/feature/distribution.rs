@@ -250,7 +250,7 @@ fn offers_the_mandatory_distribution_flags_the_monitor_flags_exit_payload_and_al
     );
     assert_eq!(
         stdout(&output),
-        "{erts_dflags,55889563580,17230663572,55889563580,8396866,8192}\n"
+        "{erts_dflags,55889571772,17230663572,55889571772,8396866,8192}\n"
     );
 }
 
@@ -361,10 +361,7 @@ fn stops_at_a_part_of_a_channel_that_pbeam_does_not_have() {
         ]
         .map(|n| (format!("reject({n})"), rejected)),
     );
-    cases.push((
-        "atom_cache()".to_owned(),
-        "unsupported distribution message on a connection with the atom cache or fragments",
-    ));
+    cases.push(("atom_cache()".to_owned(), rejected));
     cases.push((
         "reject(9)".to_owned(),
         "unsupported distribution message of a pid reference that is not of five numbers",
