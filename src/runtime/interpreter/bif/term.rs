@@ -1030,6 +1030,7 @@ pub(super) fn binary_to_term(
         overrun: 0,
         safe,
         local: false,
+        cache: None,
         atoms: &context.scheduler.atoms,
         code: &context.scheduler.code,
         ets: &context.scheduler.ets,
@@ -1065,6 +1066,7 @@ pub(super) fn binary_to_term(
 pub(in crate::runtime) fn decode_dist(
     scheduler: &crate::runtime::scheduler::Scheduler,
     input: &[u8],
+    cache: Option<&[crate::term::Atom]>,
 ) -> Result<Option<(Term, usize)>, BeamError> {
     let seed = scheduler.local_node_hash();
     let mut decoder = Decoder {
@@ -1073,11 +1075,21 @@ pub(in crate::runtime) fn decode_dist(
         overrun: 0,
         safe: false,
         local: false,
+        cache,
         atoms: &scheduler.atoms,
         code: &scheduler.code,
         ets: &scheduler.ets,
     };
-    match decoder.decode_input(seed) {
+    let decoded = if cache.is_some() {
+        validate(input, seed, cache.map_or(0, <[crate::term::Atom]>::len)).and_then(|()| {
+            decoder
+                .term()
+                .map(|term| (term, decoder.pos + decoder.overrun))
+        })
+    } else {
+        decoder.decode_input(seed)
+    };
+    match decoded {
         Ok(term_and_size) => Ok(Some(term_and_size)),
         Err(failure) => failure
             .into_error("distribution message")
@@ -1154,6 +1166,8 @@ struct Decoder<'a> {
     safe: bool,
     /// True inside `LOCAL_EXT`: `NIL_EXT` stands for the local node.
     local: bool,
+    /// Atom translation table of the distribution header.
+    cache: Option<&'a [crate::term::Atom]>,
     /// The atom table of the run.
     atoms: &'a AtomTable,
     /// The code table of the run, which holds the fun entries of the loaded
@@ -1296,7 +1310,12 @@ enum NodeScope {
 }
 
 /// Take the node atom of a pid, port, or reference at `index`.
-fn check_sysname(input: &[u8], index: &mut usize, scope: NodeScope) -> Result<(), DecodeError> {
+fn check_sysname(
+    input: &[u8],
+    index: &mut usize,
+    scope: NodeScope,
+    cache_len: usize,
+) -> Result<(), DecodeError> {
     match *input.get(*index).ok_or(DecodeError::Badarg)? {
         106 => {
             if scope == NodeScope::Remote {
@@ -1304,6 +1323,13 @@ fn check_sysname(input: &[u8], index: &mut usize, scope: NodeScope) -> Result<()
             }
             *index += 1;
             Ok(())
+        }
+        82 => {
+            *index += 1;
+            let reference = check_length(input, index, 1)?;
+            (reference < cache_len)
+                .then_some(())
+                .ok_or(DecodeError::Badarg)
         }
         100 | 118 => {
             *index += 1;
@@ -1329,7 +1355,7 @@ fn check_sysname(input: &[u8], index: &mut usize, scope: NodeScope) -> Result<()
     clippy::too_many_lines,
     reason = "mirrors the size walk `decoded_size` of `external.c`: one arm for each external term tag with the check of the node scope; each arm is short"
 )]
-fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
+fn validate(input: &[u8], seed: u32, cache_len: usize) -> Result<(), DecodeError> {
     let mut index = 0usize;
     let mut scope = NodeScope::Remote;
     let mut frames: Vec<CheckFrame> = Vec::new();
@@ -1342,6 +1368,12 @@ fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
             reason = "tag 117 is the old local fun tag, which the decoder names as its own case, so the size check keeps an arm for it apart from the wildcard"
         )]
         match tag {
+            82 => {
+                let reference = check_length(input, &mut index, 1)?;
+                if reference >= cache_len {
+                    return Err(DecodeError::Badarg);
+                }
+            }
             97 => check_skip(input, &mut index, 1)?,
             98 => check_skip(input, &mut index, 4)?,
             99 => check_skip(input, &mut index, FLOAT_TEXT_SIZE)?,
@@ -1426,20 +1458,20 @@ fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
                 check_skip(input, &mut index, 1 + length)?;
             }
             88 | 120 => {
-                check_sysname(input, &mut index, scope)?;
+                check_sysname(input, &mut index, scope, cache_len)?;
                 check_skip(input, &mut index, 12)?;
             }
             103 => {
-                check_sysname(input, &mut index, scope)?;
+                check_sysname(input, &mut index, scope, cache_len)?;
                 check_skip(input, &mut index, 8)?;
                 check_tiny_creation(input, &mut index)?;
             }
             89 => {
-                check_sysname(input, &mut index, scope)?;
+                check_sysname(input, &mut index, scope, cache_len)?;
                 check_skip(input, &mut index, 8)?;
             }
             102 | 101 => {
-                check_sysname(input, &mut index, scope)?;
+                check_sysname(input, &mut index, scope, cache_len)?;
                 check_skip(input, &mut index, 4)?;
                 check_tiny_creation(input, &mut index)?;
             }
@@ -1448,7 +1480,7 @@ fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
                 if count > MAX_REFERENCE_NUMBERS {
                     return Err(DecodeError::Badarg);
                 }
-                check_sysname(input, &mut index, scope)?;
+                check_sysname(input, &mut index, scope, cache_len)?;
                 check_skip(input, &mut index, 4 + 4 * count)?;
             }
             114 => {
@@ -1456,7 +1488,7 @@ fn validate(input: &[u8], seed: u32) -> Result<(), DecodeError> {
                 if count > MAX_REFERENCE_NUMBERS {
                     return Err(DecodeError::Badarg);
                 }
-                check_sysname(input, &mut index, scope)?;
+                check_sysname(input, &mut index, scope, cache_len)?;
                 check_tiny_creation(input, &mut index)?;
                 check_skip(input, &mut index, 4 * count)?;
             }
@@ -1576,13 +1608,14 @@ impl Decoder<'_> {
             Some(plain) => plain,
             None => &self.input[start..],
         };
-        validate(body, seed)?;
+        validate(body, seed, self.cache.map_or(0, <[crate::term::Atom]>::len))?;
         let mut decoder = Decoder {
             input: body,
             pos: 0,
             overrun: 0,
             safe: self.safe,
             local: false,
+            cache: self.cache,
             atoms: self.atoms,
             code: self.code,
             ets: self.ets,
@@ -1737,6 +1770,7 @@ impl Decoder<'_> {
                 record_term(record, Vec::new())
             } else {
                 match tag {
+                    82 => Term::Atom(self.cached_atom()?),
                     97 => Term::Integer(i64::from(self.u8()?)),
                     98 => Term::Integer(i64::from(i32::from_be_bytes(
                         self.take(4)?.try_into().expect("four bytes"),
@@ -2092,6 +2126,7 @@ impl Decoder<'_> {
     /// (`dec_atom`, `external.c:5300-5318`).
     fn header_atom(&mut self, tag: u8) -> Result<crate::term::Atom, DecodeError> {
         match tag {
+            82 => self.cached_atom(),
             100 | 118 => {
                 let length = usize::from(self.u16()?);
                 self.atom(length, CharEncoding::from(tag == 100))
@@ -2102,6 +2137,15 @@ impl Decoder<'_> {
             }
             _ => Err(DecodeError::Badarg),
         }
+    }
+
+    /// Resolve a distribution header atom reference.
+    fn cached_atom(&mut self) -> Result<crate::term::Atom, DecodeError> {
+        let index = usize::from(self.u8()?);
+        self.cache
+            .and_then(|cache| cache.get(index))
+            .cloned()
+            .ok_or(DecodeError::Badarg)
     }
 
     /// Decode an atom of `length` bytes in Latin-1 or UTF-8, as
@@ -2186,6 +2230,7 @@ impl Decoder<'_> {
             return Ok(None);
         }
         let atom = match self.u8()? {
+            82 => self.cached_atom()?,
             100 => {
                 let length = usize::from(self.u16()?);
                 self.atom(length, CharEncoding::Latin1)?

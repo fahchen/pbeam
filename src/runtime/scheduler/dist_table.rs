@@ -453,6 +453,17 @@ impl DistTable {
         )
     }
 
+    /// Return the input cache of the named connection when it is current.
+    pub(super) fn atom_cache_in(
+        &mut self,
+        name: &Atom,
+        connection: u32,
+    ) -> Option<&mut HashMap<u16, Atom>> {
+        let entry = self.entries.get_mut(&name.index())?;
+        (entry.state == State::Connected && entry.connection_id == connection)
+            .then_some(&mut entry.atom_cache_in)
+    }
+
     /// Return the distribution flags of the entry of `name` (`dep->dflags`).
     pub(in crate::runtime) fn flags(&self, name: &Atom) -> u64 {
         self.entries[&name.index()].flags
