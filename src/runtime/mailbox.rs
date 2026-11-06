@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
 use super::signal::Signal;
-use crate::term::{LiveBytes, Term};
+use crate::term::{LiveBytes, Reference, Term};
 
 /// Number of receive marker slots in a process, as
 /// `ERTS_RECV_MARKER_BLOCK_SIZE` in ERTS.
@@ -108,6 +108,17 @@ pub(super) enum Step {
     Marker,
 }
 
+/// The reason for the receive save position (`ERTS_MQ_GET_SAVE_INFO`).
+#[derive(Clone, Copy, Debug)]
+enum SaveMode {
+    /// A normal receive that starts at the first message.
+    First,
+    /// An emulator request that waits after the message queue.
+    Last,
+    /// An optimized receive that uses this marker reference.
+    Marker(Reference),
+}
+
 /// The signal queue of a process, as the private and public signal queues
 /// of ERTS (`erl_proc_sig_queue.h:43-74`). Messages, receive markers, and
 /// non-message signals are nodes of one linked list in arrival order. Two
@@ -136,6 +147,8 @@ pub(super) struct Mailbox {
     priority_messages: VecDeque<Term>,
     /// Next priority message to inspect during this receive.
     priority_save: usize,
+    /// The reason for the save position.
+    save_mode: SaveMode,
     /// Node arena. A removed node goes to `free` for reuse.
     nodes: Vec<Node>,
     /// Arena slots that hold no live node.
@@ -167,6 +180,7 @@ impl Default for Mailbox {
         Self {
             priority_messages: VecDeque::new(),
             priority_save: 0,
+            save_mode: SaveMode::First,
             nodes: Vec::new(),
             free: Vec::new(),
             first: None,
@@ -224,6 +238,21 @@ impl Mailbox {
             }
         }
         let extra = mark_priority_references(&term, &mut self.markers);
+        // ERTS keeps LAST past the priority queue, and keeps an unrelated
+        // receive marker there until its reference appears in the queue
+        // (`erl_proc_sig_queue.c:9358-9421`).
+        if self.priority_save == self.priority_messages.len() {
+            let inspect = match self.save_mode {
+                SaveMode::First => true,
+                SaveMode::Last => false,
+                SaveMode::Marker(reference) => self.markers.iter().any(|marker| {
+                    marker.id == Some(Term::Reference(reference)) && marker.in_priority
+                }),
+            };
+            if !inspect {
+                self.priority_save += 1;
+            }
+        }
         self.priority_messages.push_back(term);
         extra
     }
@@ -466,6 +495,7 @@ impl Mailbox {
     /// mailbox.set_save_first();
     /// ```
     pub(super) fn set_save_first(&mut self) {
+        self.save_mode = SaveMode::First;
         self.priority_save = 0;
         self.save = self.pass_markers(Link::First, MarkerScan::Leading);
     }
@@ -486,6 +516,7 @@ impl Mailbox {
     /// assert_eq!(mailbox.current(), None);
     /// ```
     pub(super) fn set_save_end(&mut self) {
+        self.save_mode = SaveMode::Last;
         self.priority_save = self.priority_messages.len();
         self.fetch();
         if !self.has_middle() {
@@ -623,12 +654,13 @@ impl Mailbox {
     /// mailbox.use_marker(&Term::Reference(reference));
     /// ```
     pub(super) fn use_marker(&mut self, reference: &Term) {
-        if !matches!(reference, Term::Reference(_)) {
+        let Term::Reference(reference_id) = reference else {
             return;
-        }
+        };
         let Some(index) = self.marker(reference) else {
             return;
         };
+        self.save_mode = SaveMode::Marker(*reference_id);
         self.clear_pending_set_save();
         self.priority_save =
             if self.markers[index].in_priority && !self.priority_messages.is_empty() {
@@ -834,6 +866,11 @@ impl Mailbox {
     /// assert!(!mailbox.can_stretch(&walk));
     /// ```
     pub(super) fn can_stretch(&self, walk: &Walk) -> bool {
+        // A message at the save position ends the stretch
+        // (`erl_proc_sig_queue.c:7187-7191, 7228-7231`).
+        if self.priority_save < self.priority_messages.len() {
+            return false;
+        }
         if walk.save_in_middle {
             return self.target(self.save).is_some();
         }

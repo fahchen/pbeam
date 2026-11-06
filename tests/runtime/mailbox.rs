@@ -66,6 +66,38 @@ fn caches_marker_references_when_priority_messages_arrive() {
 }
 
 #[test]
+fn priority_insertion_respects_save_end_and_receive_marker() {
+    let mut mailbox = mailbox(&[1]);
+    mailbox.set_save_end();
+    mailbox.push_priority(int(2));
+    assert_eq!(mailbox.current(), None);
+    mailbox.set_save_first();
+    assert_eq!(mailbox.current(), Some(&int(2)));
+
+    let marker = mailbox.reserve_marker();
+    let reference = Term::Reference(Reference(9));
+    mailbox.bind_marker(&marker, &reference);
+    mailbox.use_marker(&reference);
+    mailbox.push_priority(int(3));
+    assert_eq!(mailbox.current(), None);
+    let message = Term::tuple(vec![int(4), reference]);
+    mailbox.push_priority(message.clone());
+    assert_eq!(mailbox.current(), Some(&message));
+}
+
+#[test]
+fn priority_message_stops_stretching_signal_handling() {
+    let mut mailbox = mailbox_with_signal();
+    assert!(mailbox.save_next());
+    let walk = mailbox.walk();
+    assert!(mailbox.can_stretch(&walk));
+    mailbox.push_priority(int(2));
+    assert!(!mailbox.can_stretch(&walk));
+    assert!(mailbox.save_next());
+    assert!(mailbox.can_stretch(&walk));
+}
+
+#[test]
 fn walks_and_removes_messages() {
     let mut mailbox = mailbox(&[1, 2, 3]);
     assert!(mailbox.save_next());

@@ -58,6 +58,26 @@ fn current(scheduler: &mut Scheduler) -> ProcessId {
 }
 
 #[test]
+fn stops_a_signal_handling_pass_when_priority_message_waits() {
+    use super::signals::HandlingPoint;
+    let mut scheduler = test_scheduler();
+    scheduler.start(frame(), vec![], allow_all());
+    scheduler.schedule_next().unwrap();
+    let id = current(&mut scheduler);
+    let process = scheduler.processes.get_mut(id).unwrap();
+    process.mailbox.push_priority(Term::Integer(1));
+    for _ in 0..500 {
+        process.mailbox.push_signal(Signal::Resume);
+    }
+    process.mailbox.fetch();
+    let reductions = scheduler
+        .handle_signals(id, 1, 100, HandlingPoint::Running)
+        .unwrap();
+    assert_eq!(reductions, 2);
+    assert!(scheduler.processes[&id].mailbox.has_middle());
+}
+
+#[test]
 fn adds_the_reductions_of_an_ended_turn_and_starts_the_next() {
     // A BIF that runs several turns in one call adds each ended turn to the
     // process total and starts the next with a full budget, as the switch

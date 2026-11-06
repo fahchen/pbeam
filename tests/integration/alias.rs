@@ -288,6 +288,38 @@ fn receives_a_priority_down_while_waiting_selectively_as_pinned_erts() {
 }
 
 #[test]
+fn keeps_priority_down_during_a_process_info_wait_as_pinned_erts() {
+    let erts_internal = pinned_beam("erts_internal");
+    let program = BeamProgram::load(&[&erts_internal, ALIAS_PROBE]).unwrap();
+    let result = program
+        .execute("alias_probe", "priority_info_wait", &[])
+        .unwrap()
+        .term;
+    let atom = |name: &str| Term::Atom(program.atom(name).unwrap());
+    assert_eq!(
+        result,
+        Term::tuple(vec![
+            Term::tuple(vec![atom("message_queue_len"), Term::Integer(1)]),
+            Term::list_from([atom("unmatched")]),
+        ])
+    );
+    assert_eq!(
+        erl_reference("priority_info_wait()"),
+        "{{message_queue_len,1},[unmatched]}\n"
+    );
+}
+
+#[test]
+fn receives_unrelated_priority_down_after_the_marker_as_pinned_erts() {
+    let (result, atom) = run("priority_unrelated_marker");
+    assert_eq!(result, Term::list_from([atom("normal"), atom("priority")]));
+    assert_eq!(
+        erl_reference("priority_unrelated_marker()"),
+        "[normal,priority]\n"
+    );
+}
+
+#[test]
 fn receives_queued_priority_down_with_receive_marker_as_pinned_erts() {
     let (result, atom) = run("priority_marker_hit");
     assert_eq!(

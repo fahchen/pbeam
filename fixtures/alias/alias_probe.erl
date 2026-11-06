@@ -2,6 +2,7 @@
 -export([targets/0, options/0, tags/0, modes/0, downs/0, exits/0, sends/0, call/0, unsupported/1,
          priority_down_order/0, priority_down_selective/0, priority_marker_hit/0, priority_watcher/1,
          priority_immediate/0, priority_immediate_remote/0, priority_large_tag/0, priority_tag_reference/0,
+         priority_unrelated_marker/0, priority_unrelated_watcher/1, priority_info_wait/0,
          idle/0, relay/0, owner/2, server/0, id/1]).
 
 id(X) -> X.
@@ -123,6 +124,42 @@ priority_tag_reference() ->
     erlang:demonitor(Ref, [flush]),
     Held ! stop,
     {Result, length(flush())}.
+
+%% The process-info request waits for another process while the priority
+%% DOWN is delivered. The unmatched normal message remains in the queue.
+priority_info_wait() ->
+    self() ! unmatched,
+    Target = spawn(?MODULE, idle, []),
+    Ref = erlang:monitor(process, Target, [priority]),
+    Other = spawn(?MODULE, idle, []),
+    Target ! stop,
+    Other ! hello,
+    Info = process_info(Other, message_queue_len),
+    receive {'DOWN', Ref, process, Target, normal} -> ok end,
+    Other ! stop,
+    {Info, flush()}.
+
+%% A priority DOWN arrives while the watcher waits for another monitor.
+priority_unrelated_marker() ->
+    Watcher = spawn(?MODULE, priority_unrelated_watcher, [self()]),
+    receive {ready, Watcher, Held, Target} ->
+                Sync = erlang:monitor(process, Target),
+                wait_until_waiting(Watcher),
+                Target ! stop,
+                receive {'DOWN', Sync, process, Target, normal} -> ok end,
+                Held ! stop,
+                receive {result, Watcher, Result} -> Result end
+    end.
+
+priority_unrelated_watcher(Parent) ->
+    Held = spawn(?MODULE, idle, []),
+    Ref = erlang:monitor(process, Held),
+    Target = spawn(?MODULE, idle, []),
+    Priority = erlang:monitor(process, Target, [priority]),
+    Parent ! {ready, self(), Held, Target},
+    receive {'DOWN', Ref, process, Held, normal} -> ok end,
+    Result = receive {'DOWN', Priority, process, Target, normal} -> [normal, priority] end,
+    Parent ! {result, self(), Result}.
 
 %% The watcher has passed an unmatched message and waits for the normal
 %% message or the monitor DOWN. Wait for that state before ending the target.
