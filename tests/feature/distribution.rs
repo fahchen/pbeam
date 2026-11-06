@@ -605,17 +605,20 @@ fn accepts_an_empty_distribution_atom_cache_header_as_pinned_erts() {
 }
 
 #[test]
-fn rejects_a_cache_header_on_a_stale_distribution_handle() {
+fn drops_a_cache_header_on_a_stale_distribution_handle() {
     let epmd = Epmd::start();
     let id = std::process::id();
     let expression = "Old = erts_internal:new_connection(stale_cache_peer@nohost), \
         erts_internal:abort_pending_connection(stale_cache_peer@nohost, Old), \
-        erts_internal:new_connection(stale_cache_peer@nohost), \
+        New = erts_internal:new_connection(stale_cache_peer@nohost), \
+        true = Old =/= New, \
         Flags = element(3, erts_internal:get_dflags()) bor 16#2000, \
         {ok, _} = erts_internal:create_dist_channel(stale_cache_peer@nohost, self(), {Flags,1}), \
         <<131,Control/binary>> = term_to_binary({2,'',self()}), \
         <<131,Message/binary>> = term_to_binary(123), \
         ok = erlang:dist_ctrl_put_data(Old, <<131,68,1,8,0,1,97,Control/binary,Message/binary>>), \
+        ok = erlang:dist_ctrl_put_data(Old, <<131,68,0,Control/binary,Message/binary>>), \
+        ok = erlang:dist_ctrl_put_data(Old, <<131,68>>), \
         receive 123 -> io:format(\"ok~n\") after 2000 -> io:format(\"no_message~n\") end, halt().";
     let run = |name: &str| {
         vec![
@@ -632,12 +635,7 @@ fn rejects_a_cache_header_on_a_stale_distribution_handle() {
     let erts = erts_erl(&epmd, &run(&format!("dsterts{id}")));
     assert_eq!(stdout(&erts), "no_message\n");
     let pbeam = pbeam_erl(&epmd, &run(&format!("dstpbeam{id}")));
-    assert_eq!(pbeam.status.code(), Some(1), "{pbeam:?}");
-    assert_eq!(
-        String::from_utf8_lossy(&pbeam.stderr),
-        "pbeam: unsupported distribution message that ERTS rejects: ERTS ends the connection: see \"Distribution\" in docs/erts-differences.md\n",
-        "{pbeam:?}"
-    );
+    assert_eq!(stdout(&pbeam), "no_message\n");
 }
 
 // ERTS rejects a malformed header or an absent input cache entry and ends

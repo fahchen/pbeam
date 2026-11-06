@@ -32,6 +32,9 @@ const FRAGMENTS: u64 = 0x0080_0000;
 /// the connection (`dist.c:3144-3165`).
 pub(super) const REJECTED: &str = "unsupported distribution message that ERTS rejects: ERTS ends the connection: see \"Distribution\" in docs/erts-differences.md";
 
+/// The body and atom translation table of a distribution header.
+type AtomHeader<'a> = (&'a [u8], Vec<Atom>);
+
 impl Scheduler {
     /// Give the packet `packet` with data of a connection with the flags
     /// `flags` to its target, as
@@ -88,7 +91,9 @@ impl Scheduler {
             ));
         }
         let (ext, cache) = if flags & ATOM_CACHE != 0 {
-            let (ext, cache) = self.dist_atom_header(node, connection, packet)?;
+            let Some((ext, cache)) = self.dist_atom_header(node, connection, packet)? else {
+                return Ok(());
+            };
             (ext, Some(cache))
         } else {
             let ext = packet.get(1..).unwrap_or_default();
@@ -207,13 +212,17 @@ impl Scheduler {
         node: &Atom,
         connection: u32,
         packet: &'a [u8],
-    ) -> Result<(&'a [u8], Vec<Atom>), BeamError> {
+    ) -> Result<Option<AtomHeader<'a>>, BeamError> {
+        let mut dist = self.node.dist();
+        let Some(cache) = dist.atom_cache_in(node, connection) else {
+            return Ok(None);
+        };
         if packet.len() < 3 || packet[0..2] != [VERSION_MAGIC, b'D'] {
             return Err(error(REJECTED));
         }
         let count = usize::from(packet[2]);
         if count == 0 {
-            return Ok((&packet[3..], Vec::new()));
+            return Ok(Some((&packet[3..], Vec::new())));
         }
         let flag_bytes = count / 2 + 1;
         let flags = packet
@@ -222,10 +231,6 @@ impl Scheduler {
         let long = flags[count / 2] & (1 << ((count % 2) * 4)) != 0;
         let mut pos = 3 + flag_bytes;
         let mut table = Vec::with_capacity(count);
-        let mut dist = self.node.dist();
-        let cache = dist
-            .atom_cache_in(node, connection)
-            .ok_or_else(|| error(REJECTED))?;
         for index in 0..count {
             let flag = (flags[index / 2] >> ((index % 2) * 4)) & 15;
             let low = *packet.get(pos).ok_or_else(|| error(REJECTED))?;
@@ -257,7 +262,7 @@ impl Scheduler {
             };
             table.push(atom);
         }
-        Ok((&packet[pos..], table))
+        Ok(Some((&packet[pos..], table)))
     }
 
     /// Give the exit signal from `from` with the reason that `reason` gives
