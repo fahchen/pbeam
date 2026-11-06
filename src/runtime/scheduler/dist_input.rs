@@ -271,7 +271,7 @@ impl Scheduler {
         }
         let sequence = u64::from_be_bytes(packet[2..10].try_into().expect("sequence length"));
         let id = u64::from_be_bytes(packet[10..18].try_into().expect("fragment id length"));
-        if id == 0 {
+        if id == 0 && (packet[1] != b'E' || sequence != 0) {
             return Err(error(REJECTED));
         }
         if packet[1] == b'E' {
@@ -286,6 +286,9 @@ impl Scheduler {
                 return Err(error(REJECTED));
             }
             let bytes = body.to_vec();
+            if sequence == 0 {
+                return Ok(Some((bytes, atoms)));
+            }
             let mut dist = self.node.dist();
             let Some(sequences) = dist.fragments_in(node, connection) else {
                 return Ok(None);

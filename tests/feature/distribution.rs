@@ -669,6 +669,48 @@ fn kills_the_fragment_controller_on_sequence_errors_as_pinned_erts() {
     }
 }
 
+// Pinned OTP 29.1.1 exits 139 for sequence 0, fragment 2 with complete
+// control and message. PBeam follows the non-fragmented source path instead.
+#[test]
+fn treats_zero_sequence_as_a_nonfragmented_message() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let run = |name: &str, fragment: u8| {
+        let expression = format!(
+            "Node=zero_fragment_peer@nohost, erts_internal:new_connection(Node), \
+            Flags=element(3,erts_internal:get_dflags()) bor 16#800000, \
+            {{ok,H}}=erts_internal:create_dist_channel(Node,self(),{{Flags,1}}), \
+            <<131,C/binary>>=term_to_binary({{2,empty,self()}}), \
+            <<131,M/binary>>=term_to_binary(ok), \
+            erlang:dist_ctrl_put_data(H,<<131,69,0:64,{fragment}:64,0,C/binary,M/binary>>), \
+            receive ok -> io:format(\"delivered~n\") after 5000 -> io:format(\"timeout~n\") end, halt()."
+        );
+        vec![
+            "-sname".to_owned(),
+            name.to_owned(),
+            "-kernel".to_owned(),
+            "logger_level".to_owned(),
+            "none".to_owned(),
+            "-noshell".to_owned(),
+            "-eval".to_owned(),
+            expression,
+        ]
+    };
+    assert_eq!(
+        stdout(&erts_erl(&epmd, &run(&format!("fzert{id}"), 1))),
+        "delivered\n"
+    );
+    for fragment in [1, 2] {
+        assert_eq!(
+            stdout(&pbeam_erl(
+                &epmd,
+                &run(&format!("fzpb{fragment}{id}"), fragment)
+            )),
+            "delivered\n"
+        );
+    }
+}
+
 #[test]
 fn accepts_a_large_control_term_in_the_first_fragment_as_pinned_erts() {
     let epmd = Epmd::start();
