@@ -1317,6 +1317,35 @@ fn sends_exit_signals_between_erts_and_pbeam_nodes() {
 }
 
 #[test]
+fn disconnects_a_node_with_links_and_monitors_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let name = format!("ddsrv{id}");
+    let arguments = ["-sname", &name, "-setcookie", "ck", "-pa", "fixtures/dist"];
+    let server = ErtsNode::start(&epmd, &arguments, "dist_lost_probe:server().");
+    let expression = format!(
+        "dist_lost_probe:client_disconnect('{}'), halt().",
+        server.line()
+    );
+    let client_name = format!("ddcli{id}");
+    let client = [
+        "-sname",
+        &client_name,
+        "-setcookie",
+        "ck",
+        "-hidden",
+        "-noshell",
+        "-pa",
+        "fixtures/dist",
+        "-eval",
+        &expression,
+    ];
+    let expected = "[{linked,noconnection,noconnection,noconnection}]\n";
+    assert_eq!(stdout(&erts_erl(&epmd, &client)), expected);
+    assert_eq!(stdout(&pbeam_erl(&epmd, &client)), expected);
+}
+
+#[test]
 fn ends_the_links_of_a_lost_connection_as_pinned_erts() {
     // The server node halts, and each process of the client node that has a
     // link to its process takes the exit signal `noconnection`: the process
