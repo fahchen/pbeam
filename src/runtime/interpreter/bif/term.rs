@@ -953,7 +953,7 @@ pub(in crate::runtime) fn encode_dist_cached(
     control: &Term,
     message: Option<&Term>,
     slots: &mut HashMap<u16, crate::term::Atom>,
-) -> Result<Vec<Binary>, BeamError> {
+) -> Result<(Vec<Binary>, usize, usize), BeamError> {
     let mut cache = DistAtomEncoder {
         slots: slots.clone(),
         entries: Vec::new(),
@@ -968,6 +968,7 @@ pub(in crate::runtime) fn encode_dist_cached(
         &owner,
         Some(&mut cache),
     )?;
+    let control_len = body.len();
     if let Some(message) = message {
         body.extend(encode_parts(
             message,
@@ -1012,9 +1013,10 @@ pub(in crate::runtime) fn encode_dist_cached(
             packet.extend(name);
         }
     }
+    let header_len = packet.len();
     packet.extend(body);
     *slots = cache.slots;
-    Ok(vec![Binary::from(packet)])
+    Ok((vec![Binary::from(packet)], header_len, control_len))
 }
 
 /// Return the term of the pid, port, or reference `data` of the node `node`

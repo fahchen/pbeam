@@ -227,10 +227,10 @@ fn queues_and_writes_the_messages_to_a_connection_as_pinned_erts() {
 }
 
 #[test]
-fn offers_the_mandatory_distribution_flags_the_monitor_flags_exit_payload_and_alias() {
+fn offers_the_mandatory_distribution_flags_the_monitor_flags_exit_payload_fragments_and_alias() {
     // PBeam offers DFLAG_DIST_MANDATORY (dist.h:80-98), DFLAG_DIST_MONITOR,
     // DFLAG_DIST_MONITOR_NAME, DFLAG_DIST_HDR_ATOM_CACHE, DFLAG_EXIT_PAYLOAD,
-    // and DFLAG_ALIAS (dist.h:33, 34, 43, 52, 67, 113-123), with the rejectable and the strict
+    // DFLAG_FRAGMENTS, and DFLAG_ALIAS (dist.h:33, 34, 43, 52, 53, 67, 113-123), with the rejectable and the strict
     // order flags of ERTS (dist.h:129-135).
     let epmd = Epmd::start();
     let erts = erts_erl(
@@ -255,7 +255,7 @@ fn offers_the_mandatory_distribution_flags_the_monitor_flags_exit_payload_and_al
     );
     assert_eq!(
         stdout(&output),
-        "{erts_dflags,55889571772,17230663572,55889571772,8396866,8192}\n"
+        "{erts_dflags,55897960380,17230663572,55897960380,8396866,8192}\n"
     );
 }
 
@@ -577,6 +577,415 @@ fn exchanges_many_cached_atoms_with_pinned_erts() {
 }
 
 #[test]
+fn exchanges_large_messages_with_pinned_erts() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let server_name = format!("dfrag{id}");
+    let server = ErtsNode::start(
+        &epmd,
+        &["+S", "4", "-sname", &server_name, "-setcookie", "ck"],
+        "register(fragment_echo, self()), io:format(\"~s~n\", [node()]), \
+         F = fun F() -> receive {From, Data} -> spawn(fun() -> From ! {echo, Data} end), F() \
+         after 30000 -> halt(2) end end, F().",
+    );
+    let node = server.line();
+    let expression = format!(
+        "true = net_kernel:connect_node('{node}'), Parent = self(), \
+         Data = binary:copy(<<42>>, 131073), \
+         Exchange = fun() -> {{fragment_echo, '{node}'}} ! {{self(), Data}}, \
+         receive {{echo, Result}} -> Result =:= Data after 10000 -> timeout end end, \
+         Single = Exchange(), \
+         Atoms = [list_to_atom(lists:duplicate(200, 2048) ++ integer_to_list(N)) || N <- lists:seq(1,160)], \
+         Wide = {{Atoms, Data}}, {{fragment_echo, '{node}'}} ! {{self(), Wide}}, \
+         WideResult = receive {{echo, Reply}} -> Reply =:= Wide after 10000 -> timeout end, \
+         Ps = [spawn(fun() -> receive go -> Parent ! {{done, Exchange()}} end end) || _ <- lists:seq(1,4)], \
+         [P ! go || P <- Ps], \
+         Results = [receive {{done, R}} -> R after 10000 -> timeout end || _ <- Ps], \
+         io:format(\"~p~n\", [{{Single, WideResult, Results}}]), halt()."
+    );
+    let run = |name: &str| {
+        vec![
+            "+S".to_owned(),
+            "4".to_owned(),
+            "-sname".to_owned(),
+            name.to_owned(),
+            "-setcookie".to_owned(),
+            "ck".to_owned(),
+            "-noshell".to_owned(),
+            "-eval".to_owned(),
+            expression.clone(),
+        ]
+    };
+    for (label, output) in [
+        ("ERTS", erts_erl(&epmd, &run(&format!("dfrerts{id}")))),
+        ("PBeam", pbeam_erl(&epmd, &run(&format!("dfrpbeam{id}")))),
+    ] {
+        assert_eq!(
+            stdout(&output),
+            "{true,true,[true,true,true,true]}\n",
+            "{label}: {output:?}"
+        );
+    }
+}
+
+#[test]
+fn kills_the_fragment_controller_on_sequence_errors_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let expression = "F = fun(N, Case) -> Parent=self(), \
+        {Pid,Ref}=spawn_monitor(fun() -> \
+        Node=list_to_atom(\"frag_peer_\"++integer_to_list(N)++\"@nohost\"), \
+        erts_internal:new_connection(Node), Flags=element(3,erts_internal:get_dflags()) bor 16#800000, \
+        {ok,H}=erts_internal:create_dist_channel(Node,self(),{Flags,1}), \
+        <<131,C/binary>>=term_to_binary({2,empty,self()}), \
+        First= <<131,69,3:64,3:64,0,C/binary>>, Last= <<131,70,3:64,1:64>>, \
+        case Case of missing -> erlang:dist_ctrl_put_data(H,Last); \
+        duplicate -> erlang:dist_ctrl_put_data(H,First), erlang:dist_ctrl_put_data(H,First); \
+        wrong -> erlang:dist_ctrl_put_data(H,First), erlang:dist_ctrl_put_data(H,Last); \
+        split -> erlang:dist_ctrl_put_data(H,<<131,69,3:64,2:64,0,97>>); \
+        short -> erlang:dist_ctrl_put_data(H,<<131,70>>); \
+        version -> erlang:dist_ctrl_put_data(H,<<130,70,3:64,1:64>>) end, \
+        Parent ! survived, receive after 1000 -> ok end end), \
+        receive {'DOWN',Ref,process,Pid,R} -> {Case,R,nodes(connected)} after 5000 -> timeout end end, \
+        io:format(\"~w~n\",[[F(1,missing),F(2,duplicate),F(3,wrong),F(4,split),F(5,short),F(6,version)]]), halt().";
+    let run = |name: &str| {
+        vec![
+            "-sname".to_owned(),
+            name.to_owned(),
+            "-kernel".to_owned(),
+            "logger_level".to_owned(),
+            "none".to_owned(),
+            "-noshell".to_owned(),
+            "-eval".to_owned(),
+            expression.to_owned(),
+        ]
+    };
+    for (label, output) in [
+        ("ERTS", erts_erl(&epmd, &run(&format!("fser{id}")))),
+        ("PBeam", pbeam_erl(&epmd, &run(&format!("fspb{id}")))),
+    ] {
+        assert_eq!(
+            stdout(&output),
+            "[{missing,killed,[]},{duplicate,killed,[]},{wrong,killed,[]},{split,killed,[]},{short,killed,[]},{version,killed,[]}]\n",
+            "{label}: {output:?}"
+        );
+    }
+}
+
+#[test]
+fn reassembles_interleaved_fragments_with_their_own_atom_tables_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let erts_name = format!("dfintererts{id}");
+    let pbeam_name = format!("dfinterpb{id}");
+    let expression = "dist_channel_probe:fragment_interleaving(), halt().";
+    let erts = probe(
+        &["-sname", &erts_name, "-kernel", "logger_level", "none"],
+        expression,
+    );
+    let pbeam = probe(
+        &["-sname", &pbeam_name, "-kernel", "logger_level", "none"],
+        expression,
+    );
+    let expected = "fragment_interleaving: [[alpha,beta],[beta,alpha]]\n";
+    assert_eq!(stdout(&erts_erl(&epmd, &erts)), expected);
+    assert_eq!(stdout(&pbeam_erl(&epmd, &pbeam)), expected);
+}
+
+#[test]
+fn clears_fragment_sequences_when_a_connection_is_replaced_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let erts_name = format!("dfreconnecterts{id}");
+    let pbeam_name = format!("dfreconnectpb{id}");
+    let expression = "dist_channel_probe:fragment_reconnect(), halt().";
+    let erts = probe(
+        &["-sname", &erts_name, "-kernel", "logger_level", "none"],
+        expression,
+    );
+    let pbeam = probe(
+        &["-sname", &pbeam_name, "-kernel", "logger_level", "none"],
+        expression,
+    );
+    let expected = "fragment_reconnect: [killed,noconnection,[],42]\n";
+    assert_eq!(stdout(&erts_erl(&epmd, &erts)), expected);
+    assert_eq!(stdout(&pbeam_erl(&epmd, &pbeam)), expected);
+}
+
+#[test]
+fn writes_fragment_headers_and_a_large_atom_cache_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let erts_name = format!("dfoutputerts{id}");
+    let pbeam_name = format!("dfoutputpb{id}");
+    let expression = "dist_channel_probe:fragment_output(), halt().";
+    let erts = probe(
+        &["-sname", &erts_name, "-kernel", "logger_level", "none"],
+        expression,
+    );
+    let pbeam = probe(
+        &["-sname", &pbeam_name, "-kernel", "logger_level", "none"],
+        expression,
+    );
+    let expected = "fragment_output: [3,none,true,none]\n";
+    assert_eq!(stdout(&erts_erl(&epmd, &erts)), expected);
+    assert_eq!(stdout(&pbeam_erl(&epmd, &pbeam)), expected);
+}
+
+#[test]
+fn keeps_a_large_control_term_whole_until_1562_as_the_row_records() {
+    // Pinned ERTS sends an E fragment with id 2. PBeam keeps the D packet
+    // whole. Issue #1562 adds support for a split control term.
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let expression = "dist_channel_probe:fragment_large_control(), halt().";
+    let erts_name = format!("dflargeerts{id}");
+    let pbeam_name = format!("dflargepb{id}");
+    let erts = probe(&["-sname", &erts_name], expression);
+    let pbeam = probe(&["-sname", &pbeam_name], expression);
+    assert_eq!(
+        stdout(&erts_erl(&epmd, &erts)),
+        "fragment_large_control: [69,false]\n"
+    );
+    assert_eq!(
+        stdout(&pbeam_erl(&epmd, &pbeam)),
+        "fragment_large_control: [68,true]\n"
+    );
+}
+
+#[test]
+fn closes_a_port_controller_for_a_fragment_with_an_unknown_sequence() {
+    // The accepted tcp_inet port receives the packet under its port lock.
+    // A distribution payload that does not follow the documented layout
+    // makes ERTS close the controller with killed
+    // (dist.c:2147-2150, 3161-3165, 4015-4018).
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let expression = "process_flag(trap_exit,true), \
+        {ok,L}=gen_tcp:listen(0,[binary,{active,false}]), \
+        {ok,Port}=inet:port(L), \
+        {ok,C}=gen_tcp:connect({127,0,0,1},Port,[binary,{active,false},{packet,4}]), \
+        {ok,A}=gen_tcp:accept(L), Ref=erlang:monitor(port,A), \
+        Node=fragment_port_peer@nohost, erts_internal:new_connection(Node), \
+        Flags=element(3,erts_internal:get_dflags()) bor 16#800000, \
+        {ok,_}=erts_internal:create_dist_channel(Node,A,{Flags,1}), \
+        ok=inet:setopts(A,[{active,true},{deliver,port},{packet,4}]), \
+        ok=gen_tcp:send(C,<<131,70,3:64,1:64>>), \
+        Reason=receive {'DOWN',Ref,port,A,R} -> R after 5000 -> timeout end, \
+        io:format(\"~p~n\",[{Reason,erlang:port_info(A),nodes(connected),gen_tcp:recv(C,0,5000)}]), halt().";
+    let run = |name: &str| {
+        vec![
+            "-sname".to_owned(),
+            name.to_owned(),
+            "-kernel".to_owned(),
+            "logger_level".to_owned(),
+            "none".to_owned(),
+            "-noshell".to_owned(),
+            "-eval".to_owned(),
+            expression.to_owned(),
+        ]
+    };
+    let expected = "{killed,undefined,[],{error,closed}}\n";
+    assert_eq!(
+        stdout(&erts_erl(&epmd, &run(&format!("dfporterts{id}")))),
+        expected
+    );
+    assert_eq!(
+        stdout(&pbeam_erl(&epmd, &run(&format!("dfportpb{id}")))),
+        expected
+    );
+}
+
+#[test]
+fn checks_fragment_layout_from_a_process_input_handler_for_a_port_controller() {
+    // A fragment sequence that does not follow the documented layout closes
+    // the port controller when its input handler is a process.
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let expression = "process_flag(trap_exit,true), \
+        {ok,L}=gen_tcp:listen(0,[binary,{active,false}]), \
+        {ok,Port}=inet:port(L), \
+        {ok,C}=gen_tcp:connect({127,0,0,1},Port,[binary,{active,false},{packet,4}]), \
+        {ok,A}=gen_tcp:accept(L), Ref=erlang:monitor(port,A), \
+        Node=fragment_handler_peer@nohost, erts_internal:new_connection(Node), \
+        Flags=element(3,erts_internal:get_dflags()) bor 16#800000, \
+        {ok,Handle}=erts_internal:create_dist_channel(Node,A,{Flags,1}), \
+        ok=erlang:dist_ctrl_input_handler(Handle,self()), \
+        ok=erlang:dist_ctrl_put_data(Handle,<<131,70,3:64,1:64>>), \
+        Reason=receive {'DOWN',Ref,port,A,R} -> R after 5000 -> timeout end, \
+        io:format(\"~p~n\",[{Reason,erlang:port_info(A),nodes(connected),gen_tcp:recv(C,0,5000)}]), halt().";
+    let erts_name = format!("dfhandlererts{id}");
+    let pbeam_name = format!("dfhandlerpb{id}");
+    let run = |name: &str| {
+        vec![
+            "-sname".to_owned(),
+            name.to_owned(),
+            "-kernel".to_owned(),
+            "logger_level".to_owned(),
+            "none".to_owned(),
+            "-noshell".to_owned(),
+            "-eval".to_owned(),
+            expression.to_owned(),
+        ]
+    };
+    let expected = "{killed,undefined,[],{error,closed}}\n";
+    assert_eq!(stdout(&erts_erl(&epmd, &run(&erts_name))), expected);
+    assert_eq!(stdout(&pbeam_erl(&epmd, &run(&pbeam_name))), expected);
+}
+
+#[test]
+fn checks_fragment_layout_when_a_port_is_activated() {
+    // The first packet makes active-once passive. The second packet is
+    // delivered by the control that activates the port again.
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let expression = "process_flag(trap_exit,true), \
+        {ok,L}=gen_tcp:listen(0,[binary,{active,false}]), \
+        {ok,Port}=inet:port(L), \
+        {ok,C}=gen_tcp:connect({127,0,0,1},Port,[binary,{active,false}]), \
+        {ok,A}=gen_tcp:accept(L), Ref=erlang:monitor(port,A), \
+        Node=activation_fragment_peer@nohost, erts_internal:new_connection(Node), \
+        Flags=element(3,erts_internal:get_dflags()) bor 16#800000, \
+        {ok,_}=erts_internal:create_dist_channel(Node,A,{Flags,1}), \
+        ok=inet:setopts(A,[{active,once},{deliver,port},{packet,4}]), \
+        <<131,Control/binary>>=term_to_binary({2,empty,self()}), \
+        <<131,Message/binary>>=term_to_binary(ready), \
+        First= <<131,68,0,Control/binary,Message/binary>>, \
+        Second= <<131,70,3:64,1:64>>, \
+        ok=gen_tcp:send(C,<<(byte_size(First)):32,First/binary,(byte_size(Second)):32,Second/binary>>), \
+        receive ready -> ok after 5000 -> exit(first_timeout) end, \
+        ok=inet:setopts(A,[{active,true}]), \
+        Reason=receive {'DOWN',Ref,port,A,R} -> R after 5000 -> timeout end, \
+        io:format(\"~p~n\",[{Reason,erlang:port_info(A),nodes(connected),gen_tcp:recv(C,0,5000)}]), halt().";
+    let erts_name = format!("dfactiveerts{id}");
+    let pbeam_name = format!("dfactivepb{id}");
+    let erts = ErtsNode::start(
+        &epmd,
+        &["-sname", &erts_name, "-kernel", "logger_level", "none"],
+        expression,
+    );
+    assert_eq!(erts.line(), "{killed,undefined,[],{error,closed}}");
+    let pbeam = pbeam_node(
+        &epmd,
+        &["-sname", &pbeam_name, "-kernel", "logger_level", "none"],
+        expression,
+    );
+    assert_eq!(pbeam.line(), "{killed,undefined,[],{error,closed}}");
+}
+
+// Pinned OTP 29.1.1 exits 139 for sequence 0, fragment 2 with complete
+// control and message. PBeam follows the non-fragmented source path instead.
+#[test]
+fn treats_zero_sequence_as_a_nonfragmented_message() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let run = |name: &str, sequence: u8, fragment: u8| {
+        let expression = format!(
+            "Node=zero_fragment_peer@nohost, erts_internal:new_connection(Node), \
+            Flags=element(3,erts_internal:get_dflags()) bor 16#800000, \
+            {{ok,H}}=erts_internal:create_dist_channel(Node,self(),{{Flags,1}}), \
+            <<131,C/binary>>=term_to_binary({{2,empty,self()}}), \
+            <<131,M/binary>>=term_to_binary(ok), \
+            erlang:dist_ctrl_put_data(H,<<131,69,{sequence}:64,{fragment}:64,0,C/binary,M/binary>>), \
+            receive ok -> io:format(\"delivered~n\") after 5000 -> io:format(\"timeout~n\") end, halt()."
+        );
+        vec![
+            "-sname".to_owned(),
+            name.to_owned(),
+            "-kernel".to_owned(),
+            "logger_level".to_owned(),
+            "none".to_owned(),
+            "-noshell".to_owned(),
+            "-eval".to_owned(),
+            expression,
+        ]
+    };
+    assert_eq!(
+        stdout(&erts_erl(&epmd, &run(&format!("fzert{id}"), 0, 1))),
+        "delivered\n"
+    );
+    for fragment in [1, 2] {
+        assert_eq!(
+            stdout(&pbeam_erl(
+                &epmd,
+                &run(&format!("fzpb{fragment}{id}"), 0, fragment)
+            )),
+            "delivered\n"
+        );
+    }
+    assert_eq!(
+        stdout(&erts_erl(&epmd, &run(&format!("fsert{id}"), 3, 1))),
+        "delivered\n"
+    );
+    assert_eq!(
+        stdout(&pbeam_erl(&epmd, &run(&format!("fspbeam{id}"), 3, 1))),
+        "delivered\n"
+    );
+}
+
+// OTP 29.1.1 exits 139 for a complete first fragment with id 0;
+// dist.c:2131-2163 decrements its unsigned fragment count below zero.
+#[test]
+fn closes_the_controller_for_zero_fragment_id() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let expression = "{Pid,Ref}=spawn_monitor(fun() -> \
+        Node=zero_id_peer@nohost, erts_internal:new_connection(Node), \
+        Flags=element(3,erts_internal:get_dflags()) bor 16#800000, \
+        {ok,H}=erts_internal:create_dist_channel(Node,self(),{Flags,1}), \
+        <<131,C/binary>>=term_to_binary({2,empty,self()}), \
+        <<131,M/binary>>=term_to_binary(ok), \
+        erlang:dist_ctrl_put_data(H,<<131,69,3:64,0:64,0,C/binary,M/binary>>), \
+        receive after 5000 -> ok end end), \
+        receive {'DOWN',Ref,process,Pid,Reason} -> io:format(\"~p~n\",[{Reason,nodes(connected)}]) \
+        after 5000 -> io:format(\"timeout~n\") end, halt().";
+    let args = vec![
+        "-sname".to_owned(),
+        format!("fzid{id}"),
+        "-kernel".to_owned(),
+        "logger_level".to_owned(),
+        "none".to_owned(),
+        "-noshell".to_owned(),
+        "-eval".to_owned(),
+        expression.to_owned(),
+    ];
+    assert_eq!(stdout(&pbeam_erl(&epmd, &args)), "{killed,[]}\n");
+}
+
+#[test]
+fn accepts_a_large_control_term_in_the_first_fragment_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let expression = "register(fragment_control_target, self()), \
+        Node = fragment_control_peer@nohost, erts_internal:new_connection(Node), \
+        Flags = element(3, erts_internal:get_dflags()) bor 16#800000, \
+        {ok, Handle} = erts_internal:create_dist_channel(Node, self(), {Flags, 1}), \
+        <<131, Control/binary>> = term_to_binary({6, self(), binary:copy(<<42>>, 70000), fragment_control_target}), \
+        <<131, Message/binary>> = term_to_binary(ok), \
+        erlang:dist_ctrl_put_data(Handle, <<131,69,3:64,2:64,0,Control/binary>>), \
+        erlang:dist_ctrl_put_data(Handle, <<131,70,3:64,1:64,Message/binary>>), \
+        receive ok -> io:format(\"ok~n\") after 5000 -> io:format(\"timeout~n\") end, halt().";
+    let run = |name: &str| {
+        vec![
+            "-sname".to_owned(),
+            name.to_owned(),
+            "-kernel".to_owned(),
+            "logger_level".to_owned(),
+            "none".to_owned(),
+            "-noshell".to_owned(),
+            "-eval".to_owned(),
+            expression.to_owned(),
+        ]
+    };
+    for (label, output) in [
+        ("ERTS", erts_erl(&epmd, &run(&format!("dfcerts{id}")))),
+        ("PBeam", pbeam_erl(&epmd, &run(&format!("dfcpbeam{id}")))),
+    ] {
+        assert_eq!(stdout(&output), "ok\n", "{label}: {output:?}");
+    }
+}
+
+#[test]
 fn preserves_cache_order_for_concurrent_port_senders() {
     // The 64 processes interleave sends. Their scheduler assignment is not
     // deterministic, so the scheduler count is diagnostic only.
@@ -681,35 +1090,6 @@ fn reports_a_dead_alias_in_a_cached_control_term() {
 #[test]
 fn reports_a_dead_alias_in_a_cached_message() {
     cache_encoder_rejects_dead_alias("Pid ! Alias");
-}
-
-#[test]
-fn reports_an_unsupported_fragment_connection() {
-    let epmd = Epmd::start();
-    let name = format!("dcfrag{}", std::process::id());
-    let expression = "Node = cache_fragment_peer@nohost, erts_internal:new_connection(Node), \
-        Flags = element(3,erts_internal:get_dflags()) bor 16#800000, \
-        {ok,Handle} = erts_internal:create_dist_channel(Node,self(),{Flags,1}), \
-        erlang:dist_ctrl_put_data(Handle, <<131,68,0>>), halt().";
-    let output = pbeam_erl(
-        &epmd,
-        &[
-            "-sname",
-            &name,
-            "-kernel",
-            "logger_level",
-            "none",
-            "-noshell",
-            "-eval",
-            expression,
-        ],
-    );
-    assert_eq!(output.status.code(), Some(1), "{output:?}");
-    assert_eq!(
-        String::from_utf8_lossy(&output.stderr),
-        "pbeam: unsupported distribution message on a connection with the atom cache or fragments: see \"Distribution\" in docs/erts-differences.md\n",
-        "{output:?}"
-    );
 }
 
 #[test]
