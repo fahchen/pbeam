@@ -1323,13 +1323,15 @@ fn ends_the_links_of_a_lost_connection_as_pinned_erts() {
     // that traps exits gets the message `{'EXIT', Pid, noconnection}`, and
     // the process that does not trap exits ends with the reason
     // `noconnection` (erts_do_net_exits, dist.c:1021-1117,
-    // erl_proc_sig_queue.c:4632-4815). Each pair of ERTS and PBeam nodes
+    // erl_proc_sig_queue.c:4632-4815). A process monitor on the same
+    // connection also gets a DOWN message with reason `noconnection`
+    // (dist.c:305-321). Each pair of ERTS and PBeam nodes
     // runs over the prim_socket carrier and over the tcp_inet port
     // controller. A server node serves one client node, because the client
     // stops it.
     let epmd = Epmd::start();
     let id = std::process::id();
-    let expected = "[{linked,noconnection,noconnection}]\n";
+    let expected = "[{linked,noconnection,noconnection,noconnection}]\n";
     for (server_pbeam, socket) in [(false, true), (false, false), (true, true), (true, false)] {
         for client_pbeam in [false, true] {
             let name = format!("dlo{server_pbeam}{socket}{client_pbeam}{id}");

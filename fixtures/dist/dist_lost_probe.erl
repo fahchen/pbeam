@@ -24,8 +24,8 @@ serve() ->
             erlang:halt()
     end.
 
-%% Link the two client processes to the server process, stop the server
-%% node, and print the exit reason that each client process took.
+%% Link two client processes and monitor the server process. Stop the server
+%% node and print the reasons of the link exit and monitor down signals.
 client(Server) ->
     true = net_kernel:connect_node(Server),
     {dlost, Server} ! {victim, self()},
@@ -43,13 +43,16 @@ client(Server) ->
                          receive stop -> ok end
                  end),
     Ref = monitor(process, Kill),
+    RemoteRef = monitor(process, V),
     receive {ready, Trap} -> ok end,
     receive {ready, Kill} -> ok end,
     {dlost, Server} ! halt,
     Exit = receive {trap, Msg} -> Msg after 20000 -> timeout end,
     Down = receive {'DOWN', Ref, _, _, Why} -> Why after 20000 -> timeout end,
+    RemoteDown = receive {'DOWN', RemoteRef, process, V, RemoteWhy} -> RemoteWhy
+                 after 20000 -> timeout end,
     Result = case Exit of
-                 {'EXIT', V, Reason} -> {linked, Reason, Down};
-                 _ -> {Exit, Down}
+                 {'EXIT', V, Reason} -> {linked, Reason, Down, RemoteDown};
+                 _ -> {Exit, Down, RemoteDown}
              end,
     io:format("~p~n", [[Result]]).
