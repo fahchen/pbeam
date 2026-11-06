@@ -6,7 +6,7 @@
          port_message/0, deliver_port/0, deliver_udp/0, input/0, reject/1,
          trace_token/1, monitor_op/0, demonitor_name/0, demonitor_ref/0,
          atom_cache/0, fragment_interleaving/0, fragment_reconnect/0,
-         fragment_output/0, output/0, port_output/0,
+         fragment_output/0, fragment_large_control/0, output/0, port_output/0,
          alias_ext/0, dead_alias/1, exit_input/0, link_input/0,
          link_noconnection/0, altact_op/0, spawn_bad_ref/0, spawn_bad_from/0,
          spawn_bad_from_local/0,
@@ -581,6 +581,24 @@ fragment_output() ->
     <<131, 70, WideSequence:64, 1:64, _/binary>> = WideLast,
     WideCtrl ! stop,
     show(fragment_output, [length(Packets), Empty, byte_size(WideFirst) > 131072, WideEmpty]).
+
+%% ERTS starts a fragment sequence for a large control term. PBeam keeps
+%% the packet whole until issue #1562 adds support for a split control term.
+fragment_large_control() ->
+    logger:set_primary_config(level, none),
+    Flags = mandatory() bor 16#800000,
+    Node = fragment_control_peer@nohost,
+    {Ctrl, Handle} = fragment_output_controller(Node, Flags),
+    true = exit(remote_pid(Node), binary:copy(<<42>>, 70000)),
+    Ctrl ! {take, Handle, 1},
+    {[Packet], Next} = receive {Ctrl, Data} -> Data end,
+    <<131, Tag, _/binary>> = Packet,
+    case Tag of
+        69 -> <<131, 69, _:64, 2:64, _/binary>> = Packet;
+        68 -> ok
+    end,
+    Ctrl ! stop,
+    show(fragment_large_control, [Tag, Next =:= none]).
 
 %% A spawn request carries its option list in the control term.
 fragment_output_controller(Node, Flags) ->

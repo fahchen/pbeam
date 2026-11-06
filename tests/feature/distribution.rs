@@ -731,6 +731,27 @@ fn writes_fragment_headers_and_a_large_atom_cache_as_pinned_erts() {
 }
 
 #[test]
+fn keeps_a_large_control_term_whole_until_1562_as_the_row_records() {
+    // Pinned ERTS sends an E fragment with id 2. PBeam keeps the D packet
+    // whole. Issue #1562 adds support for a split control term.
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let expression = "dist_channel_probe:fragment_large_control(), halt().";
+    let erts_name = format!("dflargeerts{id}");
+    let pbeam_name = format!("dflargepb{id}");
+    let erts = probe(&["-sname", &erts_name], expression);
+    let pbeam = probe(&["-sname", &pbeam_name], expression);
+    assert_eq!(
+        stdout(&erts_erl(&epmd, &erts)),
+        "fragment_large_control: [69,false]\n"
+    );
+    assert_eq!(
+        stdout(&pbeam_erl(&epmd, &pbeam)),
+        "fragment_large_control: [68,true]\n"
+    );
+}
+
+#[test]
 fn closes_a_port_controller_for_a_fragment_with_an_unknown_sequence() {
     // The accepted tcp_inet port receives the packet under its port lock.
     // A distribution payload that does not follow the documented layout
