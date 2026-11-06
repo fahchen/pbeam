@@ -1,9 +1,9 @@
 //! The input of a distribution connection: the messages that another node
 //! sends to a local process or to a registered name, as
 //! `erts_net_message` gives them (`dist.c:2017-2600`). A connection can
-//! use the normal atom-cache header. Fragments remain unsupported.
+//! use an atom-cache header and fragment sequences.
 
-use super::{Scheduler, node::Named};
+use super::{Scheduler, dist_table::DistFragment, node::Named};
 use crate::{
     error::{BeamError, error},
     runtime::{interpreter::bif::decode_dist, signal::Signal},
@@ -67,8 +67,7 @@ impl Scheduler {
     ///
     /// # Errors
     ///
-    /// A connection with fragments (see [`FRAGMENTS`]),
-    /// a packet that ERTS rejects (see [`REJECTED`]), a control message
+    /// A packet that ERTS rejects (see [`REJECTED`]), a control message
     /// with a trace token, another operation, and a term that PBeam cannot
     /// hold.
     // `watched` and `watcher` are the names of the ERTS control message of a
@@ -85,12 +84,17 @@ impl Scheduler {
         flags: u64,
         packet: &[u8],
     ) -> Result<(), BeamError> {
-        if flags & FRAGMENTS != 0 {
-            return Err(error(
-                "unsupported distribution message on a connection with the atom cache or fragments: see \"Distribution\" in docs/erts-differences.md",
-            ));
-        }
-        let (ext, cache) = if flags & ATOM_CACHE != 0 {
+        let reassembled = if flags & FRAGMENTS != 0 && matches!(packet.get(1), Some(b'E' | b'F')) {
+            let Some(message) = self.dist_fragment(node, connection, packet)? else {
+                return Ok(());
+            };
+            Some(message)
+        } else {
+            None
+        };
+        let (ext, cache) = if let Some((bytes, atoms)) = &reassembled {
+            (bytes.as_slice(), Some(atoms.clone()))
+        } else if flags & (ATOM_CACHE | FRAGMENTS) != 0 {
             let Some((ext, cache)) = self.dist_atom_header(node, connection, packet)? else {
                 return Ok(());
             };
@@ -203,6 +207,68 @@ impl Scheduler {
             (Some(operation), _) => Err(error(format!(
                 "unsupported distribution operation {operation}: see \"Distribution\" in docs/erts-differences.md"
             ))),
+        }
+    }
+
+    /// Retain each sequence with the atom table from its first fragment.
+    fn dist_fragment(
+        &self,
+        node: &Atom,
+        connection: u32,
+        packet: &[u8],
+    ) -> Result<Option<(Vec<u8>, Vec<Atom>)>, BeamError> {
+        if packet.len() < 18 || packet[0] != VERSION_MAGIC {
+            return Err(error(REJECTED));
+        }
+        let sequence = u64::from_be_bytes(packet[2..10].try_into().expect("sequence length"));
+        let id = u64::from_be_bytes(packet[10..18].try_into().expect("fragment id length"));
+        if id == 0 {
+            return Err(error(REJECTED));
+        }
+        if packet[1] == b'E' {
+            let mut header = vec![VERSION_MAGIC, b'D'];
+            header.extend_from_slice(&packet[18..]);
+            let Some((body, atoms)) = self.dist_atom_header(node, connection, &header)? else {
+                return Ok(None);
+            };
+            let bytes = body.to_vec();
+            let mut dist = self.node.dist();
+            let Some(sequences) = dist.fragments_in(node, connection) else {
+                return Ok(None);
+            };
+            if sequences.contains_key(&sequence) {
+                return Err(error(REJECTED));
+            }
+            if id == 1 {
+                return Ok(Some((bytes, atoms)));
+            }
+            sequences.insert(
+                sequence,
+                DistFragment {
+                    next: id - 1,
+                    bytes,
+                    atoms,
+                },
+            );
+            Ok(None)
+        } else {
+            let mut dist = self.node.dist();
+            let Some(sequences) = dist.fragments_in(node, connection) else {
+                return Ok(None);
+            };
+            let Some(fragment) = sequences.get_mut(&sequence) else {
+                return Err(error(REJECTED));
+            };
+            if fragment.next != id {
+                return Err(error(REJECTED));
+            }
+            fragment.bytes.extend_from_slice(&packet[18..]);
+            fragment.next -= 1;
+            if id > 1 {
+                return Ok(None);
+            }
+            let fragment = sequences.remove(&sequence).expect("fragment exists");
+            Ok(Some((fragment.bytes, fragment.atoms)))
         }
     }
 
@@ -320,3 +386,7 @@ impl Scheduler {
             .ok_or_else(|| error(REJECTED))
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/runtime/scheduler/dist_input.rs"]
+mod tests;
