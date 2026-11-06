@@ -5,7 +5,28 @@
 %% dist.c:1021-1117; erl_proc_sig_queue.c:4632-4815).
 -module(dist_lost_probe).
 -export([server/0, client/1, client_disconnect/1, monitor_local/0, monitor_notalive/0,
-         monitor_remote/0]).
+         monitor_remote/0, monitor_connected/1]).
+
+monitor_connected(Server) ->
+    true = erlang:monitor_node(foo, false),
+    true = erlang:monitor_node(Server, false),
+    true = net_kernel:connect_node(Server),
+    true = erlang:monitor_node(Server, true),
+    true = erlang:monitor_node(Server, true, []),
+    true = erlang:monitor_node(Server, false),
+    true = erlang:disconnect_node(Server),
+    First = receive {nodedown, Server} -> nodedown after 5000 -> timeout end,
+    Second = receive {nodedown, Server} -> nodedown after 100 -> none end,
+    true = erlang:monitor_node(Server, false),
+    true = net_kernel:connect_node(Server),
+    true = erlang:monitor_node(Server, true),
+    true = erlang:monitor_node(Server, true),
+    {Child, Ref} = spawn_monitor(fun() -> erlang:monitor_node(Server, true) end),
+    receive {'DOWN', Ref, process, Child, normal} -> ok end,
+    true = erlang:disconnect_node(Server),
+    Third = receive {nodedown, Server} -> nodedown after 5000 -> timeout end,
+    Fourth = receive {nodedown, Server} -> nodedown after 5000 -> timeout end,
+    io:format("~p~n", [[First, Second, Third, Fourth]]).
 
 monitor_remote() -> erlang:monitor_node(foo, true).
 

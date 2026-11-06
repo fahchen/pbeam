@@ -4202,6 +4202,7 @@ impl Scheduler {
             .expect("the exiting process is alive");
         debug_assert!(!process.in_run_queue, "only the current process exits");
         self.node.remove_process(id);
+        self.node.dist().remove_node_monitors(id);
         // ERTS kills each process controller from the init process
         // `<0.0.0>` (`kill_dist_ctrl_proc`, `dist.c:896-903`), and each port
         // controller exits with `net_kernel_terminated` (`dist.c:930-932`,

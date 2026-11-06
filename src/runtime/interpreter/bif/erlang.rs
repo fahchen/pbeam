@@ -102,8 +102,8 @@ pub(super) fn node(term: &Term, atoms: &AtomTable) -> BifResult {
     }
 }
 
-/// Run the local-node cases of `erlang:monitor_node/2,3` (`dist.c:6479-6667`).
-/// A remote monitor needs connection event delivery, which is not available yet.
+/// Run `erlang:monitor_node/2,3` for the local node and connected nodes
+/// (`dist.c:6479-6667`). A node with no connection needs auto-connect.
 ///
 /// # Examples
 ///
@@ -140,8 +140,13 @@ pub(super) fn monitor_node(
     if *name == local {
         return Ok(Value(Term::static_atom("true")));
     }
+    let enabled = matches!(enabled, Term::Atom(atom) if atom.is_static("true"));
+    let process = scheduler.current_process().id;
+    if scheduler.node().dist().monitor_node(name, process, enabled) {
+        return Ok(Value(Term::static_atom("true")));
+    }
     Err(error(
-        "unsupported erlang:monitor_node/2,3 of another node: see Distribution in docs/erts-differences.md",
+        "unsupported erlang:monitor_node/2,3 of a node without a connection: see Distribution in docs/erts-differences.md",
     ))
 }
 

@@ -1337,9 +1337,54 @@ fn monitors_the_local_node_as_pinned_erts() {
     assert!(!result.status.success(), "{result:?}");
     assert!(
         String::from_utf8_lossy(&result.stderr)
-            .contains("unsupported erlang:monitor_node/2,3 of another node"),
+            .contains("unsupported erlang:monitor_node/2,3 of a node without a connection"),
         "{result:?}"
     );
+}
+
+#[test]
+fn monitors_a_connected_node_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let server_name = format!("dmserver{id}");
+    let server = ErtsNode::start(
+        &epmd,
+        &[
+            "-sname",
+            &server_name,
+            "-setcookie",
+            "ck",
+            "-pa",
+            "fixtures/dist",
+        ],
+        "dist_lost_probe:server().",
+    );
+    let expression = format!(
+        "dist_lost_probe:monitor_connected('{}'), halt().",
+        server.line()
+    );
+    let client_name = format!("dmclient{id}");
+    for socket in [false, true] {
+        let mut prefix = vec![
+            "-sname",
+            client_name.as_str(),
+            "-setcookie",
+            "ck",
+            "-hidden",
+        ];
+        if socket {
+            prefix.extend(SOCKET_CARRIER);
+        }
+        let arguments = probe(&prefix, &expression);
+        assert_eq!(
+            stdout(&erts_erl(&epmd, &arguments)),
+            "[nodedown,none,nodedown,nodedown]\n"
+        );
+        assert_eq!(
+            stdout(&pbeam_erl(&epmd, &arguments)),
+            "[nodedown,none,nodedown,nodedown]\n"
+        );
+    }
 }
 
 #[test]

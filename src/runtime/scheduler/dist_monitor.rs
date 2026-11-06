@@ -190,6 +190,19 @@ impl Scheduler {
         &mut self,
         ended: &super::dist_table::EndedConnection,
     ) {
+        let (name, watchers) = &ended.node_monitors;
+        for (&watcher, &count) in watchers {
+            for _ in 0..count {
+                self.send_message(
+                    ProcessId(0),
+                    watcher,
+                    Term::tuple(vec![
+                        Term::static_atom("nodedown"),
+                        Term::Atom(name.clone()),
+                    ]),
+                );
+            }
+        }
         for &monitor in &ended.monitors {
             let signal = if monitor.side == MonitorSide::Watcher {
                 // The local process holds the monitor, so the end of the

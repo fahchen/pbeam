@@ -115,6 +115,8 @@ struct Entry {
     /// the monitor or a process of the other node holds it on the local
     /// process (`dist.c:2387-2400`, `bif.c:853`).
     monitors: Vec<DistMonitor>,
+    /// Counts of node monitors held by each local process on this connection.
+    node_monitors: HashMap<ProcessId, u64>,
 }
 
 /// One monitor of a connection: the local process, the pid or the name of
@@ -171,6 +173,8 @@ pub(in crate::runtime) struct EndedConnection {
     pub(in crate::runtime) links: Vec<(ProcessId, RemotePid)>,
     /// The monitors of the connection.
     pub(in crate::runtime) monitors: Vec<DistMonitor>,
+    /// Node name and the counts of the detached node monitors.
+    pub(in crate::runtime) node_monitors: (Atom, HashMap<ProcessId, u64>),
 }
 
 /// The node type and the connection id of a node that `erlang:nodes/1,2`
@@ -242,6 +246,7 @@ impl DistTable {
                 order,
                 links: Vec::new(),
                 monitors: Vec::new(),
+                node_monitors: HashMap::new(),
             }
         });
     }
@@ -472,6 +477,49 @@ impl DistTable {
         self.entries[&name.index()].input
     }
 
+    /// Register or remove a node monitor for a process on a connection.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert!(table.monitor_node(&name, process, true));
+    /// ```
+    pub(in crate::runtime) fn monitor_node(
+        &mut self,
+        name: &Atom,
+        process: ProcessId,
+        enabled: bool,
+    ) -> bool {
+        let Some(entry) = self.entries.get_mut(&name.index()) else {
+            return !enabled;
+        };
+        if enabled {
+            if entry.state != State::Connected {
+                return false;
+            }
+            *entry.node_monitors.entry(process).or_default() += 1;
+        } else if let Some(count) = entry.node_monitors.get_mut(&process) {
+            *count -= 1;
+            if *count == 0 {
+                entry.node_monitors.remove(&process);
+            }
+        }
+        true
+    }
+
+    /// Remove each node monitor held by an exiting process.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// table.remove_node_monitors(process);
+    /// ```
+    pub(in crate::runtime) fn remove_node_monitors(&mut self, process: ProcessId) {
+        for entry in self.entries.values_mut() {
+            entry.node_monitors.remove(&process);
+        }
+    }
+
     /// Return the flags, the controller, and the connection id of the entry
     /// of `name` when it is connected (`ERTS_DSIG_PREP_CONNECTED`,
     /// `dist.c:3250-3251`).
@@ -555,17 +603,21 @@ impl DistTable {
         let connection = entry.connection_id;
         let links = std::mem::take(&mut entry.links);
         let monitors = std::mem::take(&mut entry.monitors);
+        let node_monitors = (entry.name.clone(), std::mem::take(&mut entry.node_monitors));
         entry.set_idle(self.next_order);
         entry.input = 0;
         // dist.c:1081.
         entry.out = 0;
         entry.input_handler = None;
         self.next_order += 1;
-        (!links.is_empty() || !monitors.is_empty()).then_some(EndedConnection {
-            connection,
-            links,
-            monitors,
-        })
+        (!links.is_empty() || !monitors.is_empty() || !node_monitors.1.is_empty()).then_some(
+            EndedConnection {
+                connection,
+                links,
+                monitors,
+                node_monitors,
+            },
+        )
     }
 
     /// Add the link of `process` to `remote` to the connection `connection`
@@ -796,11 +848,14 @@ impl DistTable {
                 State::Connected => {
                     let links = std::mem::take(&mut entry.links);
                     let monitors = std::mem::take(&mut entry.monitors);
-                    if !links.is_empty() || !monitors.is_empty() {
+                    let node_monitors =
+                        (entry.name.clone(), std::mem::take(&mut entry.node_monitors));
+                    if !links.is_empty() || !monitors.is_empty() || !node_monitors.1.is_empty() {
                         ended.push(EndedConnection {
                             connection: entry.connection_id,
                             links,
                             monitors,
+                            node_monitors,
                         });
                     }
                     controllers.extend(entry.controller);
