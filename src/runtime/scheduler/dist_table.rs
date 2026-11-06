@@ -138,6 +138,7 @@ struct Entry {
 pub(super) enum PendingSignal {
     Send(ProcessId, Term, Term),
     Monitor(ProcessId, Term),
+    Link(ProcessId, Term),
 }
 
 /// An incomplete distribution message and its own atom translation table.
@@ -784,6 +785,13 @@ impl DistTable {
             .push_back(PendingSignal::Monitor(sender, control));
     }
 
+    /// Queue a link on the pending connection.
+    pub(super) fn enqueue_pending_link(&mut self, name: &Atom, sender: ProcessId, control: Term) {
+        self.entry_mut(name)
+            .pending_signals
+            .push_back(PendingSignal::Link(sender, control));
+    }
+
     /// Take pending signals while the entry lock is held.
     pub(super) fn take_pending_signals(&mut self, name: &Atom) -> VecDeque<PendingSignal> {
         std::mem::take(&mut self.entry_mut(name).pending_signals)
@@ -879,7 +887,7 @@ impl DistTable {
     /// `erts_link_dist_insert` does (`erl_monitor_link.h:2523-2548`,
     /// `651-668`, `dist.c:2246-2258`, `3085`), and return whether the
     /// connection has the link. Return `false` when the entry is not
-    /// connected to `connection`, so that the caller gives the process
+    /// pending or connected to `connection`, so that the caller gives the process
     /// `noconnection` (`dist.c:2250-2258`). A connection that already has
     /// the link keeps it, as a duplicate `LINK` deletes its own dist link
     /// (`erl_proc_sig_queue.c:6635-6663`).
@@ -899,7 +907,7 @@ impl DistTable {
             .entries
             .get_mut(&remote.node)
             .expect("the entry of the node stays in the table");
-        if entry.state != State::Connected || entry.connection_id != connection {
+        if entry.state == State::Idle || entry.connection_id != connection {
             return false;
         }
         if !entry.links.contains(&(process, remote)) {

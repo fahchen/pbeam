@@ -331,7 +331,8 @@ impl Scheduler {
                     send_control(flags, Term::Pid(sender), &to, SendPriority::Normal),
                     Some(message),
                 ),
-                super::dist_table::PendingSignal::Monitor(sender, control) => {
+                super::dist_table::PendingSignal::Monitor(sender, control)
+                | super::dist_table::PendingSignal::Link(sender, control) => {
                     (sender, control, None)
                 }
             };
