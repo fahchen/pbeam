@@ -79,3 +79,22 @@ fn closes_a_distribution_port_when_the_write_fails() {
     scheduler.dist_port_send(port).unwrap();
     assert!(scheduler.node.dist().connected(&node).is_none());
 }
+
+#[test]
+fn fragments_an_oversized_distribution_packet() {
+    let mut packet = vec![131, b'D'];
+    packet.extend(vec![42; 65537]);
+    let fragments = super::fragment_packet(vec![Binary::from(packet)], ProcessId(10));
+    assert_eq!(fragments.len(), 2);
+    let first = fragments[0][0].to_bytes();
+    let last = fragments[1][0].to_bytes();
+    assert_eq!(
+        &first[..18],
+        &[131, b'E', 0, 0, 0, 0, 0, 0, 5, 3, 0, 0, 0, 0, 0, 0, 0, 2]
+    );
+    assert_eq!(
+        &last[..18],
+        &[131, b'F', 0, 0, 0, 0, 0, 0, 5, 3, 0, 0, 0, 0, 0, 0, 0, 1]
+    );
+    assert_eq!(last[18..], [42]);
+}

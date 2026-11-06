@@ -9,12 +9,16 @@ use super::{Scheduler, dist_table::Controller};
 use crate::{
     error::BeamError,
     runtime::interpreter::bif::{encode_dist, encode_dist_cached},
-    term::{Atom, Binary, PortId, ProcessId, Term, external_id::ExternalData},
+    term::{Atom, Binary, PortId, ProcessId, Term, external_id::ExternalData, pid_word},
 };
 
 /// `PASS_THROUGH` (`external.h`): the first byte of a packet without a
 /// distribution header.
 const PASS_THROUGH: u8 = 112;
+
+/// `DFLAG_FRAGMENTS` and `ERTS_DIST_FRAGMENT_SIZE` (`dist.h:53`, `208`).
+const FRAGMENTS: u64 = 0x80_0000;
+const FRAGMENT_SIZE: usize = 64 * 1024;
 
 /// `DFLAG_SEND_SENDER` (`dist.h:49`).
 const SEND_SENDER: u64 = 0x80000;
@@ -203,6 +207,16 @@ impl Scheduler {
         }
         let elements = if flags & 0x2000 != 0 {
             encode_dist_cached(self, &control, message.as_ref(), dist.atom_cache_out(node))?
+        } else if flags & FRAGMENTS != 0 {
+            let mut packet = vec![131, b'D', 0];
+            for term in std::iter::once(&control).chain(message.iter()) {
+                let bytes: Vec<u8> = encode_dist(self, term)?
+                    .iter()
+                    .flat_map(Binary::to_bytes)
+                    .collect();
+                packet.extend_from_slice(&bytes[1..]);
+            }
+            vec![Binary::from(packet)]
         } else {
             let mut elements = vec![Binary::from(vec![PASS_THROUGH])];
             elements.extend(encode_dist(self, &control)?);
@@ -211,15 +225,23 @@ impl Scheduler {
             }
             elements
         };
+        let packets = if flags & FRAGMENTS != 0 {
+            fragment_packet(elements, sender)
+        } else {
+            vec![elements]
+        };
+        let mut notify = false;
+        for packet in packets {
+            notify |= dist.enqueue(node, packet);
+        }
         match controller {
             Controller::Process(process) => {
-                if dist.enqueue(node, elements) {
+                if notify {
                     drop(dist);
                     self.send_message(sender, process, Term::static_atom("dist_data"));
                 }
             }
             Controller::Port(port) => {
-                dist.enqueue(node, elements);
                 drop(dist);
                 self.dist_port_send(port)?;
             }
@@ -320,3 +342,23 @@ fn is_remote_reference(to: &Term) -> bool {
 #[cfg(test)]
 #[path = "../../../tests/runtime/scheduler/dist_output.rs"]
 mod tests;
+
+/// Split a distribution packet into fragments with the sender's ERTS pid word.
+fn fragment_packet(elements: Vec<Binary>, sender: ProcessId) -> Vec<Vec<Binary>> {
+    let bytes: Vec<u8> = elements.iter().flat_map(Binary::to_bytes).collect();
+    if bytes.len() <= FRAGMENT_SIZE + 2 {
+        return vec![elements];
+    }
+    let body = &bytes[2..];
+    let count = body.len().div_ceil(FRAGMENT_SIZE);
+    body.chunks(FRAGMENT_SIZE)
+        .enumerate()
+        .map(|(index, chunk)| {
+            let mut packet = vec![131, if index == 0 { b'E' } else { b'F' }];
+            packet.extend_from_slice(&pid_word(sender).to_be_bytes());
+            packet.extend_from_slice(&((count - index) as u64).to_be_bytes());
+            packet.extend_from_slice(chunk);
+            vec![Binary::from(packet)]
+        })
+        .collect()
+}
