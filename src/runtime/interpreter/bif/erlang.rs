@@ -116,13 +116,15 @@ pub(super) fn monitor_node(
     enabled: &Term,
     options: &Term,
 ) -> Result<BifResult, BeamError> {
+    // ERTS sets the `badopt` cause before it checks the node and boolean
+    // (`dist.c:6489-6509`).
     let Some(mut options) = options.proper_list() else {
-        return Ok(BifResult::badarg());
+        return Ok(BifResult::badopt());
     };
     if options.any(
         |option| !matches!(option, Term::Atom(atom) if atom.is_static("allow_passive_connect")),
     ) {
-        return Ok(BifResult::badarg());
+        return Ok(BifResult::badopt());
     }
     let Term::Atom(name) = node else {
         return Ok(BifResult::badarg());

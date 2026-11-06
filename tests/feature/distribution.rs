@@ -1343,6 +1343,20 @@ fn monitors_the_local_node_as_pinned_erts() {
 }
 
 #[test]
+fn reports_the_monitor_node_badopt_cause_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let arguments = probe(&[], "dist_lost_probe:monitor_badopt(), halt().");
+    let reference = stdout(&erts_erl(&epmd, &arguments));
+    let badopt = "#{cause => badopt,module => erl_erts_errors}";
+    let plain = "#{module => erl_erts_errors}";
+    assert_eq!(
+        reference,
+        format!("[{badopt},{badopt},{badopt},{badopt},{plain},{plain}]\n")
+    );
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), reference);
+}
+
+#[test]
 fn disconnect_node_returns_the_pinned_erts_values_and_ends_the_connection() {
     let epmd = Epmd::start();
     let id = std::process::id();

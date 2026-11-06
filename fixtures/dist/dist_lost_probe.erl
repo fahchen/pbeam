@@ -9,7 +9,20 @@
          monitor_hidden/1, monitor_local_events/0, ordering_server/0, ordering_client/1,
          local_order/1, local_race/0, local_multi/0, controller_reasons/0, no_network/0,
          self_signal/1, monitor_disable_signal/1, nodes_forms/2, nodes_order/0, nodes_expiry/0,
-         disconnect_cases/1, disconnect_notalive/0]).
+         disconnect_cases/1, disconnect_notalive/0, monitor_badopt/0]).
+
+monitor_badopt() ->
+    Call = fun(Node, Enabled, Options) ->
+                   try erlang:monitor_node(Node, Enabled, Options)
+                   catch error:badarg:Stack ->
+                             [{erlang, monitor_node, _, Info} | _] = Stack,
+                             proplists:get_value(error_info, Info)
+                   end
+           end,
+    io:format("~w~n", [[Call(node(), true, bad), Call(node(), true, [bad]),
+                         Call(node(), true, [allow_passive_connect | bad]),
+                         Call(1, invalid, [bad]), Call(1, invalid, []),
+                         Call(node(), invalid, [])]]).
 
 disconnect_cases(Server) ->
     false = erlang:disconnect_node(node()),
