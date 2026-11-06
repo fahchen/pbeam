@@ -1343,6 +1343,43 @@ fn monitors_the_local_node_as_pinned_erts() {
 }
 
 #[test]
+fn disconnect_node_returns_the_pinned_erts_values_and_ends_the_connection() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    let server_name = format!("ndisserver{id}");
+    let server = ErtsNode::start(
+        &epmd,
+        &[
+            "-sname",
+            &server_name,
+            "-setcookie",
+            "ck",
+            "-pa",
+            "fixtures/dist",
+        ],
+        "dist_lost_probe:server().",
+    );
+    let expression = format!(
+        "dist_lost_probe:disconnect_cases('{}'), halt().",
+        server.line()
+    );
+    let client_name = format!("ndisclient{id}");
+    let arguments = probe(&["-sname", &client_name, "-setcookie", "ck"], &expression);
+    let expected = "[true,nodedown,false,false]\n";
+    assert_eq!(stdout(&erts_erl(&epmd, &arguments)), expected);
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), expected);
+    let arguments = probe(&[], "dist_lost_probe:disconnect_notalive(), halt().");
+    assert_eq!(
+        stdout(&erts_erl(&epmd, &arguments)),
+        "[ignored,ignored,ignored]\n"
+    );
+    assert_eq!(
+        stdout(&pbeam_erl(&epmd, &arguments)),
+        "[ignored,ignored,ignored]\n"
+    );
+}
+
+#[test]
 fn expires_send_only_known_nodes_as_pinned_erts() {
     let epmd = Epmd::start();
     let id = std::process::id();

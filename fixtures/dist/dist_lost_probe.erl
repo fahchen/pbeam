@@ -8,7 +8,24 @@
          monitor_remote/0, monitor_connected/1, monitor_events/1, monitor_forms/1,
          monitor_hidden/1, monitor_local_events/0, ordering_server/0, ordering_client/1,
          local_order/1, local_race/0, local_multi/0, controller_reasons/0, no_network/0,
-         self_signal/1, monitor_disable_signal/1, nodes_forms/2, nodes_order/0, nodes_expiry/0]).
+         self_signal/1, monitor_disable_signal/1, nodes_forms/2, nodes_order/0, nodes_expiry/0,
+         disconnect_cases/1, disconnect_notalive/0]).
+
+disconnect_cases(Server) ->
+    false = erlang:disconnect_node(node()),
+    false = erlang:disconnect_node(42),
+    false = erlang:disconnect_node('nmemissing@localhost'),
+    true = net_kernel:connect_node(Server),
+    true = erlang:monitor_node(Server, true),
+    Result = erlang:disconnect_node(Server),
+    Down = receive {nodedown, Server} -> nodedown after 5000 -> timeout end,
+    Again = erlang:disconnect_node(Server),
+    Connected = lists:member(Server, erlang:nodes(connected)),
+    io:format("~w~n", [[Result, Down, Again, Connected]]).
+
+disconnect_notalive() ->
+    io:format("~w~n", [[erlang:disconnect_node(node()), erlang:disconnect_node(42),
+                        erlang:disconnect_node('nmemissing@localhost')]]).
 
 nodes_forms(Visible, Hidden) ->
     true = net_kernel:connect_node(Visible),
