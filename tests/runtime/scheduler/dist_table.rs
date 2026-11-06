@@ -271,3 +271,30 @@ fn removes_the_monitor_of_its_own_connection_only() {
     table.remove_monitor(ProcessId(2), &a, key, 1);
     assert_eq!(table.watched_process(remote(&a), key), None);
 }
+
+#[test]
+fn removes_the_last_node_monitor_of_a_connected_entry() {
+    // `monitor_node/2,3` counts registrations, and `nodedown` uses the count
+    // that is left when the event is handled (`erl_proc_sig_queue.c:5063-5106`).
+    // Disabling the last registration removes the watcher from the entry.
+    let atoms = AtomTable::new();
+    let name = atoms.put("last_monitor@h").unwrap();
+    let watcher = ProcessId(2);
+    let mut table = DistTable::default();
+    table.insert(&name, Reference(7), 0);
+    table.new_connection(&name);
+    assert!(
+        table
+            .connect(&name, Controller::Process(ProcessId(1)), 0)
+            .is_some()
+    );
+    let connection = table.monitor_node(&name, watcher).unwrap();
+    assert_eq!(table.monitor_node(&name, watcher), Some(connection));
+    table.unmonitor_node(&name, watcher, connection);
+    assert_eq!(
+        table.entries[&name.index()].node_monitors.get(&watcher),
+        Some(&1)
+    );
+    table.unmonitor_node(&name, watcher, connection);
+    assert!(table.entries[&name.index()].node_monitors.is_empty());
+}
