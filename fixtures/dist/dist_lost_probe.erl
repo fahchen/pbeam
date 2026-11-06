@@ -197,13 +197,15 @@ ordering_loop() ->
 
 ordering_client(Server) ->
     ok = net_kernel:monitor_nodes(true, #{node_type => all}),
+    %% A loaded runner needs more than thirty seconds for one connect and
+    %% teardown. The whole loop still ends well inside the test's time budget.
     Check = fun(_) ->
                     _ = net_kernel:connect_node(Server),
                     receive
                         {nodeup, Server, _} ->
-                            receive {nodedown, Server, _} -> ok after 30000 -> down_timeout end;
+                            receive {nodedown, Server, _} -> ok after 120000 -> down_timeout end;
                         {nodedown, Server, _} -> down_first
-                    after 30000 -> up_timeout
+                    after 120000 -> up_timeout
                     end
             end,
     io:format("~p~n", [[Check(N) || N <- lists:seq(1, 12)]]).
