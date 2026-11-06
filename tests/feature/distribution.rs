@@ -142,6 +142,29 @@ fn orders_immediate_noconnection_priority_down_as_pinned_erts() {
 }
 
 #[test]
+fn aborts_pending_connections_as_pinned_erts() {
+    // dist.c:5627-5711: abort clears only the matching pending connection.
+    let epmd = Epmd::start();
+    let name = format!("dabort{}", std::process::id());
+    let expression = "Node = abort_peer@nohost, \
+        Old = erts_internal:new_connection(Node), \
+        Same = Old =:= erts_internal:new_connection(Node), \
+        A = erts_internal:abort_pending_connection(Node, Old), \
+        B = erts_internal:abort_pending_connection(Node, Old), \
+        New = erts_internal:new_connection(Node), \
+        C = erts_internal:abort_pending_connection(Node, Old), \
+        StillPending = New =:= erts_internal:new_connection(Node), \
+        D = erts_internal:abort_pending_connection(Node, New), \
+        Error = try erts_internal:abort_pending_connection(other@nohost, New) \
+                catch error:badarg -> badarg end, \
+        io:format(\"~w~n\", [{Same,A,B,Old =/= New,C,StillPending,D,Error}]), halt().";
+    let arguments = probe(&["-sname", &name], expression);
+    let expected = "{true,true,true,true,true,true,true,badarg}\n";
+    assert_eq!(stdout(&erts_erl(&epmd, &arguments)), expected);
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), expected);
+}
+
+#[test]
 fn runs_the_bifs_of_a_process_controller_as_pinned_erts() {
     // new_connection/1, abort_pending_connection/2, create_dist_channel/3,
     // the dist_ctrl_* BIFs, dist_get_stat/1, and nodes/1,2 of a connection
