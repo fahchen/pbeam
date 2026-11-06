@@ -253,7 +253,7 @@ impl Scheduler {
                 let _ = self.send_signal(Some(crate::term::ProcessId(0)), process, kill);
             }
             Controller::Port(port) if self.locked_port == Some(port) => {
-                self.bad_dist_port = Some(port)
+                self.bad_dist_port = Some(port);
             }
             Controller::Port(port) => self.fail_port(port, Term::static_atom("killed")),
         }
@@ -271,7 +271,7 @@ impl Scheduler {
         }
         let sequence = u64::from_be_bytes(packet[2..10].try_into().expect("sequence length"));
         let id = u64::from_be_bytes(packet[10..18].try_into().expect("fragment id length"));
-        if id == 0 && (packet[1] != b'E' || sequence != 0) {
+        if id == 0 {
             return Err(error(REJECTED));
         }
         if packet[1] == b'E' {
