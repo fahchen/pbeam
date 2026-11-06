@@ -421,6 +421,8 @@ pub(super) struct RemoteWatcher {
 /// `DOWN` message and to remove the monitor.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct OriginMonitor {
+    /// Whether a monitor DOWN is a priority message (`ERTS_ML_FLG_PRIO_ML`).
+    pub(super) priority: bool,
     /// The third element of the `DOWN` message: `process` or `port`.
     pub(super) kind: &'static str,
     /// The monitored process, or `None` for a name that no process had and

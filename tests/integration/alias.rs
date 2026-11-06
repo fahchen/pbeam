@@ -120,22 +120,6 @@ fn run(function: &str) -> (Term, impl Fn(&str) -> Term) {
     })
 }
 
-/// Return the error text of `alias_probe:unsupported(Case)` in PBeam.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// assert!(unsupported("priority").contains("unsupported monitor option priority"));
-/// ```
-fn unsupported(case: &str) -> String {
-    let program = BeamProgram::load(&[ALIAS_PROBE]).unwrap();
-    let case = Term::Atom(program.atom(case).unwrap());
-    program
-        .execute("alias_probe", "unsupported", &[program.host_term(case)])
-        .unwrap_err()
-        .to_string()
-}
-
 #[test]
 fn reads_the_options_of_monitor_3_before_the_type_as_pinned_erts() {
     // `options/0`: `erts_monitor_opts` (bif.c:701-756) rejects each other
@@ -283,15 +267,79 @@ fn sends_an_exit_signal_through_an_active_alias_as_pinned_erts() {
 }
 
 #[test]
-fn returns_a_runtime_error_for_the_priority_monitor_option() {
-    // ERTS 29.1.1 returns a reference and makes a priority DOWN message
-    // (bif.c:711-713). PBeam has no priority messages (row "Monitors").
-    let error = unsupported("priority");
-    assert!(
-        error.contains("unsupported monitor option priority"),
-        "{error}"
+fn pinned_erts_orders_priority_down_before_queued_messages() {
+    assert_eq!(
+        erl_reference("priority_down_order()"),
+        "{[down,first,second],[first,second,down]}\n"
     );
-    assert!(erl_reference("unsupported(priority)").starts_with("#Ref<"));
+}
+
+#[test]
+fn receives_a_priority_down_while_waiting_selectively_as_pinned_erts() {
+    let (result, atom) = run("priority_down_selective");
+    assert_eq!(
+        result,
+        Term::tuple(vec![atom("down"), Term::list_from([atom("unmatched")])])
+    );
+    assert_eq!(
+        erl_reference("priority_down_selective()"),
+        "{down,[unmatched]}\n"
+    );
+}
+
+#[test]
+fn receives_queued_priority_down_with_receive_marker_as_pinned_erts() {
+    let (result, atom) = run("priority_marker_hit");
+    assert_eq!(
+        result,
+        Term::tuple(vec![atom("down"), Term::list_from([atom("unmatched")])])
+    );
+    assert_eq!(
+        erl_reference("priority_marker_hit()"),
+        "{down,[unmatched]}\n"
+    );
+}
+
+#[test]
+fn orders_priority_down_before_queued_messages_as_pinned_erts() {
+    let (result, atom) = run("priority_down_order");
+    let list = |names: &[&str]| Term::list_from(names.iter().map(|name| atom(name)));
+    assert_eq!(
+        result,
+        Term::tuple(vec![
+            list(&["down", "first", "second"]),
+            list(&["first", "second", "down"])
+        ])
+    );
+    assert_eq!(
+        erl_reference("priority_down_order()"),
+        "{[down,first,second],[first,second,down]}\n"
+    );
+}
+
+#[test]
+fn compares_immediate_and_large_tag_priority_monitors_with_erts() {
+    for (function, expected) in [
+        (
+            "priority_immediate",
+            "{[down,first,second],[first,second,down]}\n",
+        ),
+        ("priority_large_tag", "{down,[unmatched]}\n"),
+        ("priority_tag_reference", "{found,1}\n"),
+    ] {
+        let (result, atom) = run(function);
+        let list = |names: &[&str]| Term::list_from(names.iter().map(|name| atom(name)));
+        let value = match function {
+            "priority_immediate" => Term::tuple(vec![
+                list(&["down", "first", "second"]),
+                list(&["first", "second", "down"]),
+            ]),
+            "priority_large_tag" => Term::tuple(vec![atom("down"), list(&["unmatched"])]),
+            _ => Term::tuple(vec![atom("found"), Term::Integer(1)]),
+        };
+        assert_eq!(result, value, "{function}");
+        assert_eq!(erl_reference(&format!("{function}()")), expected);
+    }
 }
 
 #[test]

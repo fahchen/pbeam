@@ -77,6 +77,8 @@ struct Marker {
     node: NodeId,
     /// Number of times a receive passed the marker.
     pass: u8,
+    /// Whether a priority message contained this marker's reference.
+    in_priority: bool,
     /// True when the save pointer goes past the marker when the handling
     /// moves it into the inner part (`set_save` in ERTS).
     set_save: bool,
@@ -129,6 +131,11 @@ pub(super) enum Step {
 /// current message.
 #[derive(Debug)]
 pub(super) struct Mailbox {
+    /// Priority messages in arrival order, before the normal queue
+    /// (`erl_proc_sig_queue.c:9483-9487`).
+    priority_messages: VecDeque<Term>,
+    /// Next priority message to inspect during this receive.
+    priority_save: usize,
     /// Node arena. A removed node goes to `free` for reuse.
     nodes: Vec<Node>,
     /// Arena slots that hold no live node.
@@ -158,6 +165,8 @@ pub(super) struct Mailbox {
 impl Default for Mailbox {
     fn default() -> Self {
         Self {
+            priority_messages: VecDeque::new(),
+            priority_save: 0,
             nodes: Vec::new(),
             free: Vec::new(),
             first: None,
@@ -196,6 +205,34 @@ impl Mailbox {
     pub(super) fn push(&mut self, term: Term) {
         self.append(Entry::Message(term));
         self.outer_messages += 1;
+    }
+
+    /// Add `term` after the priority messages, and return the extra signal
+    /// count for the marker references in it.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// mailbox.push_priority(Term::Integer(1));
+    /// assert_eq!(mailbox.current(), Some(&Term::Integer(1)));
+    /// ```
+    pub(super) fn push_priority(&mut self, term: Term) -> i32 {
+        let empty = self.priority_messages.is_empty();
+        let mut extra = 0;
+        for marker in &mut self.markers {
+            if empty {
+                marker.in_priority = false;
+            }
+            if !marker.in_priority
+                && let Some(reference @ Term::Reference(_)) = &marker.id
+                && contains_reference(&term, reference)
+            {
+                marker.in_priority = true;
+                extra += 4;
+            }
+        }
+        self.priority_messages.push_back(term);
+        extra
     }
 
     /// Add a non-message signal to the end of the outer part.
@@ -312,7 +349,7 @@ impl Mailbox {
     /// assert_eq!(mailbox.message_count(), 1);
     /// ```
     pub(super) fn message_count(&self) -> usize {
-        self.messages_until(self.fetched)
+        self.priority_messages.len() + self.messages_until(self.fetched)
     }
 
     /// Return the number of messages before the node `node`, as `mq_len` is
@@ -325,7 +362,7 @@ impl Mailbox {
     /// assert_eq!(mailbox.messages_before(node), 2);
     /// ```
     pub(super) fn messages_before(&self, node: NodeId) -> usize {
-        self.messages_until(self.nodes[node].prev)
+        self.priority_messages.len() + self.messages_until(self.nodes[node].prev)
     }
 
     /// Return the number of messages from the start of the queue up to the
@@ -358,7 +395,10 @@ impl Mailbox {
     /// assert_eq!(Mailbox::default().current(), None);
     /// ```
     pub(super) fn current(&self) -> Option<&Term> {
-        self.nodes[self.current_node()?].entry.message()
+        self.priority_messages.get(self.priority_save).or_else(|| {
+            self.current_node()
+                .and_then(|node| self.nodes[node].entry.message())
+        })
     }
 
     /// Return the node at the save pointer when it is in the inner part.
@@ -387,6 +427,10 @@ impl Mailbox {
     /// assert_eq!(mailbox.current(), None);
     /// ```
     pub(super) fn save_next(&mut self) -> bool {
+        if self.priority_save < self.priority_messages.len() {
+            self.priority_save += 1;
+            return true;
+        }
         let Some(node) = self.current_node() else {
             return false;
         };
@@ -407,6 +451,11 @@ impl Mailbox {
     /// assert_eq!(mailbox.current(), None);
     /// ```
     pub(super) fn remove_current(&mut self) -> bool {
+        if self.priority_save < self.priority_messages.len() {
+            self.priority_messages.remove(self.priority_save);
+            self.set_save_first();
+            return true;
+        }
         let Some(node) = self.current_node() else {
             return false;
         };
@@ -424,6 +473,7 @@ impl Mailbox {
     /// mailbox.set_save_first();
     /// ```
     pub(super) fn set_save_first(&mut self) {
+        self.priority_save = 0;
         self.save = self.pass_markers(Link::First, MarkerScan::Leading);
     }
 
@@ -443,6 +493,7 @@ impl Mailbox {
     /// assert_eq!(mailbox.current(), None);
     /// ```
     pub(super) fn set_save_end(&mut self) {
+        self.priority_save = self.priority_messages.len();
         self.fetch();
         if !self.has_middle() {
             self.save = self.fetched;
@@ -456,6 +507,7 @@ impl Mailbox {
                 id: Some(Term::nil()),
                 node,
                 pass: 0,
+                in_priority: false,
                 set_save: true,
                 remove: true,
             });
@@ -504,6 +556,7 @@ impl Mailbox {
             id: Some(id.clone()),
             node,
             pass,
+            in_priority: false,
             set_save: false,
             remove: false,
         });
@@ -584,6 +637,12 @@ impl Mailbox {
             return;
         };
         self.clear_pending_set_save();
+        self.priority_save =
+            if self.markers[index].in_priority && !self.priority_messages.is_empty() {
+                0
+            } else {
+                self.priority_messages.len()
+            };
         let node = self.markers[index].node;
         if self.in_inner(node) {
             self.save = self.pass_markers(Link::After(node), MarkerScan::Later);
@@ -936,7 +995,7 @@ impl Mailbox {
     /// assert_eq!(mailbox.messages(), vec![Term::Integer(1)]);
     /// ```
     pub(super) fn messages(&self) -> Vec<Term> {
-        let mut messages = Vec::new();
+        let mut messages: Vec<_> = self.priority_messages.iter().cloned().collect();
         let mut node = self.first;
         while let Some(current) = node {
             messages.extend(self.nodes[current].entry.message().cloned());
@@ -968,6 +1027,11 @@ impl Mailbox {
     pub(super) fn take_terms_bounded(&mut self, pending: &mut Vec<Term>, budget: usize) -> usize {
         let mut taken = 0;
         while taken < budget {
+            if let Some(term) = self.priority_messages.pop_back() {
+                pending.push(term);
+                taken += 1;
+                continue;
+            }
             if let Some(marker) = self.markers.pop_back() {
                 pending.extend(marker.id);
                 taken += 1;
@@ -998,7 +1062,7 @@ impl Mailbox {
     /// assert!(Mailbox::default().is_empty());
     /// ```
     pub(super) fn is_empty(&self) -> bool {
-        self.nodes.is_empty() && self.markers.is_empty()
+        self.priority_messages.is_empty() && self.nodes.is_empty() && self.markers.is_empty()
     }
 
     /// Account the terms that the arena of the mailbox holds, in no order,
@@ -1016,6 +1080,9 @@ impl Mailbox {
     /// assert!(live.bytes() > 0);
     /// ```
     pub(super) fn account_release_terms(&self, live: &mut LiveBytes) {
+        for term in &self.priority_messages {
+            live.term(term);
+        }
         for node in &self.nodes {
             match &node.entry {
                 Entry::Message(term) => live.term(term),
@@ -1045,7 +1112,8 @@ impl Mailbox {
     /// assert!(mailbox.allocated_bytes() > 0);
     /// ```
     pub(super) fn allocated_bytes(&self) -> usize {
-        self.nodes.capacity() * std::mem::size_of::<Node>()
+        self.priority_messages.capacity() * std::mem::size_of::<Term>()
+            + self.nodes.capacity() * std::mem::size_of::<Node>()
             + self.free.capacity() * std::mem::size_of::<NodeId>()
             + self.markers.capacity() * std::mem::size_of::<Marker>()
     }
@@ -1061,6 +1129,9 @@ impl Mailbox {
     /// assert!(live.bytes() > 0);
     /// ```
     pub(super) fn account_terms(&self, live: &mut LiveBytes) {
+        for term in &self.priority_messages {
+            live.term(term);
+        }
         let mut node = self.first;
         while let Some(current) = node {
             match &self.nodes[current].entry {
@@ -1076,6 +1147,38 @@ impl Mailbox {
             }
         }
     }
+}
+
+/// Return whether a term contains the receive marker reference, as the
+/// priority queue reference scan does (`erl_proc_sig_queue.c:9138-9287`).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert!(contains_reference(&Term::tuple(vec![reference.clone()]), &reference));
+/// ```
+fn contains_reference(term: &Term, reference: &Term) -> bool {
+    let mut pending = vec![term];
+    while let Some(term) = pending.pop() {
+        match term {
+            Term::Reference(_) if term == reference => return true,
+            Term::Tuple(tuple) => pending.extend(tuple.iter()),
+            Term::Cons(_) => {
+                let (head, tail) = term.cons_cell().expect("a cons cell has a head and tail");
+                pending.push(head);
+                pending.push(tail);
+            }
+            Term::Map(map) => {
+                for (key, value) in map.iter() {
+                    pending.push(key);
+                    pending.push(value);
+                }
+            }
+            Term::Fun(fun) => pending.extend(fun.free()),
+            _ => {}
+        }
+    }
+    false
 }
 
 #[cfg(test)]

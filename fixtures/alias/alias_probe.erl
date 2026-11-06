@@ -1,5 +1,7 @@
 -module(alias_probe).
 -export([targets/0, options/0, tags/0, modes/0, downs/0, exits/0, sends/0, call/0, unsupported/1,
+         priority_down_order/0, priority_down_selective/0, priority_marker_hit/0, priority_watcher/1,
+         priority_immediate/0, priority_immediate_remote/0, priority_large_tag/0, priority_tag_reference/0,
          idle/0, relay/0, owner/2, server/0, id/1]).
 
 id(X) -> X.
@@ -44,6 +46,109 @@ server() ->
     end.
 
 flush() -> receive M -> [M | flush()] after 0 -> [] end.
+
+%% Wait for a second, normal monitor before reading the message queue.
+priority_down_order() ->
+    {priority_down_order([priority]), priority_down_order([])}.
+
+priority_down_order(Options) ->
+    Pid = spawn(?MODULE, idle, []),
+    Ref = erlang:monitor(process, Pid, Options),
+    Sync = erlang:monitor(process, Pid),
+    self() ! first,
+    self() ! second,
+    Pid ! stop,
+    receive {'DOWN', Sync, process, Pid, normal} -> ok end,
+    {messages, Messages} = process_info(self(), messages),
+    _ = flush(),
+    [case Message of {'DOWN', Ref, process, Pid, normal} -> down; _ -> Message end
+     || Message <- Messages].
+
+%% The priority DOWN arrives before a receive that uses its monitor marker.
+priority_marker_hit() ->
+    self() ! unmatched,
+    Target = spawn(?MODULE, idle, []),
+    Ref = erlang:monitor(process, Target, [priority]),
+    Sync = erlang:monitor(process, Target),
+    Target ! stop,
+    receive {'DOWN', Sync, process, Target, normal} -> ok end,
+    Result = receive {'DOWN', Ref, process, Target, normal} -> down after 0 -> missed end,
+    {Result, flush()}.
+
+%% Immediate monitor failures use the same ordering as process exit.
+priority_immediate() -> immediate(alias_probe_nobody, noproc).
+
+priority_immediate_remote() -> immediate({alias_probe_nobody, 'missing@nohost'}, noconnection).
+
+immediate(Target, Reason) ->
+    {immediate(Target, Reason, [priority]), immediate(Target, Reason, [])}.
+
+immediate(Target, Reason, Options) ->
+    self() ! first,
+    self() ! second,
+    Ref = erlang:monitor(process, Target, Options),
+    Sync = erlang:monitor(process, Target),
+    receive {'DOWN', Sync, process, _, Reason} -> ok end,
+    {messages, Messages} = process_info(self(), messages),
+    _ = flush(),
+    [case Message of {'DOWN', Ref, process, _, Reason} -> down; _ -> Message end
+     || Message <- Messages].
+
+%% The monitor reference in a large-tag DOWN is found by its marker.
+priority_large_tag() ->
+    self() ! unmatched,
+    Target = spawn(?MODULE, idle, []),
+    Tag = {tag, large_tag(5000)},
+    Ref = erlang:monitor(process, Target, [priority, {tag, Tag}]),
+    Sync = erlang:monitor(process, Target),
+    Target ! stop,
+    receive {'DOWN', Sync, process, Target, normal} -> ok end,
+    Result = receive {Tag, Ref, process, Target, normal} -> down after 0 -> missed end,
+    {Result, flush()}.
+
+large_tag(0) -> [];
+large_tag(N) -> [N | large_tag(N - 1)].
+
+%% A receive can also find a reference that appears only in the custom tag.
+priority_tag_reference() ->
+    self() ! unmatched,
+    Held = spawn(?MODULE, idle, []),
+    Ref = erlang:monitor(process, Held),
+    Target = spawn(?MODULE, idle, []),
+    _Priority = erlang:monitor(process, Target, [priority, {tag, {tag, Ref}}]),
+    Sync = erlang:monitor(process, Target),
+    Target ! stop,
+    receive {'DOWN', Sync, process, Target, normal} -> ok end,
+    Result = receive {{tag, Ref}, _, process, Target, normal} -> found after 0 -> missed end,
+    erlang:demonitor(Ref, [flush]),
+    Held ! stop,
+    {Result, length(flush())}.
+
+%% The watcher has passed an unmatched message and waits for the normal
+%% message or the monitor DOWN. Wait for that state before ending the target.
+priority_down_selective() ->
+    Watcher = spawn(?MODULE, priority_watcher, [self()]),
+    receive {ready, Watcher, Target} ->
+                wait_until_waiting(Watcher),
+                Target ! stop,
+                receive {result, Watcher, Result} -> Result end
+    end.
+
+priority_watcher(Parent) ->
+    Target = spawn(?MODULE, idle, []),
+    Ref = erlang:monitor(process, Target, [priority]),
+    self() ! unmatched,
+    Parent ! {ready, self(), Target},
+    Result = receive normal -> normal;
+                     {'DOWN', Ref, process, Target, normal} -> down
+             end,
+    Parent ! {result, self(), {Result, flush()}}.
+
+wait_until_waiting(Pid) ->
+    case process_info(Pid, status) of
+        {status, waiting} -> ok;
+        _ -> erlang:yield(), wait_until_waiting(Pid)
+    end.
 
 t(F) -> try {ok, F()} catch C:E -> {C, E} end.
 

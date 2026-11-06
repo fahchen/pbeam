@@ -1182,6 +1182,7 @@ fn moves_the_containers_of_an_exiting_process_to_the_release_work_list() {
             MonitorKey::Local(Reference(1)),
             Origin {
                 monitor: Some(OriginMonitor {
+                    priority: false,
                     kind: "process",
                     target: None,
                     item: marker(8),
@@ -1254,6 +1255,7 @@ fn releases_the_terms_of_every_container_of_an_exiting_process() {
             MonitorKey::Local(Reference(1)),
             Origin {
                 monitor: Some(OriginMonitor {
+                    priority: false,
                     kind: "process",
                     target: None,
                     item: item.clone(),
@@ -1534,6 +1536,7 @@ fn moves_the_monitors_of_an_exiting_process_in_batches() {
                 MonitorKey::Local(Reference(reference)),
                 Origin {
                     monitor: Some(OriginMonitor {
+                        priority: false,
                         kind: "process",
                         target: None,
                         item: marker(i64::try_from(reference).unwrap()),
@@ -1725,6 +1728,7 @@ fn counts_the_bytes_of_the_release_work_list() {
             MonitorKey::Local(Reference(1)),
             Origin {
                 monitor: Some(OriginMonitor {
+                    priority: false,
                     kind: "process",
                     target: None,
                     item: marker(6),
@@ -4181,6 +4185,7 @@ fn second_abandon_of_a_linked_spawn_request_keeps_its_monitor() {
             key,
             Origin {
                 monitor: Some(OriginMonitor {
+                    priority: false,
                     kind: "process",
                     target: None,
                     item: atom("spawn_reply"),
@@ -4216,6 +4221,7 @@ fn second_abandon_of_a_linked_spawn_request_keeps_its_monitor() {
             plain,
             Origin {
                 monitor: Some(OriginMonitor {
+                    priority: false,
                     kind: "process",
                     target: None,
                     item: atom("spawn_reply"),
@@ -4268,6 +4274,7 @@ fn an_abandoned_spawn_request_error_sends_no_reply() {
             key,
             Origin {
                 monitor: Some(OriginMonitor {
+                    priority: false,
                     kind: "process",
                     target: None,
                     item: atom("spawn_reply"),
@@ -4346,6 +4353,7 @@ fn an_abandoned_spawn_request_success_installs_no_link_and_sends_abandoned() {
             key,
             Origin {
                 monitor: Some(OriginMonitor {
+                    priority: false,
                     kind: "process",
                     target: None,
                     item: atom("spawn_reply"),
@@ -4432,6 +4440,7 @@ fn abandon_of_a_remote_request_removes_the_connection_monitor() {
             key,
             Origin {
                 monitor: Some(OriginMonitor {
+                    priority: false,
                     kind: "process",
                     target: None,
                     item: atom("spawn_reply"),

@@ -24,6 +24,28 @@ fn link(from: u64) -> Signal {
 }
 
 #[test]
+fn priority_segment_keeps_arrival_order_before_normal_messages() {
+    let mut mailbox = mailbox(&[1, 2]);
+    mailbox.push_priority(int(3));
+    mailbox.push_priority(int(4));
+    assert_eq!(mailbox.messages(), vec![int(3), int(4), int(1), int(2)]);
+    assert_eq!(mailbox.message_count(), 4);
+    assert_eq!(mailbox.current(), Some(&int(3)));
+    assert!(mailbox.save_next());
+    assert_eq!(mailbox.current(), Some(&int(4)));
+    assert!(mailbox.remove_current());
+    assert_eq!(mailbox.current(), Some(&int(3)));
+    assert!(mailbox.save_next());
+    assert_eq!(mailbox.current(), Some(&int(1)));
+    mailbox.set_save_end();
+    assert_eq!(mailbox.current(), None);
+    mailbox.set_save_first();
+    let mut pending = Vec::new();
+    assert_eq!(mailbox.take_terms_bounded(&mut pending, 1), 1);
+    assert_eq!(pending, vec![int(3)]);
+}
+
+#[test]
 fn walks_and_removes_messages() {
     let mut mailbox = mailbox(&[1, 2, 3]);
     assert!(mailbox.save_next());

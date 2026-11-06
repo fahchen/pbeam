@@ -129,6 +129,19 @@ fn probe<'a>(before: &[&'a str], expression: &'a str) -> Vec<&'a str> {
 }
 
 #[test]
+fn orders_immediate_noconnection_priority_down_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let name = format!("priomon{}", std::process::id());
+    let arguments = probe(
+        &["-sname", &name, "-pa", "fixtures/alias"],
+        "io:format(\"~w~n\", [alias_probe:priority_immediate_remote()]), halt().",
+    );
+    let expected = "{[down,first,second],[first,second,down]}\n";
+    assert_eq!(stdout(&erts_erl(&epmd, &arguments)), expected);
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), expected);
+}
+
+#[test]
 fn runs_the_bifs_of_a_process_controller_as_pinned_erts() {
     // new_connection/1, abort_pending_connection/2, create_dist_channel/3,
     // the dist_ctrl_* BIFs, dist_get_stat/1, and nodes/1,2 of a connection
