@@ -87,17 +87,26 @@ impl Scheduler {
         to: &Term,
         message: &Term,
         priority: SendPriority,
+        connect: bool,
     ) -> Result<bool, BeamError> {
         let caller = self.current_process().id;
         let from = Term::Pid(caller);
         // A pending connection accepts an ordinary registered-name send even
         // with noconnect (bif.c:2391-2417). Keep it until the negotiated
         // flags are known, then encode it before publishing the connection.
-        if matches!(to, Term::Tuple(_)) && priority == SendPriority::Normal {
+        if matches!(to, Term::Tuple(_))
+            && priority == SendPriority::Normal
+            && self.node.net_kernel().is_some()
+        {
             let node_ref = Arc::clone(&self.node);
             let mut dist = node_ref.dist();
             if dist.pending(node) {
                 dist.enqueue_pending_send(node, caller, to.clone(), message.clone());
+                return Ok(true);
+            }
+            let idle = dist.connected(node).is_none();
+            drop(dist);
+            if idle && connect && self.dist_auto_connect_send(node, to, message)? {
                 return Ok(true);
             }
         }
@@ -110,6 +119,61 @@ impl Scheduler {
                 Some(message.clone()),
             ))
         })
+    }
+
+    /// Start an idle connection for a registered-name send (`dist.c:5713-5759`).
+    fn dist_auto_connect_send(
+        &mut self,
+        name: &Atom,
+        to: &Term,
+        message: &Term,
+    ) -> Result<bool, BeamError> {
+        let node = Arc::clone(&self.node);
+        if node.net_kernel().is_none() {
+            return Ok(false);
+        }
+        let Some(super::node::Named::Process(kernel)) = self.name_owner("net_kernel") else {
+            return Ok(false);
+        };
+        let reference = self.make_magic_ref()?;
+        let now = self.timers.now();
+        let start = u32::try_from(now & i64::from(u32::MAX)).expect("the low 32 bits fit in u32");
+        let event_lock = {
+            let mut dist = node.dist();
+            dist.expire_known(now);
+            dist.insert(name, reference, start);
+            dist.event_lock(name)
+        };
+        let _event = event_lock
+            .lock()
+            .expect("the node event lock is not poisoned");
+        let mut dist = node.dist();
+        if node.is_going_down() || node.live_owner(kernel).is_none() {
+            return Ok(false);
+        }
+        if dist.connected(name).is_some() {
+            return Ok(false);
+        }
+        let start = !dist.pending(name);
+        if start {
+            dist.new_connection(name);
+        }
+        let handle = dist.current_dhandle(name);
+        let caller = self.current_process().id;
+        dist.enqueue_pending_send(name, caller, to.clone(), message.clone());
+        drop(dist);
+        if start {
+            self.send_message(
+                caller,
+                kernel,
+                Term::tuple(vec![
+                    Term::static_atom("auto_connect"),
+                    Term::Atom(name.clone()),
+                    handle,
+                ]),
+            );
+        }
+        Ok(true)
     }
 
     /// Send the exit signal of `erlang:exit/2,3` from the current process

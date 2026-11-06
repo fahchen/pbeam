@@ -5364,7 +5364,7 @@ pub(in crate::runtime::interpreter) fn send(
     message: Term,
 ) -> Result<BifResult, BeamError> {
     Ok(
-        match deliver_to(scheduler, to, message.clone(), SendPriority::Normal)? {
+        match deliver_to(scheduler, to, message.clone(), SendPriority::Normal, true)? {
             Ok(Sent::Local) => local_send_result(scheduler, message),
             Ok(Sent::NoConnect) => Value(message),
             Err(raise) => raise,
@@ -5429,7 +5429,7 @@ pub(super) fn send3(
         }
     }
     Ok(
-        match deliver_to(scheduler, to, message.clone(), priority)? {
+        match deliver_to(scheduler, to, message.clone(), priority, connect)? {
             Ok(Sent::Local) => local_send_result(scheduler, Term::static_atom("ok")),
             Ok(Sent::NoConnect) if !connect => Value(Term::static_atom("noconnect")),
             Ok(Sent::NoConnect) => Value(Term::static_atom("ok")),
@@ -5621,6 +5621,7 @@ fn deliver_to(
     to: &Term,
     message: Term,
     priority: SendPriority,
+    connect: bool,
 ) -> Result<Result<Sent, BifResult>, BeamError> {
     let Some(destination) = destination(to, &scheduler.atoms) else {
         return Ok(Err(BifResult::badarg()));
@@ -5647,7 +5648,7 @@ fn deliver_to(
             None => None,
         },
         Destination::Remote(node) => {
-            if scheduler.dist_send(node, to, &message, priority)? {
+            if scheduler.dist_send(node, to, &message, priority, connect)? {
                 return Ok(Ok(Sent::Local));
             }
             scheduler.send_to_remote_node(node);
