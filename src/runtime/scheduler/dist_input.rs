@@ -290,29 +290,7 @@ impl Scheduler {
             if decode_dist(self, body, Some(&atoms))?.is_none() {
                 return Err(error(REJECTED));
             }
-            let bytes = body.to_vec();
-            if sequence == 0 {
-                return Ok(Some((bytes, atoms)));
-            }
-            let mut dist = self.node.dist();
-            let Some(sequences) = dist.fragments_in(node, connection) else {
-                return Ok(None);
-            };
-            if sequences.contains_key(&sequence) {
-                return Err(error(REJECTED));
-            }
-            if id == 1 {
-                return Ok(Some((bytes, atoms)));
-            }
-            sequences.insert(
-                sequence,
-                DistFragment {
-                    next: id - 1,
-                    bytes,
-                    atoms,
-                },
-            );
-            Ok(None)
+            self.store_first_fragment(node, connection, sequence, id, body.to_vec(), atoms)
         } else {
             let mut dist = self.node.dist();
             let Some(sequences) = dist.fragments_in(node, connection) else {
@@ -332,6 +310,40 @@ impl Scheduler {
             let fragment = sequences.remove(&sequence).expect("fragment exists");
             Ok(Some((fragment.bytes, fragment.atoms)))
         }
+    }
+
+    /// Store a first fragment after its control term has been decoded.
+    fn store_first_fragment(
+        &self,
+        node: &Atom,
+        connection: u32,
+        sequence: u64,
+        id: u64,
+        bytes: Vec<u8>,
+        atoms: Vec<Atom>,
+    ) -> Result<Option<Reassembled>, BeamError> {
+        if sequence == 0 {
+            return Ok(Some((bytes, atoms)));
+        }
+        let mut dist = self.node.dist();
+        let Some(sequences) = dist.fragments_in(node, connection) else {
+            return Ok(None);
+        };
+        if sequences.contains_key(&sequence) {
+            return Err(error(REJECTED));
+        }
+        if id == 1 {
+            return Ok(Some((bytes, atoms)));
+        }
+        sequences.insert(
+            sequence,
+            DistFragment {
+                next: id - 1,
+                bytes,
+                atoms,
+            },
+        );
+        Ok(None)
     }
 
     /// Read the normal distribution header and update the connection's input cache.
