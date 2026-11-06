@@ -98,7 +98,7 @@ fn returns_the_links_of_each_connection_at_the_exit_of_net_kernel() {
     let entries = table.net_kernel_exits();
     let controllers: Vec<_> = entries
         .iter()
-        .filter_map(|(name, _)| table.shutdown_entry(name))
+        .filter_map(|(name, _)| table.shutdown_entry(name).0)
         .collect();
     let ended: Vec<_> = controllers
         .iter()
@@ -199,7 +199,7 @@ fn orders_the_nodes_by_state_and_by_the_time_of_each_change() {
     let entries = table.net_kernel_exits();
     let mut controllers: Vec<_> = entries
         .iter()
-        .filter_map(|(name, _)| table.shutdown_entry(name))
+        .filter_map(|(name, _)| table.shutdown_entry(name).0)
         .collect();
     controllers.sort_by_key(|controller| match controller {
         Controller::Process(id) => id.0,

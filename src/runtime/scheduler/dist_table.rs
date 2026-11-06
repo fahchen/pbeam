@@ -103,8 +103,8 @@ struct Entry {
     /// The packets that wait for `erlang:dist_ctrl_get_data/1`, each as the
     /// binaries of its iovec (`dep->out_queue`).
     output: VecDeque<Vec<Binary>>,
-    /// Registered-name sends held until the connection flags are known.
-    pending_sends: VecDeque<(ProcessId, Term, Term)>,
+    /// Signals held until the connection flags are known.
+    pending_signals: VecDeque<PendingSignal>,
     /// The queue size of the packets in `output` (`dep->total_qsize`, see
     /// [`PACKET_OVERHEAD`]).
     queue_size: u64,
@@ -131,6 +131,13 @@ struct Entry {
     monitors: Vec<DistMonitor>,
     /// Counts of node monitors held by each local process on this connection.
     node_monitors: HashMap<ProcessId, u64>,
+}
+
+/// A signal queued while the connection flags are not yet known.
+#[derive(Debug)]
+pub(super) enum PendingSignal {
+    Send(ProcessId, Term, Term),
+    Monitor(ProcessId, Term),
 }
 
 /// An incomplete distribution message and its own atom translation table.
@@ -317,7 +324,7 @@ impl DistTable {
                 input: 0,
                 get_size: false,
                 output: VecDeque::new(),
-                pending_sends: VecDeque::new(),
+                pending_signals: VecDeque::new(),
                 queue_size: 0,
                 out: 0,
                 notify: false,
@@ -429,7 +436,8 @@ impl DistTable {
     }
 
     /// Make the pending entry of `name` idle when its connection id is
-    /// `connection_id`, and return whether the entry was connected, as
+    /// `connection_id`, and return whether the entry was connected and the
+    /// detached connection state, as
     /// `abort_pending_connection` does (`dist.c:5627-5691`). An entry in
     /// another state or of another connection does not change.
     ///
@@ -437,24 +445,35 @@ impl DistTable {
     ///
     /// ```rust,ignore
     /// let (id, _) = table.new_connection(&a, Reference(7), 0);
-    /// assert!(!table.abort_pending(&a, id));
+    /// assert!(!table.abort_pending(&a, id).0);
     /// assert_eq!(table.new_connection(&a, Reference(7), 0).0, id + 1);
     /// ```
-    pub(in crate::runtime) fn abort_pending(&mut self, name: &Atom, connection_id: u32) -> bool {
+    pub(in crate::runtime) fn abort_pending(
+        &mut self,
+        name: &Atom,
+        connection_id: u32,
+    ) -> (bool, Option<EndedConnection>) {
         let order = self.next_order;
         let entry = self.entry_mut(name);
         if entry.connection_id != connection_id {
-            return false;
+            return (false, None);
         }
         match entry.state {
             State::Pending => {
+                let ended = EndedConnection {
+                    connection: connection_id,
+                    links: std::mem::take(&mut entry.links),
+                    monitors: std::mem::take(&mut entry.monitors),
+                    node_monitors: (name.clone(), std::mem::take(&mut entry.node_monitors)),
+                    node_events: (false, Vec::new()),
+                };
                 entry.set_idle(order);
                 self.idle.insert(order, name.clone());
                 self.next_order += 1;
-                false
+                (false, Some(ended))
             }
-            State::Connected => true,
-            State::Idle => false,
+            State::Connected => (true, None),
+            State::Idle => (false, None),
         }
     }
 
@@ -749,13 +768,25 @@ impl DistTable {
         message: Term,
     ) {
         self.entry_mut(name)
-            .pending_sends
-            .push_back((sender, to, message));
+            .pending_signals
+            .push_back(PendingSignal::Send(sender, to, message));
     }
 
-    /// Take the pending sends while the entry lock is held.
-    pub(super) fn take_pending_sends(&mut self, name: &Atom) -> VecDeque<(ProcessId, Term, Term)> {
-        std::mem::take(&mut self.entry_mut(name).pending_sends)
+    /// Queue a monitor on the pending connection.
+    pub(super) fn enqueue_pending_monitor(
+        &mut self,
+        name: &Atom,
+        sender: ProcessId,
+        control: Term,
+    ) {
+        self.entry_mut(name)
+            .pending_signals
+            .push_back(PendingSignal::Monitor(sender, control));
+    }
+
+    /// Take pending signals while the entry lock is held.
+    pub(super) fn take_pending_signals(&mut self, name: &Atom) -> VecDeque<PendingSignal> {
+        std::mem::take(&mut self.entry_mut(name).pending_signals)
     }
 
     /// Put the packet `elements` at the end of the output queue of the
@@ -933,7 +964,7 @@ impl DistTable {
             .entries
             .get_mut(&node.index())
             .expect("the entry of the node stays in the table");
-        if entry.state != State::Connected || entry.connection_id != connection {
+        if entry.state == State::Idle || entry.connection_id != connection {
             return false;
         }
         let monitor = DistMonitor {
@@ -1071,18 +1102,19 @@ impl DistTable {
     /// ```rust,ignore
     /// let controller = table.shutdown_entry(&name);
     /// ```
-    pub(in crate::runtime) fn shutdown_entry(&mut self, name: &Atom) -> Option<Controller> {
+    pub(in crate::runtime) fn shutdown_entry(
+        &mut self,
+        name: &Atom,
+    ) -> (Option<Controller>, Option<EndedConnection>) {
         let entry = self.entry_mut(name);
         match entry.state {
             State::Pending => {
-                let order = self.next_order;
-                self.entry_mut(name).set_idle(order);
-                self.idle.insert(order, name.clone());
-                self.next_order += 1;
-                None
+                let connection = entry.connection_id;
+                let (_, ended) = self.abort_pending(name, connection);
+                (None, ended)
             }
-            State::Connected => entry.controller,
-            State::Idle => None,
+            State::Connected => (entry.controller, None),
+            State::Idle => (None, None),
         }
     }
 
@@ -1160,7 +1192,7 @@ impl Entry {
         self.fragments.clear();
         self.get_size = false;
         self.output.clear();
-        self.pending_sends.clear();
+        self.pending_signals.clear();
         self.queue_size = 0;
         self.notify = false;
         self.controller = None;

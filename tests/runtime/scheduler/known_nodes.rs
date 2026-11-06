@@ -21,7 +21,7 @@ fn shares_mixed_node_order_and_expiry_between_schedulers() {
         let mut dist = node.dist();
         dist.insert(&b, Reference(7), 0);
         dist.new_connection(&b);
-        assert!(!dist.abort_pending(&b, 1));
+        assert!(!dist.abort_pending(&b, 1).0);
     }
     second.send_to_remote_node(&c);
     let names = |dist: &super::super::dist_table::DistTable| {

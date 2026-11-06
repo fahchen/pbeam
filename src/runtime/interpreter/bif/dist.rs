@@ -338,7 +338,13 @@ pub(super) fn abort_pending_connection(
     let _event = event_lock
         .lock()
         .expect("the node event lock is not poisoned");
-    let connected = node.dist().abort_pending(name, connection_id);
+    let (connected, ended) = node.dist().abort_pending(name, connection_id);
+    if let Some(ended) = ended {
+        context.scheduler.dist_connection_down(&ended);
+        context
+            .scheduler
+            .dist_monitor_down(&ended, &Term::static_atom("noconnection"));
+    }
     BifResult::Value(Term::from(!connected))
 }
 

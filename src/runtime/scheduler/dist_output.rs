@@ -117,7 +117,11 @@ impl Scheduler {
             drop(dist);
             if idle
                 && connect == ConnectMode::Allow
-                && self.dist_auto_connect_send(node, to, message)?
+                && self
+                    .dist_auto_connect(node, |dist, _| {
+                        dist.enqueue_pending_send(node, caller, to.clone(), message.clone());
+                    })?
+                    .is_some()
             {
                 return Ok(true);
             }
@@ -133,19 +137,18 @@ impl Scheduler {
         })
     }
 
-    /// Start an idle connection for a registered-name send (`dist.c:5713-5759`).
-    fn dist_auto_connect_send(
+    /// Start an idle connection and queue a signal (`dist.c:5713-5759`).
+    pub(super) fn dist_auto_connect(
         &mut self,
         name: &Atom,
-        to: &Term,
-        message: &Term,
-    ) -> Result<bool, BeamError> {
+        queue: impl FnOnce(&mut super::dist_table::DistTable, u32),
+    ) -> Result<Option<u32>, BeamError> {
         let node = Arc::clone(&self.node);
         if node.net_kernel().is_none() {
-            return Ok(false);
+            return Ok(None);
         }
         let Some(super::node::Named::Process(kernel)) = self.name_owner("net_kernel") else {
-            return Ok(false);
+            return Ok(None);
         };
         let reference = self.make_magic_ref()?;
         let now = self.timers.now();
@@ -161,18 +164,19 @@ impl Scheduler {
             .expect("the node event lock is not poisoned");
         let mut dist = node.dist();
         if node.is_going_down() || node.live_owner(kernel).is_none() {
-            return Ok(false);
+            return Ok(None);
         }
         if dist.connected(name).is_some() {
-            return Ok(false);
+            return Ok(None);
         }
         let start = !dist.pending(name);
         if start {
             dist.new_connection(name);
         }
         let handle = dist.current_dhandle(name);
+        let connection = dist.connection_id(name);
         let caller = self.current_process().id;
-        dist.enqueue_pending_send(name, caller, to.clone(), message.clone());
+        queue(&mut dist, connection);
         drop(dist);
         if start {
             self.send_message(
@@ -185,7 +189,7 @@ impl Scheduler {
                 ]),
             );
         }
-        Ok(true)
+        Ok(Some(connection))
     }
 
     /// Send the exit signal of `erlang:exit/2,3` from the current process
@@ -320,11 +324,18 @@ impl Scheduler {
         node: &Atom,
         flags: u64,
     ) -> Result<(), BeamError> {
-        for (sender, to, message) in dist.take_pending_sends(node) {
-            let control = send_control(flags, Term::Pid(sender), &to, SendPriority::Normal);
-            for packet in
-                self.dist_encode_packets(dist, sender, node, flags, &control, Some(message))?
-            {
+        for signal in dist.take_pending_signals(node) {
+            let (sender, control, message) = match signal {
+                super::dist_table::PendingSignal::Send(sender, to, message) => (
+                    sender,
+                    send_control(flags, Term::Pid(sender), &to, SendPriority::Normal),
+                    Some(message),
+                ),
+                super::dist_table::PendingSignal::Monitor(sender, control) => {
+                    (sender, control, None)
+                }
+            };
+            for packet in self.dist_encode_packets(dist, sender, node, flags, &control, message)? {
                 dist.enqueue(node, packet);
             }
         }

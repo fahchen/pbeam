@@ -325,7 +325,10 @@ fn applies_auto_connect_policy_to_name_sends_as_pinned_erts() {
                 ""
             };
             let expression = format!(
-                "N='{}', {first} {{pending_receiver,N}} ! leaked, sys:get_state(net_kernel), \
+                "N='{}', {first} {{pending_receiver,N}} ! leaked, \
+                 R=monitor(process,{{pending_receiver,N}}), \
+                 receive {{'DOWN',R,process,_,noconnection}} -> ok after 5000 -> halt(7) end, \
+                 sys:get_state(net_kernel), \
                  false=lists:member(N,nodes()), true=net_kernel:connect_node(N), \
                  {{pending_receiver,N}} ! {{final,self()}}, \
                  receive final_ack -> io:format(\"ok~n\") after 5000 -> halt(6) end, halt().",
@@ -2334,9 +2337,7 @@ fn calls_a_server_of_another_node_by_name_as_pinned_erts() {
 fn pings_a_live_node_with_no_connection_as_pinned_erts() {
     // `net_adm:ping/1` makes a `gen:call` to `{net_kernel, Node}`, so it
     // monitors the name and sends to it. ERTS starts a connection on that
-    // call and answers `pong`. PBeam ends the monitor of a node with no
-    // connection at once with `noconnection`, so it answers `pang`; #1412
-    // adds the connection on the first signal (row "Distribution").
+    // call and answers `pong` (row "Distribution").
     let epmd = Epmd::start();
     let id = std::process::id();
     for (server_pbeam, socket) in [(false, true), (false, false), (true, true), (true, false)] {
@@ -2369,9 +2370,154 @@ fn pings_a_live_node_with_no_connection_as_pinned_erts() {
         let pbeam = format!("dppb{server_pbeam}{socket}{id}");
         assert_eq!(
             stdout(&pbeam_erl(&epmd, &client(&pbeam))),
-            "[{unconnected,pang}]\n",
+            "[{unconnected,pong}]\n",
             "server pbeam {server_pbeam}, socket {socket}"
         );
+    }
+}
+
+#[test]
+fn fails_a_pending_name_monitor_as_pinned_erts() {
+    // bif.c:838-858 and dist.c:5627-5674: abort detaches the monitor.
+    let epmd = Epmd::start();
+    let name = format!("dmonmissing{}", std::process::id());
+    let expression = "N=missing@localhost, R=monitor(process,{missing_name,N}), \
+        receive {'DOWN',R,process,{missing_name,N},Reason} -> \
+        io:format(\"~w~n\",[{Reason,net_adm:ping(N)}]) \
+        after 5000 -> halt(2) end, halt().";
+    let args = [
+        "-sname",
+        &name,
+        "-kernel",
+        "logger_level",
+        "none",
+        "-noshell",
+        "-eval",
+        expression,
+    ];
+    assert_eq!(stdout(&erts_erl(&epmd, &args)), "{noconnection,pang}\n");
+    assert_eq!(stdout(&pbeam_erl(&epmd, &args)), "{noconnection,pang}\n");
+    let expression = format!(
+        "{{ok,_}}=net_kernel:start(dmonshutdown{}, #{{name_domain=>shortnames}}), \
+         N=monitor_pending@nohost, erts_internal:new_connection(N), \
+         R=monitor(process,{{missing_name,N}}), ok=net_kernel:stop(), \
+         receive {{'DOWN',R,process,{{missing_name,N}},Reason}} -> io:format(\"~w~n\",[Reason]) \
+         after 5000 -> halt(2) end, halt().",
+        std::process::id()
+    );
+    let args = [
+        "-kernel",
+        "logger_level",
+        "none",
+        "-noshell",
+        "-eval",
+        &expression,
+    ];
+    assert_eq!(stdout(&erts_erl(&epmd, &args)), "noconnection\n");
+    assert_eq!(stdout(&pbeam_erl(&epmd, &args)), "noconnection\n");
+    let expression = "N=monitor_flags@nohost, erts_internal:new_connection(N), \
+        R=monitor(process,{missing_name,N}), \
+        Flags=element(3,erts_internal:get_dflags()) band bnot 16#28, \
+        {ok,H}=erts_internal:create_dist_channel(N,self(),{Flags,1}), \
+        D=erlang:dist_ctrl_get_data(H), io:format(\"~w~n\",[{D=/=none,is_reference(R)}]), halt().";
+    let args = [
+        "-sname",
+        &name,
+        "-kernel",
+        "logger_level",
+        "none",
+        "-noshell",
+        "-eval",
+        expression,
+    ];
+    assert_eq!(stdout(&erts_erl(&epmd, &args)), "{true,true}\n");
+    assert_eq!(stdout(&pbeam_erl(&epmd, &args)), "{true,true}\n");
+}
+
+#[test]
+fn preserves_a_demonitored_pending_monitor_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    for pbeam in [false, true] {
+        let server_name = format!("dmonorderserver{pbeam}{id}");
+        let server = ErtsNode::start(
+            &epmd,
+            &["-sname", &server_name, "-setcookie", "ck"],
+            "register(pending_receiver,self()), io:format(\"~s~n\",[node()]), \
+             receive {inspect,P} -> \
+             F=fun Loop(0) -> timeout; Loop(T) -> case process_info(self(),monitored_by) of \
+                {monitored_by,[]} -> []; _ -> timer:sleep(10), Loop(T-1) end end, \
+             P ! {monitors,F(50)} end, \
+             receive stop -> ok after 5000 -> ok end, halt().",
+        );
+        let expression = format!(
+            "N='{}', erts_internal:new_connection(N), \
+             R=monitor(process,{{pending_receiver,N}}), true=demonitor(R), \
+             {{pending_receiver,N}} ! {{inspect,self()}}, true=net_kernel:connect_node(N), \
+             receive {{monitors,Ms}} -> io:format(\"~w~n\",[Ms]) after 5000 -> halt(2) end, halt().",
+            server.line()
+        );
+        let client_name = format!("dmonorderclient{pbeam}{id}");
+        let args = [
+            "-sname",
+            &client_name,
+            "-setcookie",
+            "ck",
+            "-kernel",
+            "logger_level",
+            "none",
+            "-noshell",
+            "-eval",
+            &expression,
+        ];
+        let output = if pbeam {
+            pbeam_erl(&epmd, &args)
+        } else {
+            erts_erl(&epmd, &args)
+        };
+        assert_eq!(stdout(&output), "timeout\n", "pbeam={pbeam}");
+    }
+}
+
+#[test]
+fn monitors_a_pid_on_the_first_signal_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    for pbeam in [false, true] {
+        let server_name = format!("dmonpidserver{pbeam}{id}");
+        let server = ErtsNode::start(
+            &epmd,
+            &["-sname", &server_name, "-setcookie", "ck"],
+            "Parent=self(), Child=spawn(fun()->register(pending_receiver,self()), Parent ! ready, receive stop -> ok end end), \
+             receive ready -> ok end, io:format(\"~w~n~w~n\",[node(),binary_to_list(term_to_binary(Child))]), \
+             receive stop -> ok after 5000 -> ok end, halt().",
+        );
+        let node = server.line();
+        let pid_bytes = server.line();
+        let expression = format!(
+            "N={node}, P=binary_to_term(list_to_binary({pid_bytes})), R=monitor(process,P), \
+             {{pending_receiver,N}} ! stop, \
+             receive {{'DOWN',R,process,P,Reason}} -> io:format(\"~w~n\",[Reason]) after 5000 -> halt(2) end, halt()."
+        );
+        let client_name = format!("dmonpidclient{pbeam}{id}");
+        let args = [
+            "-sname",
+            &client_name,
+            "-setcookie",
+            "ck",
+            "-kernel",
+            "logger_level",
+            "none",
+            "-noshell",
+            "-eval",
+            &expression,
+        ];
+        let output = if pbeam {
+            pbeam_erl(&epmd, &args)
+        } else {
+            erts_erl(&epmd, &args)
+        };
+        assert_eq!(stdout(&output), "normal\n", "pbeam={pbeam}");
     }
 }
 

@@ -91,6 +91,27 @@ impl Scheduler {
         let to = target.term();
         let node = target.node();
         let from = Term::Pid(watcher);
+        let remote = match target {
+            RemoteTarget::Pid(remote) => Some(*remote),
+            RemoteTarget::Name { .. } => None,
+        };
+        let monitor = super::dist_table::DistMonitor {
+            process: watcher,
+            remote,
+            key,
+            side: MonitorSide::Watcher,
+        };
+        let control = monitor_control(MONITOR_P, &from, &to, key, None);
+        let already_connected = self.node.dist().connected(&node).is_some();
+        if !already_connected
+            && let Some(connection) = self.dist_auto_connect(&node, |dist, _| {
+                dist.insert_monitor_now(&node, monitor);
+                dist.enqueue_pending_monitor(&node, watcher, control);
+            })?
+        {
+            self.monitor_on(watcher, target, key, connection);
+            return Ok(());
+        }
         self.dist_output(watcher, &node, |flags, connection| {
             used = Some(connection);
             (flags & MONITOR_FLAGS == MONITOR_FLAGS).then(|| {
