@@ -118,13 +118,16 @@ pub(super) fn monitor_node(
 ) -> Result<BifResult, BeamError> {
     // ERTS sets the `badopt` cause before it checks the node and boolean
     // (`dist.c:6489-6509`).
-    let Some(mut options) = options.proper_list() else {
+    let Some(options_list) = options.proper_list() else {
         return Ok(BifResult::badopt());
     };
-    if options.any(
-        |option| !matches!(option, Term::Atom(atom) if atom.is_static("allow_passive_connect")),
-    ) {
-        return Ok(BifResult::badopt());
+    let mut passive = false;
+    for option in options_list {
+        if matches!(option, Term::Atom(atom) if atom.is_static("allow_passive_connect")) {
+            passive = true;
+        } else {
+            return Ok(BifResult::badopt());
+        }
     }
     let Term::Atom(name) = node else {
         return Ok(BifResult::badarg());
@@ -145,21 +148,47 @@ pub(super) fn monitor_node(
     let enabled = matches!(enabled, Term::Atom(atom) if atom.is_static("true"));
     let process = scheduler.current_process().id;
     let node = Arc::clone(scheduler.node());
-    let mut dist = node.dist();
     if enabled {
-        let Some(connection) = dist.monitor_node(name, process) else {
-            return Err(error(
-                "unsupported erlang:monitor_node/2,3 of a node without a connection: see Distribution in docs/erts-differences.md",
-            ));
+        let connected = node.dist().connected(name).is_some();
+        if passive && !connected {
+            return Ok(Trap {
+                module: "erlang",
+                function: "dmonitor_node",
+                arguments: vec![
+                    Term::Atom(name.clone()),
+                    Term::static_atom("true"),
+                    options.clone(),
+                ],
+            });
+        }
+        let connection = if connected {
+            node.dist().monitor_node(name, process)
+        } else {
+            scheduler.dist_auto_connect(name, |dist, _| {
+                dist.monitor_node(name, process);
+            })?
         };
-        scheduler
-            .current_process_mut()
-            .add_node_monitor(name.index(), connection);
+        let connection = connection.or_else(|| node.dist().monitor_node(name, process));
+        if let Some(connection) = connection {
+            scheduler
+                .current_process_mut()
+                .add_node_monitor(name.index(), connection);
+        } else {
+            return Ok(Trap {
+                module: "erlang",
+                function: "dmonitor_node",
+                arguments: vec![
+                    Term::Atom(name.clone()),
+                    Term::static_atom("true"),
+                    options.clone(),
+                ],
+            });
+        }
     } else if let Some(connection) = scheduler
         .current_process_mut()
         .remove_node_monitor(name.index())
     {
-        dist.unmonitor_node(name, process, connection);
+        node.dist().unmonitor_node(name, process, connection);
     }
     Ok(Value(Term::static_atom("true")))
 }

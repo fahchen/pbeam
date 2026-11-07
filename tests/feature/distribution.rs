@@ -3090,13 +3090,80 @@ fn monitors_the_local_node_as_pinned_erts() {
         "dist_lost_probe:monitor_idle(), halt().",
     ] {
         let arguments = probe(&["-sname", &name], expression);
-        let result = pbeam_erl(&epmd, &arguments);
-        assert!(!result.status.success(), "{result:?}");
-        assert!(
-            String::from_utf8_lossy(&result.stderr)
-                .contains("unsupported erlang:monitor_node/2,3 of a node without a connection"),
-            "{result:?}"
+        assert_eq!(stdout(&erts_erl(&epmd, &arguments)), "");
+        assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), "");
+    }
+}
+
+#[test]
+fn connects_and_fails_node_monitors_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    for passive in [false, true] {
+        for pbeam in [false, true] {
+            let server_name = format!("dnodeautoserver{passive}{pbeam}{id}");
+            let server = ErtsNode::start(
+                &epmd,
+                &["-sname", &server_name, "-setcookie", "ck"],
+                "register(node_receiver,self()), io:format(\"~w~n\",[node()]), receive stop -> halt() end.",
+            );
+            let node = server.line();
+            let options = if passive {
+                "[allow_passive_connect]"
+            } else {
+                "[]"
+            };
+            let expression = format!(
+                "N={node}, A=erlang:monitor_node(N,true,{options}), B=erlang:monitor_node(N,true), \
+                 C=erlang:monitor_node(N,false), {{node_receiver,N}} ! stop, \
+                 D=receive {{nodedown,N}} -> nodedown after 5000 -> timeout end, \
+                 E=receive {{nodedown,N}} -> unexpected after 100 -> none end, \
+                 io:format(\"~w~n\",[{{A,B,C,D,E}}]), halt()."
+            );
+            let client_name = format!("dnodeautoclient{passive}{pbeam}{id}");
+            let args = [
+                "-sname",
+                &client_name,
+                "-setcookie",
+                "ck",
+                "-kernel",
+                "logger_level",
+                "none",
+                "-noshell",
+                "-eval",
+                &expression,
+            ];
+            let output = if pbeam {
+                pbeam_erl(&epmd, &args)
+            } else {
+                erts_erl(&epmd, &args)
+            };
+            assert_eq!(
+                stdout(&output),
+                "{true,true,true,nodedown,none}\n",
+                "passive={passive} pbeam={pbeam}"
+            );
+        }
+    }
+    let name = format!("dnodemissing{id}");
+    for options in ["[]", "[allow_passive_connect]"] {
+        let expression = format!(
+            "N=missing@localhost, A=erlang:monitor_node(N,false,{options}), B=erlang:monitor_node(N,true,{options}), \
+             C=receive {{nodedown,N}} -> nodedown after 5000 -> timeout end, \
+             io:format(\"~w~n\",[{{A,B,C}}]), halt()."
         );
+        let args = [
+            "-sname",
+            &name,
+            "-kernel",
+            "logger_level",
+            "none",
+            "-noshell",
+            "-eval",
+            &expression,
+        ];
+        assert_eq!(stdout(&erts_erl(&epmd, &args)), "{true,true,nodedown}\n");
+        assert_eq!(stdout(&pbeam_erl(&epmd, &args)), "{true,true,nodedown}\n");
     }
 }
 

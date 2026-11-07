@@ -141,7 +141,7 @@ impl Scheduler {
     }
 
     /// Start an idle connection and queue a signal (`dist.c:5713-5759`).
-    pub(super) fn dist_auto_connect(
+    pub(in crate::runtime) fn dist_auto_connect(
         &mut self,
         name: &Atom,
         queue: impl FnOnce(&mut super::dist_table::DistTable, u32),

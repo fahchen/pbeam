@@ -620,7 +620,7 @@ impl DistTable {
         self.entries[&name.index()].input
     }
 
-    /// Register a node monitor and return its connected entry id.
+    /// Register a node monitor and return its pending or connected entry id.
     ///
     /// # Examples
     ///
@@ -633,7 +633,7 @@ impl DistTable {
         process: ProcessId,
     ) -> Option<u32> {
         let entry = self.entries.get_mut(&name.index())?;
-        if entry.state != State::Connected {
+        if entry.state == State::Idle {
             return None;
         }
         *entry.node_monitors.entry(process).or_default() += 1;
