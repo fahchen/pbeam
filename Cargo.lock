@@ -367,6 +367,7 @@ dependencies = [
  "num-traits",
  "openssl",
  "openssl-src",
+ "openssl-sys",
  "socket2",
  "zlib-rs",
  "zstd",

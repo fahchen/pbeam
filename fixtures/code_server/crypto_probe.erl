@@ -1,5 +1,5 @@
 -module(crypto_probe).
--export([main/0, nifs/0, info/0, supports/0, supports_host/0, fips/0, oneshot/0, oneshot_host/0, xof_sizes/0, ciphers/0, ciphers_host/0, cipher_order/0, contexts/0, mac_contexts/0, mac_contexts_host/0, cipher_contexts/0, mac_poly1305_final/0, mac_poly1305_update/0, unsupported/0]).
+-export([main/0, nifs/0, info/0, supports/0, supports_host/0, rsa_options/0, fips/0, oneshot/0, oneshot_host/0, xof_sizes/0, ciphers/0, ciphers_host/0, cipher_order/0, contexts/0, mac_contexts/0, mac_contexts_host/0, cipher_contexts/0, mac_poly1305_final/0, mac_poly1305_update/0, unsupported/0]).
 
 %% Write the results of crypto:strong_rand_bytes/1, one term on each line.
 %% The first call loads crypto on demand, and its -on_load function loads
@@ -103,10 +103,18 @@ supports_host() ->
     io:format("~p~n", [[[Item || Item <- crypto:supports(Type), lists:member(Item, Run)]
                         || Type <- [curves, public_keys]]]).
 
+%% Compare the complete RSA option list, its supports/0 entry, and an invalid type.
+rsa_options() ->
+    io:format("~p~n", [[crypto:supports(rsa_opts),
+                        proplists:get_value(rsa_opts, crypto:supports()),
+                        bad_reason(fun() -> crypto:supports(invalid_option) end)]]).
+
 run_algorithms() ->
     [blake2s, blake2b, sm3, shake256, shake128, sha3_512, sha3_384, sha3_256,
      sha3_224, sha512_256, sha512_224, sha512, sha384, sha256, sha224, sha,
-     ripemd160, md5, cmac, hmac, poly1305] ++ run_ciphers() ++
+     ripemd160, md5, cmac, hmac, poly1305, rsa_pkcs1_pss_padding, rsa_pss_saltlen,
+     rsa_mgf1_md, rsa_pkcs1_oaep_padding, rsa_oaep_label, rsa_oaep_md, signature_md,
+     rsa_pkcs1_padding, rsa_x931_padding, rsa_no_padding] ++ run_ciphers() ++
         [sm4_gcm, sm4_ccm, aes_cbc, aes_ccm, aes_cfb128, aes_cfb8, aes_ctr, aes_ecb, aes_gcm,
          secp160k1, secp160r1, secp160r2, secp192k1, secp224k1, secp224r1, secp256k1,
          secp384r1, secp521r1, secp192r1, prime192v1, prime192v2, prime192v3, prime239v1,

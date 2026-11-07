@@ -70,6 +70,8 @@ use pkey::{PKEY_TYPES, pkey_crypt_nif, pkey_sign_nif, pkey_verify_nif};
 use rand::{rand_seed_nif, rand_uniform_nif, strong_rand_bytes_nif, strong_rand_range_nif};
 use std::collections::HashMap;
 
+include!(concat!(env!("OUT_DIR"), "/rsa_options.rs"));
+
 /// The C `INT_MAX` as a `usize`, for the size checks of the NIFs that pass a
 /// length to OpenSSL as a C `int`.
 #[expect(
@@ -581,7 +583,7 @@ pub(super) const BINDINGS: &[Binding] = &[
         name: "rsa_opts_algorithms",
         arity: 0,
         job: Job::Normal,
-        run: |_, _| Ok(BifResult::Value(Term::Nil)),
+        run: |scheduler, _| atom_list(scheduler, RSA_OPTIONS),
     },
     Binding {
         name: "srp_host_secret_nif",
