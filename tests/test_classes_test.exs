@@ -187,6 +187,29 @@ defmodule TestClassesReportTest do
     assert output =~ "purpose=measurement; dependencies=none; selected=false"
   end
 
+  test "reports zlib scheduler sockets separately from in-memory helpers", %{directory: directory} do
+    cases = [
+      {"runtime::interpreter::native::zlib::tests::opens_and_closes_a_stream", "matches"},
+      {"runtime::interpreter::native::zlib::tests::maps_the_codec_failure_steps", "matches"}
+    ]
+
+    {output, status} =
+      report(directory, true, cases, [
+        "--scope",
+        "unit",
+        "--cases",
+        "--dependency",
+        "local_socket"
+      ])
+
+    assert status == 0
+
+    assert output =~
+             "opens_and_closes_a_stream: purpose=runtime_integration; dependencies=network,local_socket; selected=true"
+
+    refute output =~ "maps_the_codec_failure_steps: purpose="
+  end
+
   test "reports the ETS lock test's semantic wait", %{directory: directory} do
     cases = [
       {"runtime::ets::tests::keeps_the_buckets_of_a_walk_from_a_clear_of_another_thread",
