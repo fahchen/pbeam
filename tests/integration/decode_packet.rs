@@ -498,3 +498,49 @@ fn decodes_four_byte_packets_as_pinned_erts() {
         b"[{ok,<<97,98,99>>,<<120>>},{ok,<<>>,<<>>}]\n"
     );
 }
+
+#[test]
+fn decodes_four_byte_packets_errors_and_incomplete_as_pinned_erts() {
+    let result = run("four_paths");
+    let more = |value| tuple(vec![atom(&result, "more"), value]);
+    let invalid = tuple(vec![atom(&result, "error"), atom(&result, "invalid")]);
+    let badarg = tuple(vec![
+        atom(&result, "error"),
+        atom(&result, "badarg"),
+        error_info(
+            &result,
+            vec![(atom(&result, "module"), atom(&result, "erl_erts_errors"))],
+        ),
+    ]);
+    assert_eq!(
+        result.term,
+        list(vec![
+            more(atom(&result, "undefined")),
+            more(atom(&result, "undefined")),
+            more(int(7)),
+            invalid.clone(),
+            invalid.clone(),
+            invalid,
+            more(atom(&result, "undefined")),
+            ok(&result, binary(b"abc"), binary(b"")),
+            badarg.clone(),
+            badarg.clone(),
+            badarg
+        ])
+    );
+    assert_eq!(reference("four_paths"), b"[{more,undefined},{more,undefined},{more,7},{error,invalid},{error,invalid},{error,invalid},{more,undefined},{ok,<<97,98,99>>,<<>>},{error,badarg,[{error_info,#{module => erl_erts_errors}}]},{error,badarg,[{error_info,#{module => erl_erts_errors}}]},{error,badarg,[{error_info,#{module => erl_erts_errors}}]}]\n");
+}
+
+#[test]
+fn decodes_four_byte_packets_rejects_pinned_erts_crash() {
+    // No ERTS comparison: OTP 29.1.1 reads invalid memory and crashes.
+    let error = BeamProgram::load(&[PROBE])
+        .unwrap()
+        .execute("decode_packet_probe", "four_erts_crash", &[])
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("pinned ERTS reads invalid memory and crashes"),
+        "{error}"
+    );
+}

@@ -3,7 +3,7 @@
 -module(decode_packet_probe).
 
 -export([request_lines/0, header_lines/0, end_of_headers/0, incomplete/0,
-         malformed/0, options/0, badargs/0, unsupported/0, four_complete/0]).
+         malformed/0, options/0, badargs/0, unsupported/0, four_complete/0, four_paths/0, four_erts_crash/0]).
 
 decode(Type, Bin) ->
     erlang:decode_packet(Type, Bin, []).
@@ -106,3 +106,17 @@ catch_error(Type, Subject, Options) ->
 
 four_complete() ->
     [decode(4, <<0,0,0,3,"abc",120>>), decode(4, <<0,0,0,0>>)].
+
+four_paths() ->
+    [decode(4, <<>>), decode(4, <<0,0,0>>), decode(4, <<0,0,0,3,97>>),
+     erlang:decode_packet(4, <<0,0,0,3>>, [{packet_size,2}]),
+     decode(4, <<127,255,255,252>>),
+     erlang:decode_packet(4, <<128,0,0,0>>, [{packet_size,4294967295}]),
+     erlang:decode_packet(4, <<255,255,255,252>>, [{packet_size,4294967295}]),
+     erlang:decode_packet(4, <<0,0,0,3,"abc">>, [{packet_size,3},{line_length,1}]),
+     catch_error(4, <<1:1>>, []), catch_error(4, x, []),
+     catch_error(4, <<>>, [{line_delimiter,10}])].
+
+%% No ERTS comparison: OTP 29.1.1 reads invalid memory and crashes.
+four_erts_crash() ->
+    erlang:decode_packet(4, <<4294967293:32>>, [{packet_size,4294967295}]).

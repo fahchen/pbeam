@@ -146,54 +146,59 @@ pub(super) fn decode_packet(
             _ => return Ok(BifResult::badarg()),
         }
     }
-    if matches!(kind, Kind::Four) {
-        let Some(bytes) = binary.bytes() else {
-            return Ok(BifResult::badarg());
-        };
-        let Some(header) = bytes.get(..4) else {
-            return Ok(Value(Term::tuple(vec![
-                atom(context, "more")?,
-                atom(context, "undefined")?,
-            ])));
-        };
-        let length = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
-        let limit = if packet_size == 0 {
-            i32::MAX as u64 - 4
-        } else {
-            packet_size
-        };
-        if u64::from(length) > limit {
-            return Ok(Value(Term::tuple(vec![
-                atom(context, "error")?,
-                atom(context, "invalid")?,
-            ])));
-        }
-        let total = length.wrapping_add(4) as i32;
-        if total < 0 {
-            return Ok(Value(Term::tuple(vec![
-                atom(context, "error")?,
-                atom(context, "invalid")?,
-            ])));
-        }
-        if total == 0 {
-            return Ok(Value(Term::tuple(vec![
-                atom(context, "more")?,
-                atom(context, "undefined")?,
-            ])));
-        }
-        let total = total as usize;
-        if total > bytes.len() {
-            return Ok(Value(Term::tuple(vec![
-                atom(context, "more")?,
-                Term::Integer(total as i64),
-            ])));
-        }
-        let packet = Term::Binary(binary.bits(32, total * 8));
-        let rest = Term::Binary(binary.bits(total * 8, binary.bit_size()));
-        return Ok(Value(Term::tuple(vec![atom(context, "ok")?, packet, rest])));
-    }
     let line = match kind {
-        Kind::Four => unreachable!(),
+        Kind::Four => {
+            let Some(bytes) = binary.bytes() else {
+                return Ok(BifResult::badarg());
+            };
+            let Some(header) = bytes.get(..4) else {
+                return Ok(Value(Term::tuple(vec![
+                    atom(context, "more")?,
+                    atom(context, "undefined")?,
+                ])));
+            };
+            let length = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
+            let limit = if packet_size == 0 {
+                i32::MAX as u64 - 4
+            } else {
+                packet_size
+            };
+            if u64::from(length) > limit {
+                return Ok(Value(Term::tuple(vec![
+                    atom(context, "error")?,
+                    atom(context, "invalid")?,
+                ])));
+            }
+            let total = length.wrapping_add(4) as i32;
+            if total < 0 {
+                return Ok(Value(Term::tuple(vec![
+                    atom(context, "error")?,
+                    atom(context, "invalid")?,
+                ])));
+            }
+            if total == 0 {
+                return Ok(Value(Term::tuple(vec![
+                    atom(context, "more")?,
+                    atom(context, "undefined")?,
+                ])));
+            }
+            if total < 4 {
+                // Pinned ERTS reads invalid memory after this wrap, so its result is undefined.
+                return Err(error(
+                    "unsupported erlang:decode_packet/3 type 4: pinned ERTS reads invalid memory and crashes on this length",
+                ));
+            }
+            let total = total as usize;
+            if total > bytes.len() {
+                return Ok(Value(Term::tuple(vec![
+                    atom(context, "more")?,
+                    Term::Integer(total as i64),
+                ])));
+            }
+            let packet = Term::Binary(binary.bits(32, total * 8));
+            let rest = Term::Binary(binary.bits(total * 8, binary.bit_size()));
+            return Ok(Value(Term::tuple(vec![atom(context, "ok")?, packet, rest])));
+        }
         Kind::HttpBin => HttpLine::Start,
         Kind::HttpHBin => HttpLine::Header,
         Kind::Unsupported(name) => {
