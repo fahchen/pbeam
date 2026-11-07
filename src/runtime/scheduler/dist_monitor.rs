@@ -87,7 +87,6 @@ impl Scheduler {
         key: MonitorKey,
         watcher: ProcessId,
     ) -> Result<(), BeamError> {
-        let mut used = None;
         let to = target.term();
         let node = target.node();
         let from = Term::Pid(watcher);
@@ -106,22 +105,28 @@ impl Scheduler {
         if !already_connected
             && let Some(connection) = self.dist_auto_connect(&node, |dist, _| {
                 dist.insert_monitor_now(&node, monitor);
-                dist.enqueue_pending_monitor(&node, watcher, control);
+                dist.enqueue_pending_monitor(&node, watcher, control.clone());
             })?
         {
             self.monitor_on(watcher, target, key, connection);
             return Ok(());
         }
-        self.dist_output(watcher, &node, |flags, connection| {
-            used = Some(connection);
-            (flags & MONITOR_FLAGS == MONITOR_FLAGS).then(|| {
-                let control = monitor_control(MONITOR_P, &from, &to, key, None);
-                (control, None)
-            })
-        })?;
+        #[cfg(test)]
+        super::dist_output::after_connected_signal_check();
+        let pending =
+            self.node
+                .net_kernel()
+                .is_some()
+                .then_some(super::dist_output::PendingOutput::Monitor(
+                    monitor, &control,
+                ));
+        let connection =
+            self.dist_output_with_pending(watcher, &node, None, pending, |flags, _| {
+                (flags & MONITOR_FLAGS == MONITOR_FLAGS).then(|| (control.clone(), None))
+            })?;
         // No connection gives `noconnection`, as the end of a connection
         // does (`dist.c:1021-1117`, `305-310`).
-        let Some(connection) = used else {
+        let Some(connection) = connection else {
             self.monitor_down_noconnection(watcher, key);
             return Ok(());
         };

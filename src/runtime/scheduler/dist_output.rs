@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use super::{Scheduler, dist_table::Controller};
+use crate::runtime::process::RemotePid;
 use crate::{
     error::BeamError,
     runtime::interpreter::bif::{encode_dist, encode_dist_cached},
@@ -64,6 +65,19 @@ pub(in crate::runtime) enum ConnectMode {
     Allow,
     /// Do not start an idle connection.
     NoConnect,
+}
+
+/// A signal that may join a pending connection during the final state check.
+pub(super) enum PendingOutput<'a> {
+    Send(&'a Term, &'a Term, SendPriority),
+    Exit(&'a Term, &'a Term, SendPriority),
+    Link(RemotePid, &'a Term),
+    Monitor(super::dist_table::DistMonitor, &'a Term),
+}
+
+#[cfg(test)]
+pub(super) fn after_connected_signal_check() {
+    tests::after_connected_signal_check();
 }
 
 impl Scheduler {
@@ -140,7 +154,7 @@ impl Scheduler {
             .node
             .net_kernel()
             .is_some()
-            .then_some((to, message, priority));
+            .then_some(PendingOutput::Send(to, message, priority));
         self.dist_output_with_pending(caller, node, None, pending, |flags, _| {
             if is_remote_reference(to) && flags & ALIAS == 0 {
                 return None;
@@ -150,6 +164,7 @@ impl Scheduler {
                 Some(message.clone()),
             ))
         })
+        .map(|connection| connection.is_some())
     }
 
     /// Start an idle connection and queue a signal (`dist.c:5713-5759`).
@@ -259,9 +274,17 @@ impl Scheduler {
                 return Ok(true);
             }
         }
-        self.dist_output(caller, node, |flags, _| {
+        #[cfg(test)]
+        after_connected_signal_check();
+        let pending = self
+            .node
+            .net_kernel()
+            .is_some()
+            .then_some(PendingOutput::Exit(to, reason, priority));
+        self.dist_output_with_pending(caller, node, None, pending, |flags, _| {
             exit_control(flags, caller, to, reason, priority)
         })
+        .map(|connection| connection.is_some())
     }
 
     /// Put the packet of the control message and the message that `build`
@@ -301,31 +324,48 @@ impl Scheduler {
         build: impl FnOnce(u64, u32) -> Option<(Term, Option<Term>)>,
     ) -> Result<bool, BeamError> {
         self.dist_output_with_pending(sender, node, monitor, None, build)
+            .map(|connection| connection.is_some())
     }
 
-    /// Decide whether to enqueue a pending send under the same lock that
+    /// Decide whether to enqueue a pending signal under the same lock that
     /// checks for a connected controller (`dist.c:3247-3255`).
-    fn dist_output_with_pending(
+    pub(super) fn dist_output_with_pending(
         &mut self,
         sender: ProcessId,
         node: &Atom,
         monitor: Option<super::dist_table::DistMonitor>,
-        pending: Option<(&Term, &Term, SendPriority)>,
+        pending: Option<PendingOutput<'_>>,
         build: impl FnOnce(u64, u32) -> Option<(Term, Option<Term>)>,
-    ) -> Result<bool, BeamError> {
+    ) -> Result<Option<u32>, BeamError> {
         let node_ref = Arc::clone(&self.node);
         let mut dist = node_ref.dist();
-        if let Some((to, message, priority)) = pending
-            && dist.pending(node)
+        if dist.pending(node)
+            && let Some(pending) = pending
         {
-            dist.enqueue_pending_send(node, sender, to.clone(), message.clone(), priority);
-            return Ok(true);
+            let connection = dist.connection_id(node);
+            match pending {
+                PendingOutput::Send(to, message, priority) => {
+                    dist.enqueue_pending_send(node, sender, to.clone(), message.clone(), priority);
+                }
+                PendingOutput::Exit(to, reason, priority) => {
+                    dist.enqueue_pending_exit(node, sender, to.clone(), reason.clone(), priority);
+                }
+                PendingOutput::Link(remote, control) => {
+                    dist.insert_link_now(sender, remote);
+                    dist.enqueue_pending_link(node, sender, control.clone());
+                }
+                PendingOutput::Monitor(monitor, control) => {
+                    dist.insert_monitor_now(node, monitor);
+                    dist.enqueue_pending_monitor(node, sender, control.clone());
+                }
+            }
+            return Ok(Some(connection));
         }
         let Some((flags, controller, connection)) = dist.connected(node) else {
-            return Ok(false);
+            return Ok(None);
         };
         let Some((control, message)) = build(flags, connection) else {
-            return Ok(true);
+            return Ok(Some(connection));
         };
         // The monitor joins the connection before the packet leaves, so the
         // end of the connection sees it (`dist.c:6111-6120`).
@@ -350,7 +390,7 @@ impl Scheduler {
                 self.dist_port_send(port)?;
             }
         }
-        Ok(true)
+        Ok(Some(connection))
     }
 
     /// Encode pending signals before releasing the lock that publishes a connection.
