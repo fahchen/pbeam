@@ -5,7 +5,10 @@
 
 use std::sync::Arc;
 
-use super::{Scheduler, dist_table::Controller};
+use super::{
+    Scheduler,
+    dist_table::{Controller, DistTable, PendingSignal, queue_size},
+};
 use crate::runtime::process::RemotePid;
 use crate::{
     error::BeamError,
@@ -87,6 +90,64 @@ pub(super) fn after_connected_signal_check() {
 }
 
 impl Scheduler {
+    /// Count the ERTS pending iovec before flags are known
+    /// (`external.c:355-407`, `dist.c:1255-1270`, `3475-3510`).
+    pub(super) fn enqueue_pending(
+        &self,
+        dist: &mut DistTable,
+        node: &Atom,
+        signal: PendingSignal,
+    ) -> Result<(), BeamError> {
+        let (control, message) = match &signal {
+            PendingSignal::Send(sender, to, message, priority) => (
+                send_control(
+                    if is_remote_reference(to) {
+                        ALTACT_SIG
+                    } else {
+                        0
+                    },
+                    Term::Pid(*sender),
+                    to,
+                    *priority,
+                ),
+                Some(message.clone()),
+            ),
+            PendingSignal::Exit(sender, to, reason, priority) => exit_control(
+                if is_remote_reference(to) {
+                    ALTACT_SIG
+                } else {
+                    0
+                },
+                *sender,
+                to,
+                reason,
+                *priority,
+            )
+            .expect("a pending exit has a control"),
+            PendingSignal::Link(_, control) | PendingSignal::Monitor(_, control) => {
+                (control.clone(), None)
+            }
+            PendingSignal::Spawn(_, _, control, arguments) => {
+                (control.clone(), Some(arguments.clone()))
+            }
+        };
+        let mut elements = vec![Binary::from(vec![0; 17])];
+        for term in std::iter::once(&control).chain(message.iter()) {
+            let encoded = encode_dist(self, term)?;
+            let mut first = true;
+            for element in encoded {
+                let mut bytes = element.to_bytes();
+                if first {
+                    bytes.remove(0);
+                    first = false;
+                }
+                elements.push(Binary::from(bytes));
+            }
+        }
+        dist.enqueue_pending(node, signal, queue_size(&elements));
+        Ok(())
+    }
+
     /// Send `message` from the current process to `to`, a pid, a reference,
     /// or `{Name, Node}` of the node `node`, as `remote_send` does for a
     /// connected node (`bif.c:2405-2441`), and return `true`. Return
@@ -130,7 +191,11 @@ impl Scheduler {
             let node_ref = Arc::clone(&self.node);
             let mut dist = node_ref.dist();
             if dist.pending(node) {
-                dist.enqueue_pending_send(node, caller, to.clone(), message.clone(), priority);
+                self.enqueue_pending(
+                    &mut dist,
+                    node,
+                    PendingSignal::Send(caller, to.clone(), message.clone(), priority),
+                )?;
                 return Ok(true);
             }
             let idle = dist.connected(node).is_none();
@@ -142,14 +207,12 @@ impl Scheduler {
             if idle
                 && connect == ConnectMode::Allow
                 && self
-                    .dist_auto_connect(node, |dist, _| {
-                        dist.enqueue_pending_send(
+                    .dist_auto_connect(node, |scheduler, dist, _| {
+                        scheduler.enqueue_pending(
+                            dist,
                             node,
-                            caller,
-                            to.clone(),
-                            message.clone(),
-                            priority,
-                        );
+                            PendingSignal::Send(caller, to.clone(), message.clone(), priority),
+                        )
                     })?
                     .is_some()
             {
@@ -177,7 +240,7 @@ impl Scheduler {
     pub(in crate::runtime) fn dist_auto_connect(
         &mut self,
         name: &Atom,
-        queue: impl FnOnce(&mut super::dist_table::DistTable, u32),
+        queue: impl FnOnce(&Self, &mut super::dist_table::DistTable, u32) -> Result<(), BeamError>,
     ) -> Result<Option<u32>, BeamError> {
         let node = Arc::clone(&self.node);
         if node.net_kernel().is_none() {
@@ -212,7 +275,7 @@ impl Scheduler {
         let handle = dist.current_dhandle(name);
         let connection = dist.connection_id(name);
         let caller = self.current_process().id;
-        queue(&mut dist, connection);
+        queue(self, &mut dist, connection)?;
         drop(dist);
         if start {
             self.send_message(
@@ -259,21 +322,23 @@ impl Scheduler {
             let node_ref = Arc::clone(&self.node);
             let mut dist = node_ref.dist();
             if dist.pending(node) {
-                dist.enqueue_pending_exit(node, caller, to.clone(), reason.clone(), priority);
+                self.enqueue_pending(
+                    &mut dist,
+                    node,
+                    PendingSignal::Exit(caller, to.clone(), reason.clone(), priority),
+                )?;
                 return Ok(true);
             }
             let idle = dist.connected(node).is_none();
             drop(dist);
             if idle
                 && self
-                    .dist_auto_connect(node, |dist, _| {
-                        dist.enqueue_pending_exit(
+                    .dist_auto_connect(node, |scheduler, dist, _| {
+                        scheduler.enqueue_pending(
+                            dist,
                             node,
-                            caller,
-                            to.clone(),
-                            reason.clone(),
-                            priority,
-                        );
+                            PendingSignal::Exit(caller, to.clone(), reason.clone(), priority),
+                        )
                     })?
                     .is_some()
             {
@@ -351,28 +416,47 @@ impl Scheduler {
             let connection = dist.connection_id(node);
             match pending {
                 PendingOutput::Send(to, message, priority) => {
-                    dist.enqueue_pending_send(node, sender, to.clone(), message.clone(), priority);
+                    self.enqueue_pending(
+                        &mut dist,
+                        node,
+                        PendingSignal::Send(sender, to.clone(), message.clone(), priority),
+                    )?;
                 }
                 PendingOutput::Exit(to, reason, priority) => {
-                    dist.enqueue_pending_exit(node, sender, to.clone(), reason.clone(), priority);
+                    self.enqueue_pending(
+                        &mut dist,
+                        node,
+                        PendingSignal::Exit(sender, to.clone(), reason.clone(), priority),
+                    )?;
                 }
                 PendingOutput::Link(remote, control) => {
                     dist.insert_link_now(sender, remote);
-                    dist.enqueue_pending_link(node, sender, control.clone());
+                    self.enqueue_pending(
+                        &mut dist,
+                        node,
+                        PendingSignal::Link(sender, control.clone()),
+                    )?;
                 }
                 PendingOutput::Monitor(monitor, control) => {
                     dist.insert_monitor_now(node, monitor);
-                    dist.enqueue_pending_monitor(node, sender, control.clone());
+                    self.enqueue_pending(
+                        &mut dist,
+                        node,
+                        PendingSignal::Monitor(sender, control.clone()),
+                    )?;
                 }
                 PendingOutput::Spawn(monitor, control, arguments, queued) => {
                     dist.insert_monitor_now(node, monitor);
-                    dist.enqueue_pending_spawn(
+                    self.enqueue_pending(
+                        &mut dist,
                         node,
-                        sender,
-                        monitor.key,
-                        control.clone(),
-                        arguments.clone(),
-                    );
+                        PendingSignal::Spawn(
+                            sender,
+                            monitor.key,
+                            control.clone(),
+                            arguments.clone(),
+                        ),
+                    )?;
                     *queued = true;
                 }
             }

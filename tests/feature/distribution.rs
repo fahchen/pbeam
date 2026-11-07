@@ -3059,10 +3059,22 @@ fn measures_pending_queue_size_on_pinned_erts() {
         ],
         "dist_pending_size_probe:main(), halt().",
     );
-    assert_eq!(
-        stdout(&erts_erl(&epmd, &arguments)),
-        "[0,230,460,214,254,309,220,1267]\n"
+    let expected = "[0,230,460,214,254,309,220,1267]\n";
+    assert_eq!(stdout(&erts_erl(&epmd, &arguments)), expected);
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), expected);
+    let arguments = probe(
+        &[
+            "-name",
+            "pending_q@localhost",
+            "-kernel",
+            "logger_level",
+            "none",
+        ],
+        "dist_pending_size_probe:more(), halt().",
     );
+    let expected = "[213,458,688,932]\n";
+    assert_eq!(stdout(&erts_erl(&epmd, &arguments)), expected);
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), expected);
 }
 
 #[test]

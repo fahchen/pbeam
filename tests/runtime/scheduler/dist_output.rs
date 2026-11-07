@@ -89,7 +89,10 @@ fn rejects_auto_connect_when_the_connection_changes_before_its_lock() {
     let mut queued = false;
     assert_eq!(
         scheduler
-            .dist_auto_connect(&name, |_, _| queued = true)
+            .dist_auto_connect(&name, |_, _, _| {
+                queued = true;
+                Ok(())
+            })
             .unwrap(),
         None
     );
@@ -103,7 +106,10 @@ fn rejects_auto_connect_when_the_connection_changes_before_its_lock() {
     assert!(node.is_going_down());
     assert_eq!(
         scheduler
-            .dist_auto_connect(&name, |_, _| queued = true)
+            .dist_auto_connect(&name, |_, _, _| {
+                queued = true;
+                Ok(())
+            })
             .unwrap(),
         None
     );
@@ -114,7 +120,10 @@ fn rejects_auto_connect_when_the_connection_changes_before_its_lock() {
     scheduler.node.set_exiting(ProcessId(1));
     assert_eq!(
         scheduler
-            .dist_auto_connect(&name, |_, _| queued = true)
+            .dist_auto_connect(&name, |_, _, _| {
+                queued = true;
+                Ok(())
+            })
             .unwrap(),
         None
     );

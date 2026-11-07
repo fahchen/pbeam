@@ -170,15 +170,18 @@ impl Scheduler {
         let already_connected = self.node.dist().connected(node).is_some();
         if !already_connected
             && self
-                .dist_auto_connect(node, |dist, _| {
+                .dist_auto_connect(node, |scheduler, dist, _| {
                     dist.insert_monitor_now(node, monitor);
-                    dist.enqueue_pending_spawn(
+                    scheduler.enqueue_pending(
+                        dist,
                         node,
-                        sender,
-                        key,
-                        control.clone(),
-                        arguments.clone(),
-                    );
+                        super::dist_table::PendingSignal::Spawn(
+                            sender,
+                            key,
+                            control.clone(),
+                            arguments.clone(),
+                        ),
+                    )
                 })?
                 .is_some()
         {

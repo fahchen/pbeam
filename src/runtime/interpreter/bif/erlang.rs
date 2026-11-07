@@ -164,8 +164,9 @@ pub(super) fn monitor_node(
         let connection = if connected {
             node.dist().monitor_node(name, process)
         } else {
-            scheduler.dist_auto_connect(name, |dist, _| {
+            scheduler.dist_auto_connect(name, |_, dist, _| {
                 dist.monitor_node(name, process);
+                Ok(())
             })?
         };
         let connection = connection.or_else(|| node.dist().monitor_node(name, process));

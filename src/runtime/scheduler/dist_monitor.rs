@@ -103,9 +103,13 @@ impl Scheduler {
         let control = monitor_control(MONITOR_P, &from, &to, key, None);
         let already_connected = self.node.dist().connected(&node).is_some();
         if !already_connected
-            && let Some(connection) = self.dist_auto_connect(&node, |dist, _| {
+            && let Some(connection) = self.dist_auto_connect(&node, |scheduler, dist, _| {
                 dist.insert_monitor_now(&node, monitor);
-                dist.enqueue_pending_monitor(&node, watcher, control.clone());
+                scheduler.enqueue_pending(
+                    dist,
+                    &node,
+                    super::dist_table::PendingSignal::Monitor(watcher, control.clone()),
+                )
             })?
         {
             self.monitor_on(watcher, target, key, connection);
@@ -369,7 +373,11 @@ impl Scheduler {
                 && dist.connection_id(&node) == connection
             {
                 let control = monitor_control(DEMONITOR_P, &Term::Pid(process), &to, key, None);
-                dist.enqueue_pending_monitor(&node, process, control);
+                self.enqueue_pending(
+                    &mut dist,
+                    &node,
+                    super::dist_table::PendingSignal::Monitor(process, control),
+                )?;
                 return Ok(());
             }
         }

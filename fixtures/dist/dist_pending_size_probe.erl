@@ -1,6 +1,6 @@
 %% Measure the distribution output queue before connection setup.
 -module(dist_pending_size_probe).
--export([main/0]).
+-export([main/0, more/0]).
 
 main() ->
     process_flag(trap_exit, true),
@@ -30,3 +30,18 @@ main() ->
 pid(Node) ->
     Name = atom_to_binary(Node),
     binary_to_term(<<131, 88, 118, (byte_size(Name)):16, Name/binary, 1:32, 0:32, 1:32>>).
+
+more() ->
+    N = z@nohost,
+    Name = atom_to_binary(N),
+    Ref = binary_to_term(<<131,90,0,1,118,(byte_size(Name)):16,Name/binary,1:32,1:32>>),
+    H = erts_internal:new_connection(N),
+    pid(N) ! first,
+    {ok, _, _, A} = erlang:dist_get_stat(H),
+    Ref ! first,
+    {ok, _, _, B} = erlang:dist_get_stat(H),
+    ok = erlang:send({sink,N}, first, [priority]),
+    {ok, _, _, C} = erlang:dist_get_stat(H),
+    true = exit(Ref, boom),
+    {ok, _, _, D} = erlang:dist_get_stat(H),
+    io:format("~w~n", [[A,B,C,D]]).
