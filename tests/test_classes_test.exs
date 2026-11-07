@@ -147,4 +147,19 @@ defmodule TestClassesReportTest do
     assert status == 0
     assert output =~ "purpose=measurement; dependencies=none; selected=false"
   end
+
+  test "reports the ETS lock test's semantic wait", %{directory: directory} do
+    cases = [
+      {"runtime::ets::tests::keeps_the_buckets_of_a_walk_from_a_clear_of_another_thread",
+       "matches"},
+      {"runtime::ets::tests::finds_no_key_in_an_empty_table", "matches"}
+    ]
+
+    {output, status} =
+      report(directory, true, cases, ["--scope", "unit", "--cases", "--dependency", "real_time"])
+
+    assert status == 0
+    assert output =~ "purpose=runtime_integration; dependencies=real_time; selected=true"
+    refute output =~ "finds_no_key_in_an_empty_table: purpose="
+  end
 end

@@ -2,7 +2,7 @@
 
 The default report classifies feature tests. Pass `--scope unit` to report the library test binary using the separate `scripts/test_unit_classes.txt` inventory. This unit inventory is incomplete: unreviewed cases have an empty purpose and the `unknown` dependency. `--strict --scope unit` fails until every listed case has reviewed facets. The existing CI gate still checks only the feature inventory.
 
-The reviewed macOS arm64 list has 1,208 unit cases. The term, BEAM, bundle, embedded, and error groups account for 380 reviewed cases. The remaining 828 macOS cases are marked unknown. The inventory also records 17 Linux-specific cases. A Linux CI duration report listed 1,204 selected unit cases; all were present in the inventory. That report does not include unselected cases, so it does not establish the complete Linux inventory. Other missing identities stay unresolved.
+The reviewed macOS arm64 list has 1,208 unit cases. The term, BEAM, bundle, embedded, error, and ETS groups account for 466 reviewed cases. The remaining 742 macOS cases are marked unknown. The inventory also records 17 Linux-specific cases. A Linux CI duration report listed 1,204 selected unit cases; all were present in the inventory. That report does not include unselected cases, so it does not establish the complete Linux inventory. Other missing identities stay unresolved.
 
 The unit report uses `measurement` for performance probes. `test_process` identifies a child test executable. These facets do not change the selected tests.
 
