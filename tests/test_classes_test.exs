@@ -237,6 +237,42 @@ defmodule TestClassesReportTest do
     refute output =~ "maps_the_codec_failure_steps: purpose="
   end
 
+  test "reports external-term codec dependencies by exercised path", %{directory: directory} do
+    cases = [
+      {"runtime::interpreter::bif::term::tests::binary_to_term_checks_the_binary_and_the_options",
+       "matches"},
+      {"runtime::interpreter::bif::term::tests::decodes_and_rejects_the_compressed_form",
+       "matches"},
+      {"runtime::interpreter::bif::term::tests::parses_options_as_pinned_erts", "matches"}
+    ]
+
+    {output, status} = report(directory, true, cases, ["--scope", "unit", "--cases"])
+    assert status == 0
+
+    assert output =~
+             "binary_to_term_checks_the_binary_and_the_options: purpose=runtime_integration; dependencies=network,local_socket; selected=true"
+
+    assert output =~
+             "decodes_and_rejects_the_compressed_form: purpose=pure_logic; dependencies=native_library; selected=true"
+
+    assert output =~
+             "parses_options_as_pinned_erts: purpose=pure_logic; dependencies=none; selected=true"
+
+    {native, status} =
+      report(directory, true, cases, [
+        "--scope",
+        "unit",
+        "--cases",
+        "--dependency",
+        "native_library"
+      ])
+
+    assert status == 0
+    assert native =~ "decodes_and_rejects_the_compressed_form: purpose="
+    refute native =~ "parses_options_as_pinned_erts: purpose="
+    refute native =~ "binary_to_term_checks_the_binary_and_the_options: purpose="
+  end
+
   test "reports the ETS lock test's semantic wait", %{directory: directory} do
     cases = [
       {"runtime::ets::tests::keeps_the_buckets_of_a_walk_from_a_clear_of_another_thread",
