@@ -690,6 +690,119 @@ fn connects_to_an_erts_node_as_a_hidden_node_as_pinned_erts() {
 }
 
 #[test]
+fn accepts_connections_over_both_carriers() {
+    // The OTP carrier opens the listen socket and registers its port with
+    // epmd (inet_tcp_dist.erl:175-194, inet_epmd_socket.erl:49-86).
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    for socket in [false, true] {
+        for pbeam_server in [false, true] {
+            let name = format!("inbound{socket}{pbeam_server}{id}");
+            let mut arguments = vec![
+                "-sname",
+                name.as_str(),
+                "-setcookie",
+                "ck",
+                "-kernel",
+                "net_ticktime",
+                "2",
+            ];
+            if socket {
+                arguments.extend(SOCKET_CARRIER);
+            }
+            let server_expression = "register(inbound_probe, self()), io:format(\"~s~n\", [node()]), \
+             F = fun F() -> receive {From, Peer} -> \
+             From ! {net_adm:ping(Peer), lists:member(Peer, nodes(hidden)), \
+             rpc:call(Peer, erlang, node, []), erpc:call(Peer, erlang, node, [])}, F() \
+             after 30000 -> ok end end, F().";
+            let server = if pbeam_server {
+                pbeam_node(&epmd, &arguments, server_expression)
+            } else {
+                ErtsNode::start(&epmd, &arguments, server_expression)
+            };
+            let node = server.line();
+            let expression = format!(
+                "spawn(fun() -> timer:sleep(12000), halt(2) end), \
+             N = '{node}', true = net_kernel:connect_node(N), \
+             timer:sleep(5000), Ping = net_adm:ping(N), \
+             {{inbound_probe, N}} ! {{self(), node()}}, \
+             receive Reply -> io:format(\"~w~n\", [{{Ping, lists:member(N, nodes(hidden)), \
+             rpc:call(N, erlang, node, []), erpc:call(N, erlang, node, []), Reply}}]) end, halt()."
+            );
+            let client = format!("inclient{socket}{id}");
+            let mut client_arguments = vec![
+                "-sname",
+                client.as_str(),
+                "-setcookie",
+                "ck",
+                "-hidden",
+                "-kernel",
+                "net_ticktime",
+                "2",
+            ];
+            if socket {
+                client_arguments.extend(SOCKET_CARRIER);
+            }
+            let peer = format!("{}@{}", client, node.split_once('@').unwrap().1);
+            let expected = format!(
+                "{{pong,true,{0},{0},{{pong,true,{1},{1}}}}}",
+                atom_text(&node),
+                atom_text(&peer)
+            );
+            let erts = ErtsNode::start(&epmd, &client_arguments, &expression);
+            assert_eq!(erts.line(), expected);
+            drop(erts);
+            let pbeam = pbeam_node(&epmd, &client_arguments, &expression);
+            assert_eq!(pbeam.line(), expected);
+        }
+    }
+}
+
+#[test]
+fn registers_the_listen_range_and_honours_dist_listen_false() {
+    // inet_tcp_dist.erl:175-207 registers the selected port and reads the
+    // configured range. net_kernel owns startup when listening is disabled.
+    let epmd = Epmd::start();
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+        .to_string();
+    let name = format!("inrange{}", std::process::id());
+    let expression = "[Name, Host] = string:split(atom_to_list(node()), \"@\"), \
+                      io:format(\"~p~n\", [erl_epmd:port_please(Name, Host)]), halt().";
+    for socket in [false, true] {
+        for listen in [true, false] {
+            let mut arguments = vec![
+                "-sname",
+                name.as_str(),
+                "-kernel",
+                "inet_dist_listen_min",
+                port.as_str(),
+                "-kernel",
+                "inet_dist_listen_max",
+                port.as_str(),
+            ];
+            if socket {
+                arguments.extend(SOCKET_CARRIER);
+            }
+            if !listen {
+                arguments.extend(["-dist_listen", "false"]);
+            }
+            arguments.extend(["-noshell", "-eval", expression]);
+            let expected = if listen {
+                format!("{{port,{port},6}}\n")
+            } else {
+                "noport\n".to_owned()
+            };
+            assert_eq!(stdout(&erts_erl(&epmd, &arguments)), expected);
+            assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), expected);
+        }
+    }
+}
+
+#[test]
 fn connects_over_a_tcp_inet_port_as_pinned_erts() {
     // inet_tcp_dist, the default carrier, makes the tcp_inet port the
     // controller of the connection (dist.c:5269-5336) and sets
