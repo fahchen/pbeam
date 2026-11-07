@@ -18,15 +18,21 @@ defmodule TestClassesReportTest do
   end
 
   defp report(directory, target, cases, arguments \\ []) do
+    unit = Enum.chunk_every(arguments, 2, 1, :discard) |> Enum.any?(&(&1 == ["--scope", "unit"]))
+    name = if unit, do: "pbeam_runtime", else: "stty"
+    kind = if unit, do: ["lib"], else: ["test"]
+    source = if unit, do: "/workspace/src/lib.rs", else: "/workspace/tests/feature/stty.rs"
+    binary = if unit, do: "pbeam-runtime", else: "pbeam-runtime::stty"
+
     metadata = %{
       "packages" => [
         %{
           "name" => "pbeam-runtime",
           "targets" => [
             %{
-              "name" => "stty",
-              "kind" => ["test"],
-              "src_path" => "/workspace/tests/feature/stty.rs"
+              "name" => name,
+              "kind" => kind,
+              "src_path" => source
             }
           ]
         }
@@ -38,7 +44,7 @@ defmodule TestClassesReportTest do
         Map.new(cases, fn {name, status} -> {name, %{"filter-match" => %{"status" => status}}} end)
     }
 
-    list = %{"rust-suites" => if(target, do: %{"pbeam-runtime::stty" => suite}, else: %{})}
+    list = %{"rust-suites" => if(target, do: %{binary => suite}, else: %{})}
     metadata_path = Path.join(directory, "metadata.json")
     list_path = Path.join(directory, "list.json")
     File.write!(metadata_path, :json.encode(metadata))
@@ -92,5 +98,53 @@ defmodule TestClassesReportTest do
 
     assert linux =~ "platform excluded: " <> name
     assert macos =~ "not listed on this platform: " <> name
+  end
+
+  test "reports library cases separately from feature cases", %{directory: directory} do
+    cases = [{"beam::module::tests::reports_oversized_arity", "matches"}]
+    {output, status} = report(directory, true, cases, ["--scope", "unit", "--cases"])
+    assert status == 0
+    assert output =~ "Unit targets: 1; cases: 1; selected: 1"
+
+    assert output =~
+             "beam::module::tests::reports_oversized_arity: purpose=pure_logic; dependencies=none"
+
+    refute output =~ "unrecorded: pbeam-runtime "
+  end
+
+  test "rejects a new unrecorded library case", %{directory: directory} do
+    {output, status} =
+      report(directory, true, [{"new_unit_case", "matches"}], ["--scope", "unit"])
+
+    assert status != 0
+    assert output =~ "unrecorded: pbeam-runtime new_unit_case"
+  end
+
+  test "strict unit report rejects an unreviewed case", %{directory: directory} do
+    cases = [
+      {"runtime::mailbox::tests::caches_marker_references_when_priority_messages_arrive",
+       "matches"}
+    ]
+
+    {output, status} = report(directory, true, cases, ["--scope", "unit", "--strict"])
+    assert status != 0
+    assert output =~ "Cases with unknown purpose or dependencies: 1; unrecorded: 0"
+  end
+
+  test "recognizes Linux-only library cases on macOS", %{directory: directory} do
+    cases = [{"beam::module::tests::reports_oversized_arity", "matches"}]
+    {output, _status} = report(directory, true, cases, ["--scope", "unit", "--platform", "macos"])
+    {linux, _status} = report(directory, true, cases, ["--scope", "unit", "--platform", "linux"])
+
+    name = "pbeam-runtime runtime::sockets::tests::counts_an_mptcp_socket_as_tcp"
+    assert output =~ "platform excluded: " <> name
+    assert linux =~ "not listed on this platform: " <> name
+  end
+
+  test "reports measurement and nextest selection as separate facets", %{directory: directory} do
+    cases = [{"term::costs::prints_the_cost_of_a_binary_view", "mismatch"}]
+    {output, status} = report(directory, true, cases, ["--scope", "unit", "--cases"])
+    assert status == 0
+    assert output =~ "purpose=measurement; dependencies=none; selected=false"
   end
 end
