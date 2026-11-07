@@ -12,7 +12,7 @@ use super::{
 use crate::runtime::process::RemotePid;
 use crate::{
     error::BeamError,
-    runtime::interpreter::bif::{encode_dist, encode_dist_cached},
+    runtime::interpreter::bif::{encode_dist, encode_dist_cached, encode_dist_pending},
     term::{Atom, Binary, PortId, ProcessId, Term, external_id::ExternalData, pid_word},
 };
 
@@ -133,7 +133,7 @@ impl Scheduler {
         };
         let mut elements = vec![Binary::from(vec![0; 17])];
         for term in std::iter::once(&control).chain(message.iter()) {
-            let encoded = encode_dist(self, term)?;
+            let encoded = encode_dist_pending(self, term)?;
             let mut first = true;
             for element in encoded {
                 let mut bytes = element.to_bytes();

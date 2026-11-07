@@ -364,13 +364,46 @@ pub(in crate::runtime) fn encode_dist(
     scheduler: &crate::runtime::scheduler::Scheduler,
     term: &Term,
 ) -> Result<Vec<Binary>, BeamError> {
+    encode_dist_with_owner(scheduler, term, &alias_owner(scheduler))
+}
+
+/// Count pending distribution output when an alias owner has exited.
+///
+/// The two owner pid words have a fixed encoded width (`external.c:3642-3666`).
+/// A placeholder is sufficient for accounting; these bytes are not sent.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let elements = encode_dist_pending(scheduler, &term)?;
+/// ```
+///
+/// # Errors
+///
+/// The errors of [`encode_dist`] other than an alias with a missing owner.
+pub(in crate::runtime) fn encode_dist_pending(
+    scheduler: &crate::runtime::scheduler::Scheduler,
+    term: &Term,
+) -> Result<Vec<Binary>, BeamError> {
+    let owner = alias_owner(scheduler);
+    encode_dist_with_owner(scheduler, term, &|reference| {
+        Some(owner(reference).unwrap_or(ProcessId(0)))
+    })
+}
+
+/// Encode a distribution term with the owner lookup `owner`.
+fn encode_dist_with_owner(
+    scheduler: &crate::runtime::scheduler::Scheduler,
+    term: &Term,
+    owner: &dyn Fn(Reference) -> Option<ProcessId>,
+) -> Result<Vec<Binary>, BeamError> {
     let mut refs = Vec::new();
     let body = encode_parts(
         term,
         &scheduler.atoms,
         &Options::default(),
         &mut refs,
-        &alias_owner(scheduler),
+        owner,
         None,
     )?;
     let bytes = compress_term(&body, 0);

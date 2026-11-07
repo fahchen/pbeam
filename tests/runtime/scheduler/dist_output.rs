@@ -373,7 +373,7 @@ fn noconnect_send_joins_a_connection_started_after_the_idle_check() {
 }
 
 #[test]
-fn rejects_a_dead_alias_when_a_signal_joins_a_new_pending_connection() {
+fn queues_a_dead_alias_when_a_signal_joins_a_new_pending_connection() {
     // A fixture cannot force a new pending connection between the first
     // connection check and the output lock. The dead alias is a legal term.
     let mut scheduler = scheduler_with_kernel();
@@ -428,13 +428,22 @@ fn rejects_a_dead_alias_when_a_signal_joins_a_new_pending_connection() {
             Some(pending),
             |_, _| unreachable!(),
         );
-        assert!(
-            format!("{result:?}")
-                .contains("unsupported external term of a pid reference whose owner exited")
-        );
-        assert_eq!(node_ref.dist().output(&node), (0, 0));
+        assert_eq!(result.unwrap(), Some(1));
+        assert!(node_ref.dist().output(&node).1 > 0);
     }
-    assert!(!queued);
+    assert!(queued);
+    let mut dist = node_ref.dist();
+    assert!(
+        dist.connect(&node, Controller::Process(ProcessId(0)), 0)
+            .is_some()
+    );
+    let error = scheduler
+        .dist_flush_pending(&mut dist, &node, 0)
+        .unwrap_err();
+    assert!(
+        format!("{error:?}")
+            .contains("unsupported external term of a pid reference whose owner exited")
+    );
 }
 
 #[test]

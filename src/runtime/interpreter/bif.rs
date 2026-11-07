@@ -50,7 +50,9 @@ mod ycf;
 
 pub(super) use erlang::{PRELOADED, error_info_location, is_function, send};
 pub(crate) use iolist::iodata_bytes;
-pub(in crate::runtime) use term::{decode_dist, encode_dist, encode_dist_cached};
+pub(in crate::runtime) use term::{
+    decode_dist, encode_dist, encode_dist_cached, encode_dist_pending,
+};
 
 /// What a BIF call does to the calling process.
 #[derive(Debug)]
