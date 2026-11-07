@@ -1,5 +1,5 @@
 -module(tcp_active).
--export([main/1, active/1, closed/1, passive_closed/1, links/0, link_orders/0, pid_port_links/0, unsupported/2, unsupported_item/0]).
+-export([main/1, active/1, count/1, count_reactivate/1, closed/1, passive_closed/1, links/0, link_orders/0, pid_port_links/0, unsupported_item/0]).
 
 %% Delivers the data of an accepted socket in active mode, as
 %% inet:setopts/2 calls prim_inet:setopts/2, and gives the socket to a
@@ -66,6 +66,43 @@ active(Path) ->
     ok = prim_inet:close(L),
     [Set, X, Y, Get, Z, W, flush()].
 
+%% Three line packets with a count above, equal to, and below the packet count.
+count(Path) ->
+    process_flag(trap_exit, true),
+    [count_case(Path, Step, N) || {Step, N} <- [{1, 4}, {3, 3}, {5, 2}]].
+
+count_case(Path, Step, N) ->
+    {L, S} = connection(Path, Step),
+    ok = prim_inet:setopts(S, [{packet, line}, {active, N}]),
+    step(Path, Step + 1, "send_lines abc"),
+    Data = [message(S) || _ <- lists:seq(1, min(N, 3))],
+    Passive = receive {tcp_passive, S} -> tcp_passive after 100 -> none end,
+    Opt = prim_inet:getopts(S, [active]),
+    Rest = case N of 2 -> prim_inet:recv(S, 0, 1000); _ -> none end,
+    ok = prim_inet:close(S),
+    ok = prim_inet:close(L),
+    [Data, Passive, Opt, Rest].
+
+%% A single SETOPTS makes the port passive, then activates buffered input.
+count_reactivate(Path) ->
+    process_flag(trap_exit, true),
+    [reactivate_case(Path, Step, Value) || {Step, Value} <- [{1, 1}, {3, 2}, {5, 3}]].
+
+reactivate_case(Path, Step, Value) ->
+    {L, S} = connection(Path, Step),
+    ok = prim_inet:setopts(S, [{packet, line}]),
+    step(Path, Step + 1, "send_lines ab"),
+    First = prim_inet:recv(S, 0, 1000),
+    Tail = case Value of 3 -> [0, 1]; _ -> [] end,
+    Reply = erlang:port_control(S, 16#03f1a307,
+                                [22, 0, 0, 0, 3, 0, 0, 22, 0, 0, 0, Value | Tail]),
+    Messages = [receive {tcp_passive, S} -> tcp_passive; {tcp, S, Data} -> {tcp, Data}
+                after 500 -> none end || _ <- lists:seq(1, 3)],
+    Opt = prim_inet:getopts(S, [active]),
+    ok = prim_inet:close(S),
+    ok = prim_inet:close(L),
+    [First, Reply, Messages, Opt].
+
 %% The client closes before {active, once}: the setopts reads the end of
 %% file, sends {tcp_closed, S}, and the port exits with the reason normal.
 closed(Path) ->
@@ -91,7 +128,10 @@ passive_closed(Path) ->
     %% (prim_inet.erl:1028, 2972-2975).
     SetOnce = fun(S) -> erlang:port_control(S, 16#03f1a307, [22, 0, 0, 0, 2, 9, 0, 0, 0, 1]) end,
     SetTrue = fun(S) -> prim_inet:setopts(S, [{active, true}]) end,
-    [ended(Path, 1, SetOnce, once), ended(Path, 3, SetTrue, true)].
+    SetCount = fun(S) -> erlang:port_control(S, 16#03f1a307,
+                                             [22, 0, 0, 0, 3, 0, 1, 22, 0, 0, 0, 0]) end,
+    [ended(Path, 1, SetOnce, once), ended(Path, 3, SetTrue, true),
+     ended(Path, 5, SetCount, 1)].
 
 ended(Path, Step, Setopts, Active) ->
     {L, S} = connection(Path, Step),
@@ -275,14 +315,6 @@ member(Owner) ->
             member(Owner);
         {'EXIT', _Port, _Reason} ->
             Owner ! {gone, self()}
-    end.
-
-%% Each part that PBeam does not run yet.
-unsupported(Path, Case) ->
-    process_flag(trap_exit, true),
-    {_, S} = connection(Path),
-    case Case of
-        count -> prim_inet:setopts(S, [{active, 2}])
     end.
 
 %% An item of erlang:port_info/2 that PBeam does not give yet.

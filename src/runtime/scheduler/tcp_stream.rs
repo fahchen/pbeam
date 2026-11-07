@@ -351,7 +351,12 @@ impl Scheduler {
                     vec![(owner, self.udp_message(port, &address, data)?)]
                 }
                 Event::Passive => {
-                    let tag = Term::Atom(self.atoms.put("udp_passive")?);
+                    let name = if tcp.soft_busy() {
+                        "tcp_passive"
+                    } else {
+                        "udp_passive"
+                    };
+                    let tag = Term::Atom(self.atoms.put(name)?);
                     vec![(owner, Term::tuple(vec![tag, Term::Port(port)]))]
                 }
                 Event::DatagramError(name) => {

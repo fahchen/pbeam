@@ -311,10 +311,6 @@ fn stops_the_run_for_each_tcp_inet_part_that_is_not_implemented() {
             "linger_off",
             "unsupported tcp_inet option linger with a time",
         ),
-        (
-            "active_n",
-            "unsupported tcp_inet option active with a count",
-        ),
         ("getopt", "unsupported tcp_inet option 5"),
         // ERTS replies `[]` and sets the exit state of the port
         // (sys_drivers.c:731-756).
@@ -723,6 +719,11 @@ fn command_client(path: PathBuf, stop: Arc<AtomicBool>) -> thread::JoinHandle<Ve
                         .unwrap()
                         .write_all(argument.as_bytes())
                         .unwrap(),
+                    "send_lines" => {
+                        let bytes: Vec<u8> =
+                            argument.bytes().flat_map(|byte| [byte, b'\n']).collect();
+                        streams.last_mut().unwrap().write_all(&bytes).unwrap();
+                    }
                     "read" => {
                         let mut bytes = vec![0; argument.parse().unwrap()];
                         streams.last_mut().unwrap().read_exact(&mut bytes).unwrap();
@@ -784,14 +785,28 @@ fn client_runs(module: &str, function: &str) -> [(String, Vec<Vec<u8>>); 2] {
         (text, reads)
     };
     let erts = run("erts", &|path| {
-        let output = Command::new("erl")
+        let child = Command::new("erl")
             .args(["+S", "1", "-noshell", "-pa", "fixtures/tcp", "-eval"])
             .arg(format!(
                 "io:format(\"~w~n\", [{module}:{function}(\"{}\")]), halt().",
                 path.display()
             ))
-            .output()
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
             .unwrap();
+        let pid = child.id();
+        let (done, finished) = std::sync::mpsc::channel::<()>();
+        let watchdog = thread::spawn(move || {
+            if finished.recv_timeout(Duration::from_secs(30)).is_err() {
+                let _ = Command::new("kill")
+                    .args(["-KILL", &pid.to_string()])
+                    .status();
+            }
+        });
+        let output = child.wait_with_output().unwrap();
+        let _ = done.send(());
+        watchdog.join().unwrap();
         assert!(output.status.success(), "{output:?}");
         String::from_utf8_lossy(&output.stdout)
             .trim_end()
@@ -1024,10 +1039,10 @@ fn ends_the_port_at_the_close_of_the_peer_in_active_mode_as_pinned_erts() {
 #[test]
 fn ends_the_port_at_activation_after_a_passive_close_as_pinned_erts() {
     // A passive recv closes the socket at the end of file. A later
-    // `{active, once}` or `{active, true}` sends `{tcp_closed, S}`, skips
+    // `{active, once}`, `{active, true}`, or a positive count sends `{tcp_closed, S}`, skips
     // the next options, and `driver_exit` closes the port with the reason
     // `normal` (inet_drv.c:7001-7011, 12783-12847; io.c:7228-7249).
-    let expected = "[[{error,closed},[1],tcp_closed,{error,einval},undefined,[]],[{error,closed},ok,tcp_closed,{error,einval},undefined,[]]]";
+    let expected = "[[{error,closed},[1],tcp_closed,{error,einval},undefined,[]],[{error,closed},ok,tcp_closed,{error,einval},undefined,[]],[{error,closed},[1],tcp_closed,{error,einval},undefined,[]]]";
     for (name, (text, _)) in ["ERTS", "PBeam"]
         .into_iter()
         .zip(client_runs("tcp_active", "passive_closed"))
@@ -1088,34 +1103,6 @@ fn stops_the_run_for_a_port_info_item_that_is_not_implemented() {
         .to_string();
     assert!(
         error.starts_with("unsupported erlang:port_info/2 item memory"),
-        "{error}"
-    );
-}
-
-#[test]
-fn stops_the_run_for_an_active_count() {
-    // `{active, N}` and its `tcp_passive` message (inet_drv.c:1551-1559,
-    // 6975-6995) are not on the path of Thousand Island.
-    let path = std::env::temp_dir().join(format!("pbeam-tcp-active-count-{}", std::process::id()));
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(acknowledgement(&path));
-    let stop = Arc::new(AtomicBool::new(false));
-    let handle = command_client(path.clone(), Arc::clone(&stop));
-    let program = load();
-    let arguments = [
-        program.host_term(path_term(&path)),
-        program.host_term(Term::Atom(program.atom("count").unwrap())),
-    ];
-    let error = program
-        .execute("tcp_active", "unsupported", &arguments)
-        .unwrap_err()
-        .to_string();
-    stop.store(true, Ordering::SeqCst);
-    handle.join().unwrap();
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(acknowledgement(&path));
-    assert!(
-        error.starts_with("unsupported tcp_inet option active with a count"),
         "{error}"
     );
 }
@@ -1294,5 +1281,34 @@ fn ends_a_send_that_waits_behind_a_busy_port_as_pinned_erts() {
         for (name, (text, _)) in ["ERTS", "PBeam"].into_iter().zip(transfer_runs(function)) {
             assert_eq!(text, expected, "{function} {name}");
         }
+    }
+}
+
+#[test]
+fn sets_active_count_as_pinned_erts() {
+    let expected = "[{ok,{ok,[{active,2}]},none},{ok,{ok,[{active,5}]},none},{ok,{ok,[{active,3}]},none},{ok,{ok,[{active,3}]},none},{ok,{ok,[{active,false}]},tcp_passive},{ok,{ok,[{active,false}]},tcp_passive},{ok,{ok,[{active,32767}]},none},{{error,einval},{ok,[{active,32767}]},none}]";
+    assert_eq!(erts_text("tcp_probe", "active_count"), expected);
+    assert_eq!(pbeam_text("tcp_probe", "active_count"), expected);
+}
+
+#[test]
+fn delivers_active_count_packets_as_pinned_erts() {
+    let expected = "[[[{tcp,<<97,10>>},{tcp,<<98,10>>},{tcp,<<99,10>>}],none,{ok,[{active,1}]},none],[[{tcp,<<97,10>>},{tcp,<<98,10>>},{tcp,<<99,10>>}],tcp_passive,{ok,[{active,false}]},none],[[{tcp,<<97,10>>},{tcp,<<98,10>>}],tcp_passive,{ok,[{active,false}]},{ok,<<99,10>>}]]";
+    for (name, (result, _)) in ["ERTS", "PBeam"]
+        .into_iter()
+        .zip(client_runs("tcp_active", "count"))
+    {
+        assert_eq!(result, expected, "{name}");
+    }
+}
+
+#[test]
+fn delivers_buffered_input_after_passive_and_active_options_as_pinned_erts() {
+    let expected = "[[{ok,<<97,10>>},[1],[tcp_passive,{tcp,<<98,10>>},none],{ok,[{active,true}]}],[{ok,<<97,10>>},[1],[tcp_passive,{tcp,<<98,10>>},none],{ok,[{active,false}]}],[{ok,<<97,10>>},[1],[tcp_passive,{tcp,<<98,10>>},tcp_passive],{ok,[{active,false}]}]]";
+    for (name, (result, _)) in ["ERTS", "PBeam"]
+        .into_iter()
+        .zip(client_runs("tcp_active", "count_reactivate"))
+    {
+        assert_eq!(result, expected, "{name}");
     }
 }

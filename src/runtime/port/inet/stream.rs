@@ -170,7 +170,7 @@ pub(in crate::runtime) enum Event {
         /// The bytes of the datagram.
         data: Vec<u8>,
     },
-    /// `{udp_passive, S}` to the owner at the end of `{active, N}`
+    /// `{tcp_passive, S}` or `{udp_passive, S}` to the owner at the end of `{active, N}`
     /// (`packet_passive_message`, inet_drv.c:4215-4239).
     Passive,
     /// `{udp_error, S, Reason}` to the owner of an active `udp_inet` port
@@ -687,7 +687,7 @@ impl Inet {
     /// Give the packet of the first `length` bytes of the buffer without
     /// its header to the receive, as `tcp_deliver` and `tcp_reply_data` do
     /// (inet_drv.c:4279-4304, 13042-13128), or to the owner as `{tcp, S,
-    /// Data}` in active mode, which then becomes passive for `once`. An
+    /// Data}` in active mode, which then becomes passive for `once` or after the count. An
     /// active socket then gives each other whole packet of the buffer; a
     /// packet that is not valid stops the delivery with no message
     /// (inet_drv.c:13118-13119). When the packet takes all the filled
@@ -725,6 +725,13 @@ impl Inet {
                 self.active = 0;
             }
             events.push(Event::Data(data));
+            if self.active == 3 {
+                self.active_count -= 1;
+                if self.active_count == 0 {
+                    self.active = 0;
+                    events.push(Event::Passive);
+                }
+            }
             if self.active == 0 || self.stream.input_size == 0 {
                 return events;
             }

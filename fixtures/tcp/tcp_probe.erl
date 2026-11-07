@@ -1,5 +1,5 @@
 -module(tcp_probe).
--export([connect/0, control/0, data/0, enabled/0, linger/0, header/0, unsupported/1]).
+-export([connect/0, control/0, data/0, enabled/0, linger/0, header/0, active_count/0, unsupported/1]).
 
 %% The requests of the tcp_inet driver that prim_inet sends for
 %% gen_tcp:listen/2, inet:sockname/1, inet:getopts/2, and gen_tcp:close/1
@@ -129,6 +129,18 @@ flush() ->
     after 0 -> []
     end.
 
+active_count() ->
+    P = opened(),
+    Run = fun(N) ->
+                  Result = prim_inet:setopts(P, [{active, N}]),
+                  Opt = prim_inet:getopts(P, [active]),
+                  Msg = receive {tcp_passive, P} -> tcp_passive after 0 -> none end,
+                  {Result, Opt, Msg}
+          end,
+    Results = [Run(N) || N <- [2, 3, -2, 0, -3, -1, 32767, 1]],
+    true = port_close(P),
+    Results.
+
 %% Each part of the tcp_inet driver that PBeam does not run.
 unsupported(asn1) -> control(opened(), 7, [23, 0, 0, 0, 4]);
 unsupported(sctp) -> open_port({spawn_driver, "sctp_inet"}, [binary]);
@@ -138,7 +150,6 @@ unsupported(oobinline) -> control(opened(), 7, [5, 0, 0, 0, 1]);
 unsupported(recvttl) -> control(opened(), 7, [47, 0, 0, 0, 1]);
 unsupported(linger) -> linger();
 unsupported(linger_off) -> control(opened(), 7, [3, 0, 0, 0, 0, 0, 0, 0, 5]);
-unsupported(active_n) -> control(opened(), 7, [22, 0, 0, 0, 3, 0, 1]);
 unsupported(getopt) -> control(opened(), 8, [5]);
 unsupported(policy) -> open_port({spawn_driver, "tcp_inet"}, [binary]);
 %% In boot mode, a process that entered the runtime is not a boot process,
