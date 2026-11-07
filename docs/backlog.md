@@ -305,6 +305,14 @@ Each entry gives the reason, the evidence, and the trigger that makes it a task.
 
 ## Capability security
 
+### Give a process that another node spawns the policy of its node
+
+- **Now:** a process that another node spawns is a runtime process with no capability copy. A run with a policy denies each effect of that process that needs a capability. PBeam has no channel for the policy of another node.
+- **Decision:** keep the current behavior. The capability security design of m6 is out of the capability program scope, and no measured path needs a policy channel now. The ERTS-exact conservative option is to keep the effect denial, because the ERTS has no policy at all and a process that another node spawns should not gain authority that its caller did not send.
+- **Evidence:** the `Distribution` row of `docs/erts-differences.md` records the gap. #1508 proved that a process that another node spawns is a runtime process with no capability copy. The spawn request wire form of the pinned ERTS carries no policy field. A policy channel would be a PBeam addition with no ERTS form to copy.
+- **Trigger:** m6 capability security opens, or a measured consumer needs a process that another node spawns to hold a capability.
+- **Source:** owner decision of 2026-11-07 through the standing capability-program authorization.
+
 ### Add a lease to a capability
 
 - After the design of #310, a capability stays valid until a revocation or the exit of its holder. A lease ends a capability at a set time.
