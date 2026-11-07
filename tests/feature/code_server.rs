@@ -780,7 +780,7 @@ fn gives_the_crypto_algorithm_lists_and_fips_status_as_pinned_erts() {
     // and 177 with the libcrypto of the Linux CI host (algorithms.c:86-224,
     // digest.c:226-242, crypto.erl:843-895). PBeam lists only the 18 digests,
     // 3 MACs, 40 ciphers, 45 curves, and 23 public key algorithms that it
-    // runs, in the ERTS order, so the items that PBeam can run are the same.
+    // runs, with the 10 RSA options, in the ERTS order. The items that PBeam can run are the same.
     let erts = run(&mut erts_probe(
         CRYPTO_PROBE,
         "crypto_probe",
@@ -806,8 +806,10 @@ fn gives_the_crypto_algorithm_lists_and_fips_status_as_pinned_erts() {
                  sm4_ctr,sm4_ecb,sm4_ofb]},\n  \
                  {kems,[]},\n  \
                  {macs,[cmac,hmac,poly1305]},\n  \
-                 {rsa_opts,[]}]";
-    assert_eq!(pbeam, format!("[131,\n {items},\n true,true]\n"));
+                 {rsa_opts,[rsa_pkcs1_pss_padding,rsa_pss_saltlen,rsa_mgf1_md,\n             \
+                 rsa_pkcs1_oaep_padding,rsa_oaep_label,rsa_oaep_md,signature_md,\n             \
+                 rsa_pkcs1_padding,rsa_x931_padding,rsa_no_padding]}]";
+    assert_eq!(pbeam, format!("[141,\n {items},\n true,true]\n"));
     // The count and the list of the pinned ERTS depend on the libcrypto of
     // the host, so only the pinned macOS ERTS is the reference
     // (algorithms.c:162-202, 241-640, pkey.c:201-210). A Linux host with

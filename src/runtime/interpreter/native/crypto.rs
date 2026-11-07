@@ -581,7 +581,23 @@ pub(super) const BINDINGS: &[Binding] = &[
         name: "rsa_opts_algorithms",
         arity: 0,
         job: Job::Normal,
-        run: |_, _| Ok(BifResult::Value(Term::Nil)),
+        run: |scheduler, _| {
+            atom_list(
+                scheduler,
+                &[
+                    "rsa_pkcs1_pss_padding",
+                    "rsa_pss_saltlen",
+                    "rsa_mgf1_md",
+                    "rsa_pkcs1_oaep_padding",
+                    "rsa_oaep_label",
+                    "rsa_oaep_md",
+                    "signature_md",
+                    "rsa_pkcs1_padding",
+                    "rsa_x931_padding",
+                    "rsa_no_padding",
+                ],
+            )
+        },
     },
     Binding {
         name: "srp_host_secret_nif",

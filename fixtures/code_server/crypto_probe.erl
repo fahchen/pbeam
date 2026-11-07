@@ -106,7 +106,9 @@ supports_host() ->
 run_algorithms() ->
     [blake2s, blake2b, sm3, shake256, shake128, sha3_512, sha3_384, sha3_256,
      sha3_224, sha512_256, sha512_224, sha512, sha384, sha256, sha224, sha,
-     ripemd160, md5, cmac, hmac, poly1305] ++ run_ciphers() ++
+     ripemd160, md5, cmac, hmac, poly1305, rsa_pkcs1_pss_padding, rsa_pss_saltlen,
+     rsa_mgf1_md, rsa_pkcs1_oaep_padding, rsa_oaep_label, rsa_oaep_md, signature_md,
+     rsa_pkcs1_padding, rsa_x931_padding, rsa_no_padding] ++ run_ciphers() ++
         [sm4_gcm, sm4_ccm, aes_cbc, aes_ccm, aes_cfb128, aes_cfb8, aes_ctr, aes_ecb, aes_gcm,
          secp160k1, secp160r1, secp160r2, secp192k1, secp224k1, secp224r1, secp256k1,
          secp384r1, secp521r1, secp192r1, prime192v1, prime192v2, prime192v3, prime239v1,
