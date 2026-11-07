@@ -21,6 +21,42 @@ Detailed incident writeups with full context live in `postmortems/`.
 **Reference:** `path/to/file` or `postmortems/YYYY-MM-DD-slug.md`
 -->
 
+## 20261107: Require the first commit before a worker researches further
+
+**Problem:** Six delegated implementation tasks returned research, citations, and no commits, so the same slice had to be re-directed several times.
+
+**Root Cause:** The delegation asked for a method and a report but never required an early commit, and the worker spent its budget on investigation.
+
+**Fix:** Each delegation now names the concrete file and function, orders the slices, and requires a commit after each verified slice, with the first commit inside the first few edits.
+
+**Guardrail:** Before you delegate, write the slice order and the commit points. If a worker returns with no commit, re-direct with the file and function named instead of repeating the method.
+
+**Reference:** #1570, #1412, #1558
+
+## 20261107: Verify a review claim against the pinned ERTS before you change a design
+
+**Problem:** A codex finding said the peer parses the whole distribution header in the first fragment, so I directed that the control term stay whole. Pinned-ERTS probes then showed that the ERTS splits such a control term, and the change had to be withdrawn.
+
+**Root Cause:** I treated a review finding as evidence and directed a design change from it without a probe.
+
+**Fix:** Withdrew the rule, kept the verified behavior, and recorded the measured evidence in the ledger row instead.
+
+**Guardrail:** When a finding depends on runtime behavior, run the probe and cite the OTP line first. A review comment is a hypothesis until a probe or the source confirms it.
+
+**Reference:** #1559, #1562
+
+## 20261107: Edit a per-branch inventory only on the branch that owns it
+
+**Problem:** A test-classification entry for two new probes was added to two branches at once, so one branch listed tests that it did not contain and its gate failed with "not listed on this platform".
+
+**Root Cause:** I ran one script loop over both worktrees, but the inventory is a per-branch list of the tests that exist in that branch.
+
+**Fix:** Removed the two entries from the branch without those tests and pushed.
+
+**Guardrail:** When a gate cross-checks a list against a branch, edit that list only on the branch that contains the items, and read "unrecorded" and "not listed" as separate failures.
+
+**Reference:** #1593, #1594
+
 ## 20261103: Make a probe's subject and its monitor one operation
 
 **Problem:** `links_processes_between_erts_and_pbeam_nodes` failed on CI with `{down,noproc}` where it expected the exit reason of the victim.
