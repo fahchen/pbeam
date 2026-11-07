@@ -639,6 +639,26 @@ fn queues_a_distribution_packet_after_the_bytes_of_the_queue() {
     );
 }
 
+/// The port output step is asynchronous, so a fixture cannot reliably inspect
+/// the queue before that step runs. Check the queued bytes before the step.
+#[test]
+fn delays_distribution_packets_until_the_output_step() {
+    let (local, mut peer) = Socket::pair(Domain::UNIX, Type::STREAM, None).unwrap();
+    let mut port = Inet::new(SocketType::Stream).copy(local);
+    port.packet = 3;
+    port.delay_send = true;
+    assert_eq!(port.send_dist(b"first"), Vec::new());
+    assert_eq!(port.send_dist(b"second"), Vec::new());
+    assert_eq!(
+        port.stream.output.iter().copied().collect::<Vec<u8>>(),
+        b"\0\0\0\x05first\0\0\0\x06second"
+    );
+    assert_eq!(port.send_ready(), Vec::new());
+    let mut received = [0; 19];
+    peer.read_exact(&mut received).unwrap();
+    assert_eq!(&received, b"\0\0\0\x05first\0\0\0\x06second");
+}
+
 /// A packet of the distribution to a socket that waits to shut down fails
 /// as another send does, with no reply (inet_drv.c:12695-12696).
 #[test]

@@ -753,6 +753,7 @@ pbeam-runtime|runtime::port::inet::stream::tests::ends_an_active_socket_at_a_fai
 pbeam-runtime|runtime::port::inet::stream::tests::ends_the_busy_send_and_its_waiters_at_a_failed_write|host_integration|network,local_socket
 pbeam-runtime|runtime::port::inet::stream::tests::ends_the_busy_send_and_its_waiters_at_the_end_of_the_connection|host_integration|network,local_socket
 pbeam-runtime|runtime::port::inet::stream::tests::ends_the_socket_when_a_waiting_shutdown_fails|host_integration|network
+pbeam-runtime|runtime::port::inet::stream::tests::delays_distribution_packets_until_the_output_step|host_integration|network,local_socket
 pbeam-runtime|runtime::port::inet::stream::tests::fails_a_distribution_packet_after_a_shutdown_that_waits_for_the_queue|host_integration|network,local_socket
 pbeam-runtime|runtime::port::inet::stream::tests::fills_one_buffer_for_a_receive_in_many_reads|host_integration|network,local_socket
 pbeam-runtime|runtime::port::inet::stream::tests::gives_the_error_of_a_shutdown_without_a_connection_or_with_a_wrong_request|host_integration|network,local_socket
