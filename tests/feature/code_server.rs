@@ -836,6 +836,19 @@ fn gives_the_crypto_algorithm_lists_and_fips_status_as_pinned_erts() {
         ));
         assert_eq!(erts, SUPPORTS_HOST);
     }
+    let rsa_erts = run(&mut erts_probe(
+        CRYPTO_PROBE,
+        "crypto_probe",
+        "rsa_options",
+        &[],
+    ));
+    let rsa_pbeam = run(&mut pbeam_probe(
+        CRYPTO_PROBE,
+        "crypto_probe",
+        "rsa_options",
+        &[],
+    ));
+    assert_eq!(rsa_pbeam, rsa_erts);
     // A build without FIPS support (fips.c:27-62).
     let erts = run(&mut erts_probe(CRYPTO_PROBE, "crypto_probe", "fips", &[]));
     assert_eq!(erts, "[not_supported,false,true,{error,badarg}]\n");

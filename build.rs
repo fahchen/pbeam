@@ -51,6 +51,7 @@ fn main() {
     println!("cargo:rerun-if-changed=mise.toml");
     println!("cargo:rustc-env=PBEAM_OTP_RELEASE={}", otp_release());
     export_nif_api();
+    generate_rsa_options();
     let generated = generate_match_headers();
     cc::Build::new()
         .files(
@@ -65,6 +66,31 @@ fn main() {
         .opt_level(2)
         .warnings(false)
         .compile("pcre2");
+}
+
+/// Generate the RSA options from the headers of the linked OpenSSL, as OTP
+/// `openssl_config.h:114-131,312-335,369-377` and `algorithms.c:718-743` do.
+fn generate_rsa_options() {
+    let header = "src/runtime/interpreter/native/crypto/rsa_options.h";
+    println!("cargo:rerun-if-changed={header}");
+    let includes = std::env::var_os("DEP_OPENSSL_INCLUDE").expect("OpenSSL include directory");
+    let mut build = cc::Build::new();
+    build.file(header);
+    for include in std::env::split_paths(&includes) {
+        build.include(include);
+    }
+    let expanded = build.expand();
+    let text = String::from_utf8(expanded).expect("OpenSSL preprocessor output is UTF-8");
+    let mut output = String::from("const RSA_OPTIONS: &[&str] = &[\n");
+    for line in text.lines() {
+        if let Some(option) = line.trim().strip_prefix("PBEAM_RSA_OPTION(") {
+            let option = option.strip_suffix(')').expect("RSA option marker");
+            writeln!(output, "    {option},").expect("write RSA option");
+        }
+    }
+    output.push_str("];\n");
+    let path = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR")).join("rsa_options.rs");
+    std::fs::write(path, output).expect("write RSA options");
 }
 
 /// Export the `enif_*` functions of `src/runtime/nif/abi/env.rs` from each

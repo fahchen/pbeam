@@ -27,6 +27,7 @@ num-integer = "0.1"
 num-traits = "0.2"
 openssl = { version = "=0.10.75", features = ["vendored"] }
 openssl-src = "=300.5.5+3.5.5"
+openssl-sys = "=0.9.117"
 socket2 = { version = "0.6", features = ["all"] }
 zlib-rs = "0.6"
 zstd = { version = "0.13", default-features = false, features = [

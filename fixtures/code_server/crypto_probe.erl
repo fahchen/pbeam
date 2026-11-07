@@ -1,5 +1,5 @@
 -module(crypto_probe).
--export([main/0, nifs/0, info/0, supports/0, supports_host/0, fips/0, oneshot/0, oneshot_host/0, xof_sizes/0, ciphers/0, ciphers_host/0, cipher_order/0, contexts/0, mac_contexts/0, mac_contexts_host/0, cipher_contexts/0, mac_poly1305_final/0, mac_poly1305_update/0, unsupported/0]).
+-export([main/0, nifs/0, info/0, supports/0, supports_host/0, rsa_options/0, fips/0, oneshot/0, oneshot_host/0, xof_sizes/0, ciphers/0, ciphers_host/0, cipher_order/0, contexts/0, mac_contexts/0, mac_contexts_host/0, cipher_contexts/0, mac_poly1305_final/0, mac_poly1305_update/0, unsupported/0]).
 
 %% Write the results of crypto:strong_rand_bytes/1, one term on each line.
 %% The first call loads crypto on demand, and its -on_load function loads
@@ -102,6 +102,12 @@ supports_host() ->
     Run = run_algorithms(),
     io:format("~p~n", [[[Item || Item <- crypto:supports(Type), lists:member(Item, Run)]
                         || Type <- [curves, public_keys]]]).
+
+%% Compare the complete RSA option list, its supports/0 entry, and an invalid type.
+rsa_options() ->
+    io:format("~p~n", [[crypto:supports(rsa_opts),
+                        proplists:get_value(rsa_opts, crypto:supports()),
+                        bad_reason(fun() -> crypto:supports(invalid_option) end)]]).
 
 run_algorithms() ->
     [blake2s, blake2b, sm3, shake256, shake128, sha3_512, sha3_384, sha3_256,
