@@ -432,7 +432,13 @@ impl Inet {
             stream.input = vec![0; size];
             stream.input_size = size;
             stream.remain = length;
-            size
+            if length == 0 && !self.read_ahead && self.packet != 0 {
+                let header = self.header_length().max(1);
+                self.stream.expand(header);
+                header
+            } else {
+                size
+            }
         } else if length > 0 {
             if stream.filled >= length {
                 return self.deliver(length);
@@ -601,6 +607,11 @@ impl Inet {
                 stream.expand(length);
                 stream.remain = length - filled;
                 Ok((stream.remain, length))
+            }
+            None if !self.read_ahead && self.packet != 0 => {
+                let read = self.header_length().saturating_sub(filled).max(1);
+                self.stream.expand(filled + read);
+                Ok((read, 0))
             }
             None if input_size > filled => Ok((input_size - filled, 0)),
             // ERTS passes a `packet_size` above `INT_MAX` to

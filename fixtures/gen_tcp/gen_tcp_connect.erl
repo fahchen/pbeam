@@ -1,5 +1,5 @@
 -module(gen_tcp_connect).
--export([main/0, timeout/0, ipv6/0, packet/0, line/0]).
+-export([main/0, timeout/0, ipv6/0, packet/0, line/0, read_ahead_options/0, read_ahead_receive/0]).
 
 %% Connects IPv4 tcp_inet sockets to a local listen socket, as
 %% gen_tcp:connect/3,4 call inet_tcp:connect/4 and prim_inet:connect/4
@@ -259,3 +259,65 @@ message() ->
         {'EXIT', _, Reason} -> {'EXIT', Reason}
     after 300 -> missing
     end.
+
+%% inet_drv.c:7184-7197, 9305-9314, 11829-11831.
+read_ahead_options() ->
+    {ok, L} = gen_tcp:listen(0, [binary, {active, false}, {read_ahead, false}]),
+    {ok, P} = inet:port(L),
+    {ok, S} = gen_tcp:connect({127,0,0,1}, P, [binary, {active, false}]),
+    {ok, A} = gen_tcp:accept(L),
+    Before = [inet:getopts(L, [read_ahead]), inet:getopts(A, [read_ahead]),
+              inet:getopts(S, [read_ahead])],
+    Change = [inet:setopts(L, [{read_ahead, true}]), inet:getopts(L, [read_ahead]),
+              inet:getopts(A, [read_ahead])],
+    {ok, U} = gen_udp:open(0, [{active, false}]),
+    Udp = [inet:getopts(U, [read_ahead]),
+           inet:setopts(U, [{read_ahead, false}]), inet:getopts(U, [read_ahead]),
+           inet:setopts(U, [{read_ahead, true}]), inet:getopts(U, [read_ahead])],
+    [ok = gen_tcp:close(X) || X <- [L,S,A]],
+    ok = gen_udp:close(U),
+    io:format("~w~n", [[Before, Change, Udp]]).
+
+%% Set active after receiving the first of two packets. Buffered packets are
+%% delivered by SETOPTS itself (inet_drv.c:11131-11148, 12996-13005).
+read_ahead_receive() ->
+    Results = [read_ahead_receive(Option, Packet) || Option <- [false,true], Packet <- [1,2,4,line]],
+    io:format("~w~n", [[Results, read_ahead_split()]]).
+
+read_ahead_split() ->
+    {ok, L} = gen_tcp:listen(0, [binary, {active,false}, {packet,4}, {read_ahead,false}]),
+    {ok, P} = inet:port(L),
+    {ok, S} = gen_tcp:connect({127,0,0,1}, P, [binary, {active,false}]),
+    {ok, A} = gen_tcp:accept(L),
+    ok = gen_tcp:send(S, <<0,0>>),
+    Timeout = gen_tcp:recv(A, 0, 50),
+    ok = gen_tcp:send(S, <<0,1,"x">>),
+    Packet = gen_tcp:recv(A, 0, 1000),
+    ok = inet:setopts(A, [{packet,raw}]),
+    ok = gen_tcp:send(S, <<"raw">>),
+    Raw = gen_tcp:recv(A, 0, 1000),
+    [ok = gen_tcp:close(X) || X <- [S,A,L]],
+    [Timeout,Packet,Raw].
+
+read_ahead_receive(Option, Packet) ->
+    {ok, L} = gen_tcp:listen(0, [binary, {active,false}, {packet,Packet}, {read_ahead,Option}]),
+    {ok, P} = inet:port(L),
+    {ok, S} = gen_tcp:connect({127,0,0,1}, P, [binary, {active,false}]),
+    {ok, A} = gen_tcp:accept(L),
+    Bytes = case Packet of
+                1 -> <<1,"a",1,"b">>;
+                2 -> <<0,1,"a",0,1,"b">>;
+                4 -> <<0,0,0,1,"a",0,0,0,1,"b">>;
+                line -> <<"a\nb\n">>
+            end,
+    ok = gen_tcp:send(S, Bytes),
+    timer:sleep(30),
+    First = gen_tcp:recv(A, 0, 1000),
+    ok = inet:setopts(A, [{active,true}]),
+    Immediate = receive {tcp,A,Data} -> {tcp,Data} after 0 -> missing end,
+    Later = case Immediate of
+                missing -> receive {tcp,A,Data2} -> {tcp,Data2} after 1000 -> missing end;
+                _ -> done
+            end,
+    [ok = gen_tcp:close(X) || X <- [S,A,L]],
+    {First,Immediate,Later}.
