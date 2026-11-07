@@ -352,10 +352,22 @@ impl Scheduler {
         connection: u32,
     ) -> Result<(), BeamError> {
         let node = target.node();
-        self.node
-            .dist()
-            .remove_monitor(process, &node, key, connection);
         let to = target.term();
+        {
+            let node_ref = std::sync::Arc::clone(&self.node);
+            let mut dist = node_ref.dist();
+            dist.remove_monitor(process, &node, key, connection);
+            // A PID identifies its dist entry while it is pending. A name
+            // lookup only finds a connected entry (bif.c:533-546).
+            if matches!(target, RemoteTarget::Pid(_))
+                && dist.pending(&node)
+                && dist.connection_id(&node) == connection
+            {
+                let control = monitor_control(DEMONITOR_P, &Term::Pid(process), &to, key, None);
+                dist.enqueue_pending_monitor(&node, process, control);
+                return Ok(());
+            }
+        }
         self.dist_output(process, &node, |flags, current| {
             (flags & MONITOR_FLAGS == MONITOR_FLAGS && current == connection).then(|| {
                 let control = monitor_control(DEMONITOR_P, &Term::Pid(process), &to, key, None);

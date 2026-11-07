@@ -2598,6 +2598,54 @@ fn preserves_a_demonitored_pending_monitor_as_pinned_erts() {
 }
 
 #[test]
+fn demonitors_a_remote_pid_before_connection_setup_as_pinned_erts() {
+    // The pending PID monitor and demonitor reach the peer in order
+    // (bif.c:525-576, dist.c:1550-1570, erl_proc_sig_queue.c:6550-6585).
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    for pbeam in [false, true] {
+        let server_name = format!("dpiddemonserver{pbeam}{id}");
+        let server = ErtsNode::start(
+            &epmd,
+            &[
+                "-sname",
+                &server_name,
+                "-setcookie",
+                "ck",
+                "-pa",
+                "fixtures/dist",
+            ],
+            "dist_pending_demonitor_probe:server().",
+        );
+        let node = server.line();
+        let pid_bytes = server.line();
+        let expression =
+            format!("dist_pending_demonitor_probe:client({node}, {pid_bytes}), halt().");
+        let client_name = format!("dpiddemonclient{pbeam}{id}");
+        let args = [
+            "-sname",
+            &client_name,
+            "-setcookie",
+            "ck",
+            "-kernel",
+            "logger_level",
+            "none",
+            "-noshell",
+            "-pa",
+            "fixtures/dist",
+            "-eval",
+            &expression,
+        ];
+        let output = if pbeam {
+            pbeam_erl(&epmd, &args)
+        } else {
+            erts_erl(&epmd, &args)
+        };
+        assert_eq!(stdout(&output), "false\n", "pbeam={pbeam}");
+    }
+}
+
+#[test]
 fn monitors_a_pid_on_the_first_signal_as_pinned_erts() {
     let epmd = Epmd::start();
     let id = std::process::id();
