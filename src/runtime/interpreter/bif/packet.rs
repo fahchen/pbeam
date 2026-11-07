@@ -87,6 +87,8 @@ enum HttpLine {
 
 /// A packet type of `decode_packet_3` (`TCP_PB_*`, `packet_parser.h`).
 enum Kind {
+    /// Four-byte big-endian length prefix.
+    Four,
     /// `http_bin`: a request or response line, with binary strings.
     HttpBin,
     /// `httph_bin`: a header line, with binary strings.
@@ -144,7 +146,54 @@ pub(super) fn decode_packet(
             _ => return Ok(BifResult::badarg()),
         }
     }
+    if matches!(kind, Kind::Four) {
+        let Some(bytes) = binary.bytes() else {
+            return Ok(BifResult::badarg());
+        };
+        let Some(header) = bytes.get(..4) else {
+            return Ok(Value(Term::tuple(vec![
+                atom(context, "more")?,
+                atom(context, "undefined")?,
+            ])));
+        };
+        let length = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
+        let limit = if packet_size == 0 {
+            i32::MAX as u64 - 4
+        } else {
+            packet_size
+        };
+        if u64::from(length) > limit {
+            return Ok(Value(Term::tuple(vec![
+                atom(context, "error")?,
+                atom(context, "invalid")?,
+            ])));
+        }
+        let total = length.wrapping_add(4) as i32;
+        if total < 0 {
+            return Ok(Value(Term::tuple(vec![
+                atom(context, "error")?,
+                atom(context, "invalid")?,
+            ])));
+        }
+        if total == 0 {
+            return Ok(Value(Term::tuple(vec![
+                atom(context, "more")?,
+                atom(context, "undefined")?,
+            ])));
+        }
+        let total = total as usize;
+        if total > bytes.len() {
+            return Ok(Value(Term::tuple(vec![
+                atom(context, "more")?,
+                Term::Integer(total as i64),
+            ])));
+        }
+        let packet = Term::Binary(binary.bits(32, total * 8));
+        let rest = Term::Binary(binary.bits(total * 8, binary.bit_size()));
+        return Ok(Value(Term::tuple(vec![atom(context, "ok")?, packet, rest])));
+    }
     let line = match kind {
+        Kind::Four => unreachable!(),
         Kind::HttpBin => HttpLine::Start,
         Kind::HttpHBin => HttpLine::Header,
         Kind::Unsupported(name) => {
@@ -194,7 +243,8 @@ fn kind(context: &BifContext<'_>, term: &Term) -> Option<Kind> {
             | "httph" | "ssl_tls") => Kind::Unsupported(name.to_owned()),
             _ => return None,
         }),
-        Term::Integer(value) if matches!(value, 0 | 1 | 2 | 4) => {
+        Term::Integer(4) => Some(Kind::Four),
+        Term::Integer(value) if matches!(value, 0 | 1 | 2) => {
             Some(Kind::Unsupported(value.to_string()))
         }
         _ => None,

@@ -3,7 +3,7 @@
 -module(decode_packet_probe).
 
 -export([request_lines/0, header_lines/0, end_of_headers/0, incomplete/0,
-         malformed/0, options/0, badargs/0, unsupported/0]).
+         malformed/0, options/0, badargs/0, unsupported/0, four_complete/0]).
 
 decode(Type, Bin) ->
     erlang:decode_packet(Type, Bin, []).
@@ -103,3 +103,6 @@ catch_error(Type, Subject, Options) ->
             [{erlang, decode_packet, _, Info} | _] = Stack,
             {error, Reason, Info}
     end.
+
+four_complete() ->
+    [decode(4, <<0,0,0,3,"abc",120>>), decode(4, <<0,0,0,0>>)].

@@ -482,3 +482,19 @@ fn stops_at_a_packet_type_that_pbeam_does_not_run() {
         "{error}"
     );
 }
+
+#[test]
+fn decodes_four_byte_packets_as_pinned_erts() {
+    let result = run("four_complete");
+    assert_eq!(
+        &result.term,
+        &list(vec![
+            ok(&result, binary(b"abc"), binary(b"x")),
+            ok(&result, binary(b""), binary(b""))
+        ])
+    );
+    assert_eq!(
+        reference("four_complete"),
+        b"[{ok,<<97,98,99>>,<<120>>},{ok,<<>>,<<>>}]\n"
+    );
+}
