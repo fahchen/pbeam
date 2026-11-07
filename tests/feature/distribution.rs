@@ -2829,7 +2829,10 @@ fn fails_a_pending_spawn_as_pinned_erts() {
         R=spawn_request(N,erlang,node,[],[]), \
         F=element(3,erts_internal:get_dflags()) band bnot (1 bsl 32), \
         {ok,H}=erts_internal:create_dist_channel(N,self(),{F,1}), \
-        D=erlang:dist_ctrl_get_data(H), io:format(\"~w~n\",[{D=/=none,is_reference(R)}]), halt().";
+        Before=receive {spawn_reply,R,_,_}->early after 0->none end, \
+        D=erlang:dist_ctrl_get_data(H), \
+        After=receive {spawn_reply,R,error,Why}->Why after 5000->timeout end, \
+        io:format(\"~w~n\",[{Before,D,After}]), halt().";
     let args = [
         "-sname",
         &name,
@@ -2840,8 +2843,26 @@ fn fails_a_pending_spawn_as_pinned_erts() {
         "-eval",
         expression,
     ];
-    assert_eq!(stdout(&erts_erl(&epmd, &args)), "{true,true}\n");
-    assert_eq!(stdout(&pbeam_erl(&epmd, &args)), "{true,true}\n");
+    assert_eq!(stdout(&erts_erl(&epmd, &args)), "{none,[],notsup}\n");
+    assert_eq!(stdout(&pbeam_erl(&epmd, &args)), "{none,[],notsup}\n");
+    let expression = "N=spawn_port@nohost, erts_internal:new_connection(N), \
+        R=spawn_request(N,erlang,node,[],[]), \
+        F=element(3,erts_internal:get_dflags()) band bnot (1 bsl 32), \
+        {ok,L}=gen_tcp:listen(0,[]), {ok,_}=erts_internal:create_dist_channel(N,L,{F,1}), \
+        Result=receive {spawn_reply,R,error,Why}->Why after 5000->timeout end, \
+        io:format(\"~w~n\",[Result]), halt().";
+    let args = [
+        "-sname",
+        &name,
+        "-kernel",
+        "logger_level",
+        "none",
+        "-noshell",
+        "-eval",
+        expression,
+    ];
+    assert_eq!(stdout(&erts_erl(&epmd, &args)), "notsup\n");
+    assert_eq!(stdout(&pbeam_erl(&epmd, &args)), "notsup\n");
 }
 
 #[test]

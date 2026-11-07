@@ -647,12 +647,30 @@ pub(super) fn dist_ctrl_get_data(context: &mut BifContext<'_>, handle: &Term) ->
         Err(error) => return error,
     };
     let mut dist = context.scheduler.node().dist();
-    let Some(elements) = dist.dequeue(&name) else {
+    let Some(output) = dist.dequeue(&name) else {
         return BifResult::Value(Term::static_atom("none"));
     };
-    let size: usize = elements.iter().map(|element| element.bit_size() / 8).sum();
-    let data = Term::list_from(elements.into_iter().map(Term::Binary).collect::<Vec<_>>());
-    if !dist.get_size(&name) {
+    let get_size = dist.get_size(&name);
+    let connection = dist.connection_id(&name);
+    drop(dist);
+    if let Some((process, key)) = output.spawn_notsup {
+        context
+            .scheduler
+            .dist_spawn_notsup(&name, connection, process, key);
+    }
+    let size: usize = output
+        .elements
+        .iter()
+        .map(|element| element.bit_size() / 8)
+        .sum();
+    let data = Term::list_from(
+        output
+            .elements
+            .into_iter()
+            .map(Term::Binary)
+            .collect::<Vec<_>>(),
+    );
+    if !get_size {
         return BifResult::Value(data);
     }
     let size = Term::from_bigint(BigInt::from(size));

@@ -3480,7 +3480,10 @@ fn answers_noproc_for_a_monitor_of_a_pid_of_an_old_incarnation_of_this_node() {
         .dist()
         .dequeue(&name)
         .expect("the noproc answer waits in the output queue");
-    assert!(packet.len() > 1, "the answer is a whole packet: {packet:?}");
+    assert!(
+        packet.elements.len() > 1,
+        "the answer is a whole packet: {packet:?}"
+    );
 }
 
 #[test]
@@ -3529,7 +3532,7 @@ fn sends_a_demonitor_packet_at_the_exit_of_the_watcher_of_a_remote_process() {
     let packet = dist
         .dequeue(&name)
         .expect("the exit wrote the demonitor packet");
-    let control = packet[1..]
+    let control = packet.elements[1..]
         .iter()
         .flat_map(Binary::to_bytes)
         .collect::<Vec<u8>>();

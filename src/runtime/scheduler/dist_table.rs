@@ -102,7 +102,7 @@ struct Entry {
     get_size: bool,
     /// The packets that wait for `erlang:dist_ctrl_get_data/1`, each as the
     /// binaries of its iovec (`dep->out_queue`).
-    output: VecDeque<Vec<Binary>>,
+    output: VecDeque<DistOutput>,
     /// Signals held until the connection flags are known.
     pending_signals: VecDeque<PendingSignal>,
     /// The queue size of the packets in `output` (`dep->total_qsize`, see
@@ -133,13 +133,20 @@ struct Entry {
     node_monitors: HashMap<ProcessId, u64>,
 }
 
+/// A queued packet and the spawn failure delivered when the controller takes it.
+#[derive(Debug)]
+pub(in crate::runtime) struct DistOutput {
+    pub(in crate::runtime) elements: Vec<Binary>,
+    pub(in crate::runtime) spawn_notsup: Option<(ProcessId, MonitorKey)>,
+}
+
 /// A signal queued while the connection flags are not yet known.
 #[derive(Debug)]
 pub(super) enum PendingSignal {
     Send(ProcessId, Term, Term, super::dist_output::SendPriority),
     Monitor(ProcessId, Term),
     Link(ProcessId, Term),
-    Spawn(ProcessId, Term, Term),
+    Spawn(ProcessId, MonitorKey, Term, Term),
     Exit(ProcessId, Term, Term, super::dist_output::SendPriority),
 }
 
@@ -800,12 +807,13 @@ impl DistTable {
         &mut self,
         name: &Atom,
         sender: ProcessId,
+        key: MonitorKey,
         control: Term,
         arguments: Term,
     ) {
         self.entry_mut(name)
             .pending_signals
-            .push_back(PendingSignal::Spawn(sender, control, arguments));
+            .push_back(PendingSignal::Spawn(sender, key, control, arguments));
     }
 
     /// Queue an exit signal on the pending connection.
@@ -836,19 +844,32 @@ impl DistTable {
     pub(in crate::runtime) fn enqueue(&mut self, name: &Atom, elements: Vec<Binary>) -> bool {
         let entry = self.entry_mut(name);
         entry.queue_size += queue_size(&elements);
-        entry.output.push_back(elements);
+        entry.output.push_back(DistOutput {
+            elements,
+            spawn_notsup: None,
+        });
         std::mem::take(&mut entry.notify)
+    }
+
+    /// Queue a tick that reports an unsupported spawn when it is taken.
+    pub(super) fn enqueue_spawn_notsup(&mut self, name: &Atom, sender: ProcessId, key: MonitorKey) {
+        let entry = self.entry_mut(name);
+        entry.queue_size += queue_size(&[]);
+        entry.output.push_back(DistOutput {
+            elements: Vec::new(),
+            spawn_notsup: Some((sender, key)),
+        });
     }
 
     /// Take the first packet of the output queue of the entry of `name` and
     /// count it, as `erlang:dist_ctrl_get_data/1` does
     /// (`dist.c:4612-4713`), or return `None` for an empty queue.
-    pub(in crate::runtime) fn dequeue(&mut self, name: &Atom) -> Option<Vec<Binary>> {
+    pub(in crate::runtime) fn dequeue(&mut self, name: &Atom) -> Option<DistOutput> {
         let entry = self.entry_mut(name);
-        let elements = entry.output.pop_front()?;
-        entry.queue_size -= queue_size(&elements);
+        let output = entry.output.pop_front()?;
+        entry.queue_size -= queue_size(&output.elements);
         entry.out += 1;
-        Some(elements)
+        Some(output)
     }
 
     /// Ask for the `dist_data` message of the next packet of the entry of

@@ -345,7 +345,11 @@ impl Scheduler {
                         Some(message),
                     )
                 }
-                super::dist_table::PendingSignal::Spawn(sender, control, arguments) => {
+                super::dist_table::PendingSignal::Spawn(sender, key, control, arguments) => {
+                    if flags & (1 << 32) == 0 {
+                        dist.enqueue_spawn_notsup(node, sender, key);
+                        continue;
+                    }
                     (sender, control, Some(arguments))
                 }
                 super::dist_table::PendingSignal::Exit(sender, to, reason, priority) => {
@@ -436,11 +440,15 @@ impl Scheduler {
                 let Some(name) = dist.controlled_by(Controller::Port(port)) else {
                     return Ok(None);
                 };
-                let Some(elements) = dist.dequeue(&name) else {
+                let Some(output) = dist.dequeue(&name) else {
                     return Ok(None);
                 };
+                let connection = dist.connection_id(&name);
                 drop(dist);
-                let bytes: Vec<u8> = elements.iter().flat_map(Binary::to_bytes).collect();
+                if let Some((sender, key)) = output.spawn_notsup {
+                    self.dist_spawn_notsup(&name, connection, sender, key);
+                }
+                let bytes: Vec<u8> = output.elements.iter().flat_map(Binary::to_bytes).collect();
                 let events = item.inet_mut().map(|tcp| tcp.send_dist(&bytes));
                 if let Some(exit) = self.send_events(port, item, events.unwrap_or_default())? {
                     return Ok(Some(exit));
