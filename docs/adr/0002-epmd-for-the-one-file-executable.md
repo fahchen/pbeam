@@ -25,7 +25,7 @@ Redbug CLI runs a connect-only module as `Server.Epmd` (`server/lib/server/epmd.
 
 - The intended outcome is that a one-file executable reaches a node by name on a host that lacks epmd. No test does this today. Verification needs a distribution connection between two nodes on a host with no epmd.
 - Only the node that starts a connection needs the target endpoint in its map. The peer does not need the same map. There is no name discovery by broadcast.
-- An unpinned name falls back to `erl_epmd`. With no epmd and no `-erl_epmd_port`, the lookup fails and the node does not connect. The failure can come from host resolution or from the name lookup, which then gives `noport`. With `-erl_epmd_port` set, `erl_epmd:port_please/3` returns the configured fixed port without contacting epmd: `listen_port_please/2` reads the port from the configuration (`lib/kernel/src/erl_epmd.erl:390-404`) and `port_please/3` returns it in the `{ok, Prt}` branch (`lib/kernel/src/erl_epmd.erl:127-140`) at `OTP-29.1.1`.
+- An unpinned name falls back to `erl_epmd`. Without an epmd, the connection does not start. The failure can come from host resolution or from the name lookup, which then gives `noport`.
 - A node that others must find by name needs a fixed published port.
 - The future verification must check that identifiers of two incarnations of the same node name stay distinct. A fixed or reused creation makes them indistinguishable.
 - No new `unsafe`, no new daemon, and no new protocol implementation.
@@ -34,7 +34,7 @@ Redbug CLI runs a connect-only module as `Server.Epmd` (`server/lib/server/epmd.
 
 - **Require an installed epmd.** Rejected. A host without OTP can lack epmd, so this does not serve the one-file executable.
 - **Bundle the OTP epmd with the executable.** The OTP epmd is a C program. Bundling it means a second binary or embedded C code, plus its daemon lifecycle and its build. Rejected. There is no consumer.
-- **Use `erl_epmd` with `-erl_epmd_port`.** This gives one fixed port for every node name and needs no epmd for the outbound lookup. Rejected for the one-file executable, because it cannot give a different endpoint per node name and it does not cover the inbound registration that `erl_epmd` normally does.
+- **Use `erl_epmd` with `-erl_epmd_port`.** This gives one fixed port for every node name. Rejected for the one-file executable, because it cannot give a different endpoint per node name.
 - **Use only `-no_epmd` and a fixed port.** Rejected. `-no_epmd` needs `-proto_dist` and does not give the name-to-endpoint lookup that the VM calls.
 
 ## Evidence
