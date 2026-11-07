@@ -253,6 +253,8 @@ pub(in crate::runtime) struct Inet {
     send_timeout_close: i32,
     /// The option `delay_send` (`TCP_ADDF_DELAY_SEND`): false at the start.
     delay_send: bool,
+    /// Whether packet reads may consume bytes after the first packet (inet_drv.c:7184-7197).
+    read_ahead: bool,
     /// Whether a `SETOPTS` set the option `buffer` (`INET_FLG_BUFFER_SET`),
     /// after which `recbuf` does not change `buffer`. An accepted socket
     /// starts without it (`inet_drv.c:14457`).
@@ -376,6 +378,7 @@ impl Inet {
             send_timeout: -1,
             send_timeout_close: 0,
             delay_send: false,
+            read_ahead: true,
             buffer_set: false,
             op_ref: 0,
             acceptors: VecDeque::new(),
@@ -404,6 +407,7 @@ impl Inet {
             deliver: self.deliver,
             packet: self.packet,
             packet_size: self.packet_size,
+            read_ahead: self.read_ahead,
             send_timeout: self.send_timeout,
             send_timeout_close: self.send_timeout_close,
             stream: Box::new(Stream::new(self.stream.buffer)),
@@ -1100,6 +1104,12 @@ impl Inet {
                     self.delay_send = value != 0;
                     true
                 }
+                49 => {
+                    if self.socket_type == SocketType::Stream {
+                        self.read_ahead = value != 0;
+                    }
+                    true
+                }
                 &other => return Err(self.unsupported("option", other)),
             };
             if !set {
@@ -1218,6 +1228,7 @@ impl Inet {
                 25 => Some(self.deliver),
                 23 => Some(self.packet),
                 32 => Some(self.packet_size.cast_signed()),
+                49 => (self.socket_type == SocketType::Stream).then_some(i32::from(self.read_ahead)),
                 22 if self.active == 3 => {
                     // The count needs 2 more bytes (inet_drv.c:9179-9183).
                     if reply.len() + 7 > MAX_OPT_BUFFER {

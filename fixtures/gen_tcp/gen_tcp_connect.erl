@@ -1,5 +1,5 @@
 -module(gen_tcp_connect).
--export([main/0, timeout/0, ipv6/0, packet/0, line/0]).
+-export([main/0, timeout/0, ipv6/0, packet/0, line/0, read_ahead_options/0]).
 
 %% Connects IPv4 tcp_inet sockets to a local listen socket, as
 %% gen_tcp:connect/3,4 call inet_tcp:connect/4 and prim_inet:connect/4
@@ -259,3 +259,19 @@ message() ->
         {'EXIT', _, Reason} -> {'EXIT', Reason}
     after 300 -> missing
     end.
+
+%% inet_drv.c:7184-7197, 9305-9314, 11829-11831.
+read_ahead_options() ->
+    {ok, L} = gen_tcp:listen(0, [binary, {active, false}, {read_ahead, false}]),
+    {ok, P} = inet:port(L),
+    {ok, S} = gen_tcp:connect({127,0,0,1}, P, [binary, {active, false}]),
+    {ok, A} = gen_tcp:accept(L),
+    Before = [inet:getopts(L, [read_ahead]), inet:getopts(A, [read_ahead]),
+              inet:getopts(S, [read_ahead])],
+    Change = [inet:setopts(L, [{read_ahead, true}]), inet:getopts(L, [read_ahead]),
+              inet:getopts(A, [read_ahead])],
+    {ok, U} = gen_udp:open(0, [{active, false}]),
+    Udp = [inet:setopts(U, [{read_ahead, false}]), inet:getopts(U, [read_ahead])],
+    [ok = gen_tcp:close(X) || X <- [L,S,A]],
+    ok = gen_udp:close(U),
+    io:format("~w~n", [[Before, Change, Udp]]).

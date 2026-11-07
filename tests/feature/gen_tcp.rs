@@ -236,6 +236,14 @@ fn connects_ipv6_sockets_and_binds_the_address_tags_as_pinned_erts() {
 }
 
 #[test]
+fn sets_and_gets_read_ahead_as_pinned_erts() {
+    assert_connect_runs(
+        "read_ahead_options",
+        "[[{ok,[{read_ahead,false}]},{ok,[{read_ahead,false}]},{ok,[{read_ahead,true}]}],[ok,{ok,[{read_ahead,true}]},{ok,[{read_ahead,false}]}],[ok,{ok,[]}]]\n",
+    );
+}
+
+#[test]
 fn frames_packets_with_a_header_of_1_2_and_4_bytes_as_pinned_erts() {
     // `{packet, 1 | 2 | 4}` between a socket with the option and a raw
     // socket: the header of each send (inet_drv.c:13736-13885), one whole
