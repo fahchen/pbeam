@@ -234,6 +234,8 @@ pub(super) struct LinkState {
     pub(super) unlinking: u64,
     /// The connection id of a link to another node.
     pub(super) connection: u32,
+    /// Whether link exits are priority messages.
+    pub(super) priority: bool,
 }
 
 impl LinkState {
@@ -241,6 +243,7 @@ impl LinkState {
     pub(super) const ACTIVE: LinkState = LinkState {
         unlinking: 0,
         connection: 0,
+        priority: false,
     };
 
     /// Return whether the link is active, not unlinking.
@@ -461,6 +464,8 @@ pub(super) struct OriginMonitor {
     /// links sends the child the exit signal `abandoned`
     /// (`erl_proc_sig_queue.c:5785-5840`).
     pub(super) spawn_link: bool,
+    /// Whether the pending spawn link has priority.
+    pub(super) spawn_link_priority: bool,
 }
 
 /// The reply policy of a spawn request: whether the caller suppresses the
@@ -484,13 +489,15 @@ pub(super) struct SpawnReply {
 pub(super) enum SpawnLink {
     /// The request links the new process.
     Yes,
+    /// The request links with priority.
+    Priority,
     /// The request does not link the new process.
     No,
 }
 
 impl From<SpawnLink> for bool {
     fn from(link: SpawnLink) -> Self {
-        matches!(link, SpawnLink::Yes)
+        matches!(link, SpawnLink::Yes | SpawnLink::Priority)
     }
 }
 

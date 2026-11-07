@@ -85,6 +85,7 @@ impl Scheduler {
                 spawn: Some(reply),
                 abandoned: false,
                 spawn_link: link.into(),
+                spawn_link_priority: matches!(link, SpawnLink::Priority),
             }),
             alias: monitor.and_then(|options| options.alias),
             watched_by: None,

@@ -163,6 +163,7 @@ fn walks_the_terms_of_the_monitors_the_pending_bif_and_the_length_trap() {
                 spawn: None,
                 abandoned: false,
                 spawn_link: false,
+                spawn_link_priority: false,
             }),
             alias: None,
             watched_by: None,
@@ -286,6 +287,7 @@ fn gives_the_links_of_a_process_as_process_info_2() {
         LinkState {
             unlinking: 7,
             connection: 0,
+            priority: false,
         },
     );
     let value = request

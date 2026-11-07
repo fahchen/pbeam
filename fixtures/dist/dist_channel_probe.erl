@@ -22,7 +22,7 @@
          spawn_bad_mfa_not_tuple/0, spawn_bad_mfa_tuple/0,
          spawn_bad_mfa_fields/0,
          spawn_bad_arguments_list/0,
-         spawn_link_priority/0, spawn_scheduler/0,
+         spawn_scheduler/0,
          dflag_unicode_io/0]).
 
 main() ->
@@ -996,11 +996,6 @@ spawn_bad_mfa_fields() ->
 spawn_bad_arguments_list() ->
     channel({29, remote_ref(zz@nohost), remote_pid(zz@nohost),
              remote_pid(zz@nohost), {erlang, node, 0}, []}, not_a_list).
-
-%% PBeam does not implement the priority option of a link (`bif.c:675-699`).
-spawn_link_priority() ->
-    erts_internal:dist_spawn_request(zz@nohost, {erlang, node, []},
-                                     [{link, [priority]}], spawn_request).
 
 %% PBeam does not bind a process to a scheduler, as its local spawn does
 %% (`erl_process.c:12500-12507`), so the request stops the run.

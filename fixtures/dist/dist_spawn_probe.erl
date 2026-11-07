@@ -180,6 +180,15 @@ options(Server) ->
     receive _ -> ok after 5000 -> timeout end,
     Alias = [spawn_alias(Server, Mode) || Mode <-
              [explicit_unalias, demonitor, reply_demonitor]],
+    process_flag(trap_exit, true),
+    LinkRef = spawn_request(Server, dist_spawn_probe, wait, [self()], [{link, [priority]}]),
+    LinkPid = receive {spawn_reply, LinkRef, ok, LP} -> LP after 5000 -> timeout end,
+    receive {started, LinkPid} -> ok after 5000 -> timeout end,
+    self() ! ordinary,
+    LinkPid ! stop,
+    receive after 200 -> ok end,
+    LinkFirst = receive {'EXIT', LinkPid, normal} -> exit_signal; ordinary -> ordinary after 5000 -> timeout end,
+    receive _ -> ok after 5000 -> timeout end,
     io:format("options: ~0p~n",
               [[{bad_node, BadNode}, {local, Local},
                 {bad_options, BadOptions}, {bad_mfa, BadMfa},
@@ -194,7 +203,8 @@ options(Server) ->
                 {link_empty, LinkEmpty}, {monitor_empty, MonitorEmpty},
                 {monitor_tag, MonitorTag}, {reply_yes, ReplyYes},
                 {no_connection, NoConnection}, {no_receiver, NoReceiver},
-                {monitor_priority, PriorityFirst}, {monitor_alias, Alias}]]),
+                {monitor_priority, PriorityFirst}, {monitor_alias, Alias},
+                {link_priority, LinkFirst}]]),
     ok.
 
 spawn_alias(Server, Mode) ->

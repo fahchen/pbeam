@@ -916,6 +916,7 @@ pub(super) fn dist_spawn_request(
     let arguments_len = i64::try_from(arguments_list.count()).unwrap_or(i64::MAX);
     let arguments_list = arguments.clone();
     let mut link = false;
+    let mut link_priority = false;
     let mut monitor = None;
     let mut reply_tag = Term::static_atom("spawn_reply");
     let mut reply = SpawnReply {
@@ -972,9 +973,8 @@ pub(super) fn dist_spawn_request(
                 [Term::Atom(name), value] if name.is_static("link") => match link_option(value) {
                     LinkOption::Ok => link = true,
                     LinkOption::Priority => {
-                        return Err(error(
-                            "unsupported link option priority: see \"Distribution\" in docs/erts-differences.md",
-                        ));
+                        link = true;
+                        link_priority = true;
                     }
                     LinkOption::Invalid if spawn_opt => return badarg(),
                     LinkOption::Invalid => {
@@ -1013,7 +1013,13 @@ pub(super) fn dist_spawn_request(
         monitor.as_ref(),
         &reply_tag,
         reply,
-        if link { SpawnLink::Yes } else { SpawnLink::No },
+        if link_priority {
+            SpawnLink::Priority
+        } else if link {
+            SpawnLink::Yes
+        } else {
+            SpawnLink::No
+        },
     );
     let (reference, monitored) = request?;
     let value = if spawn_opt {

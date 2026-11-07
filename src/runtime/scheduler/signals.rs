@@ -806,6 +806,7 @@ impl Scheduler {
                         LinkState {
                             unlinking: 0,
                             connection,
+                            priority: false,
                         },
                     );
                 }
@@ -1116,6 +1117,9 @@ impl Scheduler {
             }
         }
         let process = self.processes.get_mut(id).expect("the process is alive");
+        let priority = link
+            .and_then(|link| process.links.get(&link))
+            .is_some_and(|state| state.priority && state.is_active());
         let active = match alias {
             Some(alias) => process
                 .monitors
@@ -1131,7 +1135,12 @@ impl Scheduler {
         let kill = !linked && reason == Term::static_atom("kill");
         if active && !kill && process.trap_exit {
             let message = Term::tuple(vec![Term::static_atom("EXIT"), from, reason]);
-            process.mailbox.convert(walk, node, message);
+            if priority {
+                process.mailbox.remove(node);
+                process.mailbox.push_priority(message);
+            } else {
+                process.mailbox.convert(walk, node, message);
+            }
             self.activate(id);
             return Handled::Continue(1);
         }
@@ -1270,6 +1279,7 @@ impl Scheduler {
         // with the reason `abandoned` (`erl_proc_sig_queue.c:5773-5840`).
         let mut exit_result: Result<bool, BeamError> = Ok(false);
         let abandoned = monitor.abandoned;
+        let link_priority = monitor.spawn_link_priority;
         let reply_tag = monitor.item.clone();
         if let Term::Atom(reason) = result {
             // The pending request leaves the monitor list of its connection
@@ -1366,6 +1376,13 @@ impl Scheduler {
             // (`erl_proc_sig_queue.c:5785-5840`).
             if !abandoned && flags & super::dist_spawn::SPAWN_LINK != 0 {
                 self.link_on(id, LinkId::Remote(remote), remote, connection);
+                if let Some(state) = self
+                    .processes
+                    .get_mut(id)
+                    .and_then(|p| p.links.get_mut(&LinkId::Remote(remote)))
+                {
+                    state.priority = link_priority;
+                }
             }
         }
         let _ = exit_result?;

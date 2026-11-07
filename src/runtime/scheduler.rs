@@ -3237,6 +3237,7 @@ impl Scheduler {
                     spawn: None,
                     abandoned: false,
                     spawn_link: false,
+                    spawn_link_priority: false,
                 }),
                 alias: None,
                 watched_by: None,
@@ -3428,6 +3429,7 @@ impl Scheduler {
                 LinkState {
                     unlinking: id,
                     connection: 0,
+                    priority: false,
                 },
             );
         } else {
@@ -3530,6 +3532,7 @@ impl Scheduler {
                 spawn: None,
                 abandoned: false,
                 spawn_link: false,
+                spawn_link_priority: false,
             }),
             alias: options.alias,
             watched_by: None,

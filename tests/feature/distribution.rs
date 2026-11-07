@@ -569,17 +569,10 @@ fn stops_at_a_part_of_a_channel_that_pbeam_does_not_have() {
         ]
         .map(|call| (call.to_owned(), rejected)),
     );
-    // PBeam does not implement the priority option of a link (`bif.c:675-699`).
-    cases.extend([
-        (
-            "spawn_link_priority()".to_owned(),
-            "unsupported link option priority",
-        ),
-        (
-            "spawn_scheduler()".to_owned(),
-            "unsupported spawn option Tuple([Atom(\"scheduler\"), Integer(1)])",
-        ),
-    ]);
+    cases.extend([(
+        "spawn_scheduler()".to_owned(),
+        "unsupported spawn option Tuple([Atom(\"scheduler\"), Integer(1)])",
+    )]);
     cases.extend([12, 13, 18, 25, 27].map(|op| {
         (
             format!("trace_token({op})"),
@@ -2399,7 +2392,7 @@ fn shows_the_options_of_a_spawn_as_pinned_erts() {
         "{erts}"
     );
     assert!(
-        erts.ends_with("{no_connection,none},{no_receiver,none},{monitor_priority,down},{monitor_alias,[{explicit_unalias,received,true},{demonitor,received,true},{reply_demonitor,received,false}]}]\n"),
+        erts.ends_with("{no_connection,none},{no_receiver,none},{monitor_priority,down},{monitor_alias,[{explicit_unalias,received,true},{demonitor,received,true},{reply_demonitor,received,false}]},{link_priority,exit_signal}]\n"),
         "{erts}"
     );
     assert_eq!(stdout(&pbeam_erl(&epmd, &client)), erts);
