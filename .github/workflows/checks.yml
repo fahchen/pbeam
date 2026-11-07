@@ -167,6 +167,20 @@ jobs:
           overwrite: true
           retention-days: 1
 
+      - name: Extract test durations
+        if: ${{ !cancelled() && steps.select.outputs.task == 'check' }}
+        run: python3 scripts/ci_test_durations.py target/nextest/ci/junit.xml target/test-durations.json
+
+      - name: Keep test durations
+        if: ${{ !cancelled() && steps.select.outputs.task == 'check' }}
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: test-durations-${{ matrix.partition }}
+          path: target/test-durations.json
+          if-no-files-found: warn
+          overwrite: true
+          retention-days: 1
+
   checks:
     name: checks
     needs: [lint, fixtures, test]

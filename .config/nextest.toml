@@ -39,6 +39,11 @@ not (
 )
 '''
 
+[profile.ci.junit]
+path = "junit.xml"
+store-success-output = false
+store-failure-output = false
+
 # Each distribution test starts real ERTS and pbeam nodes with their own epmd,
 # so two of them at once already make a node wait longer than its own timeouts
 # allow, and the failure names whichever test lost the race. One thread keeps
