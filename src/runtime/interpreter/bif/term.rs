@@ -2700,9 +2700,15 @@ impl Decoder<'_> {
         mut items: Vec<Term>,
     ) -> Result<Term, DecodeError> {
         let free = items.split_off(4);
-        let [Term::Atom(module), old_index, old_unique, Term::Pid(_)] = &items[..] else {
+        let [Term::Atom(module), old_index, old_unique, creator] = &items[..] else {
             return Err(DecodeError::Badarg);
         };
+        // ERTS accepts a local or remote pid and discards it (external.c:5153-5160).
+        if !matches!(creator, Term::Pid(_))
+            && crate::term::external_id::pid_parts(creator).is_none()
+        {
+            return Err(DecodeError::Badarg);
+        }
         let small = |term: &Term| match term {
             Term::Integer(value) if (integer::MIN_SMALL..=integer::MAX_SMALL).contains(value) => {
                 Ok(*value as i32)

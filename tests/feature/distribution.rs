@@ -4093,3 +4093,68 @@ fn runs_erpc_and_rpc_between_erts_and_pbeam_nodes_as_pinned_erts() {
         );
     }
 }
+
+#[test]
+fn synchronizes_global_names_and_pg_members_in_visible_clusters_as_pinned_erts() {
+    // global.erl:338-452, 487-500; pg.erl:193-215, 225-259, 360-392.
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    for (servers_pbeam, client_pbeam) in [(false, false), (true, false), (false, true)] {
+        let name_a = format!("dga{servers_pbeam}{client_pbeam}{id}");
+        let name_b = format!("dgb{servers_pbeam}{client_pbeam}{id}");
+        let start = |name: &str| {
+            let args = ["-sname", name, "-setcookie", "ck", "-pa", "fixtures/dist"];
+            if servers_pbeam {
+                pbeam_node(&epmd, &args, "dist_global_pg_probe:server(), halt().")
+            } else {
+                ErtsNode::start(&epmd, &args, "dist_global_pg_probe:server(), halt().")
+            }
+        };
+        let a = start(&name_a);
+        let b = start(&name_b);
+        let expression = format!(
+            "dist_global_pg_probe:run('{}','{}'), halt().",
+            a.line(),
+            b.line()
+        );
+        let client_name = format!("dgc{servers_pbeam}{client_pbeam}{id}");
+        let args = [
+            "-sname",
+            &client_name,
+            "-setcookie",
+            "ck",
+            "-noshell",
+            "-pa",
+            "fixtures/dist",
+            "-eval",
+            &expression,
+        ];
+        let output = if client_pbeam {
+            pbeam_erl(&epmd, &args)
+        } else {
+            erts_erl(&epmd, &args)
+        };
+        assert_eq!(
+            stdout(&output),
+            "cluster: ok\n",
+            "servers_pbeam={servers_pbeam}, client_pbeam={client_pbeam}"
+        );
+    }
+}
+
+#[test]
+fn decodes_fun_creator_pids_and_rejects_other_terms_as_pinned_erts() {
+    // ERTS validates and discards the creator (external.c:5153-5160),
+    // then writes the local init pid when it encodes the fun (external.c:3989).
+    let epmd = Epmd::start();
+    let arguments = [
+        "-noshell",
+        "-pa",
+        "fixtures/dist",
+        "-eval",
+        "dist_fun_creator_probe:run(), halt().",
+    ];
+    let expected = "[{true,true,42},{true,true,42},{error,badarg}]\n";
+    assert_eq!(stdout(&erts_erl(&epmd, &arguments)), expected);
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), expected);
+}
