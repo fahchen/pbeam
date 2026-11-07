@@ -3995,3 +3995,20 @@ fn synchronizes_global_names_and_pg_members_in_visible_clusters_as_pinned_erts()
         );
     }
 }
+
+#[test]
+fn decodes_fun_creator_pids_and_rejects_other_terms_as_pinned_erts() {
+    // ERTS validates and discards the creator (external.c:5153-5160),
+    // then writes the local init pid when it encodes the fun (external.c:3989).
+    let epmd = Epmd::start();
+    let arguments = [
+        "-noshell",
+        "-pa",
+        "fixtures/dist",
+        "-eval",
+        "dist_fun_creator_probe:run(), halt().",
+    ];
+    let expected = "[{true,true,42},{true,true,42},{error,badarg}]\n";
+    assert_eq!(stdout(&erts_erl(&epmd, &arguments)), expected);
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), expected);
+}
