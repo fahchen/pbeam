@@ -23,6 +23,9 @@ const FRAGMENT_SIZE: usize = 64 * 1024;
 /// `DFLAG_SEND_SENDER` (`dist.h:49`).
 const SEND_SENDER: u64 = 0x80000;
 
+/// Monitor flags that a pending monitor needs on the peer (`dist.h:33-34`).
+const MONITOR_FLAGS: u64 = 0x28;
+
 /// `DFLAG_ALIAS` (`dist.h:67`).
 const ALIAS: u64 = 0x8 << 32;
 
@@ -331,11 +334,17 @@ impl Scheduler {
     ) -> Result<(), BeamError> {
         for signal in dist.take_pending_signals(node) {
             let (sender, control, message) = match signal {
-                super::dist_table::PendingSignal::Send(sender, to, message, priority) => (
-                    sender,
-                    send_control(flags, Term::Pid(sender), &to, priority),
-                    Some(message),
-                ),
+                super::dist_table::PendingSignal::Send(sender, to, message, priority) => {
+                    if is_remote_reference(&to) && flags & (ALIAS | ALTACT_SIG) == 0 {
+                        dist.enqueue(node, Vec::new());
+                        continue;
+                    }
+                    (
+                        sender,
+                        send_control(flags, Term::Pid(sender), &to, priority),
+                        Some(message),
+                    )
+                }
                 super::dist_table::PendingSignal::Spawn(sender, control, arguments) => {
                     (sender, control, Some(arguments))
                 }
@@ -348,10 +357,14 @@ impl Scheduler {
                     };
                     (sender, control, message)
                 }
-                super::dist_table::PendingSignal::Monitor(sender, control)
-                | super::dist_table::PendingSignal::Link(sender, control) => {
+                super::dist_table::PendingSignal::Monitor(sender, control) => {
+                    if flags & MONITOR_FLAGS != MONITOR_FLAGS {
+                        dist.enqueue(node, Vec::new());
+                        continue;
+                    }
                     (sender, control, None)
                 }
+                super::dist_table::PendingSignal::Link(sender, control) => (sender, control, None),
             };
             for packet in self.dist_encode_packets(dist, sender, node, flags, &control, message)? {
                 dist.enqueue(node, packet);

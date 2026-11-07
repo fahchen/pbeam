@@ -2537,7 +2537,7 @@ fn fails_a_pending_name_monitor_as_pinned_erts() {
         R=monitor(process,{missing_name,N}), \
         Flags=element(3,erts_internal:get_dflags()) band bnot 16#28, \
         {ok,H}=erts_internal:create_dist_channel(N,self(),{Flags,1}), \
-        D=erlang:dist_ctrl_get_data(H), io:format(\"~w~n\",[{D=/=none,is_reference(R)}]), halt().";
+        D=erlang:dist_ctrl_get_data(H), io:format(\"~w~n\",[{D=:=[],is_reference(R)}]), halt().";
     let args = [
         "-sname",
         &name,
@@ -2893,7 +2893,7 @@ fn sends_to_a_pid_and_alias_on_the_first_signal_as_pinned_erts() {
         erts_internal:new_connection(N), ok=erlang:send(A,msg,[noconnect]), \
         F=element(3,erts_internal:get_dflags()) band bnot (8 bsl 32), \
         {ok,H}=erts_internal:create_dist_channel(N,self(),{F,1}), \
-        D=erlang:dist_ctrl_get_data(H), io:format(\"~w~n\",[D=/=none]), halt().";
+        D=erlang:dist_ctrl_get_data(H), io:format(\"~w~n\",[D=:=[]]), halt().";
     let args = [
         "-sname",
         &name,
@@ -2906,6 +2906,22 @@ fn sends_to_a_pid_and_alias_on_the_first_signal_as_pinned_erts() {
     ];
     assert_eq!(stdout(&erts_erl(&epmd, &args)), "true\n");
     assert_eq!(stdout(&pbeam_erl(&epmd, &args)), "true\n");
+    let expression = expression.replace(
+        "band bnot (8 bsl 32)",
+        "band bnot (8 bsl 32) bor (32 bsl 32)",
+    );
+    let args = [
+        "-sname",
+        &name,
+        "-kernel",
+        "logger_level",
+        "none",
+        "-noshell",
+        "-eval",
+        &expression,
+    ];
+    assert_eq!(stdout(&erts_erl(&epmd, &args)), "false\n");
+    assert_eq!(stdout(&pbeam_erl(&epmd, &args)), "false\n");
 }
 
 #[test]
@@ -3243,6 +3259,31 @@ fn connects_and_fails_node_monitors_as_pinned_erts() {
         assert_eq!(stdout(&erts_erl(&epmd, &args)), "{true,true,nodedown}\n");
         assert_eq!(stdout(&pbeam_erl(&epmd, &args)), "{true,true,nodedown}\n");
     }
+}
+
+#[test]
+fn records_pending_queue_size_difference_from_pinned_erts() {
+    // external.c:355-363 and dist.c:1255-1269: ERTS counts the hopeful header and iovec.
+    let epmd = Epmd::start();
+    let name = format!("dpendingstat{}", std::process::id());
+    let expression = "N=stat_peer@nohost, H=erts_internal:new_connection(N), \
+        {ok,0,0,A}=erlang:dist_get_stat(H), {nm,N}!hello, \
+        {ok,0,0,B}=erlang:dist_get_stat(H), {nm,N}!hello, \
+        {ok,0,0,C}=erlang:dist_get_stat(H), \
+        Expected=175+byte_size(term_to_binary({6,self(),'',nm}))+byte_size(term_to_binary(hello)), \
+        io:format(\"~w~n\",[{A=:=0,B=:=Expected,C=:=2*Expected}]), halt().";
+    let args = [
+        "-sname",
+        &name,
+        "-kernel",
+        "logger_level",
+        "none",
+        "-noshell",
+        "-eval",
+        expression,
+    ];
+    assert_eq!(stdout(&erts_erl(&epmd, &args)), "{true,true,true}\n");
+    assert_eq!(stdout(&pbeam_erl(&epmd, &args)), "{true,false,false}\n");
 }
 
 #[test]
