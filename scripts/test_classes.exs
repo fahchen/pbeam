@@ -324,7 +324,7 @@ defmodule TestClasses do
                  "restores_the_terminal_before_the_result_of_terra_counter_as_interactive_erts"}
               ])
 
-  # These unit tests have explicit #[cfg(target_os = "linux")] attributes.
+  # These unit tests or their modules have Linux-specific cfg attributes.
   @linux_only_units MapSet.new(
                       for name <- ~w(
     runtime::sockets::tests::counts_an_mptcp_socket_as_tcp
@@ -337,7 +337,13 @@ defmodule TestClasses do
     runtime::interpreter::native::prim_socket::socket::options::tests::stops_at_a_control_message_that_ip_pktoptions_does_not_give
     runtime::interpreter::native::prim_socket::socket::options::tests::ends_ip_pktoptions_at_a_header_with_a_zero_length
     runtime::interpreter::native::prim_socket::socket::options::tests::gives_the_value_of_an_ip_tos_control_message_of_ip_pktoptions
+    runtime::interpreter::native::prim_socket::socket::tests::gives_an_abstract_source_name_with_its_leading_nul
     runtime::interpreter::bif::erlang::tests::gives_undefined_for_an_empty_detected_topology
+    runtime::port::inet::tests::gives_a_failed_set_of_priority_again_with_propagate_unless_it_is_eperm
+    runtime::port::inet::tests::gives_a_failed_set_of_tos_again_only_with_propagate
+    runtime::port::inet::tests::sets_nothing_again_after_priority_or_a_failed_set
+    runtime::port::inet::tests::sets_only_priority_again_after_an_option_with_the_constant_of_ip_tos
+    runtime::port::inet::tests::sets_tos_and_priority_again_after_another_option
   ),
                           do: {"pbeam-runtime", name}
                     )

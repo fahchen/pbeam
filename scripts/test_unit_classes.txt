@@ -499,6 +499,7 @@ pbeam-runtime|runtime::interpreter::native::prim_socket::socket::options::tests:
 pbeam-runtime|runtime::interpreter::native::prim_socket::socket::options::tests::raises_invalid_for_an_otp_option_number_without_a_getter||unknown
 pbeam-runtime|runtime::interpreter::native::prim_socket::socket::options::tests::stops_at_a_control_message_that_ip_pktoptions_does_not_give||unknown
 pbeam-runtime|runtime::interpreter::native::prim_socket::socket::tests::finds_no_field_in_a_term_that_is_not_a_map||unknown
+pbeam-runtime|runtime::interpreter::native::prim_socket::socket::tests::gives_an_abstract_source_name_with_its_leading_nul||unknown
 pbeam-runtime|runtime::interpreter::native::prim_socket::socket::tests::reads_no_unsigned_int_from_a_term_that_is_not_an_integer||unknown
 pbeam-runtime|runtime::interpreter::native::prim_socket::supports::tests::reads_the_entries_of_a_protocols_file_as_getprotoent||unknown
 pbeam-runtime|runtime::interpreter::native::prim_tty::tests::gives_ebadf_for_an_fd_that_is_not_open||unknown
@@ -768,6 +769,11 @@ pbeam-runtime|runtime::port::inet::stream::tests::shuts_down_the_write_side_afte
 pbeam-runtime|runtime::port::inet::stream::tests::shuts_down_the_write_side_of_a_connected_socket||unknown
 pbeam-runtime|runtime::port::inet::stream::tests::stops_a_delay_send_with_a_send_that_waits||unknown
 pbeam-runtime|runtime::port::inet::stream::tests::suspends_a_send_that_arrives_while_the_port_is_busy||unknown
+pbeam-runtime|runtime::port::inet::tests::gives_a_failed_set_of_priority_again_with_propagate_unless_it_is_eperm||unknown
+pbeam-runtime|runtime::port::inet::tests::gives_a_failed_set_of_tos_again_only_with_propagate||unknown
+pbeam-runtime|runtime::port::inet::tests::sets_nothing_again_after_priority_or_a_failed_set||unknown
+pbeam-runtime|runtime::port::inet::tests::sets_only_priority_again_after_an_option_with_the_constant_of_ip_tos||unknown
+pbeam-runtime|runtime::port::inet::tests::sets_tos_and_priority_again_after_another_option||unknown
 pbeam-runtime|runtime::port::tests::stops_the_read_select_of_an_fd_port_after_a_failed_read||unknown
 pbeam-runtime|runtime::process::dictionary::tests::hashes_a_small_integer_as_its_value_bits_and_an_atom_as_its_index||unknown
 pbeam-runtime|runtime::process::dictionary::tests::reads_no_value_before_the_first_put||unknown
