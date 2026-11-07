@@ -1046,10 +1046,9 @@ impl Inet {
     /// as for another send (`inet_drv.c:12695-12696`).
     ///
     /// The bytes join the queue or go to the socket as for another send.
-    /// PBeam writes them at once also with `delay_send`, which only delays
-    /// the write in ERTS, and a queue that reaches the high watermark does
-    /// not make the port busy: see row "Distribution" of
-    /// `docs/erts-differences.md`.
+    /// With `delay_send`, the socket writes them on its next output step.
+    /// A queue that reaches the high watermark does not make the port busy:
+    /// see row "Distribution" of `docs/erts-differences.md`.
     pub(in crate::runtime) fn send_dist(&mut self, data: &[u8]) -> Vec<Event> {
         if self.stream.pending_shutdown.is_some() {
             return self.send_failed(None);
@@ -1062,7 +1061,7 @@ impl Inet {
         let length = to_u64(data.len()).to_be_bytes();
         let framed = [&length[8 - header..], data].concat();
         self.stream.statistics.output(to_u64(framed.len()));
-        if self.stream.output.is_empty() {
+        if self.stream.output.is_empty() && !self.delay_send {
             let socket = self.socket.as_ref().expect("a connected port has a socket");
             match socket.send(&framed) {
                 Err(failure) if !blocked(&failure) => return self.send_failed(None),

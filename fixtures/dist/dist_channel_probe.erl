@@ -393,6 +393,11 @@ port_output() ->
     timer:sleep(100),
     show(written, [pkt(gen_tcp:recv(C1, 0, 1000)), pkt(gen_tcp:recv(C1, 0, 1000)),
                    erlang:dist_get_stat(DH1), flush()]),
+    {C2, A2, _DH2} = Connect(yy@nohost, [{packet, 4}]),
+    ok = inet:setopts(A2, [{packet, 4}, {delay_send, true}]),
+    {nm, yy@nohost} ! first,
+    {nm, yy@nohost} ! second,
+    show(delayed, [pkt(gen_tcp:recv(C2, 0, 1000)), pkt(gen_tcp:recv(C2, 0, 1000))]),
     %% The first write to a socket that the other side closed makes the
     %% other side reset it, so the next write fails and closes the socket;
     %% the send after it finds no connection.
