@@ -1,5 +1,5 @@
-//! The BIF `erlang:decode_packet/3` for the packet types `http_bin` and
-//! `httph_bin`: the length detection of `packet_get_length`
+//! The BIF `erlang:decode_packet/3` for packet type `4` and the types
+//! `http_bin` and `httph_bin`: the length detection of `packet_get_length`
 //! (`packet_parser.c:394-450`), the HTTP parser of `packet_parse_http`
 //! (`packet_parser.c:662-862`), and the results of `decode_packet_3`
 //! (`erl_bif_port.c:1476-1617`). Each other packet type gives a runtime
@@ -87,6 +87,8 @@ enum HttpLine {
 
 /// A packet type of `decode_packet_3` (`TCP_PB_*`, `packet_parser.h`).
 enum Kind {
+    /// Four-byte big-endian length prefix.
+    Four,
     /// `http_bin`: a request or response line, with binary strings.
     HttpBin,
     /// `httph_bin`: a header line, with binary strings.
@@ -101,8 +103,8 @@ enum Kind {
 /// that is not a whole number of bytes or a third argument that is not a
 /// proper list raises `badarg`. An unknown type raises `badarg` with the
 /// `badopt` cause. A whole packet gives `{ok, Packet, Rest}` and an
-/// incomplete one gives `{more, undefined}`; a length that is too large
-/// gives `{error, invalid}`.
+/// incomplete one gives `{more, undefined}` or `{more, Size}`; a length
+/// that is too large gives `{error, invalid}`.
 pub(super) fn decode_packet(
     context: &mut BifContext<'_>,
     packet_type: &Term,
@@ -145,6 +147,7 @@ pub(super) fn decode_packet(
         }
     }
     let line = match kind {
+        Kind::Four => return decode_four(context, binary, packet_size),
         Kind::HttpBin => HttpLine::Start,
         Kind::HttpHBin => HttpLine::Header,
         Kind::Unsupported(name) => {
@@ -182,6 +185,70 @@ pub(super) fn decode_packet(
     Ok(Value(Term::tuple(vec![atom(context, "ok")?, packet, rest])))
 }
 
+/// Decode a four-byte length-prefixed packet (`packet_parser.c:279-284,483-494`).
+///
+/// # Examples
+///
+/// `<<0,0,0,1,97,98>>` gives `{ok, <<97>>, <<98>>}`.
+fn decode_four(
+    context: &mut BifContext<'_>,
+    binary: &Binary,
+    packet_size: u64,
+) -> Result<BifResult, BeamError> {
+    let Some(bytes) = binary.bytes() else {
+        return Ok(BifResult::badarg());
+    };
+    let Some(header) = bytes.get(..4) else {
+        return Ok(Value(Term::tuple(vec![
+            atom(context, "more")?,
+            atom(context, "undefined")?,
+        ])));
+    };
+    let length = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
+    let limit = if packet_size == 0 {
+        u64::from(i32::MAX.cast_unsigned()) - 4
+    } else {
+        packet_size
+    };
+    if u64::from(length) > limit {
+        return Ok(Value(Term::tuple(vec![
+            atom(context, "error")?,
+            atom(context, "invalid")?,
+        ])));
+    }
+    let total = length.wrapping_add(4).cast_signed();
+    if total < 0 {
+        return Ok(Value(Term::tuple(vec![
+            atom(context, "error")?,
+            atom(context, "invalid")?,
+        ])));
+    }
+    if total == 0 {
+        return Ok(Value(Term::tuple(vec![
+            atom(context, "more")?,
+            atom(context, "undefined")?,
+        ])));
+    }
+    if total < 4 {
+        // The header addition wrapped, so the pinned ERTS behavior is undefined
+        // here: for the measured input it reads invalid memory and crashes. Do
+        // not copy a crash, and do not guess a result.
+        return Err(error(
+            "unsupported erlang:decode_packet/3 type 4: the header addition wraps and the pinned ERTS behavior is undefined for this length",
+        ));
+    }
+    let total = usize::try_from(total).expect("positive i32 fits usize");
+    if total > bytes.len() {
+        return Ok(Value(Term::tuple(vec![
+            atom(context, "more")?,
+            Term::Integer(i64::try_from(total).expect("total fits i64")),
+        ])));
+    }
+    let packet = Term::Binary(binary.bits(32, total * 8));
+    let rest = Term::Binary(binary.bits(total * 8, binary.bit_size()));
+    Ok(Value(Term::tuple(vec![atom(context, "ok")?, packet, rest])))
+}
+
 /// Return the kind of the first argument of `decode_packet_3`
 /// (`erl_bif_port.c:1492-1511`), or `None` for a type that the BIF does not
 /// know.
@@ -194,7 +261,8 @@ fn kind(context: &BifContext<'_>, term: &Term) -> Option<Kind> {
             | "httph" | "ssl_tls") => Kind::Unsupported(name.to_owned()),
             _ => return None,
         }),
-        Term::Integer(value) if matches!(value, 0 | 1 | 2 | 4) => {
+        Term::Integer(4) => Some(Kind::Four),
+        Term::Integer(value) if matches!(value, 0..=2) => {
             Some(Kind::Unsupported(value.to_string()))
         }
         _ => None,
