@@ -690,6 +690,82 @@ fn connects_to_an_erts_node_as_a_hidden_node_as_pinned_erts() {
 }
 
 #[test]
+fn connects_over_tls_in_both_directions_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let tls = std::fs::canonicalize("fixtures/gen_tcp/tls").unwrap();
+    let cert = tls.join("ca.pem");
+    let key = tls.join("key.pem");
+    let node_cert = tls.join("node.pem");
+    let options =
+        std::env::temp_dir().join(format!("pbeam-dist-tls-{}.config", std::process::id()));
+    // Both nodes verify the test CA. Node names use the host name, so the
+    // client disables hostname checking for this certificate fixture.
+    std::fs::write(
+        &options,
+        format!(
+            "[{{server,[{{certfile,{2:?}}},{{keyfile,{1:?}}},{{cacertfile,{0:?}}},{{verify,verify_peer}},{{fail_if_no_peer_cert,true}}]}},{{client,[{{certfile,{2:?}}},{{keyfile,{1:?}}},{{cacertfile,{0:?}}},{{verify,verify_peer}},{{server_name_indication,disable}}]}}].\n",
+            cert.to_str().unwrap(),
+            key.to_str().unwrap(),
+            node_cert.to_str().unwrap()
+        ),
+    )
+    .unwrap();
+    let options_path = options.to_str().unwrap();
+    let id = std::process::id();
+    let run = |server_pbeam: bool, client_pbeam: bool| {
+        let server_name = format!("tlssrv{server_pbeam}{client_pbeam}{id}");
+        let server_args = [
+            "+S",
+            "1",
+            "-sname",
+            &server_name,
+            "-setcookie",
+            "ck",
+            "-proto_dist",
+            "inet_tls",
+            "-ssl_dist_optfile",
+            options_path,
+        ];
+        let server_expression = "register(tls_probe, self()), io:format(\"~s~n\", [node()]), receive stop -> io:format(\"stopped~n\"), halt() after 60000 -> halt(2) end.";
+        let server = if server_pbeam {
+            pbeam_node(&epmd, &server_args, server_expression)
+        } else {
+            ErtsNode::start(&epmd, &server_args, server_expression)
+        };
+        let expression = format!(
+            "N = '{}', R = {{net_adm:ping(N), erpc:call(N, erlang, length, [[a,b,c]])}}, {{tls_probe,N}} ! stop, io:format(\"~w~n\", [R]), halt().",
+            server.line()
+        );
+        let client_name = format!("tlscli{server_pbeam}{client_pbeam}{id}");
+        let client_args = [
+            "+S",
+            "1",
+            "-sname",
+            &client_name,
+            "-setcookie",
+            "ck",
+            "-proto_dist",
+            "inet_tls",
+            "-ssl_dist_optfile",
+            options_path,
+        ];
+        let client = if client_pbeam {
+            pbeam_node(&epmd, &client_args, &expression)
+        } else {
+            ErtsNode::start(&epmd, &client_args, &expression)
+        };
+        let result = client.line();
+        assert_eq!(server.line(), "stopped");
+        result
+    };
+    let expected = run(false, false);
+    assert_eq!(expected, "{pong,3}");
+    assert_eq!(run(false, true), expected, "PBeam to ERTS");
+    assert_eq!(run(true, false), expected, "ERTS to PBeam");
+    std::fs::remove_file(options).unwrap();
+}
+
+#[test]
 fn accepts_connections_over_both_carriers() {
     // The OTP carrier opens the listen socket and registers its port with
     // epmd (inet_tcp_dist.erl:175-194, inet_epmd_socket.erl:49-86).
