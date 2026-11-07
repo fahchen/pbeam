@@ -230,9 +230,11 @@ fn decode_four(
         ])));
     }
     if total < 4 {
-        // Pinned ERTS reads invalid memory after this wrap, so its result is undefined.
+        // The header addition wrapped, so the pinned ERTS behavior is undefined
+        // here: for the measured input it reads invalid memory and crashes. Do
+        // not copy a crash, and do not guess a result.
         return Err(error(
-            "unsupported erlang:decode_packet/3 type 4: pinned ERTS reads invalid memory and crashes on this length",
+            "unsupported erlang:decode_packet/3 type 4: the header addition wraps and the pinned ERTS behavior is undefined for this length",
         ));
     }
     let total = usize::try_from(total).expect("positive i32 fits usize");
