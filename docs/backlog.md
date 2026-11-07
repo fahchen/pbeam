@@ -543,7 +543,7 @@ The owner opened [m13] Foundation seams ([#908](https://github.com/fahchen/pbeam
 
 - **Now:** `pbeam erl` starts `epmd` from `PATH`. A one-file executable has no sibling `epmd` binary, and a host without OTP has no `epmd`. ADR 0002 decides that the one-file executable uses the pinned OTP `-epmd_module` with a fixed name-to-endpoint map and no daemon.
 - **Option:** add a connect-only module like `Server.Epmd` of redbug-cli, install it with `-start_epmd false -epmd_module`, and keep the `PATH` behavior of `pbeam erl`.
-- **Evidence:** `server/lib/server/epmd.ex` at redbug-cli returns a pinned `{Ip, Port, Version}` from `address_please/3` and never registers in a real epmd. `lib/kernel/src/erl_epmd.erl:58-60` lists the callbacks at `OTP-29.1.1`. #1419 connects PBeam to a pinned-ERTS peer over an SSH tunnel with no host epmd.
+- **Evidence:** `server/lib/server/epmd.ex` at redbug-cli returns a pinned `{ok, Ip, Port, Version}` from `address_please/3` and never registers in a real epmd. `lib/kernel/src/erl_epmd.erl:57-60` is its export list at `OTP-29.1.1`. PR #1539 merged as `5c8d29a3` for #1419 connects PBeam to a pinned-ERTS peer over an SSH tunnel with no host epmd.
 - **Trigger:** a one-file executable needs to find a node by name. No such consumer exists now, so no field or configuration was added.
 - **Source:** ADR 0002, owner decision of 2026-11-06 through the standing capability-program authorization.
 
