@@ -23,7 +23,7 @@ The pinned ERTS supports an `-epmd_module` that replaces `erl_epmd`. Its externa
 
 ## Consequences
 
-- When the module is built, a one-file executable will reach a node by name on a host with no OTP installed. No such module exists yet.
+- The intended outcome is that a one-file executable reaches a node by name on a host with no OTP installed. No such module exists yet. Verification needs a distribution connection between two nodes on a host without epmd, which no test does today.
 - Only the node that starts a connection needs the target endpoint in its map. The peer does not need the same map. There is no name discovery by broadcast.
 - A node that others must find by name needs a fixed published port.
 - A pinned endpoint such as a tunnel port works with the direct dial of `address_please/3`. The tunnel test of PR #1539 uses a TCP echo, so this is a design consequence, not a measured distribution result.
@@ -32,7 +32,7 @@ The pinned ERTS supports an `-epmd_module` that replaces `erl_epmd`. Its externa
 ## Alternatives
 
 - **Require an installed `epmd`.** Rejected. A host without OTP has no `epmd`, so this breaks the one-file executable.
-- **Put an `epmd` inside the executable.** This needs a Rust daemon or a copy of the OTP Erlang code, plus a daemon lifecycle and a second protocol implementation. Rejected. There is no consumer, and the repository rule keeps the pinned OTP module code.
+- **Bundle the OTP `epmd` with the executable.** The OTP `epmd` is a C program. Bundling it means shipping a second binary or embedding that C code, plus owning its daemon lifecycle and its build. Rejected. There is no consumer, and it adds a second program to a one-file executable.
 - **Use only `-no_epmd` and a fixed port.** Rejected. `-no_epmd` needs `-proto_dist` and does not give the name-to-endpoint lookup that the VM calls.
 
 ## Evidence
