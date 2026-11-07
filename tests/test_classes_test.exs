@@ -187,6 +187,31 @@ defmodule TestClassesReportTest do
     assert output =~ "purpose=measurement; dependencies=none; selected=false"
   end
 
+  test "distinguishes inet local sockets, IPv4 sockets, and fake option callbacks", %{
+    directory: directory
+  } do
+    cases = [
+      {"runtime::port::inet::stream::tests::fills_one_buffer_for_a_receive_in_many_reads",
+       "matches"},
+      {"runtime::port::inet::datagram::tests::reads_no_datagram_without_a_receive", "matches"},
+      {"runtime::port::inet::tests::sets_tos_and_priority_again_after_another_option", "matches"}
+    ]
+
+    {output, status} =
+      report(directory, true, cases, ["--scope", "unit", "--cases", "--platform", "linux"])
+
+    assert status == 0
+
+    assert output =~
+             "fills_one_buffer_for_a_receive_in_many_reads: purpose=host_integration; dependencies=network,local_socket; selected=true"
+
+    assert output =~
+             "reads_no_datagram_without_a_receive: purpose=host_integration; dependencies=network; selected=true"
+
+    assert output =~
+             "sets_tos_and_priority_again_after_another_option: purpose=pure_logic; dependencies=none; selected=true"
+  end
+
   test "reports Erlang BIF scheduler sockets separately from direct checks", %{
     directory: directory
   } do
