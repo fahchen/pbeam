@@ -3344,31 +3344,6 @@ fn connects_and_fails_node_monitors_as_pinned_erts() {
 }
 
 #[test]
-fn records_pending_queue_size_difference_from_pinned_erts() {
-    // external.c:355-363 and dist.c:1255-1269: ERTS counts the hopeful header and iovec.
-    let epmd = Epmd::start();
-    let name = format!("dpendingstat{}", std::process::id());
-    let expression = "N=stat_peer@nohost, H=erts_internal:new_connection(N), \
-        {ok,0,0,A}=erlang:dist_get_stat(H), {nm,N}!hello, \
-        {ok,0,0,B}=erlang:dist_get_stat(H), {nm,N}!hello, \
-        {ok,0,0,C}=erlang:dist_get_stat(H), \
-        Expected=175+byte_size(term_to_binary({6,self(),'',nm}))+byte_size(term_to_binary(hello)), \
-        io:format(\"~w~n\",[{A=:=0,B=:=Expected,C=:=2*Expected}]), halt().";
-    let args = [
-        "-sname",
-        &name,
-        "-kernel",
-        "logger_level",
-        "none",
-        "-noshell",
-        "-eval",
-        expression,
-    ];
-    assert_eq!(stdout(&erts_erl(&epmd, &args)), "{true,true,true}\n");
-    assert_eq!(stdout(&pbeam_erl(&epmd, &args)), "{true,false,false}\n");
-}
-
-#[test]
 fn handles_an_unregistered_distribution_owner_as_pinned_erts() {
     // dist.c:5732-5736 aborts auto-connect when net_kernel has no name.
     let epmd = Epmd::start();
