@@ -122,8 +122,7 @@ defmodule TestClassesReportTest do
 
   test "strict unit report rejects an unreviewed case", %{directory: directory} do
     cases = [
-      {"runtime::mailbox::tests::caches_marker_references_when_priority_messages_arrive",
-       "matches"}
+      {"runtime::dirty::tests::drops_a_finish_that_did_not_run_on_a_dirty_io_thread", "matches"}
     ]
 
     {output, status} = report(directory, true, cases, ["--scope", "unit", "--strict"])
