@@ -234,8 +234,7 @@ pub(in crate::runtime) struct Inet {
     /// the header, 0 (the start value) for no limit (inet_drv.c:7026-7032).
     packet_size: u32,
     /// The option `active`: 0 for `false` (the start value), 1 for `true`,
-    /// 2 for `once`, and 3 for `{active, N}` (`INET_MULTI`, only on a
-    /// `udp_inet` port). A delivery in `once` mode sets it to 0, and the
+    /// 2 for `once`, and 3 for `{active, N}` (`INET_MULTI`). A delivery in `once` mode sets it to 0, and the
     /// last delivery of `{active, N}` sets it to 0
     /// (`INET_CHECK_ACTIVE_TO_PASSIVE`, inet_drv.c:1551-1560).
     active: i32,
@@ -300,12 +299,12 @@ pub(in crate::runtime) enum Control {
         activation: Activation,
     },
     /// A `SETOPTS` that ended `{active, N}` this many times
-    /// (inet_drv.c:6993-6998): the port sends `{udp_passive, S}` to the
+    /// (inet_drv.c:6993-6998): the port sends `{tcp_passive, S}` or `{udp_passive, S}` to the
     /// owner for each, and the reply follows.
     Passive {
         /// The reply bytes.
         reply: Vec<u8>,
-        /// The number of `{udp_passive, S}` messages.
+        /// The number of passive messages.
         count: usize,
     },
     /// A valid `TCP_REQ_RECV` with this timeout in milliseconds,
@@ -1155,8 +1154,7 @@ impl Inet {
     /// connection ended is active,
     /// else the reply (inet_drv.c:7001-7011, 7949-7981). A connected
     /// `udp_inet` socket gives the reply, so a receive that waits does not
-    /// read for the owner (inet_drv.c:4335-4357). PBeam runs no
-    /// `{active, N}`, so only `once` reads.
+    /// read for the owner (inet_drv.c:4335-4357). Only `once` reads.
     fn set_active_result(&self, old: i32, old_packet: i32, reply: Vec<u8>) -> Control {
         let ended = self.stream.ended && self.active != 0;
         // A change of the packet type in active mode delivers the packets

@@ -719,6 +719,12 @@ fn command_client(path: PathBuf, stop: Arc<AtomicBool>) -> thread::JoinHandle<Ve
                         .unwrap()
                         .write_all(argument.as_bytes())
                         .unwrap(),
+                    "send_lines" => {
+                        let stream = streams.last_mut().unwrap();
+                        for byte in argument.bytes() {
+                            stream.write_all(&[byte, b'\n']).unwrap();
+                        }
+                    }
                     "read" => {
                         let mut bytes = vec![0; argument.parse().unwrap()];
                         streams.last_mut().unwrap().read_exact(&mut bytes).unwrap();
@@ -1270,4 +1276,15 @@ fn sets_active_count_as_pinned_erts() {
     let expected = "[{ok,{ok,[{active,2}]},none},{ok,{ok,[{active,2}]},none},{ok,{ok,[{active,false}]},tcp_passive},{ok,{ok,[{active,false}]},tcp_passive},{ok,{ok,[{active,32767}]},none},{{error,einval},{ok,[{active,32767}]},none}]";
     assert_eq!(erts_text("tcp_probe", "active_count"), expected);
     assert_eq!(pbeam_text("tcp_probe", "active_count"), expected);
+}
+
+#[test]
+fn delivers_active_count_packets_as_pinned_erts() {
+    let expected = "[[[{tcp,<<97,10>>},{tcp,<<98,10>>},{tcp,<<99,10>>}],none,{ok,[{active,1}]},none],[[{tcp,<<97,10>>},{tcp,<<98,10>>},{tcp,<<99,10>>}],tcp_passive,{ok,[{active,false}]},none],[[{tcp,<<97,10>>},{tcp,<<98,10>>}],tcp_passive,{ok,[{active,false}]},{ok,<<99,10>>}]]";
+    for (name, (result, _)) in ["ERTS", "PBeam"]
+        .into_iter()
+        .zip(client_runs("tcp_active", "count"))
+    {
+        assert_eq!(result, expected, "{name}");
+    }
 }

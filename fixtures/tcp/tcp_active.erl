@@ -1,5 +1,5 @@
 -module(tcp_active).
--export([main/1, active/1, closed/1, passive_closed/1, links/0, link_orders/0, pid_port_links/0, unsupported/2, unsupported_item/0]).
+-export([main/1, active/1, count/1, closed/1, passive_closed/1, links/0, link_orders/0, pid_port_links/0, unsupported/2, unsupported_item/0]).
 
 %% Delivers the data of an accepted socket in active mode, as
 %% inet:setopts/2 calls prim_inet:setopts/2, and gives the socket to a
@@ -65,6 +65,23 @@ active(Path) ->
     W = message(S),
     ok = prim_inet:close(L),
     [Set, X, Y, Get, Z, W, flush()].
+
+%% Three line packets with a count above, equal to, and below the packet count.
+count(Path) ->
+    process_flag(trap_exit, true),
+    [count_case(Path, Step, N) || {Step, N} <- [{1, 4}, {3, 3}, {5, 2}]].
+
+count_case(Path, Step, N) ->
+    {L, S} = connection(Path, Step),
+    ok = prim_inet:setopts(S, [{packet, line}, {active, N}]),
+    step(Path, Step + 1, "send_lines abc"),
+    Data = [message(S) || _ <- lists:seq(1, min(N, 3))],
+    Passive = receive {tcp_passive, S} -> tcp_passive after 100 -> none end,
+    Opt = prim_inet:getopts(S, [active]),
+    Rest = case N of 2 -> prim_inet:recv(S, 0, 1000); _ -> none end,
+    ok = prim_inet:close(S),
+    ok = prim_inet:close(L),
+    [Data, Passive, Opt, Rest].
 
 %% The client closes before {active, once}: the setopts reads the end of
 %% file, sends {tcp_closed, S}, and the port exits with the reason normal.
