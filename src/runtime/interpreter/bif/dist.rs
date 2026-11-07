@@ -917,6 +917,7 @@ pub(super) fn dist_spawn_request(
     let arguments_list = arguments.clone();
     let mut link = false;
     let mut monitor = None;
+    let mut monitor_priority = false;
     let mut reply_tag = Term::static_atom("spawn_reply");
     let mut reply = SpawnReply {
         no_smsg: false,
@@ -961,11 +962,7 @@ pub(super) fn dist_spawn_request(
                         badopt = true;
                         break;
                     };
-                    if priority {
-                        return Err(error(
-                            "unsupported monitor option priority: see \"Distribution\" in docs/erts-differences.md",
-                        ));
-                    }
+                    monitor_priority = priority;
                     if alias {
                         return Err(error(
                             "unsupported spawn monitor option alias: see \"Distribution\" in docs/erts-differences.md",
@@ -1015,6 +1012,7 @@ pub(super) fn dist_spawn_request(
         &arguments_list,
         Term::list_from(sent),
         monitor.as_ref(),
+        monitor_priority,
         &reply_tag,
         reply,
         if link { SpawnLink::Yes } else { SpawnLink::No },

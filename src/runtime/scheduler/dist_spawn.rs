@@ -61,6 +61,7 @@ impl Scheduler {
         arguments: &Term,
         options: Term,
         monitor: Option<&Term>,
+        monitor_priority: bool,
         reply_tag: &Term,
         reply: SpawnReply,
         link: SpawnLink,
@@ -70,7 +71,7 @@ impl Scheduler {
         let key = MonitorKey::Local(reference);
         let pending = Origin {
             monitor: Some(OriginMonitor {
-                priority: false,
+                priority: monitor_priority,
                 kind: "process",
                 target: None,
                 item: reply_tag.clone(),

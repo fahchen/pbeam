@@ -175,6 +175,7 @@ fn spawn_joins_a_new_pending_connection_after_the_connected_check() {
             &Term::nil(),
             Term::nil(),
             None,
+            false,
             &Term::static_atom("spawn_reply"),
             reply,
             SpawnLink::No,

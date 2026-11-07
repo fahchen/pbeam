@@ -21,7 +21,7 @@
          monitor_down_unknown/0, spawn_local_ref/0, spawn_bad_local_leader/0,
          spawn_bad_mfa_not_tuple/0, spawn_bad_mfa_tuple/0,
          spawn_bad_mfa_fields/0,
-         spawn_bad_arguments_list/0, spawn_monitor_priority/0,
+         spawn_bad_arguments_list/0,
          spawn_monitor_alias/0, spawn_link_priority/0, spawn_scheduler/0,
          dflag_unicode_io/0]).
 
@@ -997,13 +997,8 @@ spawn_bad_arguments_list() ->
     channel({29, remote_ref(zz@nohost), remote_pid(zz@nohost),
              remote_pid(zz@nohost), {erlang, node, 0}, []}, not_a_list).
 
-%% PBeam does not implement the priority option of a monitor or a link and
-%% the alias option of a monitor (`bif.c:675-780`), so the request stops the
-%% run with a runtime error (row "Distribution").
-spawn_monitor_priority() ->
-    erts_internal:dist_spawn_request(zz@nohost, {erlang, node, []},
-                                     [{monitor, [priority]}], spawn_request).
-
+%% PBeam does not implement the priority option of a link or the alias option
+%% of a spawn monitor (`bif.c:675-780`).
 spawn_monitor_alias() ->
     erts_internal:dist_spawn_request(zz@nohost, {erlang, node, []},
                                      [{monitor, [{alias, demonitor}]}],

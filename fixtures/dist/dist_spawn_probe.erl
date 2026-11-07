@@ -165,6 +165,19 @@ options(Server) ->
                                           [{reply, no}, monitor])),
     NoReceiver = received(spawn_request(Server, erlang, node, [],
                                         [{reply, no}, foo])),
+    PriorityRef = spawn_request(Server, dist_spawn_probe, wait, [self()],
+                                [{monitor, [priority]}]),
+    PriorityPid = receive {spawn_reply, PriorityRef, ok, PP} -> PP after 5000 -> timeout end,
+    receive {started, PriorityPid} -> ok after 5000 -> timeout end,
+    self() ! ordinary,
+    PriorityPid ! stop,
+    receive after 200 -> ok end,
+    PriorityFirst = receive
+                        {'DOWN', PriorityRef, process, PriorityPid, normal} -> down;
+                        ordinary -> ordinary
+                    after 5000 -> timeout
+                    end,
+    receive _ -> ok after 5000 -> timeout end,
     io:format("options: ~0p~n",
               [[{bad_node, BadNode}, {local, Local},
                 {bad_options, BadOptions}, {bad_mfa, BadMfa},
@@ -178,7 +191,8 @@ options(Server) ->
                 {bad_monitor_tag, BadMonitorTag}, {bad_tuple, BadTuple},
                 {link_empty, LinkEmpty}, {monitor_empty, MonitorEmpty},
                 {monitor_tag, MonitorTag}, {reply_yes, ReplyYes},
-                {no_connection, NoConnection}, {no_receiver, NoReceiver}]]),
+                {no_connection, NoConnection}, {no_receiver, NoReceiver},
+                {monitor_priority, PriorityFirst}]]),
     ok.
 
 %% The options of a spawn request set the start values of the priority, the

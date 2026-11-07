@@ -569,13 +569,9 @@ fn stops_at_a_part_of_a_channel_that_pbeam_does_not_have() {
         ]
         .map(|call| (call.to_owned(), rejected)),
     );
-    // PBeam does not implement the priority option of a monitor or a link and
-    // the alias option of a monitor (`bif.c:675-780`).
+    // PBeam does not implement the priority option of a link and the alias
+    // option of a spawn monitor (`bif.c:675-780`).
     cases.extend([
-        (
-            "spawn_monitor_priority()".to_owned(),
-            "unsupported monitor option priority",
-        ),
         (
             "spawn_monitor_alias()".to_owned(),
             "unsupported spawn monitor option alias",
@@ -2408,7 +2404,7 @@ fn shows_the_options_of_a_spawn_as_pinned_erts() {
         "{erts}"
     );
     assert!(
-        erts.ends_with("{no_connection,none},{no_receiver,none}]\n"),
+        erts.ends_with("{no_connection,none},{no_receiver,none},{monitor_priority,down}]\n"),
         "{erts}"
     );
     assert_eq!(stdout(&pbeam_erl(&epmd, &client)), erts);
