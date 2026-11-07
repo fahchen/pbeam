@@ -17,7 +17,7 @@ defmodule TestClassesReportTest do
     %{directory: directory}
   end
 
-  defp report(directory, target, cases, arguments \\ []) do
+  defp report(directory, target, cases, arguments \\ [], integration_target \\ "arith") do
     unit = Enum.chunk_every(arguments, 2, 1, :discard) |> Enum.any?(&(&1 == ["--scope", "unit"]))
 
     integration =
@@ -27,7 +27,7 @@ defmodule TestClassesReportTest do
     name =
       cond do
         unit -> "pbeam_runtime"
-        integration -> "arith"
+        integration -> integration_target
         true -> "stty"
       end
 
@@ -36,7 +36,7 @@ defmodule TestClassesReportTest do
     source =
       cond do
         unit -> "/workspace/src/lib.rs"
-        integration -> "/workspace/tests/integration/arith.rs"
+        integration -> "/workspace/tests/integration/#{name}.rs"
         true -> "/workspace/tests/feature/stty.rs"
       end
 
@@ -216,5 +216,23 @@ defmodule TestClassesReportTest do
     name = "pbeam-runtime::net stops_the_run_at_a_network_namespace"
     assert mac =~ "platform excluded: " <> name
     assert linux =~ "not listed on this platform: " <> name
+  end
+
+  test "distinguishes live ERTS comparison from a recorded result", %{directory: directory} do
+    cases = [
+      {"runs_the_utf16_and_utf32_match_instructions_as_pinned_erts", "matches"},
+      {"runs_bs_match_string_as_pinned_erts", "matches"}
+    ]
+
+    {output, status} =
+      report(directory, true, cases, ["--scope", "integration", "--cases"], "binary_match")
+
+    assert status == 0
+
+    assert output =~
+             "runs_the_utf16_and_utf32_match_instructions_as_pinned_erts: purpose=runtime_integration; dependencies=network,local_socket"
+
+    assert output =~
+             "runs_bs_match_string_as_pinned_erts: purpose=runtime_integration,erts_comparison; dependencies=erts_process,pipes,filesystem,network,local_socket"
   end
 end
