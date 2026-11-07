@@ -1108,6 +1108,7 @@ impl Inet {
                     self.delay_send = value != 0;
                     true
                 }
+                // UDP accepts the option without changing state (inet_drv.c:7184-7197).
                 49 => {
                     if self.socket_type == SocketType::Stream {
                         self.read_ahead = value != 0;
@@ -1236,6 +1237,7 @@ impl Inet {
                 25 => Some(self.deliver),
                 23 => Some(self.packet),
                 32 => Some(self.packet_size.cast_signed()),
+                // UDP omits the option from the reply (inet_drv.c:9305-9314).
                 49 => {
                     (self.socket_type == SocketType::Stream).then_some(i32::from(self.read_ahead))
                 }

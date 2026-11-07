@@ -271,7 +271,9 @@ read_ahead_options() ->
     Change = [inet:setopts(L, [{read_ahead, true}]), inet:getopts(L, [read_ahead]),
               inet:getopts(A, [read_ahead])],
     {ok, U} = gen_udp:open(0, [{active, false}]),
-    Udp = [inet:setopts(U, [{read_ahead, false}]), inet:getopts(U, [read_ahead])],
+    Udp = [inet:getopts(U, [read_ahead]),
+           inet:setopts(U, [{read_ahead, false}]), inet:getopts(U, [read_ahead]),
+           inet:setopts(U, [{read_ahead, true}]), inet:getopts(U, [read_ahead])],
     [ok = gen_tcp:close(X) || X <- [L,S,A]],
     ok = gen_udp:close(U),
     io:format("~w~n", [[Before, Change, Udp]]).

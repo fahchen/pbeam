@@ -239,7 +239,7 @@ fn connects_ipv6_sockets_and_binds_the_address_tags_as_pinned_erts() {
 fn sets_and_gets_read_ahead_as_pinned_erts() {
     assert_connect_runs(
         "read_ahead_options",
-        "[[{ok,[{read_ahead,false}]},{ok,[{read_ahead,false}]},{ok,[{read_ahead,true}]}],[ok,{ok,[{read_ahead,true}]},{ok,[{read_ahead,false}]}],[ok,{ok,[]}]]\n",
+        "[[{ok,[{read_ahead,false}]},{ok,[{read_ahead,false}]},{ok,[{read_ahead,true}]}],[ok,{ok,[{read_ahead,true}]},{ok,[{read_ahead,false}]}],[{ok,[]},ok,{ok,[]},ok,{ok,[]}]]\n",
     );
 }
 
