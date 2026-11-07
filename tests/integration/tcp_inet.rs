@@ -1039,10 +1039,10 @@ fn ends_the_port_at_the_close_of_the_peer_in_active_mode_as_pinned_erts() {
 #[test]
 fn ends_the_port_at_activation_after_a_passive_close_as_pinned_erts() {
     // A passive recv closes the socket at the end of file. A later
-    // `{active, once}` or `{active, true}` sends `{tcp_closed, S}`, skips
+    // `{active, once}`, `{active, true}`, or a positive count sends `{tcp_closed, S}`, skips
     // the next options, and `driver_exit` closes the port with the reason
     // `normal` (inet_drv.c:7001-7011, 12783-12847; io.c:7228-7249).
-    let expected = "[[{error,closed},[1],tcp_closed,{error,einval},undefined,[]],[{error,closed},ok,tcp_closed,{error,einval},undefined,[]]]";
+    let expected = "[[{error,closed},[1],tcp_closed,{error,einval},undefined,[]],[{error,closed},ok,tcp_closed,{error,einval},undefined,[]],[{error,closed},[1],tcp_closed,{error,einval},undefined,[]]]";
     for (name, (text, _)) in ["ERTS", "PBeam"]
         .into_iter()
         .zip(client_runs("tcp_active", "passive_closed"))

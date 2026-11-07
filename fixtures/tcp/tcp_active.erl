@@ -128,7 +128,10 @@ passive_closed(Path) ->
     %% (prim_inet.erl:1028, 2972-2975).
     SetOnce = fun(S) -> erlang:port_control(S, 16#03f1a307, [22, 0, 0, 0, 2, 9, 0, 0, 0, 1]) end,
     SetTrue = fun(S) -> prim_inet:setopts(S, [{active, true}]) end,
-    [ended(Path, 1, SetOnce, once), ended(Path, 3, SetTrue, true)].
+    SetCount = fun(S) -> erlang:port_control(S, 16#03f1a307,
+                                             [22, 0, 0, 0, 3, 0, 1, 22, 0, 0, 0, 0]) end,
+    [ended(Path, 1, SetOnce, once), ended(Path, 3, SetTrue, true),
+     ended(Path, 5, SetCount, 1)].
 
 ended(Path, Step, Setopts, Active) ->
     {L, S} = connection(Path, Step),

@@ -926,6 +926,9 @@ impl Inet {
                     if self.active_count == 0 {
                         self.active = 0;
                         *passive += 1;
+                    } else if self.socket_type == SocketType::Stream && self.stream.ended {
+                        // A closed stream sends tcp_closed before later options (inet_drv.c:7001-7011).
+                        break;
                     }
                     true
                 }
