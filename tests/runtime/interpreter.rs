@@ -5790,6 +5790,46 @@ fn raises_the_reason_of_an_error_with_cause_that_no_call_path_converted() {
 }
 
 #[test]
+fn returns_a_suspended_send_result_after_an_early_wakeup() {
+    // A compiled fixture cannot force a port drain inside the same BIF call.
+    let program =
+        BeamProgram::load(&[include_bytes!("../../fixtures/funs/fun_probe.beam")]).unwrap();
+    let label = program.modules["fun_probe"].exports[&(
+        program.modules["fun_probe"]
+            .tables
+            .name_id("tail_wait")
+            .unwrap(),
+        1,
+    )];
+    let mut scheduler = Scheduler::new((*program.atoms).clone());
+    scheduler.code = CodeTable::new(program.modules);
+    let frame = scheduler.code.frame("fun_probe", label, 1).unwrap();
+    scheduler.start(frame, vec![Term::Integer(1)], Vec::new());
+    scheduler.schedule_next().unwrap();
+    let reply = Term::Integer(42);
+    let outcome = BeamProgram::finish_bif(
+        &mut scheduler,
+        BifResult::SuspendReturn(reply.clone()),
+        CallKind::Body,
+    )
+    .unwrap();
+    assert!(outcome.is_none());
+    assert_eq!(
+        read(scheduler.current_process(), &Operand::X(0)).unwrap(),
+        reply
+    );
+    scheduler.current_process_mut().suspended = true;
+    let outcome = BeamProgram::finish_bif(
+        &mut scheduler,
+        BifResult::SuspendReturn(reply.clone()),
+        CallKind::Body,
+    )
+    .unwrap();
+    assert!(matches!(outcome, Some(Outcome::Wait)));
+    assert_eq!(scheduler.current_process().pending_dist_reply, Some(reply));
+}
+
+#[test]
 fn rejects_dirty_work_outside_a_nif_entry() {
     // Only the `nif_start` instruction switches a caller out to a dirty
     // pool. A BIF result with dirty work on another path is an invariant
