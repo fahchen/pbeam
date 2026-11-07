@@ -43,6 +43,71 @@ fn scheduler() -> Scheduler {
     scheduler
 }
 
+fn scheduler_with_kernel() -> Scheduler {
+    let mut scheduler = scheduler();
+    scheduler.insert(ProcessState::new(
+        ProcessId(1),
+        Start::Entry(frame()),
+        vec![],
+    ));
+    let node = Arc::clone(&scheduler.node);
+    assert!(node.name_register("net_kernel", ProcessId(1)));
+    let local = scheduler.atoms.put("coverage_local@nohost").unwrap();
+    assert!(node.set_this_node(&scheduler.atoms, ProcessId(1), &local, 4));
+    scheduler
+}
+
+#[test]
+fn rejects_auto_connect_when_the_connection_changes_before_its_lock() {
+    // A BEAM fixture cannot pause between the caller's state check and
+    // dist_auto_connect's entry lock. Model the legal connected, shutdown,
+    // and exiting-owner transitions directly at that boundary (dist.c:5713-5736).
+    let mut scheduler = scheduler_with_kernel();
+    let name = scheduler.atoms.put("coverage_connected@nohost").unwrap();
+    {
+        let mut dist = scheduler.node.dist();
+        dist.insert(&name, Reference(8), 0);
+        dist.new_connection(&name);
+        assert!(
+            dist.connect(&name, Controller::Process(ProcessId(0)), 0)
+                .is_some()
+        );
+    }
+    let mut queued = false;
+    assert_eq!(
+        scheduler
+            .dist_auto_connect(&name, |_, _| queued = true)
+            .unwrap(),
+        None
+    );
+    assert!(!queued);
+
+    let mut scheduler = scheduler_with_kernel();
+    let name = scheduler.atoms.put("coverage_shutdown@nohost").unwrap();
+    let node = Arc::clone(&scheduler.node);
+    node.begin_net_exits(&Term::static_atom("net_kernel_terminated"));
+    let _ = node.net_exits(ProcessId(1), &scheduler.atoms);
+    assert!(node.is_going_down());
+    assert_eq!(
+        scheduler
+            .dist_auto_connect(&name, |_, _| queued = true)
+            .unwrap(),
+        None
+    );
+    assert!(!queued);
+
+    let mut scheduler = scheduler_with_kernel();
+    let name = scheduler.atoms.put("coverage_exiting@nohost").unwrap();
+    scheduler.node.set_exiting(ProcessId(1));
+    assert_eq!(
+        scheduler
+            .dist_auto_connect(&name, |_, _| queued = true)
+            .unwrap(),
+        None
+    );
+    assert!(!queued);
+}
+
 #[test]
 fn noconnect_send_joins_a_connection_started_after_the_idle_check() {
     // A BEAM fixture cannot pause a scheduler between the idle check and

@@ -3369,6 +3369,16 @@ fn records_pending_queue_size_difference_from_pinned_erts() {
 }
 
 #[test]
+fn handles_an_unregistered_distribution_owner_as_pinned_erts() {
+    // dist.c:5732-5736 aborts auto-connect when net_kernel has no name.
+    let epmd = Epmd::start();
+    let arguments = probe(&[], "dist_coverage_probe:missing_kernel(), halt().");
+    let expected = "{true,nodedown,noconnection,none}\n";
+    assert_eq!(stdout(&erts_erl(&epmd, &arguments)), expected);
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), expected);
+}
+
+#[test]
 fn reports_the_monitor_node_badopt_cause_as_pinned_erts() {
     let epmd = Epmd::start();
     let arguments = probe(&[], "dist_lost_probe:monitor_badopt(), halt().");
