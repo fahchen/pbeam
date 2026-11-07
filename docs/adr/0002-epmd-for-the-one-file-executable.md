@@ -25,7 +25,7 @@ Redbug CLI runs a connect-only module as `Server.Epmd` (`server/lib/server/epmd.
 
 - The intended outcome is that a one-file executable reaches a node by name on a host that lacks epmd. No test does this today. Verification needs a distribution connection between two nodes on a host with no epmd.
 - Only the node that starts a connection needs the target endpoint in its map. The peer does not need the same map. There is no name discovery by broadcast.
-- An unpinned name falls back to `erl_epmd`. Without an epmd, the connection does not start. The failure can come from host resolution or from the name lookup, which then gives `noport`.
+- An unpinned name falls back to `erl_epmd`. Without an epmd and without a nonzero `-erl_epmd_port`, the connection does not start. The failure can come from host resolution or from the name lookup, which then gives `noport`.
 - A node that others must find by name needs a fixed published port.
 - The future verification must check that identifiers of two incarnations of the same node name stay distinct. A fixed or reused creation makes them indistinguishable.
 - No new `unsafe`, no new daemon, and no new protocol implementation.
