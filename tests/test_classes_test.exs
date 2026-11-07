@@ -270,6 +270,45 @@ defmodule TestClassesReportTest do
     assert output =~ "dependencies=erts_process,pipes,filesystem,network"
   end
 
+  test "reports ETS comparison, lookup, measurement and wait facets", %{directory: directory} do
+    cases = [
+      {"looks_up_a_key_in_a_loop_as_pinned_erts", "matches"},
+      {"orders_the_alias_keys_of_an_ordered_set", "matches"},
+      {"records_the_ets_program_cost", "mismatch"},
+      {"traps_the_delete_of_a_large_table_as_pinned_erts", "matches"}
+    ]
+
+    {output, status} =
+      report(directory, true, cases, ["--scope", "integration", "--cases"], "ets")
+
+    assert status == 0
+
+    assert output =~
+             "looks_up_a_key_in_a_loop_as_pinned_erts: purpose=runtime_integration,erts_comparison; dependencies=erts_process,pipes,filesystem,network,local_socket; selected=true"
+
+    assert output =~
+             "orders_the_alias_keys_of_an_ordered_set: purpose=runtime_integration; dependencies=erts_process_may_be_conditional,pipes,filesystem,network,local_socket; selected=true"
+
+    assert output =~
+             "records_the_ets_program_cost: purpose=runtime_integration,measurement; dependencies=network,local_socket; selected=false"
+
+    assert output =~
+             "traps_the_delete_of_a_large_table_as_pinned_erts: purpose=runtime_integration,erts_comparison; dependencies=erts_process,pipes,filesystem,network,local_socket,real_time; selected=true"
+
+    {waits, status} =
+      report(
+        directory,
+        true,
+        cases,
+        ["--scope", "integration", "--cases", "--dependency", "real_time"],
+        "ets"
+      )
+
+    assert status == 0
+    assert waits =~ "traps_the_delete_of_a_large_table_as_pinned_erts: purpose="
+    refute waits =~ "looks_up_a_key_in_a_loop_as_pinned_erts: purpose="
+  end
+
   test "rejects missing integration targets and new cases", %{directory: directory} do
     {missing, missing_status} = report(directory, false, [], ["--scope", "integration"])
     assert missing_status != 0
