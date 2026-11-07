@@ -3335,7 +3335,7 @@ fn measures_distribution_busy_state_on_pinned_erts() {
     );
     assert_eq!(
         stdout(&erts_erl(&epmd, &arguments)),
-        "{1048576,true,nosuspend,true,1100000}\n"
+        "{1048576,true,nosuspend,true,1100000,1100000}\n"
     );
 }
 
