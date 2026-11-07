@@ -9,7 +9,7 @@
 
 `pbeam erl` starts an epmd before the boot for a named node. The default command is `epmd -daemon` from `PATH`. `-epmd Program` replaces that command. `-start_epmd false` and `-no_epmd` disable the start. `start_epmd` in `src/bin/pbeam.rs:672` starts the program, and the run stops with `cannot start epmd -daemon: <Reason>` when the command cannot start. A nonzero exit status is ignored. The pinned ERTS launcher uses `$BINDIR/epmd` (`erlexec.c:1131-1132`, `1327-1372`).
 
-A one-file executable has no sibling epmd binary. A host without OTP can lack epmd. The pinned ERTS supports an `-epmd_module` that replaces `erl_epmd`. Selected external exports are `start_link/0`, `register_node/2,3`, `address_please/3`, `port_please/2,3`, `listen_port_please/2`, and `names/0,1`. The same export list also names `start/0`, `stop/0`, and `open/0,1,2` (`lib/kernel/src/erl_epmd.erl:57-60` at `OTP-29.1.1`).
+A one-file executable has no sibling epmd binary. A host without OTP can lack epmd. The pinned ERTS supports an `-epmd_module` that replaces `erl_epmd`. Selected external exports are `start_link/0`, `register_node/2,3`, `address_please/3`, `port_please/2,3`, `listen_port_please/2`, and `names/0,1`. The same export list also names `start/0`, `stop/0`, and `open/0,1,2` (the `-export` attribute of `lib/kernel/src/erl_epmd.erl` at `OTP-29.1.1`).
 
 Redbug CLI runs a connect-only module as `Server.Epmd` (`server/lib/server/epmd.ex` at redbug-cli). The release installs it with `-start_epmd false -epmd_module Elixir.Server.Epmd` (`server/rel/env.sh.eex:13`). The module does not register in a real epmd. Its `address_please/3` returns `{ok, Ip, Port, Version}` for a pinned name, and it falls back to `erl_epmd` for an unpinned name. The module documents an SSH tunnel as a use of a pinned endpoint.
 
@@ -40,7 +40,7 @@ Redbug CLI runs a connect-only module as `Server.Epmd` (`server/lib/server/epmd.
 ## Evidence
 
 - `src/bin/pbeam.rs:672` starts the epmd of `pbeam erl`; `erlexec.c:1131-1132` and `1327-1372` show the launcher of the pinned ERTS.
-- `lib/kernel/src/erl_epmd.erl:57-60` is the external export list of OTP `erl_epmd` at `OTP-29.1.1`.
+- The `-export` attribute of `lib/kernel/src/erl_epmd.erl` lists the external functions of OTP `erl_epmd` at `OTP-29.1.1`.
 - `server/lib/server/epmd.ex` and `server/rel/env.sh.eex:13` at redbug-cli show the connect-only module and its installation flags.
 - PR #1539 merged as `5c8d29a3` for #1419 proves a TCP echo over an SSH tunnel between PBeam and a pinned-ERTS node with `{packet, line}` framing. Its test starts an epmd, so it gives no evidence about a host without one, and it does not test distribution through the tunnel.
 - Row "Distribution" of `docs/erts-differences.md` records the current epmd behavior.
