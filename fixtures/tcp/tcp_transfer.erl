@@ -1,6 +1,6 @@
 -module(tcp_transfer).
 -export([main/1, reset/1, busy_close/1, busy_timeout/1, busy_drain/1, busy_end/1,
-         busy_kill/1, busy_reset/1, unsupported/2]).
+         busy_kill/1, busy_reset/1, header_option/1, unsupported/2]).
 
 %% Receives and sends on an accepted socket in passive mode, as
 %% gen_tcp:recv/3 and gen_tcp:send/2 call prim_inet:recv/3 and
@@ -250,3 +250,41 @@ flush() ->
               || E <- tuple_to_list(Message)] | flush()]
     after 0 -> []
     end.
+
+%% Header size shapes for passive and active TCP receive.
+header_option(Path) ->
+    process_flag(trap_exit, true),
+    {ok, L} = prim_inet:open(tcp, inet, stream),
+    ok = prim_inet:setopts(L, [binary, {active, false}, {header, 1}]),
+    {ok, _} = prim_inet:bind(L, {127, 0, 0, 1}, 0),
+    ok = prim_inet:listen(L, 5),
+    S = accept(Path, L, 1),
+    Inherited = prim_inet:getopts(S, [header]),
+    Read = fun(Step, Opts) ->
+                   ok = prim_inet:setopts(S, Opts),
+                   step(Path, Step, "send abc"),
+                   prim_inet:recv(S, 3, 1000)
+           end,
+    A = Read(2, [binary, {header, 0}]),
+    B = Read(3, [{header, 1}]),
+    C = Read(4, [{header, 3}]),
+    D = Read(5, [{header, 4}]),
+    E = Read(6, [list, {header, 1}]),
+    ok = prim_inet:setopts(S, [binary, {header, 1}, {active, once}]),
+    step(Path, 7, "send abc"),
+    F = receive {tcp, S, Data} -> Data after 3000 -> missing end,
+    Active = fun(Step, Opts) ->
+                     ok = prim_inet:setopts(S, Opts ++ [{active, once}]),
+                     step(Path, Step, "send abc"),
+                     receive {tcp, S, Packet} -> Packet after 3000 -> missing end
+             end,
+    G = Active(8, [binary, {header, 0}]),
+    H = Active(9, [{header, 3}]),
+    I = Active(10, [{header, 4}]),
+    J = Active(11, [list, {header, 1}]),
+    ok = prim_inet:close(S),
+    ok = prim_inet:close(L),
+    [Inherited =:= {ok, [{header, 1}]}, A =:= {ok, <<"abc">>}, B =:= {ok, [97 | <<"bc">>]},
+     C =:= {ok, [97,98,99 | <<>>]}, D =:= {ok, [97,98,99]},
+     E =:= {ok, [97,98,99]}, F =:= [97 | <<"bc">>], G =:= <<"abc">>,
+     H =:= [97,98,99 | <<>>], I =:= [97,98,99], J =:= [97,98,99]].

@@ -1183,10 +1183,19 @@ impl Inet {
     /// binary, or a list of bytes in `list` mode (`inet_async_data`,
     /// inet_drv.c:3162-3200).
     pub(in crate::runtime) fn data_term(&self, bytes: Vec<u8>) -> Term {
-        if self.mode == 0 {
+        let header =
+            usize::try_from(self.header.cast_unsigned()).expect("a header size fits in usize");
+        if self.mode == 0 || header > bytes.len() {
             Term::list_from(bytes.into_iter().map(|byte| Term::Integer(byte.into())))
         } else {
-            Term::binary(bytes)
+            let (prefix, rest) = bytes.split_at(header);
+            Term::list_with_tail(
+                prefix
+                    .iter()
+                    .map(|byte| Term::Integer((*byte).into()))
+                    .collect(),
+                Term::binary(rest.to_vec()),
+            )
         }
     }
 
