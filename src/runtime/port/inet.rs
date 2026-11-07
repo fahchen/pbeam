@@ -200,6 +200,10 @@ impl SocketType {
 /// and `inet_start` make it (inet_drv.c:10891-10987, 11726-11784,
 /// 14496-14520).
 #[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the driver stores independent socket flags"
+)]
 pub(in crate::runtime) struct Inet {
     /// The socket type of the driver.
     socket_type: SocketType,
@@ -1201,6 +1205,10 @@ impl Inet {
     /// before `OPEN`. Without `SO_PRIORITY`, as on macOS, `priority` is 0
     /// (inet_drv.c:9316-9324). A reply of more than 64 KiB gives `einval`,
     /// also when only the last 4 bytes of `linger` exceed it.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "option table: one arm for each driver option"
+    )]
     fn get_options(&self, request: &[u8]) -> Result<Vec<u8>, BeamError> {
         let mut reply = vec![OK];
         for &option in request {
@@ -1228,7 +1236,9 @@ impl Inet {
                 25 => Some(self.deliver),
                 23 => Some(self.packet),
                 32 => Some(self.packet_size.cast_signed()),
-                49 => (self.socket_type == SocketType::Stream).then_some(i32::from(self.read_ahead)),
+                49 => {
+                    (self.socket_type == SocketType::Stream).then_some(i32::from(self.read_ahead))
+                }
                 22 if self.active == 3 => {
                     // The count needs 2 more bytes (inet_drv.c:9179-9183).
                     if reply.len() + 7 > MAX_OPT_BUFFER {

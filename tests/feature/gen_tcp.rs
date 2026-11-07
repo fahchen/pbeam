@@ -244,6 +244,14 @@ fn sets_and_gets_read_ahead_as_pinned_erts() {
 }
 
 #[test]
+fn limits_packet_reads_when_read_ahead_is_false_as_pinned_erts() {
+    assert_connect_runs(
+        "read_ahead_receive",
+        "[[{{ok,<<97>>},missing,{tcp,<<98>>}},{{ok,<<97>>},missing,{tcp,<<98>>}},{{ok,<<97>>},missing,{tcp,<<98>>}},{{ok,<<97,10>>},missing,{tcp,<<98,10>>}},{{ok,<<97>>},{tcp,<<98>>},done},{{ok,<<97>>},{tcp,<<98>>},done},{{ok,<<97>>},{tcp,<<98>>},done},{{ok,<<97,10>>},{tcp,<<98,10>>},done}],[{error,timeout},{ok,<<120>>},{ok,<<114,97,119>>}]]\n",
+    );
+}
+
+#[test]
 fn frames_packets_with_a_header_of_1_2_and_4_bytes_as_pinned_erts() {
     // `{packet, 1 | 2 | 4}` between a socket with the option and a raw
     // socket: the header of each send (inet_drv.c:13736-13885), one whole
