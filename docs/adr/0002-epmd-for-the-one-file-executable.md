@@ -7,38 +7,38 @@
 
 ## Context
 
-`pbeam erl` starts `epmd -daemon` from `PATH` before the boot when a node has a name and neither `-start_epmd false` nor `-no_epmd` is given. It reads `-name`, `-sname`, `-proto_dist`, `-start_epmd`, and `-no_epmd` as `erlexec` does. When that start is enabled and no `epmd` is in `PATH`, the run stops with `cannot start epmd -daemon: <Reason>` (`start_epmd` in `src/bin/pbeam.rs:672`; row "Distribution" of `docs/erts-differences.md`). `erlexec` uses `$BINDIR/epmd` (`erlexec.c:1131-1132`, `1327-1372`).
+`pbeam erl` starts an epmd before the boot for a named node. The default command is `epmd -daemon` from `PATH`. `-epmd Program` replaces that command. `-start_epmd false` and `-no_epmd` disable the start. `start_epmd` in `src/bin/pbeam.rs:672` starts the program, and the run stops with `cannot start epmd -daemon: <Reason>` when the command fails. The pinned ERTS launcher uses `$BINDIR/epmd` (`erlexec.c:1131-1132`, `1327-1372`).
 
-A one-file executable has no sibling `epmd` binary. A host without OTP has no `epmd`. PR #1539 merged as `5c8d29a3` for #1419 proved that a PBeam node sends a term through an SSH tunnel to a TCP echo server on the pinned ERTS with `{packet, line}` framing. The test starts an epmd and passes its port to both nodes. It gives no evidence about a host without one, and distribution through the tunnel remains unverified.
+A one-file executable has no sibling epmd binary. A host without OTP can lack epmd. The pinned ERTS supports an `-epmd_module` that replaces `erl_epmd`. Its external export list gives `start_link/0`, `register_node/2,3`, `address_please/3`, `port_please/2,3`, `listen_port_please/2`, and `names/0,1` (`lib/kernel/src/erl_epmd.erl:57-60` at `OTP-29.1.1`).
 
-The pinned ERTS supports an `-epmd_module` that replaces `erl_epmd`. Its external export list gives `start_link/0`, `register_node/2,3`, `address_please/3`, `port_please/2,3`, `listen_port_please/2`, and `names/0,1` (`lib/kernel/src/erl_epmd.erl:57-60`). Redbug CLI runs such a module as `Server.Epmd` (`server/lib/server/epmd.ex` at redbug-cli). The release installs the module with `-start_epmd false -epmd_module Elixir.Server.Epmd` (`server/rel/env.sh.eex:13` at redbug-cli). The module never registers in a real epmd, and it returns a pinned `{ok, Ip, Port, Version}` from `address_please/3`. The VM uses that four-tuple for a direct dial, so no `port_please` round and no epmd daemon are needed. Redbug CLI documents this connect-only path for an SSH tunnel.
+Redbug CLI runs a connect-only module as `Server.Epmd` (`server/lib/server/epmd.ex` at redbug-cli). The release installs it with `-start_epmd false -epmd_module Elixir.Server.Epmd` (`server/rel/env.sh.eex:13`). The module does not register in a real epmd. Its `address_please/3` returns `{ok, Ip, Port, Version}` for a pinned name, and it falls back to `erl_epmd` for an unpinned name. The module documents an SSH tunnel as a use of a pinned endpoint.
 
 ## Decision
 
-- `pbeam erl` keeps the `epmd` from `PATH` and stays unchanged. `erlexec` uses `$BINDIR/epmd`, so the two launchers find the program in different places.
-- A one-file executable uses the pinned OTP `-epmd_module` with a fixed name-to-endpoint map and `-start_epmd false`. It starts no epmd daemon for a pinned name. An unpinned name falls back to `erl_epmd`, which needs an epmd; with no epmd available the lookup fails and the node does not connect. The failure can come from host resolution or from the name lookup, which then gives `noport`.
-- The module follows the Redbug CLI shape: `register_node/2,3` returns a creation without a daemon, `address_please/3` returns `{ok, Ip, Port, Version}`, and an unpinned name falls back to `erl_epmd`.
+- `pbeam erl` keeps its current epmd start and its overrides. This ADR does not change that path.
+- A one-file executable uses the pinned OTP `-epmd_module` with a fixed name-to-endpoint map and `-start_epmd false`. A pinned name needs no epmd daemon.
+- The module follows the Redbug CLI shape. `register_node/2,3` returns a creation without a daemon. `address_please/3` returns `{ok, Ip, Port, Version}` for a pinned name and falls back to `erl_epmd` otherwise.
 - PBeam does not add the module or its configuration now. No one-file executable needs distribution yet, so there is no consumer. The work waits in `docs/backlog.md` with its trigger.
 - Row "Distribution" of `docs/erts-differences.md` points to this ADR.
 
 ## Consequences
 
-- The intended outcome is that a one-file executable reaches a node by name on a host with no OTP installed. No such module exists yet. Verification needs a distribution connection between two nodes on a host without epmd, which no test does today.
+- The intended outcome is that a one-file executable reaches a node by name on a host that lacks epmd. No test does this today. Verification needs a distribution connection between two nodes on a host with no epmd.
 - Only the node that starts a connection needs the target endpoint in its map. The peer does not need the same map. There is no name discovery by broadcast.
+- An unpinned name falls back to `erl_epmd`, which needs an epmd. Without one, the lookup fails and the node does not connect. The failure can come from host resolution or from the name lookup, which then gives `noport`.
 - A node that others must find by name needs a fixed published port.
-- A pinned endpoint such as a tunnel port works with the direct dial of `address_please/3`. The tunnel test of PR #1539 uses a TCP echo, so this is a design consequence, not a measured distribution result.
 - No new `unsafe`, no new daemon, and no new protocol implementation.
 
 ## Alternatives
 
-- **Require an installed `epmd`.** Rejected. A host without OTP has no `epmd`, so this breaks the one-file executable.
-- **Bundle the OTP `epmd` with the executable.** The OTP `epmd` is a C program. Bundling it means shipping a second binary or embedding that C code, plus owning its daemon lifecycle and its build. Rejected. There is no consumer, and it adds a second program to a one-file executable.
+- **Require an installed epmd.** Rejected. A host without OTP can lack epmd, so this does not serve the one-file executable.
+- **Bundle the OTP epmd with the executable.** The OTP epmd is a C program. Bundling it means a second binary or embedded C code, plus its daemon lifecycle and its build. Rejected. There is no consumer.
 - **Use only `-no_epmd` and a fixed port.** Rejected. `-no_epmd` needs `-proto_dist` and does not give the name-to-endpoint lookup that the VM calls.
 
 ## Evidence
 
-- `server/lib/server/epmd.ex` at redbug-cli shows the connect-only module. `server/rel/env.sh.eex:13` installs its `-start_epmd false -epmd_module` flags.
-- `lib/kernel/src/erl_epmd.erl:57-60` is the export list of the module at `OTP-29.1.1`.
-- `src/bin/pbeam.rs:672` starts epmd for `pbeam erl`. `erlexec.c:1131-1132` and `1327-1372` show the launcher of the pinned ERTS, which uses `$BINDIR/epmd`.
-- PR #1539 merged as `5c8d29a3` proved a TCP echo over an SSH tunnel between PBeam and a pinned-ERTS node with `{packet, line}` framing. Its test starts an epmd, so it gives no evidence about a host without one, and it does not test distribution through the tunnel.
-- Row "Distribution" of `docs/erts-differences.md` records the current `PATH` behavior.
+- `src/bin/pbeam.rs:672` starts the epmd of `pbeam erl`; `erlexec.c:1131-1132` and `1327-1372` show the launcher of the pinned ERTS.
+- `lib/kernel/src/erl_epmd.erl:57-60` is the external export list of OTP `erl_epmd` at `OTP-29.1.1`.
+- `server/lib/server/epmd.ex` and `server/rel/env.sh.eex:13` at redbug-cli show the connect-only module and its installation flags.
+- PR #1539 merged as `5c8d29a3` for #1419 proves a TCP echo over an SSH tunnel between PBeam and a pinned-ERTS node with `{packet, line}` framing. Its test starts an epmd, so it gives no evidence about a host without one, and it does not test distribution through the tunnel.
+- Row "Distribution" of `docs/erts-differences.md` records the current epmd behavior.
