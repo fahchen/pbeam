@@ -1,5 +1,5 @@
 -module(tcp_probe).
--export([connect/0, control/0, data/0, enabled/0, linger/0, unsupported/1]).
+-export([connect/0, control/0, data/0, enabled/0, linger/0, header/0, unsupported/1]).
 
 %% The requests of the tcp_inet driver that prim_inet sends for
 %% gen_tcp:listen/2, inet:sockname/1, inet:getopts/2, and gen_tcp:close/1
@@ -173,3 +173,19 @@ connect() ->
     Listen = control(L, 3, [0, 0, 0, 0, 1, P1, P0, 127, 0, 0, 1]),
     [port_close(X) || X <- [P, Q, L]],
     [Closed, Checks, Listen].
+
+%% Header option values before and after OPEN (inet_drv.c:6931-6937, 9164-9167).
+header() ->
+    P = open_port({spawn_driver, "tcp_inet"}, [binary]),
+    Initial = control(P, 8, [21]),
+    [1] = control(P, 1, [1, 1, 1]),
+    Values = [[control(P, 7, [21, 0, 0, 0, 1]), control(P, 8, [21])],
+              [control(P, 7, [21, 255, 255, 255, 255]), control(P, 8, [21])],
+              [control(P, 7, [21, 0, 0, 0, 0]), control(P, 8, [21])]],
+    Options = [{header, 4294967296}, {header, 8589934591}, {header, 18446744073709551616},
+               {header, 4294967297}, {header, -1}, {header, 1.5},
+               {header, foo}, {header, <<1>>}, header, {header}, {header, 1, 2}],
+    Prim = [{prim_inet:setopts(P, [Option]), prim_inet:getopts(P, [header])}
+            || Option <- Options],
+    true = port_close(P),
+    [Initial, Values, Prim].

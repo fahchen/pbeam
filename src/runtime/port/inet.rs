@@ -218,6 +218,8 @@ pub(in crate::runtime) struct Inet {
     state: State,
     /// The option `mode`: 0 for `list` (the start value), 1 for `binary`.
     mode: i32,
+    /// The `header` option (`hsz`, inet_drv.c:6931-6937).
+    header: i32,
     /// The option `deliver` (`INET_LOPT_DELIVER`, `inet_drv.c:781-783`):
     /// 1 for `term` (the start value, `inet_drv.c:10931`), 0 for `port`. A
     /// port controller with `port` gives its data to the distribution of
@@ -372,6 +374,7 @@ impl Inet {
             socket: None,
             state: State::Closed,
             mode: 0,
+            header: 0,
             deliver: 1,
             packet: 0,
             packet_size: 0,
@@ -408,6 +411,7 @@ impl Inet {
             family: self.family,
             state: State::Connected,
             mode: self.mode,
+            header: self.header,
             deliver: self.deliver,
             packet: self.packet,
             packet_size: self.packet_size,
@@ -872,6 +876,10 @@ impl Inet {
             let value = i32::from_be_bytes([*v3, *v2, *v1, *v0]);
             request = rest;
             let set = match option {
+                21 if self.socket_type == SocketType::Stream => {
+                    self.header = value;
+                    true
+                }
                 // The port stores the packet type (inet_drv.c:7018-7024).
                 // PBeam frames `raw`, the headers of 1, 2, and 4 bytes, and a
                 // line up to its delimiter.
@@ -1233,6 +1241,7 @@ impl Inet {
                     .map(|value| low_u32(to_u64(value)).cast_signed())
             };
             let value = match option {
+                21 if self.socket_type == SocketType::Stream => Some(self.header),
                 24 => Some(self.mode),
                 25 => Some(self.deliver),
                 23 => Some(self.packet),

@@ -185,6 +185,54 @@ fn pbeam_text(module: &str, function: &str) -> String {
 }
 
 #[test]
+fn sets_and_gets_the_header_size_as_pinned_erts() {
+    assert_runs(
+        "header",
+        "[[1,21,0,0,0,0],[[[1],[1,21,0,0,0,1]],[[1],[1,21,255,255,255,255]],[[1],[1,21,0,0,0,0]]],[{ok,{ok,[{header,0}]}},{ok,{ok,[{header,4294967295}]}},{ok,{ok,[{header,0}]}},{ok,{ok,[{header,1}]}},{{error,einval},{ok,[{header,1}]}},{{error,einval},{ok,[{header,1}]}},{{error,einval},{ok,[{header,1}]}},{{error,einval},{ok,[{header,1}]}},{{error,einval},{ok,[{header,1}]}},{{error,einval},{ok,[{header,1}]}},{{error,einval},{ok,[{header,1}]}}]]",
+    );
+}
+
+#[test]
+fn receives_tcp_header_shapes_as_pinned_erts() {
+    for (result, _) in transfer_runs("header_option") {
+        assert_eq!(
+            result,
+            "[true,true,true,true,true,true,true,true,true,true,true]"
+        );
+    }
+}
+
+#[test]
+fn stops_for_the_udp_header_option() {
+    let program = load();
+    for case in ["header_set", "header_get"] {
+        let output = Command::new("erl")
+            .args(["+S", "1", "-noshell", "-pa", "fixtures/tcp", "-eval"])
+            .arg(format!(
+                r#"io:format("~w~n", [udp_probe:unsupported({case})]), halt()."#
+            ))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let expected = if case == "header_set" {
+            "[1]\n"
+        } else {
+            "[1,21,0,0,0,0]\n"
+        };
+        assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
+        let argument = Term::Atom(program.atom(case).unwrap());
+        let error = program
+            .execute("udp_probe", "unsupported", &[program.host_term(argument)])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("unsupported udp_inet option 21"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
 fn gives_the_reply_bytes_of_each_request_as_pinned_erts() {
     // The error of each argument and state check of `OPEN`, `BIND`,
     // `LISTEN`, and `NAME` (inet_drv.c:5119-5221, 11360-11437,

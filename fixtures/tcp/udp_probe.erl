@@ -106,6 +106,10 @@ open() ->
     [Before, Open, After].
 
 %% A request of the udp_inet driver that PBeam does not run.
+unsupported(header_set) ->
+    {ok, S} = udp(), control(S, 7, [21, 0, 0, 0, 1]);
+unsupported(header_get) ->
+    {ok, S} = udp(), control(S, 8, [21]);
 unsupported(stream) -> open_with([1, 1, 0]);
 unsupported(seqpacket) -> open_with([1, 3, 0]);
 unsupported(sctp) -> open_with([1, 2, 3]);
