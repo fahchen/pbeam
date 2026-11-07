@@ -336,6 +336,52 @@ defmodule TestClassesReportTest do
     refute waits =~ "looks_up_a_key_in_a_loop_as_pinned_erts: purpose="
   end
 
+  test "reports loader dependencies at the parsing boundary", %{directory: directory} do
+    cases = [
+      {"rejects_truncated_container", "matches"},
+      {"rejects_wrong_container_identity", "matches"},
+      {"rejects_duplicate_and_missing_required_chunks", "matches"}
+    ]
+
+    {output, status} =
+      report(directory, true, cases, ["--scope", "integration", "--cases"], "constant")
+
+    assert status == 0
+
+    assert output =~
+             "rejects_truncated_container: purpose=pure_logic; dependencies=none; selected=true"
+
+    assert output =~
+             "rejects_wrong_container_identity: purpose=pure_logic; dependencies=filesystem; selected=true"
+
+    assert output =~
+             "rejects_duplicate_and_missing_required_chunks: purpose=pure_logic; dependencies=filesystem,native_library; selected=true"
+
+    {native, status} =
+      report(
+        directory,
+        true,
+        cases,
+        ["--scope", "integration", "--cases", "--dependency", "native_library"],
+        "constant"
+      )
+
+    assert status == 0
+    assert native =~ "rejects_duplicate_and_missing_required_chunks: purpose="
+    refute native =~ "rejects_wrong_container_identity: purpose="
+    refute native =~ "rejects_truncated_container: purpose="
+  end
+
+  test "reports fixture opcode byte checks as filesystem test helpers", %{directory: directory} do
+    cases = [{"arith_probe_has_the_gc_bif1_and_gc_bif2_bytes", "matches"}]
+
+    {output, status} =
+      report(directory, true, cases, ["--scope", "integration", "--cases"], "fixture_opcodes")
+
+    assert status == 0
+    assert output =~ "purpose=test_helper; dependencies=filesystem; selected=true"
+  end
+
   test "rejects missing integration targets and new cases", %{directory: directory} do
     {missing, missing_status} = report(directory, false, [], ["--scope", "integration"])
     assert missing_status != 0
