@@ -1287,7 +1287,7 @@ fn ends_a_send_that_waits_behind_a_busy_port_as_pinned_erts() {
 
 #[test]
 fn sets_active_count_as_pinned_erts() {
-    let expected = "[{ok,{ok,[{active,2}]},none},{ok,{ok,[{active,2}]},none},{ok,{ok,[{active,false}]},tcp_passive},{ok,{ok,[{active,false}]},tcp_passive},{ok,{ok,[{active,32767}]},none},{{error,einval},{ok,[{active,32767}]},none}]";
+    let expected = "[{ok,{ok,[{active,2}]},none},{ok,{ok,[{active,5}]},none},{ok,{ok,[{active,3}]},none},{ok,{ok,[{active,3}]},none},{ok,{ok,[{active,false}]},tcp_passive},{ok,{ok,[{active,false}]},tcp_passive},{ok,{ok,[{active,32767}]},none},{{error,einval},{ok,[{active,32767}]},none}]";
     assert_eq!(erts_text("tcp_probe", "active_count"), expected);
     assert_eq!(pbeam_text("tcp_probe", "active_count"), expected);
 }

@@ -137,7 +137,7 @@ active_count() ->
                   Msg = receive {tcp_passive, P} -> tcp_passive after 0 -> none end,
                   {Result, Opt, Msg}
           end,
-    Results = [Run(N) || N <- [2, 0, -2, -1, 32767, 1]],
+    Results = [Run(N) || N <- [2, 3, -2, 0, -3, -1, 32767, 1]],
     true = port_close(P),
     Results.
 
