@@ -115,6 +115,10 @@ impl Scheduler {
             }
             let idle = dist.connected(node).is_none();
             drop(dist);
+            #[cfg(test)]
+            if idle && connect == ConnectMode::NoConnect {
+                tests::after_idle_send_check();
+            }
             if idle
                 && connect == ConnectMode::Allow
                 && self
@@ -132,7 +136,12 @@ impl Scheduler {
                 return Ok(true);
             }
         }
-        self.dist_output(caller, node, |flags, _| {
+        let pending = self
+            .node
+            .net_kernel()
+            .is_some()
+            .then_some((to, message, priority));
+        self.dist_output_with_pending(caller, node, None, pending, |flags, _| {
             if is_remote_reference(to) && flags & ALIAS == 0 {
                 return None;
             }
@@ -291,8 +300,27 @@ impl Scheduler {
         monitor: Option<super::dist_table::DistMonitor>,
         build: impl FnOnce(u64, u32) -> Option<(Term, Option<Term>)>,
     ) -> Result<bool, BeamError> {
+        self.dist_output_with_pending(sender, node, monitor, None, build)
+    }
+
+    /// Decide whether to enqueue a pending send under the same lock that
+    /// checks for a connected controller (`dist.c:3247-3255`).
+    fn dist_output_with_pending(
+        &mut self,
+        sender: ProcessId,
+        node: &Atom,
+        monitor: Option<super::dist_table::DistMonitor>,
+        pending: Option<(&Term, &Term, SendPriority)>,
+        build: impl FnOnce(u64, u32) -> Option<(Term, Option<Term>)>,
+    ) -> Result<bool, BeamError> {
         let node_ref = Arc::clone(&self.node);
         let mut dist = node_ref.dist();
+        if let Some((to, message, priority)) = pending
+            && dist.pending(node)
+        {
+            dist.enqueue_pending_send(node, sender, to.clone(), message.clone(), priority);
+            return Ok(true);
+        }
         let Some((flags, controller, connection)) = dist.connected(node) else {
             return Ok(false);
         };
