@@ -900,9 +900,6 @@ impl Inet {
                     self.deliver = value;
                     true
                 }
-                22 if value == 3 && self.socket_type == SocketType::Stream => {
-                    return Err(error(ACTIVE_N));
-                }
                 22 if value == 3 => {
                     let [n1, n0, rest @ ..] = request else {
                         return Err(
@@ -1348,12 +1345,9 @@ impl Inet {
     }
 }
 
-/// The runtime error of `{active, N}`.
 /// The `buffer` that `recbuf` sets on a `udp_inet` port at most
 /// (`INET_UDP_THEORETICAL_MAX_MTU`, `inet_drv.c:1059`).
 const MAX_UDP_BUFFER: i32 = 1 << 16;
-
-const ACTIVE_N: &str = "unsupported tcp_inet option active with a count: see \"tcp_inet ports\" in docs/erts-differences.md";
 
 /// The runtime error of `{recvttl, true}`: `socket2` has no `IP_RECVTTL`
 /// call.

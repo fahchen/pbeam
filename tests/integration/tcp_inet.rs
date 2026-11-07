@@ -311,10 +311,6 @@ fn stops_the_run_for_each_tcp_inet_part_that_is_not_implemented() {
             "linger_off",
             "unsupported tcp_inet option linger with a time",
         ),
-        (
-            "active_n",
-            "unsupported tcp_inet option active with a count",
-        ),
         ("getopt", "unsupported tcp_inet option 5"),
         // ERTS replies `[]` and sets the exit state of the port
         // (sys_drivers.c:731-756).
@@ -1093,34 +1089,6 @@ fn stops_the_run_for_a_port_info_item_that_is_not_implemented() {
 }
 
 #[test]
-fn stops_the_run_for_an_active_count() {
-    // `{active, N}` and its `tcp_passive` message (inet_drv.c:1551-1559,
-    // 6975-6995) are not on the path of Thousand Island.
-    let path = std::env::temp_dir().join(format!("pbeam-tcp-active-count-{}", std::process::id()));
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(acknowledgement(&path));
-    let stop = Arc::new(AtomicBool::new(false));
-    let handle = command_client(path.clone(), Arc::clone(&stop));
-    let program = load();
-    let arguments = [
-        program.host_term(path_term(&path)),
-        program.host_term(Term::Atom(program.atom("count").unwrap())),
-    ];
-    let error = program
-        .execute("tcp_active", "unsupported", &arguments)
-        .unwrap_err()
-        .to_string();
-    stop.store(true, Ordering::SeqCst);
-    handle.join().unwrap();
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(acknowledgement(&path));
-    assert!(
-        error.starts_with("unsupported tcp_inet option active with a count"),
-        "{error}"
-    );
-}
-
-#[test]
 fn stops_the_open_of_an_inet_port_in_a_runtime_process_of_a_boot_run() {
     // In boot mode, the root process is a boot process and can open an inet
     // port. After `pbeam_cap:enter_runtime/2`, it is a runtime process, and
@@ -1295,4 +1263,11 @@ fn ends_a_send_that_waits_behind_a_busy_port_as_pinned_erts() {
             assert_eq!(text, expected, "{function} {name}");
         }
     }
+}
+
+#[test]
+fn sets_active_count_as_pinned_erts() {
+    let expected = "[{ok,{ok,[{active,2}]},none},{ok,{ok,[{active,2}]},none},{ok,{ok,[{active,false}]},tcp_passive},{ok,{ok,[{active,false}]},tcp_passive},{ok,{ok,[{active,32767}]},none},{{error,einval},{ok,[{active,32767}]},none}]";
+    assert_eq!(erts_text("tcp_probe", "active_count"), expected);
+    assert_eq!(pbeam_text("tcp_probe", "active_count"), expected);
 }
