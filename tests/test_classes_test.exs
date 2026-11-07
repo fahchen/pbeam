@@ -19,10 +19,28 @@ defmodule TestClassesReportTest do
 
   defp report(directory, target, cases, arguments \\ []) do
     unit = Enum.chunk_every(arguments, 2, 1, :discard) |> Enum.any?(&(&1 == ["--scope", "unit"]))
-    name = if unit, do: "pbeam_runtime", else: "stty"
+
+    integration =
+      Enum.chunk_every(arguments, 2, 1, :discard)
+      |> Enum.any?(&(&1 == ["--scope", "integration"]))
+
+    name =
+      cond do
+        unit -> "pbeam_runtime"
+        integration -> "arith"
+        true -> "stty"
+      end
+
     kind = if unit, do: ["lib"], else: ["test"]
-    source = if unit, do: "/workspace/src/lib.rs", else: "/workspace/tests/feature/stty.rs"
-    binary = if unit, do: "pbeam-runtime", else: "pbeam-runtime::stty"
+
+    source =
+      cond do
+        unit -> "/workspace/src/lib.rs"
+        integration -> "/workspace/tests/integration/arith.rs"
+        true -> "/workspace/tests/feature/stty.rs"
+      end
+
+    binary = if unit, do: "pbeam-runtime", else: "pbeam-runtime::" <> name
 
     metadata = %{
       "packages" => [
@@ -112,6 +130,28 @@ defmodule TestClassesReportTest do
     refute output =~ "unrecorded: pbeam-runtime "
   end
 
+  test "selects a scheduler socket case without a pure scheduler helper", %{directory: directory} do
+    cases = [
+      {"runtime::scheduler::tests::runs_other_processes_while_a_dirty_write_waits_and_resumes_it_after",
+       "matches"},
+      {"runtime::scheduler::tests::stops_a_break_key_with_no_data_at_a_second_break", "matches"}
+    ]
+
+    {output, status} =
+      report(directory, true, cases, [
+        "--scope",
+        "unit",
+        "--cases",
+        "--dependency",
+        "local_socket"
+      ])
+
+    assert status == 0
+    assert output =~ "Matching both requested facets: 1"
+    assert output =~ "dependencies=network,local_socket,pipes,real_time; selected=true"
+    refute output =~ "stops_a_break_key_with_no_data_at_a_second_break: purpose="
+  end
+
   test "rejects a new unrecorded library case", %{directory: directory} do
     {output, status} =
       report(directory, true, [{"new_unit_case", "matches"}], ["--scope", "unit"])
@@ -161,5 +201,35 @@ defmodule TestClassesReportTest do
     assert status == 0
     assert output =~ "purpose=runtime_integration; dependencies=real_time; selected=true"
     refute output =~ "finds_no_key_in_an_empty_table: purpose="
+  end
+
+  test "reports integration cases separately", %{directory: directory} do
+    cases = [{"adds_and_subtracts_integers_as_pinned_erts", "matches"}]
+    {output, status} = report(directory, true, cases, ["--scope", "integration", "--cases"])
+    assert status == 0
+    assert output =~ "Integration targets: 1; cases: 1; selected: 1"
+    assert output =~ "purpose=runtime_integration,erts_comparison"
+    assert output =~ "dependencies=erts_process,pipes,filesystem,network"
+  end
+
+  test "rejects missing integration targets and new cases", %{directory: directory} do
+    {missing, missing_status} = report(directory, false, [], ["--scope", "integration"])
+    assert missing_status != 0
+    assert missing =~ "nextest list omits integration targets"
+
+    {new, new_status} =
+      report(directory, true, [{"new_case", "matches"}], ["--scope", "integration"])
+
+    assert new_status != 0
+    assert new =~ "unrecorded: pbeam-runtime::arith new_case"
+  end
+
+  test "recognizes integration platform exclusions", %{directory: directory} do
+    cases = [{"adds_and_subtracts_integers_as_pinned_erts", "matches"}]
+    {mac, _} = report(directory, true, cases, ["--scope", "integration", "--platform", "macos"])
+    {linux, _} = report(directory, true, cases, ["--scope", "integration", "--platform", "linux"])
+    name = "pbeam-runtime::net stops_the_run_at_a_network_namespace"
+    assert mac =~ "platform excluded: " <> name
+    assert linux =~ "not listed on this platform: " <> name
   end
 end
