@@ -1,4 +1,4 @@
-# Classify feature test cases from a nextest JSON list. Purpose and observed
+# Classify test cases from a nextest JSON list. Purpose and observed
 # dependencies are separate facets. An empty purpose, or the `unknown`
 # dependency, means that the case still needs review.
 
@@ -324,10 +324,31 @@ defmodule TestClasses do
                  "restores_the_terminal_before_the_result_of_terra_counter_as_interactive_erts"}
               ])
 
-  @purposes ~w(application_end_to_end cli erts_comparison erts_reference host_integration interoperability native_extension pure_logic runtime_integration test_helper)
-  @dependencies ~w(build_toolchain epmd erts_peer erts_process erts_process_may_be_conditional filesystem host_commands host_signals native_library network none pbeam_process pbeam_tool pipes pty real_time unknown)
+  # These unit tests have explicit #[cfg(target_os = "linux")] attributes.
+  @linux_only_units MapSet.new(
+                      for name <- ~w(
+    runtime::sockets::tests::counts_an_mptcp_socket_as_tcp
+    runtime::schedulers::tests::counts_the_allowed_processors_online_as_pinned_erts
+    runtime::schedulers::tests::reads_the_cpu_topology_as_pinned_erts
+    runtime::schedulers::tests::moves_a_processor_on_two_nodes_to_processor_nodes_as_pinned_erts
+    runtime::interpreter::native::prim_socket::io::tests::checks_the_state_and_the_messages_of_sendmmsg_and_the_state_of_recvmmsg
+    runtime::interpreter::native::prim_socket::io::tests::stops_the_run_of_recvmmsg_when_a_message_needs_an_atom_of_a_full_table
+    runtime::interpreter::native::prim_socket::socket::options::tests::allows_only_eperm_from_the_reset_of_so_priority
+    runtime::interpreter::native::prim_socket::socket::options::tests::stops_at_a_control_message_that_ip_pktoptions_does_not_give
+    runtime::interpreter::native::prim_socket::socket::options::tests::ends_ip_pktoptions_at_a_header_with_a_zero_length
+    runtime::interpreter::native::prim_socket::socket::options::tests::gives_the_value_of_an_ip_tos_control_message_of_ip_pktoptions
+    runtime::interpreter::bif::erlang::tests::gives_undefined_for_an_empty_detected_topology
+  ),
+                          do: {"pbeam-runtime", name}
+                    )
+
+  @purposes ~w(application_end_to_end cli erts_comparison erts_reference host_integration interoperability measurement native_extension pure_logic runtime_integration test_helper)
+  @dependencies ~w(build_toolchain epmd erts_peer erts_process erts_process_may_be_conditional filesystem host_commands host_signals native_library network none pbeam_process pbeam_tool pipes pty real_time test_process unknown)
 
   def inventory, do: parse_inventory(@inventory)
+
+  def unit_inventory,
+    do: Path.join(__DIR__, "test_unit_classes.txt") |> File.read!() |> parse_inventory()
 
   def parse_inventory(text) do
     text
@@ -382,12 +403,13 @@ defmodule TestClasses do
           cases: :boolean,
           purpose: :string,
           dependency: :string,
-          platform: :string
+          platform: :string,
+          scope: :string
         ]
       )
 
     if invalid != [] or length(paths) != 2 do
-      raise "usage: elixir scripts/test_classes.exs [--strict] [--cases] [--purpose LABEL] [--dependency LABEL] [--platform linux|macos] <cargo-metadata.json> <nextest-list.json>"
+      raise "usage: elixir scripts/test_classes.exs [--strict] [--cases] [--purpose LABEL] [--dependency LABEL] [--platform linux|macos] [--scope feature|unit] <cargo-metadata.json> <nextest-list.json>"
     end
 
     if options[:purpose] && options[:purpose] not in @purposes,
@@ -406,27 +428,33 @@ defmodule TestClasses do
 
     unless platform in ["linux", "macos", "other"], do: raise("unknown platform: #{platform}")
 
+    scope = options[:scope] || "feature"
+    unless scope in ["feature", "unit"], do: raise("unknown scope: #{scope}")
+
     [metadata_path, list_path] = paths
     metadata = metadata_path |> File.read!() |> :json.decode()
     list = list_path |> File.read!() |> :json.decode()
-    known = inventory()
+    known = if scope == "unit", do: unit_inventory(), else: inventory()
 
     targets =
       for package <- Map.fetch!(metadata, "packages"),
           target <- Map.fetch!(package, "targets"),
-          "test" in Map.fetch!(target, "kind"),
-          String.contains?(Map.fetch!(target, "src_path"), "/tests/feature/"),
+          (scope == "feature" and "test" in Map.fetch!(target, "kind") and
+             String.contains?(Map.fetch!(target, "src_path"), "/tests/feature/")) or
+            (scope == "unit" and "lib" in Map.fetch!(target, "kind")),
           into: MapSet.new() do
-        package["name"] <> "::" <> target["name"]
+        if scope == "feature",
+          do: package["name"] <> "::" <> target["name"],
+          else: package["name"]
       end
 
-    if MapSet.size(targets) == 0, do: raise("metadata has no feature test targets")
+    if MapSet.size(targets) == 0, do: raise("metadata has no #{scope} test targets")
     suites = Map.fetch!(list, "rust-suites")
     listed = MapSet.new(Map.keys(suites))
     missing_targets = MapSet.difference(targets, listed)
 
     if MapSet.size(missing_targets) != 0,
-      do: raise("nextest list omits feature targets: #{inspect(Enum.sort(missing_targets))}")
+      do: raise("nextest list omits #{scope} targets: #{inspect(Enum.sort(missing_targets))}")
 
     cases =
       for {id, suite} <- suites,
@@ -441,10 +469,17 @@ defmodule TestClasses do
         {{id, name}, %{selected: status == "matches"}}
       end
 
-    if map_size(cases) == 0, do: raise("nextest list has no feature test cases")
+    if map_size(cases) == 0, do: raise("nextest list has no #{scope} test cases")
     unrecorded = Map.keys(cases) -- Map.keys(known)
     absent = Map.keys(known) -- Map.keys(cases)
-    expected_absent = if platform == "linux", do: @macos_only, else: MapSet.new()
+
+    expected_absent =
+      cond do
+        scope == "feature" and platform == "linux" -> @macos_only
+        scope == "unit" and platform == "macos" -> @linux_only_units
+        true -> MapSet.new()
+      end
+
     unexpected_absent = Enum.reject(absent, &MapSet.member?(expected_absent, &1))
 
     for {id, name} <- Enum.sort(unrecorded), do: IO.puts(:stderr, "unrecorded: #{id} #{name}")
@@ -463,7 +498,7 @@ defmodule TestClasses do
     selected = Enum.count(cases, fn {_, %{selected: selected}} -> selected end)
 
     IO.puts(
-      "Feature targets: #{MapSet.size(targets)}; cases: #{map_size(cases)}; selected: #{selected}"
+      "#{String.capitalize(scope)} targets: #{MapSet.size(targets)}; cases: #{map_size(cases)}; selected: #{selected}"
     )
 
     IO.puts(

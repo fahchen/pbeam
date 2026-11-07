@@ -1,8 +1,16 @@
 # Feature test classification
 
+The default report classifies feature tests. Pass `--scope unit` to report the library test binary using the separate `scripts/test_unit_classes.txt` inventory. This unit inventory is incomplete: unreviewed cases have an empty purpose and the `unknown` dependency. `--strict --scope unit` fails until every listed case has reviewed facets. The existing CI gate still checks only the feature inventory.
+
+The reviewed macOS arm64 list has 1,208 unit cases. The term, BEAM, bundle, embedded, and error groups account for 380 reviewed cases. The remaining 828 macOS cases are marked unknown. The inventory also records 11 source-identified Linux-only cases. The Linux list has not yet been checked against CI. A missing identity is a platform exclusion only when an explicit `cfg(target_os = "linux")` applies; other missing identities stay unresolved.
+
+The unit report uses `measurement` for performance probes. `test_process` identifies a child test executable. These facets do not change the selected tests.
+
 The inventory in `scripts/test_classes.exs` records nextest identities, purpose, and observed dependencies separately. A case can have more than one purpose or dependency. For example, the terminal-mode `stty` test is an ERTS comparison and a host integration test. It uses a PTY. The other `stty` test uses pipes and `/dev/null`, not a PTY. The SSH tunnel test uses ERTS as a peer; it is not an ERTS comparison.
 
 The dependency boundary covers the test harness, its helpers, and the observable host interactions of the programs and guest fixtures it launches. It covers processes, pipes, PTYs, files, network and epmd, host signals, non-toolchain host commands, build tools, native extensions, and semantic wall-time waits. OTP compilers such as `erlc` are build tools, not `host_commands`. It does not attempt to enumerate implicit kernel services or every dynamically loaded system library. `none` means none of the tracked external dependencies, not an absence of all host dependencies.
+
+The `network` facet includes loopback sockets and local Unix socket pairs. It does not by itself mean that a test needs outbound network access. `epmd` identifies tests that start or use an actual EPMD service.
 
 The inventory records all 312 feature cases in the macOS arm64 list used for this review. Linux CI lists 311 cases; the terminal restore case is compiled on macOS only. Empty purpose or an `unknown` dependency means that a case needs further review. Do not treat a missing label as evidence that a case does not have that dependency. Each dependency label records an observed use on at least one applicable host. `erts_reference` records a case that calls both reference and PBeam probes; it does not by itself assert that their results are directly compared. The reference call can be conditional on the host.
 
@@ -13,6 +21,8 @@ mise exec -- cargo metadata --locked --no-deps --format-version 1 > /tmp/pbeam-m
 mise exec -- cargo nextest list --locked --workspace --all-features --profile ci --message-format json > /tmp/pbeam-tests.json
 mise exec -- elixir scripts/test_classes.exs /tmp/pbeam-metadata.json /tmp/pbeam-tests.json
 ```
+
+Use the same files with `--scope unit` to report the library tests. The list must include the library binary, so do not pass `--test` to `cargo nextest list`.
 
 The report checks all Cargo test targets under `tests/feature/` against the nextest list. It rejects a list that omits a feature target and reports newly observed identities as `unrecorded`. The known macOS-only terminal restore case is reported as `platform excluded` on Linux. Other absent identities are reported as `not listed`; review them before removing an entry. The inventory was checked against macOS arm64 and Linux CI lists.
 
