@@ -37,6 +37,20 @@ else
     --status-level slow --final-status-level slow --no-fail-fast \
     ${PBEAM_TEST_PARTITION:+--partition "$PBEAM_TEST_PARTITION"} \
     --cobertura --output-path target/coverage.xml
+  # One CI partition checks the feature inventory against the compiled test list.
+  # Use the coverage build and keep listing profiles separate from the test report.
+  if [[ "${PBEAM_TEST_PARTITION:-}" == slice:1/* ]]; then
+    (
+      list_dir=$(mktemp -d "${TMPDIR:-/tmp}/pbeam-test-classes.XXXXXX")
+      trap 'rm -rf "$list_dir"' EXIT
+      cargo metadata --locked --no-deps --format-version 1 >"$list_dir/metadata.json"
+      eval "$(cargo llvm-cov show-env --sh)"
+      export LLVM_PROFILE_FILE="$list_dir/list-%p-%8m.profraw"
+      cargo nextest list --locked --workspace --all-features --profile ci \
+        --target-dir "$cov_dir" --message-format json >"$list_dir/tests.json"
+      mise exec -- elixir scripts/test_classes.exs --strict "$list_dir/metadata.json" "$list_dir/tests.json"
+    )
+  fi
   if [[ -z "${PBEAM_TEST_PARTITION:-}" ]]; then
     mise exec -- elixir scripts/check_coverage.exs target/coverage.xml
   fi
