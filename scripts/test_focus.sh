@@ -13,5 +13,6 @@ statuses=("${PIPESTATUS[@]}")
 # A build failure or an unknown target also prints no result line; report `no test ran` only when cargo passed.
 if [ "${statuses[0]}" -eq 0 ] && [ "${statuses[1]}" -ne 0 ]; then
   echo "no test ran"
+  exit "${statuses[1]}"
 fi
 exit "${statuses[0]}"
