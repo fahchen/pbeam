@@ -356,7 +356,7 @@ defmodule TestClasses do
                           do: {"pbeam-runtime", name}
                     )
 
-  @purposes ~w(application_end_to_end cli erts_comparison erts_reference host_integration interoperability measurement native_extension pure_logic runtime_integration test_helper)
+  @purposes ~w(application_end_to_end cli erts_comparison erts_only erts_reference host_integration interoperability measurement native_extension pure_logic runtime_integration test_helper)
   @dependencies ~w(build_toolchain epmd erts_peer erts_process erts_process_may_be_conditional filesystem host_commands host_signals local_socket native_library network none pbeam_process pbeam_tool pipes pty real_time test_process unknown)
 
   def inventory, do: parse_inventory(@inventory)

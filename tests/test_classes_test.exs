@@ -374,4 +374,54 @@ defmodule TestClassesReportTest do
     assert output =~
              "runs_bs_match_string_as_pinned_erts: purpose=runtime_integration,erts_comparison; dependencies=erts_process,pipes,filesystem,network,local_socket"
   end
+
+  test "reports binary construction reference and dependency differences", %{directory: directory} do
+    cases = [
+      {"builds_string_and_binary_segments_as_pinned_erts", "matches"},
+      {"rejects_an_allocation_list_that_erts_rejects", "matches"},
+      {"raises_badarg_with_the_erts_error_info_for_an_append_segment", "matches"},
+      {"formats_the_erts_error_info_for_an_append_segment_as_the_reference", "matches"},
+      {"stops_at_an_append_segment_that_is_not_the_first_segment", "matches"},
+      {"uses_no_reduction_for_a_private_append_as_the_pinned_erts_on_arm64", "matches"}
+    ]
+
+    {output, status} =
+      report(directory, true, cases, ["--scope", "integration", "--cases"], "bs_create_bin")
+
+    assert status == 0
+
+    assert output =~
+             "builds_string_and_binary_segments_as_pinned_erts: purpose=runtime_integration,erts_comparison; dependencies=erts_process,pipes,filesystem,network,local_socket"
+
+    assert output =~
+             "rejects_an_allocation_list_that_erts_rejects: purpose=runtime_integration,erts_comparison; dependencies=erts_process,pipes,filesystem;"
+
+    assert output =~
+             "raises_badarg_with_the_erts_error_info_for_an_append_segment: purpose=runtime_integration; dependencies=network,local_socket;"
+
+    assert output =~
+             "formats_the_erts_error_info_for_an_append_segment_as_the_reference: purpose=erts_only; dependencies=erts_process,pipes,filesystem;"
+
+    assert output =~
+             "stops_at_an_append_segment_that_is_not_the_first_segment: purpose=runtime_integration,erts_reference; dependencies=erts_process,pipes,filesystem,network,local_socket;"
+
+    assert output =~
+             "uses_no_reduction_for_a_private_append_as_the_pinned_erts_on_arm64: purpose=runtime_integration,erts_comparison; dependencies=erts_process_may_be_conditional,pipes,filesystem,network,local_socket;"
+
+    {filtered, status} =
+      report(
+        directory,
+        true,
+        cases,
+        ["--scope", "integration", "--cases", "--purpose", "erts_only"],
+        "bs_create_bin"
+      )
+
+    assert status == 0
+
+    assert filtered =~
+             "formats_the_erts_error_info_for_an_append_segment_as_the_reference: purpose=erts_only"
+
+    refute filtered =~ "rejects_an_allocation_list_that_erts_rejects: purpose="
+  end
 end
