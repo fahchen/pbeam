@@ -315,12 +315,12 @@ fn applies_auto_connect_policy_to_name_sends_as_pinned_erts() {
                 &["-sname", &server_name, "-setcookie", "ck"],
                 "register(pending_receiver,self()), io:format(\"~s~n\",[node()]), \
                  receive {initial,P} -> P ! initial_ack; {final,P} -> P ! final_ack; _ -> halt(3) end, \
-                 receive {final,P2} -> P2 ! final_ack; _ -> halt(4) after 5000 -> ok end, halt().",
+                 receive {final,P2} -> P2 ! final_ack; Unexpected -> io:format(standard_error, \"policy server unexpected: ~p~n\", [Unexpected]), halt(4) after 5000 -> io:format(standard_error, \"policy server timed out~n\"), ok end, halt().",
             );
             let first = if policy == "once" {
                 "{pending_receiver,N} ! {initial,self()}, \
                  receive initial_ack -> ok after 5000 -> halt(5) end, \
-                 true=erlang:disconnect_node(N), timer:sleep(200),"
+                 case erlang:disconnect_node(N) of true -> ok; Disconnect -> error({disconnect_failed,Disconnect}) end, timer:sleep(200),"
             } else {
                 ""
             };
@@ -334,7 +334,7 @@ fn applies_auto_connect_policy_to_name_sends_as_pinned_erts() {
                  Req=spawn_request(N,erlang,node,[],[]), \
                  receive {{spawn_reply,Req,error,noconnection}} -> ok after 5000 -> halt(9) end, \
                  sys:get_state(net_kernel), \
-                 false=lists:member(N,nodes()), true=net_kernel:connect_node(N), \
+                 false=lists:member(N,nodes()), case net_kernel:connect_node(N) of true -> ok; Connect -> error({{connect_failed,Connect}}) end, \
                  {{pending_receiver,N}} ! {{final,self()}}, \
                  receive final_ack -> io:format(\"ok~n\") after 5000 -> halt(6) end, halt().",
                 server.line()
