@@ -272,4 +272,27 @@ defmodule TestClassesReportTest do
     assert output =~
              "runs_bs_match_string_as_pinned_erts: purpose=runtime_integration,erts_comparison; dependencies=erts_process,pipes,filesystem,network,local_socket"
   end
+
+  test "reports host commands only for type cases that start a port", %{directory: directory} do
+    cases = [
+      {"runs_is_number_in_a_guard_as_pinned_erts", "matches"},
+      {"runs_is_record_2_and_3_in_a_body_through_a_fun_and_through_apply_as_pinned_erts",
+       "matches"}
+    ]
+
+    {output, status} =
+      report(
+        directory,
+        true,
+        cases,
+        ["--scope", "integration", "--cases", "--dependency", "host_commands"],
+        "type_test"
+      )
+
+    assert status == 0
+    assert output =~ "runs_is_number_in_a_guard_as_pinned_erts: purpose="
+
+    refute output =~
+             "runs_is_record_2_and_3_in_a_body_through_a_fun_and_through_apply_as_pinned_erts: purpose="
+  end
 end
