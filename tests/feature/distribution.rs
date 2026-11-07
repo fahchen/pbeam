@@ -3047,6 +3047,27 @@ fn orders_the_four_pending_signals_as_pinned_erts() {
 }
 
 #[test]
+fn rejects_dead_aliases_in_pending_signals() {
+    let epmd = Epmd::start();
+    let name = format!("dpenderr{}", std::process::id());
+    for operation in ["send", "exit_signal", "link_exit"] {
+        let expression = format!("dist_pending_error_probe:main({operation}), halt().");
+        let arguments = probe(
+            &["-sname", &name, "-kernel", "logger_level", "none"],
+            &expression,
+        );
+        assert_eq!(stdout(&erts_erl(&epmd, &arguments)), "ok\n", "{operation}");
+        let output = pbeam_erl(&epmd, &arguments);
+        assert_eq!(output.status.code(), Some(1), "{operation}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("unsupported external term of a pid reference whose owner exited"),
+            "{operation}: {output:?}"
+        );
+    }
+}
+
+#[test]
 fn measures_pending_queue_size_on_pinned_erts() {
     let epmd = Epmd::start();
     let arguments = probe(
