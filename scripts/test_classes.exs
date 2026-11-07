@@ -324,6 +324,14 @@ defmodule TestClasses do
                  "restores_the_terminal_before_the_result_of_terra_counter_as_interactive_erts"}
               ])
 
+  # The first two tests are Linux-only; the last is excluded on Apple hosts.
+  @non_apple_integration MapSet.new([
+                           {"pbeam-runtime::net", "stops_the_run_at_a_network_namespace"},
+                           {"pbeam-runtime::tcp_inet",
+                            "closes_a_port_with_linger_zero_and_queued_output_as_pinned_erts"},
+                           {"pbeam-runtime::tcp_inet", "sets_a_linger_time_as_pinned_erts"}
+                         ])
+
   # These unit tests or their modules have Linux-specific cfg attributes.
   @linux_only_units MapSet.new(
                       for name <- ~w(
@@ -355,6 +363,9 @@ defmodule TestClasses do
 
   def unit_inventory,
     do: Path.join(__DIR__, "test_unit_classes.txt") |> File.read!() |> parse_inventory()
+
+  def integration_inventory,
+    do: Path.join(__DIR__, "test_integration_classes.txt") |> File.read!() |> parse_inventory()
 
   def parse_inventory(text) do
     text
@@ -415,7 +426,7 @@ defmodule TestClasses do
       )
 
     if invalid != [] or length(paths) != 2 do
-      raise "usage: elixir scripts/test_classes.exs [--strict] [--cases] [--purpose LABEL] [--dependency LABEL] [--platform linux|macos] [--scope feature|unit] <cargo-metadata.json> <nextest-list.json>"
+      raise "usage: elixir scripts/test_classes.exs [--strict] [--cases] [--purpose LABEL] [--dependency LABEL] [--platform linux|macos] [--scope feature|unit|integration] <cargo-metadata.json> <nextest-list.json>"
     end
 
     if options[:purpose] && options[:purpose] not in @purposes,
@@ -435,21 +446,29 @@ defmodule TestClasses do
     unless platform in ["linux", "macos", "other"], do: raise("unknown platform: #{platform}")
 
     scope = options[:scope] || "feature"
-    unless scope in ["feature", "unit"], do: raise("unknown scope: #{scope}")
+    unless scope in ["feature", "unit", "integration"], do: raise("unknown scope: #{scope}")
 
     [metadata_path, list_path] = paths
     metadata = metadata_path |> File.read!() |> :json.decode()
     list = list_path |> File.read!() |> :json.decode()
-    known = if scope == "unit", do: unit_inventory(), else: inventory()
+
+    known =
+      case scope do
+        "unit" -> unit_inventory()
+        "integration" -> integration_inventory()
+        "feature" -> inventory()
+      end
 
     targets =
       for package <- Map.fetch!(metadata, "packages"),
           target <- Map.fetch!(package, "targets"),
           (scope == "feature" and "test" in Map.fetch!(target, "kind") and
              String.contains?(Map.fetch!(target, "src_path"), "/tests/feature/")) or
-            (scope == "unit" and "lib" in Map.fetch!(target, "kind")),
+            (scope == "unit" and "lib" in Map.fetch!(target, "kind")) or
+            (scope == "integration" and "test" in Map.fetch!(target, "kind") and
+               String.contains?(Map.fetch!(target, "src_path"), "/tests/integration/")),
           into: MapSet.new() do
-        if scope == "feature",
+        if scope in ["feature", "integration"],
           do: package["name"] <> "::" <> target["name"],
           else: package["name"]
       end
@@ -483,6 +502,7 @@ defmodule TestClasses do
       cond do
         scope == "feature" and platform == "linux" -> @macos_only
         scope == "unit" and platform == "macos" -> @linux_only_units
+        scope == "integration" and platform == "macos" -> @non_apple_integration
         true -> MapSet.new()
       end
 
