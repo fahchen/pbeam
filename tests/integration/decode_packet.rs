@@ -540,7 +540,7 @@ fn decodes_four_byte_packets_rejects_pinned_erts_crash() {
         .unwrap_err()
         .to_string();
     assert!(
-        error.contains("pinned ERTS reads invalid memory and crashes"),
+        error.contains("the pinned ERTS behavior is undefined for this length"),
         "{error}"
     );
 }
