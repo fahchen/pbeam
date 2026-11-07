@@ -786,14 +786,28 @@ fn client_runs(module: &str, function: &str) -> [(String, Vec<Vec<u8>>); 2] {
         (text, reads)
     };
     let erts = run("erts", &|path| {
-        let output = Command::new("erl")
+        let child = Command::new("erl")
             .args(["+S", "1", "-noshell", "-pa", "fixtures/tcp", "-eval"])
             .arg(format!(
                 "io:format(\"~w~n\", [{module}:{function}(\"{}\")]), halt().",
                 path.display()
             ))
-            .output()
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
             .unwrap();
+        let pid = child.id();
+        let (done, finished) = std::sync::mpsc::channel::<()>();
+        let watchdog = thread::spawn(move || {
+            if finished.recv_timeout(Duration::from_secs(30)).is_err() {
+                let _ = Command::new("kill")
+                    .args(["-KILL", &pid.to_string()])
+                    .status();
+            }
+        });
+        let output = child.wait_with_output().unwrap();
+        let _ = done.send(());
+        watchdog.join().unwrap();
         assert!(output.status.success(), "{output:?}");
         String::from_utf8_lossy(&output.stdout)
             .trim_end()
