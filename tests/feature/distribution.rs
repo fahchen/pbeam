@@ -2999,6 +2999,19 @@ fn orders_the_four_pending_signals_as_pinned_erts() {
 }
 
 #[test]
+fn orders_all_five_pending_signal_packets_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let name = format!("dorder{}", std::process::id());
+    let arguments = probe(
+        &["-sname", &name, "-kernel", "logger_level", "none"],
+        "dist_pending_order_probe:main(), halt().",
+    );
+    let expected = "[6,1,19,29,8]\n";
+    assert_eq!(stdout(&erts_erl(&epmd, &arguments)), expected);
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), expected);
+}
+
+#[test]
 fn monitors_processes_between_erts_and_pbeam_nodes() {
     // A client process monitors a process of a server node and a process of
     // the server node monitors a client process, and the watched process
