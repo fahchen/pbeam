@@ -81,4 +81,16 @@ defmodule TestClassesReportTest do
     assert status != 0
     assert output =~ "not listed on this platform"
   end
+
+  test "reports the macOS-only case as excluded on Linux", %{directory: directory} do
+    cases = [{"sets_the_terminal_mode_with_stty_through_a_port_as_pinned_erts", "matches"}]
+    {linux, _} = report(directory, true, cases, ["--platform", "linux"])
+    {macos, _} = report(directory, true, cases, ["--platform", "macos"])
+
+    name =
+      "pbeam-runtime::example restores_the_terminal_before_the_result_of_terra_counter_as_interactive_erts"
+
+    assert linux =~ "platform excluded: " <> name
+    assert macos =~ "not listed on this platform: " <> name
+  end
 end

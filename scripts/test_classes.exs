@@ -318,6 +318,12 @@ defmodule TestClasses do
   pbeam-runtime::tty_restore|sets_fd_0_to_its_first_mode_at_the_run_end_as_pinned_erts|erts_comparison,host_integration|erts_process,pbeam_process,pty,pipes,filesystem,build_toolchain,host_commands
   """
 
+  # This test is compiled only on macOS (`tests/feature/example.rs`).
+  @macos_only MapSet.new([
+                {"pbeam-runtime::example",
+                 "restores_the_terminal_before_the_result_of_terra_counter_as_interactive_erts"}
+              ])
+
   @purposes ~w(application_end_to_end cli erts_comparison erts_reference host_integration interoperability native_extension pure_logic runtime_integration test_helper)
   @dependencies ~w(build_toolchain epmd erts_peer erts_process erts_process_may_be_conditional filesystem host_commands host_signals native_library network none pbeam_process pbeam_tool pipes pty real_time unknown)
 
@@ -371,11 +377,17 @@ defmodule TestClasses do
   def run(args) do
     {options, paths, invalid} =
       OptionParser.parse(args,
-        strict: [strict: :boolean, cases: :boolean, purpose: :string, dependency: :string]
+        strict: [
+          strict: :boolean,
+          cases: :boolean,
+          purpose: :string,
+          dependency: :string,
+          platform: :string
+        ]
       )
 
     if invalid != [] or length(paths) != 2 do
-      raise "usage: elixir scripts/test_classes.exs [--strict] [--cases] [--purpose LABEL] [--dependency LABEL] <cargo-metadata.json> <nextest-list.json>"
+      raise "usage: elixir scripts/test_classes.exs [--strict] [--cases] [--purpose LABEL] [--dependency LABEL] [--platform linux|macos] <cargo-metadata.json> <nextest-list.json>"
     end
 
     if options[:purpose] && options[:purpose] not in @purposes,
@@ -383,6 +395,16 @@ defmodule TestClasses do
 
     if options[:dependency] && options[:dependency] not in @dependencies,
       do: raise("unknown dependency filter: #{options[:dependency]}")
+
+    platform =
+      options[:platform] ||
+        case :os.type() do
+          {:unix, :linux} -> "linux"
+          {:unix, :darwin} -> "macos"
+          _ -> "other"
+        end
+
+    unless platform in ["linux", "macos", "other"], do: raise("unknown platform: #{platform}")
 
     [metadata_path, list_path] = paths
     metadata = metadata_path |> File.read!() |> :json.decode()
@@ -422,11 +444,19 @@ defmodule TestClasses do
     if map_size(cases) == 0, do: raise("nextest list has no feature test cases")
     unrecorded = Map.keys(cases) -- Map.keys(known)
     absent = Map.keys(known) -- Map.keys(cases)
+    expected_absent = if platform == "linux", do: @macos_only, else: MapSet.new()
+    unexpected_absent = Enum.reject(absent, &MapSet.member?(expected_absent, &1))
 
     for {id, name} <- Enum.sort(unrecorded), do: IO.puts(:stderr, "unrecorded: #{id} #{name}")
 
-    for {id, name} <- Enum.sort(absent),
-        do: IO.puts(:stderr, "not listed on this platform: #{id} #{name}")
+    for {id, name} <- Enum.sort(absent) do
+      kind =
+        if MapSet.member?(expected_absent, {id, name}),
+          do: "platform excluded",
+          else: "not listed on this platform"
+
+      IO.puts(:stderr, "#{kind}: #{id} #{name}")
+    end
 
     incomplete = Enum.filter(cases, fn {key, _} -> incomplete?(known[key]) end)
 
@@ -480,8 +510,9 @@ defmodule TestClasses do
       end
     end
 
-    if unrecorded != [] or (options[:strict] == true and (incomplete != [] or absent != [])),
-      do: System.halt(1)
+    if unrecorded != [] or
+         (options[:strict] == true and (incomplete != [] or unexpected_absent != [])),
+       do: System.halt(1)
   end
 end
 

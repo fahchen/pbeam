@@ -48,7 +48,7 @@ else
       export LLVM_PROFILE_FILE="$list_dir/list-%p-%8m.profraw"
       cargo nextest list --locked --workspace --all-features --profile ci \
         --target-dir "$cov_dir" --message-format json >"$list_dir/tests.json"
-      mise exec -- elixir scripts/test_classes.exs "$list_dir/metadata.json" "$list_dir/tests.json"
+      mise exec -- elixir scripts/test_classes.exs --strict "$list_dir/metadata.json" "$list_dir/tests.json"
     )
   fi
   if [[ -z "${PBEAM_TEST_PARTITION:-}" ]]; then
