@@ -44,4 +44,8 @@ more() ->
     {ok, _, _, C} = erlang:dist_get_stat(H),
     true = exit(Ref, boom),
     {ok, _, _, D} = erlang:dist_get_stat(H),
-    io:format("~w~n", [[A,B,C,D]]).
+    ok = erlang:send(pid(N), first, [priority]),
+    {ok, _, _, E} = erlang:dist_get_stat(H),
+    true = erlang:exit(pid(N), boom, [priority]),
+    {ok, _, _, F} = erlang:dist_get_stat(H),
+    io:format("~w~n", [[A,B,C,D,E,F]]).

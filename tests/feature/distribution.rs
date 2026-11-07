@@ -3072,7 +3072,7 @@ fn measures_pending_queue_size_on_pinned_erts() {
         ],
         "dist_pending_size_probe:more(), halt().",
     );
-    let expected = "[213,458,688,932]\n";
+    let expected = "[213,458,688,932,1179,1425]\n";
     assert_eq!(stdout(&erts_erl(&epmd, &arguments)), expected);
     assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), expected);
 }

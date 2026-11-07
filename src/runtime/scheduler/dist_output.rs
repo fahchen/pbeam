@@ -101,7 +101,7 @@ impl Scheduler {
         let (control, message) = match &signal {
             PendingSignal::Send(sender, to, message, priority) => (
                 send_control(
-                    if is_remote_reference(to) {
+                    if is_remote_reference(to) || *priority == SendPriority::Priority {
                         ALTACT_SIG
                     } else {
                         0
@@ -113,7 +113,7 @@ impl Scheduler {
                 Some(message.clone()),
             ),
             PendingSignal::Exit(sender, to, reason, priority) => exit_control(
-                if is_remote_reference(to) {
+                if is_remote_reference(to) || *priority == SendPriority::Priority {
                     ALTACT_SIG
                 } else {
                     0
