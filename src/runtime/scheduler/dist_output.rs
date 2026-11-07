@@ -195,7 +195,8 @@ impl Scheduler {
                     &mut dist,
                     node,
                     PendingSignal::Send(caller, to.clone(), message.clone(), priority),
-                )?;
+                )
+                .expect("a pending send contains no match context");
                 return Ok(true);
             }
             let idle = dist.connected(node).is_none();
@@ -326,7 +327,8 @@ impl Scheduler {
                     &mut dist,
                     node,
                     PendingSignal::Exit(caller, to.clone(), reason.clone(), priority),
-                )?;
+                )
+                .expect("a pending exit contains no match context");
                 return Ok(true);
             }
             let idle = dist.connected(node).is_none();
@@ -420,14 +422,16 @@ impl Scheduler {
                         &mut dist,
                         node,
                         PendingSignal::Send(sender, to.clone(), message.clone(), priority),
-                    )?;
+                    )
+                    .expect("a pending send contains no match context");
                 }
                 PendingOutput::Exit(to, reason, priority) => {
                     self.enqueue_pending(
                         &mut dist,
                         node,
                         PendingSignal::Exit(sender, to.clone(), reason.clone(), priority),
-                    )?;
+                    )
+                    .expect("a pending exit contains no match context");
                 }
                 PendingOutput::Link(remote, control) => {
                     dist.insert_link_now(sender, remote);
@@ -458,7 +462,8 @@ impl Scheduler {
                             control.clone(),
                             arguments.clone(),
                         ),
-                    )?;
+                    )
+                    .expect("a pending spawn request contains no match context");
                     *queued = true;
                 }
             }

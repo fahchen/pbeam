@@ -266,7 +266,8 @@ impl Scheduler {
                     &mut dist,
                     &node,
                     super::dist_table::PendingSignal::Link(from, control),
-                )?;
+                )
+                .expect("a pending link exit contains no match context");
                 return Ok(());
             }
         }
