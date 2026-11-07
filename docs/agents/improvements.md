@@ -31,19 +31,19 @@ Detailed incident writeups with full context live in `postmortems/`.
 
 **Guardrail:** Before you delegate, write the slice order and the commit points. If a worker returns with no commit, re-direct with the file and function named instead of repeating the method.
 
-**Reference:** #1570, #1412, #1558
+**Reference:** `docs/agents/knowledge.md`, <https://github.com/fahchen/pbeam/issues/1570>
 
 ## 20261107: Verify a review claim against the pinned ERTS before you change a design
 
-**Problem:** A codex finding said the peer parses the whole distribution header in the first fragment, so I directed that the control term stay whole. Pinned-ERTS probes then showed that the ERTS splits such a control term, and the change had to be withdrawn.
+**Problem:** A codex finding said the peer parses the whole distribution header in the first fragment, so I withdrew the rule that keeps a control term whole. A pinned-ERTS probe showed that the sender splits a large control term but the receiver rejects that split, so the withdrawn rule was right and the code change was wrong.
 
 **Root Cause:** I treated a review finding as evidence and directed a design change from it without a probe.
 
-**Fix:** Withdrew the rule, kept the verified behavior, and recorded the measured evidence in the ledger row instead.
+**Fix:** Restored the rule: PBeam keeps a control term whole, which matches the receiver, and its packet stays acceptable to the pinned ERTS. Recorded the measured evidence in the ledger row.
 
-**Guardrail:** When a finding depends on runtime behavior, run the probe and cite the OTP line first. A review comment is a hypothesis until a probe or the source confirms it.
+**Guardrail:** When a finding depends on runtime behavior, probe the sender and the receiver and cite the OTP lines first. A review comment is a hypothesis until a probe or the source confirms it.
 
-**Reference:** #1559, #1562
+**Reference:** `docs/erts-differences.md`, <https://github.com/fahchen/pbeam/issues/1562>
 
 ## 20261107: Edit a per-branch inventory only on the branch that owns it
 
@@ -55,7 +55,7 @@ Detailed incident writeups with full context live in `postmortems/`.
 
 **Guardrail:** When a gate cross-checks a list against a branch, edit that list only on the branch that contains the items, and read "unrecorded" and "not listed" as separate failures.
 
-**Reference:** #1593, #1594
+**Reference:** `scripts/test_classes.exs`, <https://github.com/fahchen/pbeam/pull/1593>
 
 ## 20261103: Make a probe's subject and its monitor one operation
 
