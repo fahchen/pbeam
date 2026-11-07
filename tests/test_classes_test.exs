@@ -187,6 +187,33 @@ defmodule TestClassesReportTest do
     assert output =~ "purpose=measurement; dependencies=none; selected=false"
   end
 
+  test "reports Erlang BIF scheduler sockets separately from direct checks", %{
+    directory: directory
+  } do
+    cases = [
+      {"runtime::interpreter::bif::erlang::tests::returns_the_erlang_unique_integer_sequences",
+       "matches"},
+      {"runtime::interpreter::bif::erlang::tests::raises_a_runtime_error_for_the_stdin_display_device",
+       "matches"}
+    ]
+
+    {output, status} =
+      report(directory, true, cases, [
+        "--scope",
+        "unit",
+        "--cases",
+        "--dependency",
+        "local_socket"
+      ])
+
+    assert status == 0
+
+    assert output =~
+             "returns_the_erlang_unique_integer_sequences: purpose=runtime_integration; dependencies=network,local_socket; selected=true"
+
+    refute output =~ "raises_a_runtime_error_for_the_stdin_display_device: purpose="
+  end
+
   test "reports zlib scheduler sockets separately from in-memory helpers", %{directory: directory} do
     cases = [
       {"runtime::interpreter::native::zlib::tests::opens_and_closes_a_stream", "matches"},
