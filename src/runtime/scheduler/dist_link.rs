@@ -62,8 +62,8 @@ impl Scheduler {
         let already_connected = self.node.dist().connected(&node).is_some();
         if !already_connected {
             let control = link_control(LINK, current, pid);
-            if let Some(connection) = self.dist_auto_connect(&node, |dist, connection| {
-                assert!(dist.insert_link(current, remote, connection));
+            if let Some(connection) = self.dist_auto_connect(&node, |dist, _| {
+                dist.insert_link_now(current, remote);
                 dist.enqueue_pending_link(&node, current, control);
             })? {
                 self.link_on(current, link, remote, connection);

@@ -925,10 +925,19 @@ impl DistTable {
         if entry.state == State::Idle || entry.connection_id != connection {
             return false;
         }
+        self.insert_link_now(process, remote);
+        true
+    }
+
+    /// Insert a link while the caller holds the matching connection lock.
+    pub(super) fn insert_link_now(&mut self, process: ProcessId, remote: RemotePid) {
+        let entry = self
+            .entries
+            .get_mut(&remote.node)
+            .expect("the entry of the node stays in the table");
         if !entry.links.contains(&(process, remote)) {
             entry.links.insert(0, (process, remote));
         }
-        true
     }
 
     /// Remove the link of `process` to `remote` from the connection
