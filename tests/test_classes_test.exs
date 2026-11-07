@@ -112,6 +112,28 @@ defmodule TestClassesReportTest do
     refute output =~ "unrecorded: pbeam-runtime "
   end
 
+  test "selects a scheduler socket case without a pure scheduler helper", %{directory: directory} do
+    cases = [
+      {"runtime::scheduler::tests::runs_other_processes_while_a_dirty_write_waits_and_resumes_it_after",
+       "matches"},
+      {"runtime::scheduler::tests::stops_a_break_key_with_no_data_at_a_second_break", "matches"}
+    ]
+
+    {output, status} =
+      report(directory, true, cases, [
+        "--scope",
+        "unit",
+        "--cases",
+        "--dependency",
+        "local_socket"
+      ])
+
+    assert status == 0
+    assert output =~ "Matching both requested facets: 1"
+    assert output =~ "dependencies=network,local_socket,pipes,real_time; selected=true"
+    refute output =~ "stops_a_break_key_with_no_data_at_a_second_break: purpose="
+  end
+
   test "rejects a new unrecorded library case", %{directory: directory} do
     {output, status} =
       report(directory, true, [{"new_unit_case", "matches"}], ["--scope", "unit"])
