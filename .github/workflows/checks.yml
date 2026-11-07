@@ -148,15 +148,6 @@ jobs:
           save-if: ${{ matrix.partition == 1 }}
           cache-on-failure: true
 
-      # This branch collects the stty process tree before the diagnosis PR is merged.
-      - name: Prepare stty trace
-        if: github.head_ref == 'ci/stty-diagnosis' && matrix.partition == 1 && steps.select.outputs.task == 'check'
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y strace
-          mkdir -p "$RUNNER_TEMP/pbeam-stty-trace"
-          echo "PBEAM_STTY_TRACE_DIR=$RUNNER_TEMP/pbeam-stty-trace" >> "$GITHUB_ENV"
-
       - name: Run the tests
         if: steps.select.outputs.task == 'check'
         env:
@@ -164,15 +155,6 @@ jobs:
           PBEAM_TEST_PARTITION: slice:${{ matrix.partition }}/${{ strategy.job-total }}
           PBEAM_FIXTURE_MODE: prepare
         run: mise run test
-
-      - name: Keep stty trace
-        if: always() && github.head_ref == 'ci/stty-diagnosis' && matrix.partition == 1 && steps.select.outputs.task == 'check'
-        uses: actions/upload-artifact@v7.0.2
-        with:
-          name: stty-trace
-          path: ${{ runner.temp }}/pbeam-stty-trace
-          if-no-files-found: error
-          retention-days: 1
 
       - name: Keep the coverage report
         if: steps.select.outputs.task == 'check'

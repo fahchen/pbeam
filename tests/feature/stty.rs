@@ -88,7 +88,7 @@ fn reports_the_exit_status_of_stty_without_a_terminal_as_pinned_erts() {
 /// let command = erts();
 /// ```
 fn erts() -> Command {
-    let mut command = traceable_command("erl", "erts");
+    let mut command = Command::new("erl");
     command.args([
         "-noshell",
         "-pa",
@@ -108,7 +108,7 @@ fn erts() -> Command {
 /// let command = pbeam();
 /// ```
 fn pbeam() -> Command {
-    let mut command = traceable_command(env!("CARGO_BIN_EXE_pbeam"), "pbeam");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_pbeam"));
     command
         .args([
             "pbeam_boot",
@@ -123,45 +123,6 @@ fn pbeam() -> Command {
         .args(BOOT_MODULES.map(pinned_beam_path))
         .arg(boot_beam());
     command
-}
-
-/// Build a command for the terminal probe. On Linux, when
-/// `PBEAM_STTY_TRACE_DIR` names an existing directory, trace each process
-/// into a separate file with the given label and the test process ID.
-/// `-D` keeps the program as the direct child of the test, so its exit
-/// status and controlling terminal stay visible to the test.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let command = traceable_command("erl", "erts");
-/// ```
-fn traceable_command(program: &str, label: &str) -> Command {
-    #[cfg(target_os = "linux")]
-    if let Some(directory) = std::env::var_os("PBEAM_STTY_TRACE_DIR") {
-        let path =
-            std::path::PathBuf::from(directory).join(format!("{label}-{}", std::process::id()));
-        let mut command = Command::new("strace");
-        command
-            .args([
-                "-D",
-                "-ff",
-                "-tt",
-                "-s",
-                "128",
-                "-e",
-                "trace=%process,%signal,write,writev",
-                "-o",
-            ])
-            .arg(path)
-            .arg("--")
-            .arg(program);
-        return command;
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    let _ = label;
-    Command::new(program)
 }
 
 /// Wait until `child` exits, and return its exit status code, its stdout,

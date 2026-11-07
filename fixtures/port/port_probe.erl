@@ -39,8 +39,9 @@ terminal() ->
 show({error, {stty_exit, Status}}) -> ["stty_exit ", integer_to_list(Status)];
 show(Atom) -> atom_to_list(Atom).
 
+%% Read the full output: grep -q can close the pipe before stty finishes.
 isig() ->
-    Script = "if stty -a 2>/dev/null | grep -q -- -isig; then printf off >&4; else printf on >&4; fi",
+    Script = "if stty -a 2>/dev/null | grep -- -isig >/dev/null; then printf off >&4; else printf on >&4; fi",
     Port = open_port({spawn_executable, sh()}, [binary, exit_status, nouse_stdio,
                                                 {args, ["-c", Script]}]),
     {Mode, 0} = collect(Port, []),
