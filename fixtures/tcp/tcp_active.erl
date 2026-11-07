@@ -1,5 +1,5 @@
 -module(tcp_active).
--export([main/1, active/1, count/1, closed/1, passive_closed/1, links/0, link_orders/0, pid_port_links/0, unsupported/2, unsupported_item/0]).
+-export([main/1, active/1, count/1, closed/1, passive_closed/1, links/0, link_orders/0, pid_port_links/0, unsupported_item/0]).
 
 %% Delivers the data of an accepted socket in active mode, as
 %% inet:setopts/2 calls prim_inet:setopts/2, and gives the socket to a
@@ -292,14 +292,6 @@ member(Owner) ->
             member(Owner);
         {'EXIT', _Port, _Reason} ->
             Owner ! {gone, self()}
-    end.
-
-%% Each part that PBeam does not run yet.
-unsupported(Path, Case) ->
-    process_flag(trap_exit, true),
-    {_, S} = connection(Path),
-    case Case of
-        count -> prim_inet:setopts(S, [{active, 2}])
     end.
 
 %% An item of erlang:port_info/2 that PBeam does not give yet.
