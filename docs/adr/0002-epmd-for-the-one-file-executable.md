@@ -7,9 +7,9 @@
 
 ## Context
 
-`pbeam erl` starts an epmd before the boot for a named node. The default command is `epmd -daemon` from `PATH`. `-epmd Program` replaces that command. `-start_epmd false` and `-no_epmd` disable the start. `start_epmd` in `src/bin/pbeam.rs:672` starts the program, and the run stops with `cannot start epmd -daemon: <Reason>` when the command fails. The pinned ERTS launcher uses `$BINDIR/epmd` (`erlexec.c:1131-1132`, `1327-1372`).
+`pbeam erl` starts an epmd before the boot for a named node. The default command is `epmd -daemon` from `PATH`. `-epmd Program` replaces that command. `-start_epmd false` and `-no_epmd` disable the start. `start_epmd` in `src/bin/pbeam.rs:672` starts the program, and the run stops with `cannot start epmd -daemon: <Reason>` when the command cannot start. A nonzero exit status is ignored. The pinned ERTS launcher uses `$BINDIR/epmd` (`erlexec.c:1131-1132`, `1327-1372`).
 
-A one-file executable has no sibling epmd binary. A host without OTP can lack epmd. The pinned ERTS supports an `-epmd_module` that replaces `erl_epmd`. Its external export list gives `start_link/0`, `register_node/2,3`, `address_please/3`, `port_please/2,3`, `listen_port_please/2`, and `names/0,1` (`lib/kernel/src/erl_epmd.erl:57-60` at `OTP-29.1.1`).
+A one-file executable has no sibling epmd binary. A host without OTP can lack epmd. The pinned ERTS supports an `-epmd_module` that replaces `erl_epmd`. Selected external exports are `start_link/0`, `register_node/2,3`, `address_please/3`, `port_please/2,3`, `listen_port_please/2`, and `names/0,1`. The same export list also names `start/0`, `stop/0`, and `open/0,1,2` (`lib/kernel/src/erl_epmd.erl:57-60` at `OTP-29.1.1`).
 
 Redbug CLI runs a connect-only module as `Server.Epmd` (`server/lib/server/epmd.ex` at redbug-cli). The release installs it with `-start_epmd false -epmd_module Elixir.Server.Epmd` (`server/rel/env.sh.eex:13`). The module does not register in a real epmd. Its `address_please/3` returns `{ok, Ip, Port, Version}` for a pinned name, and it falls back to `erl_epmd` for an unpinned name. The module documents an SSH tunnel as a use of a pinned endpoint.
 
@@ -25,7 +25,7 @@ Redbug CLI runs a connect-only module as `Server.Epmd` (`server/lib/server/epmd.
 
 - The intended outcome is that a one-file executable reaches a node by name on a host that lacks epmd. No test does this today. Verification needs a distribution connection between two nodes on a host with no epmd.
 - Only the node that starts a connection needs the target endpoint in its map. The peer does not need the same map. There is no name discovery by broadcast.
-- An unpinned name falls back to `erl_epmd`. With no epmd and no `-erl_epmd_port`, the lookup fails and the node does not connect. The failure can come from host resolution or from the name lookup, which then gives `noport`. With `-erl_epmd_port` set, `erl_epmd:port_please/3` returns the configured fixed port without contacting epmd (`lib/kernel/src/erl_epmd.erl:390-404` at `OTP-29.1.1`).
+- An unpinned name falls back to `erl_epmd`. With no epmd and no `-erl_epmd_port`, the lookup fails and the node does not connect. The failure can come from host resolution or from the name lookup, which then gives `noport`. With `-erl_epmd_port` set, `erl_epmd:port_please/3` returns the configured fixed port without contacting epmd: `listen_port_please/2` reads the port from the configuration (`lib/kernel/src/erl_epmd.erl:390-404`) and `port_please/3` returns it in the `{ok, Prt}` branch (`lib/kernel/src/erl_epmd.erl:127-140`) at `OTP-29.1.1`.
 - A node that others must find by name needs a fixed published port.
 - The future verification must check that identifiers of two incarnations of the same node name stay distinct. A fixed or reused creation makes them indistinguishable.
 - No new `unsafe`, no new daemon, and no new protocol implementation.
