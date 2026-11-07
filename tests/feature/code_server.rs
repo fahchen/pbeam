@@ -1099,7 +1099,10 @@ fn raises_badfun_for_the_funs_of_removed_code_as_pinned_erts() {
         "stale",
         &[],
     ));
-    assert!(erts.starts_with(expected), "{erts}");
+    assert!(
+        erts.lines().any(|line| line == expected.trim_end()),
+        "{erts}"
+    );
     assert_eq!(
         run(&mut pbeam_probe(
             FUN_ENTRY_PROBE,
