@@ -3047,6 +3047,22 @@ fn orders_the_four_pending_signals_as_pinned_erts() {
 }
 
 #[test]
+fn measures_pending_queue_size_on_pinned_erts() {
+    let epmd = Epmd::start();
+    let arguments = probe(
+        &[
+            "-name",
+            "pending_q@localhost",
+            "-kernel",
+            "logger_level",
+            "none",
+        ],
+        "dist_pending_size_probe:main(), halt().",
+    );
+    assert_eq!(stdout(&erts_erl(&epmd, &arguments)), "[0,230,460]\n");
+}
+
+#[test]
 fn orders_all_five_pending_signal_packets_as_pinned_erts() {
     let epmd = Epmd::start();
     let name = format!("dorder{}", std::process::id());
