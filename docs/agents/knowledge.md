@@ -156,3 +156,11 @@ can remove their entries.
 ## Values from another node lose their written form
 
 Keep each value that arrives from another node in the form that the peer wrote it. Do not shorten, normalize, or re-encode it, because the peer matches it by that form.
+
+## Peer-starting tests contend for the shared daemon
+
+Give each test process its own daemon port and hold it with a lock file until the test ends. Run a target that starts real peers on one thread. Two tests that share a daemon let a node of one test reach the daemon of the other, so the failure can name the wrong test.
+
+## Measurement must not fail on input the runtime accepts
+
+Keep accounting and reporting on a path that cannot cancel the operation it measures. Count every input that the operation accepts, even when the encoder needed for the count rejects it, and still return a value. Do not make a measurement stop an operation.
