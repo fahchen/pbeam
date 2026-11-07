@@ -3959,6 +3959,18 @@ impl BeamProgram {
                 }
                 Ok(Some(Outcome::Yield))
             }
+            BifResult::SuspendReturn(value) => {
+                write(process, &Operand::X(0), value.clone())?;
+                if entry.is_tail() {
+                    return_from_frame(process)?;
+                }
+                if process.suspended {
+                    process.pending_dist_reply = Some(value);
+                    Ok(Some(Outcome::Wait))
+                } else {
+                    Ok(None)
+                }
+            }
             BifResult::Raise { class, reason } => Ok(raise(process, class, reason)),
             BifResult::ErrorWithCause { reason, .. } => {
                 Ok(raise(process, ExceptionClass::Error, reason))
