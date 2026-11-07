@@ -917,8 +917,6 @@ pub(super) fn dist_spawn_request(
     let arguments_list = arguments.clone();
     let mut link = false;
     let mut monitor = None;
-    let mut monitor_priority = false;
-    let mut monitor_alias = None;
     let mut reply_tag = Term::static_atom("spawn_reply");
     let mut reply = SpawnReply {
         no_smsg: false,
@@ -930,7 +928,13 @@ pub(super) fn dist_spawn_request(
         match option {
             Term::Atom(name) if name.is_static("link") => link = true,
             Term::Atom(name) if name.is_static("monitor") => {
-                monitor = Some(Term::static_atom("DOWN"));
+                let options =
+                    monitor.get_or_insert_with(|| crate::runtime::scheduler::MonitorOptions {
+                        tag: Term::static_atom("DOWN"),
+                        priority: false,
+                        alias: None,
+                    });
+                options.tag = Term::static_atom("DOWN");
             }
             Term::Tuple(fields) => match fields.as_ref() {
                 [Term::Atom(name), value] if name.is_static("reply_tag") => {
@@ -963,9 +967,7 @@ pub(super) fn dist_spawn_request(
                         badopt = true;
                         break;
                     };
-                    monitor_priority = options.priority;
-                    monitor_alias = options.alias;
-                    monitor = Some(options.tag);
+                    monitor = Some(options);
                 }
                 [Term::Atom(name), value] if name.is_static("link") => match link_option(value) {
                     LinkOption::Ok => link = true,
@@ -1009,8 +1011,6 @@ pub(super) fn dist_spawn_request(
         &arguments_list,
         Term::list_from(sent),
         monitor.as_ref(),
-        monitor_priority,
-        monitor_alias,
         &reply_tag,
         reply,
         if link { SpawnLink::Yes } else { SpawnLink::No },

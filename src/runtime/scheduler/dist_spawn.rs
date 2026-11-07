@@ -60,36 +60,33 @@ impl Scheduler {
         arity: i64,
         arguments: &Term,
         options: Term,
-        monitor: Option<&Term>,
-        monitor_priority: bool,
-        monitor_alias: Option<super::AliasMode>,
+        monitor: Option<&super::MonitorOptions>,
         reply_tag: &Term,
         reply: SpawnReply,
         link: SpawnLink,
     ) -> Result<(Reference, bool), BeamError> {
         let watcher = self.current_process_mut().id;
         let mut reference = self.make_ref()?;
-        if monitor_alias.is_some() {
+        if monitor.is_some_and(|options| options.alias.is_some()) {
             reference = reference.pid_reference();
             self.node.register_alias(reference, watcher);
         }
         let key = MonitorKey::Local(reference);
         let pending = Origin {
             monitor: Some(OriginMonitor {
-                priority: monitor_priority,
+                priority: monitor.is_some_and(|options| options.priority),
                 kind: "process",
                 target: None,
                 item: reply_tag.clone(),
                 tag: monitor
-                    .cloned()
-                    .unwrap_or_else(|| Term::static_atom("DOWN")),
+                    .map_or_else(|| Term::static_atom("DOWN"), |options| options.tag.clone()),
                 connection: 0,
                 remote: None,
                 spawn: Some(reply),
                 abandoned: false,
                 spawn_link: link.into(),
             }),
-            alias: monitor_alias,
+            alias: monitor.and_then(|options| options.alias),
             watched_by: None,
         };
         self.current_process_mut().monitors.insert(key, pending);
