@@ -12,7 +12,9 @@ use crate::{
             Driver,
             inet::{Inet, SocketType},
         },
-        process::{ProcessState, RemotePid, Start, tests::frame},
+        process::{
+            MonitorKey, ProcessState, RemotePid, SpawnLink, SpawnReply, Start, tests::frame,
+        },
         scheduler::node::Node,
     },
     term::{AtomTable, Binary, ProcessId, Reference, Term},
@@ -117,6 +119,91 @@ fn rejects_auto_connect_when_the_connection_changes_before_its_lock() {
         None
     );
     assert!(!queued);
+}
+
+#[test]
+fn spawn_joins_a_new_pending_connection_after_the_connected_check() {
+    // A BEAM fixture cannot pause between the first connection check and
+    // the output lock. Force that transition here. Pinned OTP returns
+    // {true,none,29}: a reference, no early error, and SPAWN_REQUEST
+    // (dist.c:3247-3255, 6081-6120).
+    let mut scheduler = scheduler_with_kernel();
+    let node = scheduler.atoms.put("spawn_race@nohost").unwrap();
+    let shared = Arc::clone(&scheduler.node);
+    {
+        let mut dist = shared.dist();
+        dist.insert(&node, Reference(8), 0);
+        dist.new_connection(&node);
+        assert!(
+            dist.connect(&node, Controller::Process(ProcessId(0)), 0)
+                .is_some()
+        );
+    }
+    let other = Arc::clone(&shared);
+    let other_name = node.clone();
+    AFTER_CONNECTED_SIGNAL_CHECK.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            let mut dist = other.dist();
+            assert!(
+                dist.controller_exits(Controller::Process(ProcessId(0)))
+                    .is_some()
+            );
+            dist.new_connection(&other_name);
+        }));
+    });
+    let module = scheduler.atoms.put("erlang").unwrap();
+    let function = scheduler.atoms.put("node").unwrap();
+    let reply = SpawnReply {
+        no_smsg: false,
+        no_emsg: false,
+    };
+    let (reference, monitored) = scheduler
+        .dist_spawn_request(
+            &node,
+            &module,
+            &function,
+            0,
+            &Term::nil(),
+            Term::nil(),
+            None,
+            &Term::static_atom("spawn_reply"),
+            reply,
+            SpawnLink::No,
+        )
+        .unwrap();
+    assert!(!monitored);
+    let key = MonitorKey::Local(reference);
+    assert!(scheduler.current_process().monitors.get(&key).is_some());
+    assert_eq!(
+        scheduler.current_process().mailbox.messages(),
+        Vec::<Term>::new()
+    );
+    let mut dist = shared.dist();
+    assert!(
+        dist.connect(&node, Controller::Process(ProcessId(0)), 1 << 32)
+            .is_some()
+    );
+    scheduler
+        .dist_flush_pending(&mut dist, &node, 1 << 32)
+        .unwrap();
+    let packet = dist
+        .dequeue(&node)
+        .expect("the spawn request remains queued");
+    let ended = dist
+        .controller_exits(Controller::Process(ProcessId(0)))
+        .unwrap();
+    assert_eq!(ended.monitors.len(), 1);
+    assert_eq!(ended.monitors[0].key, key);
+    drop(dist);
+    let bytes: Vec<_> = packet.elements.iter().flat_map(Binary::to_bytes).collect();
+    assert_eq!(bytes[0], 112);
+    let (control, _) = crate::runtime::interpreter::bif::decode_dist(&scheduler, &bytes[1..], None)
+        .unwrap()
+        .unwrap();
+    let Term::Tuple(ref fields) = control else {
+        panic!("control is a tuple");
+    };
+    assert_eq!(fields[0].small_integer(), Some(29));
 }
 
 #[test]

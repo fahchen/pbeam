@@ -73,6 +73,12 @@ pub(super) enum PendingOutput<'a> {
     Exit(&'a Term, &'a Term, SendPriority),
     Link(RemotePid, &'a Term),
     Monitor(super::dist_table::DistMonitor, &'a Term),
+    Spawn(
+        super::dist_table::DistMonitor,
+        &'a Term,
+        &'a Term,
+        &'a mut bool,
+    ),
 }
 
 #[cfg(test)]
@@ -357,6 +363,17 @@ impl Scheduler {
                 PendingOutput::Monitor(monitor, control) => {
                     dist.insert_monitor_now(node, monitor);
                     dist.enqueue_pending_monitor(node, sender, control.clone());
+                }
+                PendingOutput::Spawn(monitor, control, arguments, queued) => {
+                    dist.insert_monitor_now(node, monitor);
+                    dist.enqueue_pending_spawn(
+                        node,
+                        sender,
+                        monitor.key,
+                        control.clone(),
+                        arguments.clone(),
+                    );
+                    *queued = true;
                 }
             }
             return Ok(Some(connection));

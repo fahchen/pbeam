@@ -184,20 +184,34 @@ impl Scheduler {
         {
             return Ok(SpawnSend::Sent);
         }
-        let mut connection = None;
-        let sent = self.dist_output_monitor(sender, node, Some(monitor), |flags, current| {
-            if flags & DIST_SPAWN == 0 {
-                return None;
-            }
-            connection = Some(current);
-            Some((control.clone(), Some(arguments.clone())))
-        })?;
-        Ok(match (sent, connection) {
-            (false, _) => SpawnSend::NoConnection,
-            (true, Some(_)) => SpawnSend::Sent,
+        #[cfg(test)]
+        super::dist_output::after_connected_signal_check();
+        let mut supported = false;
+        let mut queued = false;
+        let pending =
+            self.node
+                .net_kernel()
+                .is_some()
+                .then_some(super::dist_output::PendingOutput::Spawn(
+                    monitor,
+                    control,
+                    arguments,
+                    &mut queued,
+                ));
+        let connection =
+            self.dist_output_with_pending(sender, node, Some(monitor), pending, |flags, _| {
+                if flags & DIST_SPAWN == 0 {
+                    return None;
+                }
+                supported = true;
+                Some((control.clone(), Some(arguments.clone())))
+            })?;
+        Ok(match (connection, queued || supported) {
+            (None, _) => SpawnSend::NoConnection,
+            (Some(_), true) => SpawnSend::Sent,
             // A connection without `DFLAG_SPAWN` drops the request
             // (`dist.c:6089-6093`).
-            (true, None) => SpawnSend::NoSupport,
+            (Some(_), false) => SpawnSend::NoSupport,
         })
     }
 
