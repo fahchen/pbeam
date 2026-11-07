@@ -62,12 +62,17 @@ impl Scheduler {
         options: Term,
         monitor: Option<&Term>,
         monitor_priority: bool,
+        monitor_alias: Option<super::AliasMode>,
         reply_tag: &Term,
         reply: SpawnReply,
         link: SpawnLink,
     ) -> Result<(Reference, bool), BeamError> {
         let watcher = self.current_process_mut().id;
-        let reference = self.make_ref()?;
+        let mut reference = self.make_ref()?;
+        if monitor_alias.is_some() {
+            reference = reference.pid_reference();
+            self.node.register_alias(reference, watcher);
+        }
         let key = MonitorKey::Local(reference);
         let pending = Origin {
             monitor: Some(OriginMonitor {
@@ -84,7 +89,7 @@ impl Scheduler {
                 abandoned: false,
                 spawn_link: link.into(),
             }),
-            alias: None,
+            alias: monitor_alias,
             watched_by: None,
         };
         self.current_process_mut().monitors.insert(key, pending);

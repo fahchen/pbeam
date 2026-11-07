@@ -1922,7 +1922,7 @@ fn old_monitor_unsupported() -> BeamError {
 /// assert_eq!(options.alias, Some(AliasMode::Demonitor));
 /// assert!(monitor_options(&Term::static_atom("x")).is_none());
 /// ```
-fn monitor_options(options: &Term) -> Option<MonitorOptions> {
+pub(super) fn monitor_options(options: &Term) -> Option<MonitorOptions> {
     let options = options.proper_list()?;
     let mut result = MonitorOptions {
         alias: None,

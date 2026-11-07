@@ -4,7 +4,7 @@
 %% erl_process.c:12440-12530, dist.c:5850-6260).
 -module(dist_spawn_probe).
 -export([server/0, client/1, leader/1, options/1, flags/1, demonitor/1,
-         report/1, report_flags/1, wait/1, boom/0]).
+         report/1, report_flags/1, wait/1, alias_wait/1, boom/0]).
 
 server() ->
     io:format("~s~n", [node()]),
@@ -178,6 +178,8 @@ options(Server) ->
                     after 5000 -> timeout
                     end,
     receive _ -> ok after 5000 -> timeout end,
+    Alias = [spawn_alias(Server, Mode) || Mode <-
+             [explicit_unalias, demonitor, reply_demonitor]],
     io:format("options: ~0p~n",
               [[{bad_node, BadNode}, {local, Local},
                 {bad_options, BadOptions}, {bad_mfa, BadMfa},
@@ -192,8 +194,25 @@ options(Server) ->
                 {link_empty, LinkEmpty}, {monitor_empty, MonitorEmpty},
                 {monitor_tag, MonitorTag}, {reply_yes, ReplyYes},
                 {no_connection, NoConnection}, {no_receiver, NoReceiver},
-                {monitor_priority, PriorityFirst}]]),
+                {monitor_priority, PriorityFirst}, {monitor_alias, Alias}]]),
     ok.
+
+spawn_alias(Server, Mode) ->
+    Ref = spawn_request(Server, dist_spawn_probe, alias_wait, [self()],
+                        [{monitor, [{alias, Mode}]}]),
+    Pid = receive {spawn_reply, Ref, ok, P} -> P after 5000 -> timeout end,
+    receive {started, Pid} -> ok after 5000 -> timeout end,
+    Pid ! {alias, Ref},
+    Message = receive alias_message -> received after 5000 -> timeout end,
+    Active = erlang:unalias(Ref),
+    erlang:demonitor(Ref, [flush]),
+    Pid ! stop,
+    {Mode, Message, Active}.
+
+alias_wait(Parent) ->
+    Parent ! {started, self()},
+    receive {alias, Ref} -> Ref ! alias_message end,
+    receive stop -> ok end.
 
 %% The options of a spawn request set the start values of the priority, the
 %% message queue data, and the async_dist flag of the new process

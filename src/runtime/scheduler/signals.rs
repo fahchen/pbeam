@@ -1404,12 +1404,9 @@ impl Scheduler {
             && let Some(origin) = process.monitors.remove(&key)
             && let Some(monitor) = origin.monitor
         {
-            // The target of a process or a port monitor also loses it
-            // (`erl_proc_sig_queue.c:6064-6107`). An alias monitor watches a
-            // local process or a port, so the removal sends no packet, and
-            // the only error source of the removal cannot fail.
+            // The removal also sends a demonitor packet for a remote target.
             self.end_monitor(id, key, &monitor)
-                .expect("the removal of a local monitor does not fail");
+                .expect("the monitored target can be encoded");
         }
         let process = self.processes.get_mut(id).expect("the process is alive");
         process.mailbox.convert(walk, node, message);
