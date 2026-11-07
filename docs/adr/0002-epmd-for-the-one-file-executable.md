@@ -17,7 +17,7 @@ Redbug CLI runs a connect-only module as `Server.Epmd` (`server/lib/server/epmd.
 
 - `pbeam erl` keeps its current epmd start and its overrides. This ADR does not change that path.
 - A one-file executable uses the pinned OTP `-epmd_module` with a fixed name-to-endpoint map and `-start_epmd false`. A pinned name needs no epmd daemon.
-- The module follows the Redbug CLI shape. `register_node/2,3` returns a creation without a daemon. `address_please/3` returns `{ok, Ip, Port, Version}` for a pinned name and falls back to `erl_epmd` otherwise.
+- The module follows the Redbug CLI shape for its callbacks, but it does not copy the creation value. `register_node/2,3` must return a creation that changes for each incarnation of the same node name. Redbug CLI returns a random number from 1 through 3, and PBeam converts a creation below 4 to 4, so a restarted node can get the same creation. `address_please/3` returns `{ok, Ip, Port, Version}` for a pinned name and falls back to `erl_epmd` otherwise.
 - PBeam does not add the module or its configuration now. No one-file executable needs distribution yet, so there is no consumer. The work waits in `docs/backlog.md` with its trigger.
 - Row "Distribution" of `docs/erts-differences.md` points to this ADR.
 
@@ -27,6 +27,7 @@ Redbug CLI runs a connect-only module as `Server.Epmd` (`server/lib/server/epmd.
 - Only the node that starts a connection needs the target endpoint in its map. The peer does not need the same map. There is no name discovery by broadcast.
 - An unpinned name falls back to `erl_epmd`, which needs an epmd. Without one, the lookup fails and the node does not connect. The failure can come from host resolution or from the name lookup, which then gives `noport`.
 - A node that others must find by name needs a fixed published port.
+- The future verification must check that identifiers of two incarnations of the same node name stay distinct. A fixed or reused creation makes them indistinguishable.
 - No new `unsafe`, no new daemon, and no new protocol implementation.
 
 ## Alternatives
