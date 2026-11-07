@@ -291,7 +291,7 @@ pub(in crate::runtime) enum Control {
     /// A valid `SETOPTS` that made a connected socket active, as
     /// `inet_set_opts` returns 1 or 2 (inet_drv.c:7949-7981): the reply is
     /// `[1]` after the scheduler delivers the data. With
-    /// [`Activation::Read`], the change to `once` reads the socket (`tcp_recv`), else the change to `true`
+    /// [`Activation::Read`], the change to `once` or a count reads the socket (`tcp_recv`), else the change to `true`
     /// delivers the bytes of the input buffer (`tcp_deliver`)
     /// (inet_drv.c:11131-11148).
     Active {
@@ -300,12 +300,14 @@ pub(in crate::runtime) enum Control {
     },
     /// A `SETOPTS` that ended `{active, N}` this many times
     /// (inet_drv.c:6993-6998): the port sends `{tcp_passive, S}` or `{udp_passive, S}` to the
-    /// owner for each, and the reply follows.
+    /// owner for each, then runs any activation, and the reply follows.
     Passive {
         /// The reply bytes.
         reply: Vec<u8>,
         /// The number of passive messages.
         count: usize,
+        /// The activation that follows the passive messages, if any.
+        activation: Option<Activation>,
     },
     /// A valid `TCP_REQ_RECV` with this timeout in milliseconds,
     /// `u32::MAX` for `infinity`, and this length. The scheduler runs it,
@@ -523,9 +525,6 @@ impl Inet {
                 if reply == [OK] {
                     self.select_datagram_read(old);
                 }
-                if count > 0 {
-                    return Ok(Control::Passive { reply, count });
-                }
                 // A change of the packet type in active mode drops the
                 // remaining length of the packet (inet_drv.c:7975-7981).
                 if self.packet != old_packet
@@ -536,7 +535,18 @@ impl Inet {
                 {
                     self.stream.remain = 0;
                 }
-                return Ok(self.set_active_result(old, old_packet, reply));
+                let activation = self.set_active_result(old, old_packet, &reply);
+                return Ok(if count > 0 {
+                    Control::Passive {
+                        reply,
+                        count,
+                        activation,
+                    }
+                } else if let Some(activation) = activation {
+                    Control::Active { activation }
+                } else {
+                    Control::Reply(reply)
+                });
             }
             8 => self.get_options(request)?,
             11 => return Ok(self.statistics(request)),
@@ -1149,16 +1159,15 @@ impl Inet {
 
     /// Return the result of a `SETOPTS` with the reply `reply` that changed
     /// the option `active` from `old` and the option `packet` from
-    /// `old_packet`: [`Control::Active`] when a connected socket became
-    /// active, an active socket changed its packet type, or a socket whose
-    /// connection ended is active,
-    /// else the reply (inet_drv.c:7001-7011, 7949-7981). A connected
-    /// `udp_inet` socket gives the reply, so a receive that waits does not
-    /// read for the owner (inet_drv.c:4335-4357). Only `once` reads.
-    fn set_active_result(&self, old: i32, old_packet: i32, reply: Vec<u8>) -> Control {
+    /// `old_packet`: an activation when a connected socket became active,
+    /// an active socket changed its packet type, or a socket whose
+    /// connection ended is active, else none (inet_drv.c:7001-7011, 7949-7981). A connected
+    /// `udp_inet` socket gives no activation, so a receive that waits does not
+    /// read for the owner (inet_drv.c:4335-4357). `once` and a count read.
+    fn set_active_result(&self, old: i32, old_packet: i32, reply: &[u8]) -> Option<Activation> {
         let ended = self.stream.ended && self.active != 0;
         // A change of the packet type in active mode delivers the packets
-        // of the buffer, and a change to `once` with the same packet type
+        // of the buffer, and a change to `once` or a count with the same packet type
         // reads (inet_drv.c:7949-7981).
         let same_packet = self.packet == old_packet;
         if reply != [OK]
@@ -1168,15 +1177,13 @@ impl Inet {
                     || self.state != State::Connected
                     || self.socket_type != SocketType::Stream)
         {
-            return Control::Reply(reply);
+            return None;
         }
-        Control::Active {
-            activation: if old == 0 && self.active == 2 && same_packet {
-                Activation::Read
-            } else {
-                Activation::Deliver
-            },
-        }
+        Some(if old == 0 && matches!(self.active, 2 | 3) && same_packet {
+            Activation::Read
+        } else {
+            Activation::Deliver
+        })
     }
 
     /// Return whether the port has a socket of the stream type, the only type

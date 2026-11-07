@@ -1541,8 +1541,16 @@ pub(super) fn port_control(
             events = Some(received);
             Accept::Queued(reply)
         }
-        Control::Passive { reply, count } => {
-            events = Some((0..count).map(|_| Event::Passive).collect());
+        Control::Passive {
+            reply,
+            count,
+            activation,
+        } => {
+            let mut emitted: Vec<_> = (0..count).map(|_| Event::Passive).collect();
+            if let Some(activation) = activation {
+                emitted.extend(tcp.activate(activation));
+            }
+            events = Some(emitted);
             Accept::Queued(reply)
         }
         Control::Active { activation } => {
