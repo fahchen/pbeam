@@ -35,10 +35,9 @@ fn returns_the_links_of_the_connection_that_ended() {
 }
 
 #[test]
-fn adds_a_link_only_to_its_own_connected_connection() {
-    // `erts_link_dist_insert` fails when the connection is down, and a
-    // duplicate LINK deletes its own dist link, so the connection keeps one
-    // link of a pair (dist.c:2246-2258, erl_proc_sig_queue.c:6635-6663).
+fn adds_a_link_only_to_its_own_pending_or_connected_connection() {
+    // A pending connection owns links before its controller is ready
+    // (bif.c:313-350).
     let atoms = AtomTable::new();
     let a = atoms.put("a@h").unwrap();
     let remote = RemotePid {
@@ -50,8 +49,8 @@ fn adds_a_link_only_to_its_own_connected_connection() {
     let mut table = DistTable::default();
     table.insert(&a, Reference(7), 0);
     table.new_connection(&a);
-    // The entry is pending, so it has no connection yet.
-    assert!(!table.insert_link(ProcessId(1), remote, 1));
+    // The pending entry accepts a link of its current connection.
+    assert!(table.insert_link(ProcessId(1), remote, 1));
     let controller = Controller::Process(ProcessId(1));
     assert!(table.connect(&a, controller, 0).is_some());
     assert!(table.insert_link(ProcessId(1), remote, 1));
@@ -98,7 +97,7 @@ fn returns_the_links_of_each_connection_at_the_exit_of_net_kernel() {
     let entries = table.net_kernel_exits();
     let controllers: Vec<_> = entries
         .iter()
-        .filter_map(|(name, _)| table.shutdown_entry(name))
+        .filter_map(|(name, _)| table.shutdown_entry(name).0)
         .collect();
     let ended: Vec<_> = controllers
         .iter()
@@ -199,7 +198,7 @@ fn orders_the_nodes_by_state_and_by_the_time_of_each_change() {
     let entries = table.net_kernel_exits();
     let mut controllers: Vec<_> = entries
         .iter()
-        .filter_map(|(name, _)| table.shutdown_entry(name))
+        .filter_map(|(name, _)| table.shutdown_entry(name).0)
         .collect();
     controllers.sort_by_key(|controller| match controller {
         Controller::Process(id) => id.0,

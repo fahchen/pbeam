@@ -338,7 +338,13 @@ pub(super) fn abort_pending_connection(
     let _event = event_lock
         .lock()
         .expect("the node event lock is not poisoned");
-    let connected = node.dist().abort_pending(name, connection_id);
+    let (connected, ended) = node.dist().abort_pending(name, connection_id);
+    if let Some(ended) = ended {
+        context.scheduler.dist_connection_down(&ended);
+        context
+            .scheduler
+            .dist_monitor_down(&ended, &Term::static_atom("noconnection"));
+    }
     BifResult::Value(Term::from(!connected))
 }
 
@@ -454,8 +460,11 @@ pub(super) fn create_dist_channel(
         {
             return Ok(BifResult::Value(Term::static_atom("badarg")));
         }
-        dist.connect(name, Controller::Process(controller), flags)
-            .map(|handle| (handle, dist.connection_id(name), dist.nodes_monitors()))
+        let handle = dist.connect(name, Controller::Process(controller), flags);
+        if handle.is_some() {
+            scheduler.dist_flush_pending(&mut dist, name, flags)?;
+        }
+        handle.map(|handle| (handle, dist.connection_id(name), dist.nodes_monitors()))
     };
     let Some((handle, connection, watchers)) = handle else {
         return Ok(if caller == controller {
@@ -513,20 +522,24 @@ fn port_channel(
     let _event = event_lock
         .lock()
         .expect("the node event lock is not poisoned");
-    let setup = |item: Option<&mut crate::runtime::port::Port>| {
+    let mut setup = |item: Option<&mut crate::runtime::port::Port>| -> Result<_, BeamError> {
         let mut dist = node.dist();
-        item.filter(|item| {
-            !node.is_going_down()
-                && node.live_owner(net_kernel).is_some()
-                && !item.closing
-                && item.soft_busy()
-        })
-        .and_then(|_| dist.connect(name, Controller::Port(port), flags))
-        .map(|handle| (handle, dist.connection_id(name), dist.nodes_monitors()))
+        let handle = item
+            .filter(|item| {
+                !node.is_going_down()
+                    && node.live_owner(net_kernel).is_some()
+                    && !item.closing
+                    && item.soft_busy()
+            })
+            .and_then(|_| dist.connect(name, Controller::Port(port), flags));
+        if handle.is_some() {
+            scheduler.dist_flush_pending(&mut dist, name, flags)?;
+        }
+        Ok(handle.map(|handle| (handle, dist.connection_id(name), dist.nodes_monitors())))
     };
     let handle = match node.with_port(port, |item| setup(Some(item))) {
-        Some(handle) => handle,
-        None => setup(None),
+        Some(handle) => handle?,
+        None => setup(None)?,
     };
     let Some((handle, connection, watchers)) = handle else {
         return Ok(BifResult::Value(Term::static_atom("badarg")));
@@ -544,6 +557,7 @@ fn port_channel(
         ]),
     );
     scheduler.nodes_event(name, flags & 1 != 0, Some(connection), None, &watchers);
+    scheduler.dist_port_send(port)?;
     Ok(BifResult::Value(Term::tuple(vec![
         Term::static_atom("ok"),
         handle,
@@ -633,12 +647,30 @@ pub(super) fn dist_ctrl_get_data(context: &mut BifContext<'_>, handle: &Term) ->
         Err(error) => return error,
     };
     let mut dist = context.scheduler.node().dist();
-    let Some(elements) = dist.dequeue(&name) else {
+    let Some(output) = dist.dequeue(&name) else {
         return BifResult::Value(Term::static_atom("none"));
     };
-    let size: usize = elements.iter().map(|element| element.bit_size() / 8).sum();
-    let data = Term::list_from(elements.into_iter().map(Term::Binary).collect::<Vec<_>>());
-    if !dist.get_size(&name) {
+    let get_size = dist.get_size(&name);
+    let connection = dist.connection_id(&name);
+    drop(dist);
+    if let Some((process, key)) = output.spawn_notsup {
+        context
+            .scheduler
+            .dist_spawn_notsup(&name, connection, process, key);
+    }
+    let size: usize = output
+        .elements
+        .iter()
+        .map(|element| element.bit_size() / 8)
+        .sum();
+    let data = Term::list_from(
+        output
+            .elements
+            .into_iter()
+            .map(Term::Binary)
+            .collect::<Vec<_>>(),
+    );
+    if !get_size {
         return BifResult::Value(data);
     }
     let size = Term::from_bigint(BigInt::from(size));

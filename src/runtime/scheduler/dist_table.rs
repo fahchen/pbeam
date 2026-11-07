@@ -102,7 +102,9 @@ struct Entry {
     get_size: bool,
     /// The packets that wait for `erlang:dist_ctrl_get_data/1`, each as the
     /// binaries of its iovec (`dep->out_queue`).
-    output: VecDeque<Vec<Binary>>,
+    output: VecDeque<DistOutput>,
+    /// Signals held until the connection flags are known.
+    pending_signals: VecDeque<PendingSignal>,
     /// The queue size of the packets in `output` (`dep->total_qsize`, see
     /// [`PACKET_OVERHEAD`]).
     queue_size: u64,
@@ -129,6 +131,23 @@ struct Entry {
     monitors: Vec<DistMonitor>,
     /// Counts of node monitors held by each local process on this connection.
     node_monitors: HashMap<ProcessId, u64>,
+}
+
+/// A queued packet and the spawn failure delivered when the controller takes it.
+#[derive(Debug)]
+pub(in crate::runtime) struct DistOutput {
+    pub(in crate::runtime) elements: Vec<Binary>,
+    pub(in crate::runtime) spawn_notsup: Option<(ProcessId, MonitorKey)>,
+}
+
+/// A signal queued while the connection flags are not yet known.
+#[derive(Debug)]
+pub(super) enum PendingSignal {
+    Send(ProcessId, Term, Term, super::dist_output::SendPriority),
+    Monitor(ProcessId, Term),
+    Link(ProcessId, Term),
+    Spawn(ProcessId, MonitorKey, Term, Term),
+    Exit(ProcessId, Term, Term, super::dist_output::SendPriority),
 }
 
 /// An incomplete distribution message and its own atom translation table.
@@ -315,6 +334,7 @@ impl DistTable {
                 input: 0,
                 get_size: false,
                 output: VecDeque::new(),
+                pending_signals: VecDeque::new(),
                 queue_size: 0,
                 out: 0,
                 notify: false,
@@ -426,7 +446,8 @@ impl DistTable {
     }
 
     /// Make the pending entry of `name` idle when its connection id is
-    /// `connection_id`, and return whether the entry was connected, as
+    /// `connection_id`, and return whether the entry was connected and the
+    /// detached connection state, as
     /// `abort_pending_connection` does (`dist.c:5627-5691`). An entry in
     /// another state or of another connection does not change.
     ///
@@ -434,24 +455,35 @@ impl DistTable {
     ///
     /// ```rust,ignore
     /// let (id, _) = table.new_connection(&a, Reference(7), 0);
-    /// assert!(!table.abort_pending(&a, id));
+    /// assert!(!table.abort_pending(&a, id).0);
     /// assert_eq!(table.new_connection(&a, Reference(7), 0).0, id + 1);
     /// ```
-    pub(in crate::runtime) fn abort_pending(&mut self, name: &Atom, connection_id: u32) -> bool {
+    pub(in crate::runtime) fn abort_pending(
+        &mut self,
+        name: &Atom,
+        connection_id: u32,
+    ) -> (bool, Option<EndedConnection>) {
         let order = self.next_order;
         let entry = self.entry_mut(name);
         if entry.connection_id != connection_id {
-            return false;
+            return (false, None);
         }
         match entry.state {
             State::Pending => {
+                let ended = EndedConnection {
+                    connection: connection_id,
+                    links: std::mem::take(&mut entry.links),
+                    monitors: std::mem::take(&mut entry.monitors),
+                    node_monitors: (name.clone(), std::mem::take(&mut entry.node_monitors)),
+                    node_events: (false, Vec::new()),
+                };
                 entry.set_idle(order);
                 self.idle.insert(order, name.clone());
                 self.next_order += 1;
-                false
+                (false, Some(ended))
             }
-            State::Connected => true,
-            State::Idle => false,
+            State::Connected => (true, None),
+            State::Idle => (false, None),
         }
     }
 
@@ -596,7 +628,7 @@ impl DistTable {
         self.entries[&name.index()].input
     }
 
-    /// Register a node monitor and return its connected entry id.
+    /// Register a node monitor and return its pending or connected entry id.
     ///
     /// # Examples
     ///
@@ -609,7 +641,7 @@ impl DistTable {
         process: ProcessId,
     ) -> Option<u32> {
         let entry = self.entries.get_mut(&name.index())?;
-        if entry.state != State::Connected {
+        if entry.state == State::Idle {
             return None;
         }
         *entry.node_monitors.entry(process).or_default() += 1;
@@ -719,6 +751,13 @@ impl DistTable {
         }
     }
 
+    /// Return whether the entry of `name` has a pending connection.
+    pub(super) fn pending(&self, name: &Atom) -> bool {
+        self.entries
+            .get(&name.index())
+            .is_some_and(|entry| entry.state == State::Pending)
+    }
+
     /// Return the flags, the controller, and the connection id of the entry
     /// of `name` when it is connected (`ERTS_DSIG_PREP_CONNECTED`,
     /// `dist.c:3250-3251`).
@@ -730,6 +769,72 @@ impl DistTable {
         Some((entry.flags, entry.controller?, entry.connection_id))
     }
 
+    /// Queue a send while the entry is pending.
+    pub(super) fn enqueue_pending_send(
+        &mut self,
+        name: &Atom,
+        sender: ProcessId,
+        to: Term,
+        message: Term,
+        priority: super::dist_output::SendPriority,
+    ) {
+        self.entry_mut(name)
+            .pending_signals
+            .push_back(PendingSignal::Send(sender, to, message, priority));
+    }
+
+    /// Queue a monitor on the pending connection.
+    pub(super) fn enqueue_pending_monitor(
+        &mut self,
+        name: &Atom,
+        sender: ProcessId,
+        control: Term,
+    ) {
+        self.entry_mut(name)
+            .pending_signals
+            .push_back(PendingSignal::Monitor(sender, control));
+    }
+
+    /// Queue a link on the pending connection.
+    pub(super) fn enqueue_pending_link(&mut self, name: &Atom, sender: ProcessId, control: Term) {
+        self.entry_mut(name)
+            .pending_signals
+            .push_back(PendingSignal::Link(sender, control));
+    }
+
+    /// Queue a spawn request on the pending connection.
+    pub(super) fn enqueue_pending_spawn(
+        &mut self,
+        name: &Atom,
+        sender: ProcessId,
+        key: MonitorKey,
+        control: Term,
+        arguments: Term,
+    ) {
+        self.entry_mut(name)
+            .pending_signals
+            .push_back(PendingSignal::Spawn(sender, key, control, arguments));
+    }
+
+    /// Queue an exit signal on the pending connection.
+    pub(super) fn enqueue_pending_exit(
+        &mut self,
+        name: &Atom,
+        sender: ProcessId,
+        to: Term,
+        reason: Term,
+        priority: super::dist_output::SendPriority,
+    ) {
+        self.entry_mut(name)
+            .pending_signals
+            .push_back(PendingSignal::Exit(sender, to, reason, priority));
+    }
+
+    /// Take pending signals while the entry lock is held.
+    pub(super) fn take_pending_signals(&mut self, name: &Atom) -> VecDeque<PendingSignal> {
+        std::mem::take(&mut self.entry_mut(name).pending_signals)
+    }
+
     /// Put the packet `elements` at the end of the output queue of the
     /// connected entry of `name`, as `erts_dsig_send` does
     /// (`dist.c:3646-3683`), and return whether the controller gets the
@@ -739,19 +844,32 @@ impl DistTable {
     pub(in crate::runtime) fn enqueue(&mut self, name: &Atom, elements: Vec<Binary>) -> bool {
         let entry = self.entry_mut(name);
         entry.queue_size += queue_size(&elements);
-        entry.output.push_back(elements);
+        entry.output.push_back(DistOutput {
+            elements,
+            spawn_notsup: None,
+        });
         std::mem::take(&mut entry.notify)
+    }
+
+    /// Queue a tick that reports an unsupported spawn when it is taken.
+    pub(super) fn enqueue_spawn_notsup(&mut self, name: &Atom, sender: ProcessId, key: MonitorKey) {
+        let entry = self.entry_mut(name);
+        entry.queue_size += queue_size(&[]);
+        entry.output.push_back(DistOutput {
+            elements: Vec::new(),
+            spawn_notsup: Some((sender, key)),
+        });
     }
 
     /// Take the first packet of the output queue of the entry of `name` and
     /// count it, as `erlang:dist_ctrl_get_data/1` does
     /// (`dist.c:4612-4713`), or return `None` for an empty queue.
-    pub(in crate::runtime) fn dequeue(&mut self, name: &Atom) -> Option<Vec<Binary>> {
+    pub(in crate::runtime) fn dequeue(&mut self, name: &Atom) -> Option<DistOutput> {
         let entry = self.entry_mut(name);
-        let elements = entry.output.pop_front()?;
-        entry.queue_size -= queue_size(&elements);
+        let output = entry.output.pop_front()?;
+        entry.queue_size -= queue_size(&output.elements);
         entry.out += 1;
-        Some(elements)
+        Some(output)
     }
 
     /// Ask for the `dist_data` message of the next packet of the entry of
@@ -820,7 +938,7 @@ impl DistTable {
     /// `erts_link_dist_insert` does (`erl_monitor_link.h:2523-2548`,
     /// `651-668`, `dist.c:2246-2258`, `3085`), and return whether the
     /// connection has the link. Return `false` when the entry is not
-    /// connected to `connection`, so that the caller gives the process
+    /// pending or connected to `connection`, so that the caller gives the process
     /// `noconnection` (`dist.c:2250-2258`). A connection that already has
     /// the link keeps it, as a duplicate `LINK` deletes its own dist link
     /// (`erl_proc_sig_queue.c:6635-6663`).
@@ -840,13 +958,22 @@ impl DistTable {
             .entries
             .get_mut(&remote.node)
             .expect("the entry of the node stays in the table");
-        if entry.state != State::Connected || entry.connection_id != connection {
+        if entry.state == State::Idle || entry.connection_id != connection {
             return false;
         }
+        self.insert_link_now(process, remote);
+        true
+    }
+
+    /// Insert a link while the caller holds the matching connection lock.
+    pub(super) fn insert_link_now(&mut self, process: ProcessId, remote: RemotePid) {
+        let entry = self
+            .entries
+            .get_mut(&remote.node)
+            .expect("the entry of the node stays in the table");
         if !entry.links.contains(&(process, remote)) {
             entry.links.insert(0, (process, remote));
         }
-        true
     }
 
     /// Remove the link of `process` to `remote` from the connection
@@ -905,7 +1032,7 @@ impl DistTable {
             .entries
             .get_mut(&node.index())
             .expect("the entry of the node stays in the table");
-        if entry.state != State::Connected || entry.connection_id != connection {
+        if entry.state == State::Idle || entry.connection_id != connection {
             return false;
         }
         let monitor = DistMonitor {
@@ -1043,18 +1170,19 @@ impl DistTable {
     /// ```rust,ignore
     /// let controller = table.shutdown_entry(&name);
     /// ```
-    pub(in crate::runtime) fn shutdown_entry(&mut self, name: &Atom) -> Option<Controller> {
+    pub(in crate::runtime) fn shutdown_entry(
+        &mut self,
+        name: &Atom,
+    ) -> (Option<Controller>, Option<EndedConnection>) {
         let entry = self.entry_mut(name);
         match entry.state {
             State::Pending => {
-                let order = self.next_order;
-                self.entry_mut(name).set_idle(order);
-                self.idle.insert(order, name.clone());
-                self.next_order += 1;
-                None
+                let connection = entry.connection_id;
+                let (_, ended) = self.abort_pending(name, connection);
+                (None, ended)
             }
-            State::Connected => entry.controller,
-            State::Idle => None,
+            State::Connected => (entry.controller, None),
+            State::Idle => (None, None),
         }
     }
 
@@ -1132,6 +1260,7 @@ impl Entry {
         self.fragments.clear();
         self.get_size = false;
         self.output.clear();
+        self.pending_signals.clear();
         self.queue_size = 0;
         self.notify = false;
         self.controller = None;

@@ -142,6 +142,229 @@ fn orders_immediate_noconnection_priority_down_as_pinned_erts() {
 }
 
 #[test]
+fn aborts_pending_connections_as_pinned_erts() {
+    // dist.c:5627-5711: abort clears only the matching pending connection.
+    let epmd = Epmd::start();
+    let name = format!("dabort{}", std::process::id());
+    let expression = "Node = abort_peer@nohost, \
+        Old = erts_internal:new_connection(Node), \
+        Same = Old =:= erts_internal:new_connection(Node), \
+        A = erts_internal:abort_pending_connection(Node, Old), \
+        B = erts_internal:abort_pending_connection(Node, Old), \
+        New = erts_internal:new_connection(Node), \
+        C = erts_internal:abort_pending_connection(Node, Old), \
+        StillPending = New =:= erts_internal:new_connection(Node), \
+        D = erts_internal:abort_pending_connection(Node, New), \
+        Error = try erts_internal:abort_pending_connection(other@nohost, New) \
+                catch error:badarg -> badarg end, \
+        io:format(\"~w~n\", [{Same,A,B,Old =/= New,C,StillPending,D,Error}]), halt().";
+    let arguments = probe(&["-sname", &name], expression);
+    let expected = "{true,true,true,true,true,true,true,badarg}\n";
+    assert_eq!(stdout(&erts_erl(&epmd, &arguments)), expected);
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), expected);
+}
+
+#[test]
+fn delivers_name_sends_queued_on_a_pending_connection_as_pinned_erts() {
+    // bif.c:2391-2417 accepts noconnect on a pending connection.
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    for socket in [false, true] {
+        for pbeam in [false, true] {
+            let server_name = format!("dpendserver{socket}{pbeam}{id}");
+            let mut server_args = vec!["-sname", server_name.as_str(), "-setcookie", "ck"];
+            if socket {
+                server_args.extend(SOCKET_CARRIER);
+            }
+            let server = ErtsNode::start(
+                &epmd,
+                &server_args,
+                "register(pending_receiver,self()), io:format(\"~s~n\",[node()]), \
+                 receive {one,From} -> receive two -> io:format(\"~w~n\",[{one,two}]), From ! ack end end, \
+                 receive stop -> ok after 5000 -> ok end, halt().",
+            );
+            let expression = format!(
+                "N='{}', erts_internal:new_connection(N), \
+                 ok=erlang:send({{pending_receiver,N}},{{one,self()}},[noconnect]), \
+                 ok=erlang:send({{pending_receiver,N}},two,[noconnect]), \
+                 true=net_kernel:connect_node(N), \
+                 receive ack -> io:format(\"true~n\") after 5000 -> io:format(\"timeout~n\") end, halt().",
+                server.line()
+            );
+            let client_name = format!("dpendclient{socket}{pbeam}{id}");
+            let mut args = vec![
+                "-sname",
+                client_name.as_str(),
+                "-setcookie",
+                "ck",
+                "-kernel",
+                "logger_level",
+                "none",
+            ];
+            if socket {
+                args.extend(SOCKET_CARRIER);
+            }
+            args.extend(["-noshell", "-eval", expression.as_str()]);
+            let output = if pbeam {
+                pbeam_erl(&epmd, &args)
+            } else {
+                erts_erl(&epmd, &args)
+            };
+            let text = stdout(&output);
+            assert_eq!(text, "true\n", "socket={socket} pbeam={pbeam}");
+            assert_eq!(server.line(), "{one,two}");
+        }
+    }
+    let name = format!("dpendabort{id}");
+    let expression = "N=pending_abort@nohost, H=erts_internal:new_connection(N), \
+        ok=erlang:send({pending_receiver,N},discard,[noconnect]), \
+        true=erts_internal:abort_pending_connection(N,H), \
+        H2=erts_internal:new_connection(N), Flags=element(3,erts_internal:get_dflags()), \
+        {ok,H2}=erts_internal:create_dist_channel(N,self(),{Flags,1}), \
+        io:format(\"~w~n\",[erlang:dist_ctrl_get_data(H2)]), halt().";
+    let args = [
+        "-sname",
+        &name,
+        "-kernel",
+        "logger_level",
+        "none",
+        "-noshell",
+        "-eval",
+        expression,
+    ];
+    assert_eq!(stdout(&erts_erl(&epmd, &args)), "none\n");
+    assert_eq!(stdout(&pbeam_erl(&epmd, &args)), "none\n");
+}
+
+#[test]
+fn sends_to_a_name_on_the_first_signal_as_pinned_erts() {
+    // dist.c:5713-5759 sends auto_connect to net_kernel for an idle entry.
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    for socket in [false, true] {
+        for pbeam in [false, true] {
+            let server_name = format!("dfirstserver{socket}{pbeam}{id}");
+            let mut server_args = vec!["-sname", server_name.as_str(), "-setcookie", "ck"];
+            if socket {
+                server_args.extend(SOCKET_CARRIER);
+            }
+            let server = ErtsNode::start(
+                &epmd,
+                &server_args,
+                "register(pending_receiver,self()), io:format(\"~s~n\",[node()]), \
+                 receive {one,From} -> receive two -> io:format(\"~w~n\",[{one,two}]), From ! ack end end, \
+                 receive stop -> ok after 5000 -> ok end, halt().",
+            );
+            let expression = format!(
+                "N='{}', noconnect=erlang:send({{pending_receiver,N}},discard,[noconnect]), \
+                 {{one,_}}=erlang:send({{pending_receiver,N}},{{one,self()}}), \
+                 ok=erlang:send({{pending_receiver,N}},two,[noconnect]), \
+                 receive ack -> io:format(\"true~n\") after 5000 -> io:format(\"timeout~n\") end, halt().",
+                server.line()
+            );
+            let client_name = format!("dfirstclient{socket}{pbeam}{id}");
+            let mut args = vec![
+                "-sname",
+                client_name.as_str(),
+                "-setcookie",
+                "ck",
+                "-kernel",
+                "logger_level",
+                "none",
+            ];
+            if socket {
+                args.extend(SOCKET_CARRIER);
+            }
+            args.extend(["-noshell", "-eval", expression.as_str()]);
+            let output = if pbeam {
+                pbeam_erl(&epmd, &args)
+            } else {
+                erts_erl(&epmd, &args)
+            };
+            assert_eq!(stdout(&output), "true\n", "socket={socket} pbeam={pbeam}");
+            assert_eq!(server.line(), "{one,two}");
+        }
+    }
+    let name = format!("dfirstmissing{id}");
+    let expression = "ok=erlang:send({pending_receiver,missing@localhost},lost,[]), \
+        false=net_kernel:connect_node(missing@localhost), io:format(\"ok~n\"), halt().";
+    let args = [
+        "-sname",
+        &name,
+        "-kernel",
+        "logger_level",
+        "none",
+        "-noshell",
+        "-eval",
+        expression,
+    ];
+    assert_eq!(stdout(&erts_erl(&epmd, &args)), "ok\n");
+    assert_eq!(stdout(&pbeam_erl(&epmd, &args)), "ok\n");
+}
+
+#[test]
+fn applies_auto_connect_policy_to_name_sends_as_pinned_erts() {
+    // net_kernel.erl:1047-1100 aborts a barred or disabled auto-connect.
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    for policy in ["never", "once"] {
+        for pbeam in [false, true] {
+            let server_name = format!("dpolicyserver{policy}{pbeam}{id}");
+            let server = ErtsNode::start(
+                &epmd,
+                &["-sname", &server_name, "-setcookie", "ck"],
+                "register(pending_receiver,self()), io:format(\"~s~n\",[node()]), \
+                 receive {initial,P} -> P ! initial_ack; {final,P} -> P ! final_ack; _ -> halt(3) end, \
+                 receive {final,P2} -> P2 ! final_ack; _ -> halt(4) after 5000 -> ok end, halt().",
+            );
+            let first = if policy == "once" {
+                "{pending_receiver,N} ! {initial,self()}, \
+                 receive initial_ack -> ok after 5000 -> halt(5) end, \
+                 true=erlang:disconnect_node(N), timer:sleep(200),"
+            } else {
+                ""
+            };
+            let expression = format!(
+                "N='{}', {first} {{pending_receiver,N}} ! leaked, \
+                 R=monitor(process,{{pending_receiver,N}}), \
+                 receive {{'DOWN',R,process,_,noconnection}} -> ok after 5000 -> halt(7) end, \
+                 B=atom_to_binary(N), P=binary_to_term(<<131,88,118,(byte_size(B)):16,B/binary,1:32,0:32,1:32>>), \
+                 process_flag(trap_exit,true), true=link(P), \
+                 receive {{'EXIT',P,noconnection}} -> ok after 5000 -> halt(8) end, \
+                 Req=spawn_request(N,erlang,node,[],[]), \
+                 receive {{spawn_reply,Req,error,noconnection}} -> ok after 5000 -> halt(9) end, \
+                 sys:get_state(net_kernel), \
+                 false=lists:member(N,nodes()), true=net_kernel:connect_node(N), \
+                 {{pending_receiver,N}} ! {{final,self()}}, \
+                 receive final_ack -> io:format(\"ok~n\") after 5000 -> halt(6) end, halt().",
+                server.line()
+            );
+            let client_name = format!("dpolicyclient{policy}{pbeam}{id}");
+            let args = [
+                "-sname",
+                &client_name,
+                "-setcookie",
+                "ck",
+                "-kernel",
+                "logger_level",
+                "none",
+                "dist_auto_connect",
+                policy,
+                "-noshell",
+                "-eval",
+                &expression,
+            ];
+            let output = if pbeam {
+                pbeam_erl(&epmd, &args)
+            } else {
+                erts_erl(&epmd, &args)
+            };
+            assert_eq!(stdout(&output), "ok\n", "policy={policy} pbeam={pbeam}");
+        }
+    }
+}
+
+#[test]
 fn runs_the_bifs_of_a_process_controller_as_pinned_erts() {
     // new_connection/1, abort_pending_connection/2, create_dist_channel/3,
     // the dist_ctrl_* BIFs, dist_get_stat/1, and nodes/1,2 of a connection
@@ -2232,9 +2455,7 @@ fn calls_a_server_of_another_node_by_name_as_pinned_erts() {
 fn pings_a_live_node_with_no_connection_as_pinned_erts() {
     // `net_adm:ping/1` makes a `gen:call` to `{net_kernel, Node}`, so it
     // monitors the name and sends to it. ERTS starts a connection on that
-    // call and answers `pong`. PBeam ends the monitor of a node with no
-    // connection at once with `noconnection`, so it answers `pang`; #1412
-    // adds the connection on the first signal (row "Distribution").
+    // call and answers `pong` (row "Distribution").
     let epmd = Epmd::start();
     let id = std::process::id();
     for (server_pbeam, socket) in [(false, true), (false, false), (true, true), (true, false)] {
@@ -2267,10 +2488,575 @@ fn pings_a_live_node_with_no_connection_as_pinned_erts() {
         let pbeam = format!("dppb{server_pbeam}{socket}{id}");
         assert_eq!(
             stdout(&pbeam_erl(&epmd, &client(&pbeam))),
-            "[{unconnected,pang}]\n",
+            "[{unconnected,pong}]\n",
             "server pbeam {server_pbeam}, socket {socket}"
         );
     }
+}
+
+#[test]
+fn fails_a_pending_name_monitor_as_pinned_erts() {
+    // bif.c:838-858 and dist.c:5627-5674: abort detaches the monitor.
+    let epmd = Epmd::start();
+    let name = format!("dmonmissing{}", std::process::id());
+    let expression = "N=missing@localhost, R=monitor(process,{missing_name,N}), \
+        receive {'DOWN',R,process,{missing_name,N},Reason} -> \
+        io:format(\"~w~n\",[{Reason,net_adm:ping(N)}]) \
+        after 5000 -> halt(2) end, halt().";
+    let args = [
+        "-sname",
+        &name,
+        "-kernel",
+        "logger_level",
+        "none",
+        "-noshell",
+        "-eval",
+        expression,
+    ];
+    assert_eq!(stdout(&erts_erl(&epmd, &args)), "{noconnection,pang}\n");
+    assert_eq!(stdout(&pbeam_erl(&epmd, &args)), "{noconnection,pang}\n");
+    let expression = format!(
+        "{{ok,_}}=net_kernel:start(dmonshutdown{}, #{{name_domain=>shortnames}}), \
+         N=monitor_pending@nohost, erts_internal:new_connection(N), \
+         R=monitor(process,{{missing_name,N}}), ok=net_kernel:stop(), \
+         receive {{'DOWN',R,process,{{missing_name,N}},Reason}} -> io:format(\"~w~n\",[Reason]) \
+         after 5000 -> halt(2) end, halt().",
+        std::process::id()
+    );
+    let args = [
+        "-kernel",
+        "logger_level",
+        "none",
+        "-noshell",
+        "-eval",
+        &expression,
+    ];
+    assert_eq!(stdout(&erts_erl(&epmd, &args)), "noconnection\n");
+    assert_eq!(stdout(&pbeam_erl(&epmd, &args)), "noconnection\n");
+    let expression = "N=monitor_flags@nohost, erts_internal:new_connection(N), \
+        R=monitor(process,{missing_name,N}), \
+        Flags=element(3,erts_internal:get_dflags()) band bnot 16#28, \
+        {ok,H}=erts_internal:create_dist_channel(N,self(),{Flags,1}), \
+        D=erlang:dist_ctrl_get_data(H), io:format(\"~w~n\",[{D=:=[],is_reference(R)}]), halt().";
+    let args = [
+        "-sname",
+        &name,
+        "-kernel",
+        "logger_level",
+        "none",
+        "-noshell",
+        "-eval",
+        expression,
+    ];
+    assert_eq!(stdout(&erts_erl(&epmd, &args)), "{true,true}\n");
+    assert_eq!(stdout(&pbeam_erl(&epmd, &args)), "{true,true}\n");
+}
+
+#[test]
+fn preserves_a_demonitored_pending_monitor_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    for pbeam in [false, true] {
+        let server_name = format!("dmonorderserver{pbeam}{id}");
+        let server = ErtsNode::start(
+            &epmd,
+            &["-sname", &server_name, "-setcookie", "ck"],
+            "register(pending_receiver,self()), io:format(\"~s~n\",[node()]), \
+             receive {inspect,P} -> \
+             F=fun Loop(0) -> timeout; Loop(T) -> case process_info(self(),monitored_by) of \
+                {monitored_by,[]} -> []; _ -> timer:sleep(10), Loop(T-1) end end, \
+             P ! {monitors,F(50)} end, \
+             receive stop -> ok after 5000 -> ok end, halt().",
+        );
+        let expression = format!(
+            "N='{}', erts_internal:new_connection(N), \
+             R=monitor(process,{{pending_receiver,N}}), true=demonitor(R), \
+             {{pending_receiver,N}} ! {{inspect,self()}}, true=net_kernel:connect_node(N), \
+             receive {{monitors,Ms}} -> io:format(\"~w~n\",[Ms]) after 5000 -> halt(2) end, halt().",
+            server.line()
+        );
+        let client_name = format!("dmonorderclient{pbeam}{id}");
+        let args = [
+            "-sname",
+            &client_name,
+            "-setcookie",
+            "ck",
+            "-kernel",
+            "logger_level",
+            "none",
+            "-noshell",
+            "-eval",
+            &expression,
+        ];
+        let output = if pbeam {
+            pbeam_erl(&epmd, &args)
+        } else {
+            erts_erl(&epmd, &args)
+        };
+        assert_eq!(stdout(&output), "timeout\n", "pbeam={pbeam}");
+    }
+}
+
+#[test]
+fn demonitors_a_remote_pid_before_connection_setup_as_pinned_erts() {
+    // The pending PID monitor and demonitor reach the peer in order
+    // (bif.c:525-576, dist.c:1550-1570, erl_proc_sig_queue.c:6550-6585).
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    for pbeam in [false, true] {
+        let server_name = format!("dpiddemonserver{pbeam}{id}");
+        let server = ErtsNode::start(
+            &epmd,
+            &[
+                "-sname",
+                &server_name,
+                "-setcookie",
+                "ck",
+                "-pa",
+                "fixtures/dist",
+            ],
+            "dist_pending_demonitor_probe:server().",
+        );
+        let node = server.line();
+        let pid_bytes = server.line();
+        let expression =
+            format!("dist_pending_demonitor_probe:client({node}, {pid_bytes}), halt().");
+        let client_name = format!("dpiddemonclient{pbeam}{id}");
+        let args = [
+            "-sname",
+            &client_name,
+            "-setcookie",
+            "ck",
+            "-kernel",
+            "logger_level",
+            "none",
+            "-noshell",
+            "-pa",
+            "fixtures/dist",
+            "-eval",
+            &expression,
+        ];
+        let output = if pbeam {
+            pbeam_erl(&epmd, &args)
+        } else {
+            erts_erl(&epmd, &args)
+        };
+        assert_eq!(stdout(&output), "false\n", "pbeam={pbeam}");
+    }
+}
+
+#[test]
+fn monitors_a_pid_on_the_first_signal_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    for pbeam in [false, true] {
+        let server_name = format!("dmonpidserver{pbeam}{id}");
+        let server = ErtsNode::start(
+            &epmd,
+            &["-sname", &server_name, "-setcookie", "ck"],
+            "Parent=self(), Child=spawn(fun()->register(pending_receiver,self()), Parent ! ready, receive stop -> ok end end), \
+             receive ready -> ok end, io:format(\"~w~n~w~n\",[node(),binary_to_list(term_to_binary(Child))]), \
+             receive stop -> ok after 5000 -> ok end, halt().",
+        );
+        let node = server.line();
+        let pid_bytes = server.line();
+        let expression = format!(
+            "N={node}, P=binary_to_term(list_to_binary({pid_bytes})), R=monitor(process,P), \
+             {{pending_receiver,N}} ! stop, \
+             receive {{'DOWN',R,process,P,Reason}} -> io:format(\"~w~n\",[Reason]) after 5000 -> halt(2) end, halt()."
+        );
+        let client_name = format!("dmonpidclient{pbeam}{id}");
+        let args = [
+            "-sname",
+            &client_name,
+            "-setcookie",
+            "ck",
+            "-kernel",
+            "logger_level",
+            "none",
+            "-noshell",
+            "-eval",
+            &expression,
+        ];
+        let output = if pbeam {
+            pbeam_erl(&epmd, &args)
+        } else {
+            erts_erl(&epmd, &args)
+        };
+        assert_eq!(stdout(&output), "normal\n", "pbeam={pbeam}");
+    }
+}
+
+#[test]
+fn links_a_pid_on_the_first_signal_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    for pbeam in [false, true] {
+        let server_name = format!("dlinkserver{pbeam}{id}");
+        let server = ErtsNode::start(
+            &epmd,
+            &["-sname", &server_name, "-setcookie", "ck"],
+            "Parent=self(), Child=spawn(fun()->register(pending_receiver,self()), Parent ! ready, receive crash -> exit(boom) end end), \
+             receive ready -> ok end, io:format(\"~w~n~w~n\",[node(),binary_to_list(term_to_binary(Child))]), \
+             receive stop -> ok after 5000 -> ok end, halt().",
+        );
+        let node = server.line();
+        let pid_bytes = server.line();
+        let expression = format!(
+            "process_flag(trap_exit,true), N={node}, P=binary_to_term(list_to_binary({pid_bytes})), \
+             true=link(P), R=monitor(process,P), {{pending_receiver,N}} ! crash, \
+             X=receive {{'EXIT',P,Reason1}} -> Reason1 after 5000 -> timeout end, \
+             Y=receive {{'DOWN',R,process,P,Reason2}} -> Reason2 after 5000 -> timeout end, \
+             io:format(\"~w~n\",[{{X,Y}}]), halt()."
+        );
+        let client_name = format!("dlinkclient{pbeam}{id}");
+        let args = [
+            "-sname",
+            &client_name,
+            "-setcookie",
+            "ck",
+            "-kernel",
+            "logger_level",
+            "none",
+            "-noshell",
+            "-eval",
+            &expression,
+        ];
+        let output = if pbeam {
+            pbeam_erl(&epmd, &args)
+        } else {
+            erts_erl(&epmd, &args)
+        };
+        assert_eq!(stdout(&output), "{boom,boom}\n", "pbeam={pbeam}");
+    }
+}
+
+#[test]
+fn fails_and_unlinks_pending_links_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let name = format!("dlinkmissing{}", std::process::id());
+    let expression = "N=missing@localhost, B=atom_to_binary(N), \
+        P=binary_to_term(<<131,88,118,(byte_size(B)):16,B/binary,1:32,0:32,1:32>>), \
+        process_flag(trap_exit,true), true=link(P), \
+        A=receive {'EXIT',P,X} -> X after 5000 -> timeout end, \
+        {_,R}=spawn_monitor(fun()->link(P),receive after 5000 -> ok end end), \
+        C=receive {'DOWN',R,process,_,Y} -> Y after 5000 -> timeout end, \
+        io:format(\"~w~n\",[{A,C}]), halt().";
+    let args = [
+        "-sname",
+        &name,
+        "-kernel",
+        "logger_level",
+        "none",
+        "-noshell",
+        "-eval",
+        expression,
+    ];
+    assert_eq!(
+        stdout(&erts_erl(&epmd, &args)),
+        "{noconnection,noconnection}\n"
+    );
+    assert_eq!(
+        stdout(&pbeam_erl(&epmd, &args)),
+        "{noconnection,noconnection}\n"
+    );
+    for operation in ["unlink", "exit"] {
+        let action = if operation == "unlink" {
+            "true=link(P),true=unlink(P)"
+        } else {
+            "{_,R}=spawn_monitor(fun()->link(P),exit(boom) end), receive {'DOWN',R,process,_,boom}->ok end"
+        };
+        let expression = format!(
+            "N=link_pending@nohost, B=atom_to_binary(N), \
+             P=binary_to_term(<<131,88,118,(byte_size(B)):16,B/binary,1:32,0:32,1:32>>), \
+             erts_internal:new_connection(N), {action}, Flags=element(3,erts_internal:get_dflags()), \
+             {{ok,H}}=erts_internal:create_dist_channel(N,self(),{{Flags,1}}), \
+             A=erlang:dist_ctrl_get_data(H), C=erlang:dist_ctrl_get_data(H), \
+             io:format(\"~w~n\",[{{A=/=none,C=/=none}}]), halt()."
+        );
+        let args = [
+            "-sname",
+            &name,
+            "-kernel",
+            "logger_level",
+            "none",
+            "-noshell",
+            "-eval",
+            &expression,
+        ];
+        assert_eq!(
+            stdout(&erts_erl(&epmd, &args)),
+            "{true,true}\n",
+            "{operation}"
+        );
+        assert_eq!(
+            stdout(&pbeam_erl(&epmd, &args)),
+            "{true,true}\n",
+            "{operation}"
+        );
+    }
+}
+
+#[test]
+fn spawns_on_the_first_signal_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    for socket in [false, true] {
+        for pbeam in [false, true] {
+            let server_name = format!("dspawnfirstserver{socket}{pbeam}{id}");
+            let mut server_args = vec!["-sname", server_name.as_str(), "-setcookie", "ck"];
+            if socket {
+                server_args.extend(SOCKET_CARRIER);
+            }
+            let server = ErtsNode::start(
+                &epmd,
+                &server_args,
+                "io:format(\"~w~n\",[node()]), receive stop -> ok after 5000 -> ok end, halt().",
+            );
+            let node = server.line();
+            let expression = format!(
+                "N={node}, R=spawn_request(N,erlang,send,[self(),spawned],[monitor]), \
+                 P=receive {{spawn_reply,R,ok,Pid}} -> Pid after 5000 -> halt(2) end, \
+                 receive spawned -> ok after 5000 -> halt(3) end, \
+                 Reason=receive {{'DOWN',R,process,P,X}} -> X after 5000 -> timeout end, \
+                 io:format(\"~w~n\",[Reason]), halt()."
+            );
+            let client_name = format!("dspawnfirstclient{socket}{pbeam}{id}");
+            let mut args = vec![
+                "-sname",
+                client_name.as_str(),
+                "-setcookie",
+                "ck",
+                "-kernel",
+                "logger_level",
+                "none",
+            ];
+            if socket {
+                args.extend(SOCKET_CARRIER);
+            }
+            args.extend(["-noshell", "-eval", expression.as_str()]);
+            let output = if pbeam {
+                pbeam_erl(&epmd, &args)
+            } else {
+                erts_erl(&epmd, &args)
+            };
+            assert_eq!(stdout(&output), "normal\n", "socket={socket} pbeam={pbeam}");
+        }
+    }
+}
+
+#[test]
+fn fails_a_pending_spawn_as_pinned_erts() {
+    // dist.c:6081-6120 and erl_proc_sig_queue.c:4864-4900.
+    let epmd = Epmd::start();
+    let name = format!("dspawnmissing{}", std::process::id());
+    let expression = "N=missing@localhost, R=spawn_request(N,erlang,node,[],[]), \
+        A=receive {spawn_reply,R,error,E}->E after 5000->timeout end, \
+        process_flag(trap_exit,true), P=spawn_link(N,erlang,node,[]), \
+        B=receive {'EXIT',P,E2}->E2 after 5000->timeout end, \
+        io:format(\"~w~n\",[{A,is_pid(P),B}]), halt().";
+    let args = [
+        "-sname",
+        &name,
+        "-kernel",
+        "logger_level",
+        "none",
+        "-noshell",
+        "-eval",
+        expression,
+    ];
+    assert_eq!(
+        stdout(&erts_erl(&epmd, &args)),
+        "{noconnection,true,noconnection}\n"
+    );
+    assert_eq!(
+        stdout(&pbeam_erl(&epmd, &args)),
+        "{noconnection,true,noconnection}\n"
+    );
+    let expression = "N=spawn_peer@nohost, erts_internal:new_connection(N), \
+        R=spawn_request(N,erlang,node,[],[]), \
+        F=element(3,erts_internal:get_dflags()) band bnot (1 bsl 32), \
+        {ok,H}=erts_internal:create_dist_channel(N,self(),{F,1}), \
+        Before=receive {spawn_reply,R,_,_}->early after 0->none end, \
+        D=erlang:dist_ctrl_get_data(H), \
+        After=receive {spawn_reply,R,error,Why}->Why after 5000->timeout end, \
+        io:format(\"~w~n\",[{Before,D,After}]), halt().";
+    let args = [
+        "-sname",
+        &name,
+        "-kernel",
+        "logger_level",
+        "none",
+        "-noshell",
+        "-eval",
+        expression,
+    ];
+    assert_eq!(stdout(&erts_erl(&epmd, &args)), "{none,[],notsup}\n");
+    assert_eq!(stdout(&pbeam_erl(&epmd, &args)), "{none,[],notsup}\n");
+    let expression = "N=spawn_port@nohost, erts_internal:new_connection(N), \
+        R=spawn_request(N,erlang,node,[],[]), \
+        F=element(3,erts_internal:get_dflags()) band bnot (1 bsl 32), \
+        {ok,L}=gen_tcp:listen(0,[]), {ok,_}=erts_internal:create_dist_channel(N,L,{F,1}), \
+        Result=receive {spawn_reply,R,error,Why}->Why after 5000->timeout end, \
+        io:format(\"~w~n\",[Result]), halt().";
+    let args = [
+        "-sname",
+        &name,
+        "-kernel",
+        "logger_level",
+        "none",
+        "-noshell",
+        "-eval",
+        expression,
+    ];
+    assert_eq!(stdout(&erts_erl(&epmd, &args)), "notsup\n");
+    assert_eq!(stdout(&pbeam_erl(&epmd, &args)), "notsup\n");
+}
+
+#[test]
+fn sends_to_a_pid_and_alias_on_the_first_signal_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    for pbeam in [false, true] {
+        let server_name = format!("dsendidserver{pbeam}{id}");
+        let server = ErtsNode::start(
+            &epmd,
+            &["-sname", &server_name, "-setcookie", "ck"],
+            "register(pending_receiver,self()), A=alias(), \
+             io:format(\"~w~n~w~n~w~n\",[node(),binary_to_list(term_to_binary(self())),binary_to_list(term_to_binary(A))]), \
+             receive {one,P} -> receive two -> receive three -> P ! ack end end end, \
+             receive stop -> ok after 5000 -> ok end, halt().",
+        );
+        let node = server.line();
+        let pid = server.line();
+        let alias = server.line();
+        let expression = format!(
+            "N={node}, P=binary_to_term(list_to_binary({pid})), A=binary_to_term(list_to_binary({alias})), \
+             P ! {{one,self()}}, ok=erlang:send(A,two,[noconnect,priority]), \
+             ok=erlang:send({{pending_receiver,N}},three,[noconnect]), \
+             receive ack -> io:format(\"ok~n\") after 5000 -> halt(2) end, halt()."
+        );
+        let client_name = format!("dsendidclient{pbeam}{id}");
+        let args = [
+            "-sname",
+            &client_name,
+            "-setcookie",
+            "ck",
+            "-kernel",
+            "logger_level",
+            "none",
+            "-noshell",
+            "-eval",
+            &expression,
+        ];
+        let output = if pbeam {
+            pbeam_erl(&epmd, &args)
+        } else {
+            erts_erl(&epmd, &args)
+        };
+        assert_eq!(stdout(&output), "ok\n", "pbeam={pbeam}");
+    }
+    let name = format!("dsendaliasflags{id}");
+    let expression = "N=alias_peer@nohost, B=atom_to_binary(N), \
+        A=binary_to_term(<<131,90,0,1,118,(byte_size(B)):16,B/binary,1:32,1:32>>), \
+        erts_internal:new_connection(N), ok=erlang:send(A,msg,[noconnect]), \
+        F=element(3,erts_internal:get_dflags()) band bnot (8 bsl 32), \
+        {ok,H}=erts_internal:create_dist_channel(N,self(),{F,1}), \
+        D=erlang:dist_ctrl_get_data(H), io:format(\"~w~n\",[D=:=[]]), halt().";
+    let args = [
+        "-sname",
+        &name,
+        "-kernel",
+        "logger_level",
+        "none",
+        "-noshell",
+        "-eval",
+        expression,
+    ];
+    assert_eq!(stdout(&erts_erl(&epmd, &args)), "true\n");
+    assert_eq!(stdout(&pbeam_erl(&epmd, &args)), "true\n");
+    let expression = expression.replace(
+        "band bnot (8 bsl 32)",
+        "band bnot (8 bsl 32) bor (32 bsl 32)",
+    );
+    let args = [
+        "-sname",
+        &name,
+        "-kernel",
+        "logger_level",
+        "none",
+        "-noshell",
+        "-eval",
+        &expression,
+    ];
+    assert_eq!(stdout(&erts_erl(&epmd, &args)), "false\n");
+    assert_eq!(stdout(&pbeam_erl(&epmd, &args)), "false\n");
+}
+
+#[test]
+fn orders_the_four_pending_signals_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    for pbeam in [false, true] {
+        let server_name = format!("dallserver{pbeam}{id}");
+        let server = ErtsNode::start(
+            &epmd,
+            &["-sname", &server_name, "-setcookie", "ck"],
+            "Parent=self(), Child=spawn(fun()->register(pending_receiver,self()), Parent ! ready, \
+             receive {first,P} -> receive A -> receive B -> P ! {observed,lists:sort([A,B])} end end end, exit(boom) end), \
+             receive ready -> ok end, io:format(\"~w~n~w~n\",[node(),binary_to_list(term_to_binary(Child))]), \
+             receive stop -> ok after 5000 -> ok end, halt().",
+        );
+        let node = server.line();
+        let pid = server.line();
+        let expression = format!(
+            "process_flag(trap_exit,true), N={node}, P=binary_to_term(list_to_binary({pid})), \
+             {{pending_receiver,N}} ! {{first,self()}}, true=link(P), M=monitor(process,P), \
+             R=spawn_request(N,erlang,send,[{{pending_receiver,N}},spawned],[]), \
+             {{pending_receiver,N}} ! last, \
+             receive {{spawn_reply,R,ok,_}} -> ok after 5000 -> halt(2) end, \
+             Seen=receive {{observed,Items}} -> Items after 5000 -> timeout end, \
+             X=receive {{'EXIT',P,R1}} -> R1 after 5000 -> timeout end, \
+             Y=receive {{'DOWN',M,process,P,R2}} -> R2 after 5000 -> timeout end, \
+             io:format(\"~w~n\",[{{Seen,X,Y}}]), halt()."
+        );
+        let client_name = format!("dallclient{pbeam}{id}");
+        let args = [
+            "-sname",
+            &client_name,
+            "-setcookie",
+            "ck",
+            "-kernel",
+            "logger_level",
+            "none",
+            "-noshell",
+            "-eval",
+            &expression,
+        ];
+        let output = if pbeam {
+            pbeam_erl(&epmd, &args)
+        } else {
+            erts_erl(&epmd, &args)
+        };
+        assert_eq!(
+            stdout(&output),
+            "{[last,spawned],boom,boom}\n",
+            "pbeam={pbeam}"
+        );
+    }
+}
+
+#[test]
+fn orders_all_five_pending_signal_packets_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let name = format!("dorder{}", std::process::id());
+    let arguments = probe(
+        &["-sname", &name, "-kernel", "logger_level", "none"],
+        "dist_pending_order_probe:main(), halt().",
+    );
+    let expected = "[6,1,19,29,8]\n";
+    assert_eq!(stdout(&erts_erl(&epmd, &arguments)), expected);
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), expected);
 }
 
 #[test]
@@ -2385,6 +3171,84 @@ fn sends_exit_signals_between_erts_and_pbeam_nodes() {
 }
 
 #[test]
+fn connects_and_queues_exit_signals_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    for pbeam in [false, true] {
+        let server_name = format!("dexitautoserver{pbeam}{id}");
+        let server = ErtsNode::start(
+            &epmd,
+            &["-sname", &server_name, "-setcookie", "ck"],
+            "process_flag(trap_exit,true), register(exit_receiver,self()), A=alias(), \
+             io:format(\"~w~n~w~n~w~n\",[node(),binary_to_list(term_to_binary(self())),binary_to_list(term_to_binary(A))]), \
+             receive {'EXIT',_,boom} -> ok after 5000 -> halt(2) end, \
+             receive {probe,P} -> P ! ack after 5000 -> halt(3) end, \
+             receive stop -> ok after 5000 -> ok end, halt().",
+        );
+        let node = server.line();
+        let pid = server.line();
+        let alias = server.line();
+        let expression = format!(
+            "N={node}, P=binary_to_term(list_to_binary({pid})), A=binary_to_term(list_to_binary({alias})), \
+             true=exit(P,boom), true=exit(A,alias_boom), {{exit_receiver,N}} ! {{probe,self()}}, \
+             receive ack -> io:format(\"ok~n\") after 5000 -> halt(2) end, halt()."
+        );
+        let client_name = format!("dexitautoclient{pbeam}{id}");
+        let args = [
+            "-sname",
+            &client_name,
+            "-setcookie",
+            "ck",
+            "-kernel",
+            "logger_level",
+            "none",
+            "-noshell",
+            "-eval",
+            &expression,
+        ];
+        let output = if pbeam {
+            pbeam_erl(&epmd, &args)
+        } else {
+            erts_erl(&epmd, &args)
+        };
+        assert_eq!(stdout(&output), "ok\n", "pbeam={pbeam}");
+    }
+    let name = format!("dexitautoflags{id}");
+    let expression = "N=exit_peer@nohost, B=atom_to_binary(N), \
+        A=binary_to_term(<<131,90,0,1,118,(byte_size(B)):16,B/binary,1:32,1:32>>), \
+        erts_internal:new_connection(N), true=exit(A,boom), F=element(3,erts_internal:get_dflags()), \
+        {ok,H}=erts_internal:create_dist_channel(N,self(),{F,1}), \
+        io:format(\"~w~n\",[erlang:dist_ctrl_get_data(H)]), halt().";
+    let args = [
+        "-sname",
+        &name,
+        "-kernel",
+        "logger_level",
+        "none",
+        "-noshell",
+        "-eval",
+        expression,
+    ];
+    assert_eq!(stdout(&erts_erl(&epmd, &args)), "[]\n");
+    assert_eq!(stdout(&pbeam_erl(&epmd, &args)), "[]\n");
+    let expression = "N=missing@localhost, B=atom_to_binary(N), \
+        P=binary_to_term(<<131,88,118,(byte_size(B)):16,B/binary,1:32,0:32,1:32>>), \
+        Result=exit(P,boom), io:format(\"~w~n\",[{Result,net_adm:ping(N)}]), halt().";
+    let args = [
+        "-sname",
+        &name,
+        "-kernel",
+        "logger_level",
+        "none",
+        "-noshell",
+        "-eval",
+        expression,
+    ];
+    assert_eq!(stdout(&erts_erl(&epmd, &args)), "{true,pang}\n");
+    assert_eq!(stdout(&pbeam_erl(&epmd, &args)), "{true,pang}\n");
+}
+
+#[test]
 fn monitors_the_local_node_as_pinned_erts() {
     let epmd = Epmd::start();
     let name = format!("dml{}", std::process::id());
@@ -2402,14 +3266,91 @@ fn monitors_the_local_node_as_pinned_erts() {
         "dist_lost_probe:monitor_idle(), halt().",
     ] {
         let arguments = probe(&["-sname", &name], expression);
-        let result = pbeam_erl(&epmd, &arguments);
-        assert!(!result.status.success(), "{result:?}");
-        assert!(
-            String::from_utf8_lossy(&result.stderr)
-                .contains("unsupported erlang:monitor_node/2,3 of a node without a connection"),
-            "{result:?}"
-        );
+        assert_eq!(stdout(&erts_erl(&epmd, &arguments)), "");
+        assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), "");
     }
+}
+
+#[test]
+fn connects_and_fails_node_monitors_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let id = std::process::id();
+    for passive in [false, true] {
+        for pbeam in [false, true] {
+            let server_name = format!("dnodeautoserver{passive}{pbeam}{id}");
+            let server = ErtsNode::start(
+                &epmd,
+                &["-sname", &server_name, "-setcookie", "ck"],
+                "register(node_receiver,self()), io:format(\"~w~n\",[node()]), receive stop -> halt() end.",
+            );
+            let node = server.line();
+            let options = if passive {
+                "[allow_passive_connect]"
+            } else {
+                "[]"
+            };
+            let expression = format!(
+                "N={node}, A=erlang:monitor_node(N,true,{options}), B=erlang:monitor_node(N,true), \
+                 C=erlang:monitor_node(N,false), {{node_receiver,N}} ! stop, \
+                 D=receive {{nodedown,N}} -> nodedown after 5000 -> timeout end, \
+                 E=receive {{nodedown,N}} -> unexpected after 100 -> none end, \
+                 io:format(\"~w~n\",[{{A,B,C,D,E}}]), halt()."
+            );
+            let client_name = format!("dnodeautoclient{passive}{pbeam}{id}");
+            let args = [
+                "-sname",
+                &client_name,
+                "-setcookie",
+                "ck",
+                "-kernel",
+                "logger_level",
+                "none",
+                "-noshell",
+                "-eval",
+                &expression,
+            ];
+            let output = if pbeam {
+                pbeam_erl(&epmd, &args)
+            } else {
+                erts_erl(&epmd, &args)
+            };
+            assert_eq!(
+                stdout(&output),
+                "{true,true,true,nodedown,none}\n",
+                "passive={passive} pbeam={pbeam}"
+            );
+        }
+    }
+    let name = format!("dnodemissing{id}");
+    for options in ["[]", "[allow_passive_connect]"] {
+        let expression = format!(
+            "N=missing@localhost, A=erlang:monitor_node(N,false,{options}), B=erlang:monitor_node(N,true,{options}), \
+             C=receive {{nodedown,N}} -> nodedown after 5000 -> timeout end, \
+             io:format(\"~w~n\",[{{A,B,C}}]), halt()."
+        );
+        let args = [
+            "-sname",
+            &name,
+            "-kernel",
+            "logger_level",
+            "none",
+            "-noshell",
+            "-eval",
+            &expression,
+        ];
+        assert_eq!(stdout(&erts_erl(&epmd, &args)), "{true,true,nodedown}\n");
+        assert_eq!(stdout(&pbeam_erl(&epmd, &args)), "{true,true,nodedown}\n");
+    }
+}
+
+#[test]
+fn handles_an_unregistered_distribution_owner_as_pinned_erts() {
+    // dist.c:5732-5736 aborts auto-connect when net_kernel has no name.
+    let epmd = Epmd::start();
+    let arguments = probe(&[], "dist_coverage_probe:missing_kernel(), halt().");
+    let expected = "{true,nodedown,noconnection,none}\n";
+    assert_eq!(stdout(&erts_erl(&epmd, &arguments)), expected);
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), expected);
 }
 
 #[test]

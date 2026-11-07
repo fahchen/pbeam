@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use super::{Scheduler, dist_table::Controller};
+use crate::runtime::process::RemotePid;
 use crate::{
     error::BeamError,
     runtime::interpreter::bif::{encode_dist, encode_dist_cached},
@@ -22,6 +23,9 @@ const FRAGMENT_SIZE: usize = 64 * 1024;
 
 /// `DFLAG_SEND_SENDER` (`dist.h:49`).
 const SEND_SENDER: u64 = 0x80000;
+
+/// Monitor flags that a pending monitor needs on the peer (`dist.h:33-34`).
+const MONITOR_FLAGS: u64 = 0x28;
 
 /// `DFLAG_ALIAS` (`dist.h:67`).
 const ALIAS: u64 = 0x8 << 32;
@@ -52,6 +56,34 @@ pub(in crate::runtime) enum SendPriority {
     Normal,
     /// A send with the option `priority`.
     Priority,
+}
+
+/// Whether a send may start an idle connection (`bif.c:2384`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::runtime) enum ConnectMode {
+    /// Start a connection when necessary.
+    Allow,
+    /// Do not start an idle connection.
+    NoConnect,
+}
+
+/// A signal that may join a pending connection during the final state check.
+pub(super) enum PendingOutput<'a> {
+    Send(&'a Term, &'a Term, SendPriority),
+    Exit(&'a Term, &'a Term, SendPriority),
+    Link(RemotePid, &'a Term),
+    Monitor(super::dist_table::DistMonitor, &'a Term),
+    Spawn(
+        super::dist_table::DistMonitor,
+        &'a Term,
+        &'a Term,
+        &'a mut bool,
+    ),
+}
+
+#[cfg(test)]
+pub(super) fn after_connected_signal_check() {
+    tests::after_connected_signal_check();
 }
 
 impl Scheduler {
@@ -87,10 +119,49 @@ impl Scheduler {
         to: &Term,
         message: &Term,
         priority: SendPriority,
+        connect: ConnectMode,
     ) -> Result<bool, BeamError> {
         let caller = self.current_process().id;
         let from = Term::Pid(caller);
-        self.dist_output(caller, node, |flags, _| {
+        // A pending connection accepts sends even with noconnect
+        // (bif.c:2391-2417). Keep them until the negotiated flags are known,
+        // then encode them before publishing the connection.
+        if self.node.net_kernel().is_some() {
+            let node_ref = Arc::clone(&self.node);
+            let mut dist = node_ref.dist();
+            if dist.pending(node) {
+                dist.enqueue_pending_send(node, caller, to.clone(), message.clone(), priority);
+                return Ok(true);
+            }
+            let idle = dist.connected(node).is_none();
+            drop(dist);
+            #[cfg(test)]
+            if idle && connect == ConnectMode::NoConnect {
+                tests::after_idle_send_check();
+            }
+            if idle
+                && connect == ConnectMode::Allow
+                && self
+                    .dist_auto_connect(node, |dist, _| {
+                        dist.enqueue_pending_send(
+                            node,
+                            caller,
+                            to.clone(),
+                            message.clone(),
+                            priority,
+                        );
+                    })?
+                    .is_some()
+            {
+                return Ok(true);
+            }
+        }
+        let pending = self
+            .node
+            .net_kernel()
+            .is_some()
+            .then_some(PendingOutput::Send(to, message, priority));
+        self.dist_output_with_pending(caller, node, None, pending, |flags, _| {
             if is_remote_reference(to) && flags & ALIAS == 0 {
                 return None;
             }
@@ -99,6 +170,62 @@ impl Scheduler {
                 Some(message.clone()),
             ))
         })
+        .map(|connection| connection.is_some())
+    }
+
+    /// Start an idle connection and queue a signal (`dist.c:5713-5759`).
+    pub(in crate::runtime) fn dist_auto_connect(
+        &mut self,
+        name: &Atom,
+        queue: impl FnOnce(&mut super::dist_table::DistTable, u32),
+    ) -> Result<Option<u32>, BeamError> {
+        let node = Arc::clone(&self.node);
+        if node.net_kernel().is_none() {
+            return Ok(None);
+        }
+        let Some(super::node::Named::Process(kernel)) = self.name_owner("net_kernel") else {
+            return Ok(None);
+        };
+        let reference = self.make_magic_ref()?;
+        let now = self.timers.now();
+        let start = u32::try_from(now & i64::from(u32::MAX)).expect("the low 32 bits fit in u32");
+        let event_lock = {
+            let mut dist = node.dist();
+            dist.expire_known(now);
+            dist.insert(name, reference, start);
+            dist.event_lock(name)
+        };
+        let _event = event_lock
+            .lock()
+            .expect("the node event lock is not poisoned");
+        let mut dist = node.dist();
+        if node.is_going_down() || node.live_owner(kernel).is_none() {
+            return Ok(None);
+        }
+        if dist.connected(name).is_some() {
+            return Ok(None);
+        }
+        let start = !dist.pending(name);
+        if start {
+            dist.new_connection(name);
+        }
+        let handle = dist.current_dhandle(name);
+        let connection = dist.connection_id(name);
+        let caller = self.current_process().id;
+        queue(&mut dist, connection);
+        drop(dist);
+        if start {
+            self.send_message(
+                caller,
+                kernel,
+                Term::tuple(vec![
+                    Term::static_atom("auto_connect"),
+                    Term::Atom(name.clone()),
+                    handle,
+                ]),
+            );
+        }
+        Ok(Some(connection))
     }
 
     /// Send the exit signal of `erlang:exit/2,3` from the current process
@@ -128,32 +255,42 @@ impl Scheduler {
         priority: SendPriority,
     ) -> Result<bool, BeamError> {
         let caller = self.current_process().id;
-        let from = Term::Pid(caller);
-        let alias = is_remote_reference(to);
-        let prio = priority == SendPriority::Priority;
-        self.dist_output(caller, node, |flags, _| {
-            if (prio || alias) && flags & ALTACT_SIG != 0 {
-                let mut fs = ALTACT_SIG_EXIT;
-                if alias {
-                    fs |= ALTACT_SIG_ALIAS;
-                }
-                if prio {
-                    fs |= ALTACT_SIG_PRIO;
-                }
-                let control =
-                    Term::tuple(vec![Term::Integer(37), Term::Integer(fs), from, to.clone()]);
-                return Some((control, Some(reason.clone())));
+        if self.node.net_kernel().is_some() {
+            let node_ref = Arc::clone(&self.node);
+            let mut dist = node_ref.dist();
+            if dist.pending(node) {
+                dist.enqueue_pending_exit(node, caller, to.clone(), reason.clone(), priority);
+                return Ok(true);
             }
-            if alias {
-                return None;
+            let idle = dist.connected(node).is_none();
+            drop(dist);
+            if idle
+                && self
+                    .dist_auto_connect(node, |dist, _| {
+                        dist.enqueue_pending_exit(
+                            node,
+                            caller,
+                            to.clone(),
+                            reason.clone(),
+                            priority,
+                        );
+                    })?
+                    .is_some()
+            {
+                return Ok(true);
             }
-            if flags & EXIT_PAYLOAD != 0 {
-                let control = Term::tuple(vec![Term::Integer(26), from, to.clone()]);
-                return Some((control, Some(reason.clone())));
-            }
-            let control = Term::tuple(vec![Term::Integer(8), from, to.clone(), reason.clone()]);
-            Some((control, None))
+        }
+        #[cfg(test)]
+        after_connected_signal_check();
+        let pending = self
+            .node
+            .net_kernel()
+            .is_some()
+            .then_some(PendingOutput::Exit(to, reason, priority));
+        self.dist_output_with_pending(caller, node, None, pending, |flags, _| {
+            exit_control(flags, caller, to, reason, priority)
         })
+        .map(|connection| connection.is_some())
     }
 
     /// Put the packet of the control message and the message that `build`
@@ -192,48 +329,68 @@ impl Scheduler {
         monitor: Option<super::dist_table::DistMonitor>,
         build: impl FnOnce(u64, u32) -> Option<(Term, Option<Term>)>,
     ) -> Result<bool, BeamError> {
+        self.dist_output_with_pending(sender, node, monitor, None, build)
+            .map(|connection| connection.is_some())
+    }
+
+    /// Decide whether to enqueue a pending signal under the same lock that
+    /// checks for a connected controller (`dist.c:3247-3255`).
+    pub(super) fn dist_output_with_pending(
+        &mut self,
+        sender: ProcessId,
+        node: &Atom,
+        monitor: Option<super::dist_table::DistMonitor>,
+        pending: Option<PendingOutput<'_>>,
+        build: impl FnOnce(u64, u32) -> Option<(Term, Option<Term>)>,
+    ) -> Result<Option<u32>, BeamError> {
         let node_ref = Arc::clone(&self.node);
         let mut dist = node_ref.dist();
+        if dist.pending(node)
+            && let Some(pending) = pending
+        {
+            let connection = dist.connection_id(node);
+            match pending {
+                PendingOutput::Send(to, message, priority) => {
+                    dist.enqueue_pending_send(node, sender, to.clone(), message.clone(), priority);
+                }
+                PendingOutput::Exit(to, reason, priority) => {
+                    dist.enqueue_pending_exit(node, sender, to.clone(), reason.clone(), priority);
+                }
+                PendingOutput::Link(remote, control) => {
+                    dist.insert_link_now(sender, remote);
+                    dist.enqueue_pending_link(node, sender, control.clone());
+                }
+                PendingOutput::Monitor(monitor, control) => {
+                    dist.insert_monitor_now(node, monitor);
+                    dist.enqueue_pending_monitor(node, sender, control.clone());
+                }
+                PendingOutput::Spawn(monitor, control, arguments, queued) => {
+                    dist.insert_monitor_now(node, monitor);
+                    dist.enqueue_pending_spawn(
+                        node,
+                        sender,
+                        monitor.key,
+                        control.clone(),
+                        arguments.clone(),
+                    );
+                    *queued = true;
+                }
+            }
+            return Ok(Some(connection));
+        }
         let Some((flags, controller, connection)) = dist.connected(node) else {
-            return Ok(false);
+            return Ok(None);
         };
         let Some((control, message)) = build(flags, connection) else {
-            return Ok(true);
+            return Ok(Some(connection));
         };
         // The monitor joins the connection before the packet leaves, so the
         // end of the connection sees it (`dist.c:6111-6120`).
         if let Some(monitor) = monitor {
             dist.insert_monitor_now(node, monitor);
         }
-        let (elements, header_len, control_len) = if flags & 0x2000 != 0 {
-            encode_dist_cached(self, &control, message.as_ref(), dist.atom_cache_out(node))?
-        } else if flags & FRAGMENTS != 0 {
-            let mut packet = vec![131, b'D', 0];
-            let mut control_len = 0;
-            for term in std::iter::once(&control).chain(message.iter()) {
-                let bytes: Vec<u8> = encode_dist(self, term)?
-                    .iter()
-                    .flat_map(Binary::to_bytes)
-                    .collect();
-                if control_len == 0 {
-                    control_len = bytes.len() - 1;
-                }
-                packet.extend_from_slice(&bytes[1..]);
-            }
-            (vec![Binary::from(packet)], 3, control_len)
-        } else {
-            let mut elements = vec![Binary::from(vec![PASS_THROUGH])];
-            elements.extend(encode_dist(self, &control)?);
-            if let Some(message) = message {
-                elements.extend(encode_dist(self, &message)?);
-            }
-            (elements, 0, 0)
-        };
-        let packets = if flags & FRAGMENTS != 0 {
-            fragment_packet(elements, sender, header_len, control_len)
-        } else {
-            vec![elements]
-        };
+        let packets =
+            self.dist_encode_packets(&mut dist, sender, node, flags, &control, message)?;
         let mut notify = false;
         for packet in packets {
             notify |= dist.enqueue(node, packet);
@@ -250,7 +407,101 @@ impl Scheduler {
                 self.dist_port_send(port)?;
             }
         }
-        Ok(true)
+        Ok(Some(connection))
+    }
+
+    /// Encode pending signals before releasing the lock that publishes a connection.
+    pub(in crate::runtime) fn dist_flush_pending(
+        &mut self,
+        dist: &mut super::dist_table::DistTable,
+        node: &Atom,
+        flags: u64,
+    ) -> Result<(), BeamError> {
+        for signal in dist.take_pending_signals(node) {
+            let (sender, control, message) = match signal {
+                super::dist_table::PendingSignal::Send(sender, to, message, priority) => {
+                    if is_remote_reference(&to) && flags & (ALIAS | ALTACT_SIG) == 0 {
+                        dist.enqueue(node, Vec::new());
+                        continue;
+                    }
+                    (
+                        sender,
+                        send_control(flags, Term::Pid(sender), &to, priority),
+                        Some(message),
+                    )
+                }
+                super::dist_table::PendingSignal::Spawn(sender, key, control, arguments) => {
+                    if flags & (1 << 32) == 0 {
+                        dist.enqueue_spawn_notsup(node, sender, key);
+                        continue;
+                    }
+                    (sender, control, Some(arguments))
+                }
+                super::dist_table::PendingSignal::Exit(sender, to, reason, priority) => {
+                    let Some((control, message)) =
+                        exit_control(flags, sender, &to, &reason, priority)
+                    else {
+                        dist.enqueue(node, Vec::new());
+                        continue;
+                    };
+                    (sender, control, message)
+                }
+                super::dist_table::PendingSignal::Monitor(sender, control) => {
+                    if flags & MONITOR_FLAGS != MONITOR_FLAGS {
+                        dist.enqueue(node, Vec::new());
+                        continue;
+                    }
+                    (sender, control, None)
+                }
+                super::dist_table::PendingSignal::Link(sender, control) => (sender, control, None),
+            };
+            for packet in self.dist_encode_packets(dist, sender, node, flags, &control, message)? {
+                dist.enqueue(node, packet);
+            }
+        }
+        Ok(())
+    }
+
+    /// Encode one distribution signal with the flags of its connection.
+    fn dist_encode_packets(
+        &mut self,
+        dist: &mut super::dist_table::DistTable,
+        sender: ProcessId,
+        node: &Atom,
+        flags: u64,
+        control: &Term,
+        message: Option<Term>,
+    ) -> Result<Vec<Vec<Binary>>, BeamError> {
+        let (elements, header_len, control_len) = if flags & 0x2000 != 0 {
+            encode_dist_cached(self, control, message.as_ref(), dist.atom_cache_out(node))?
+        } else if flags & FRAGMENTS != 0 {
+            let mut packet = vec![131, b'D', 0];
+            let mut control_len = 0;
+            for term in std::iter::once(control).chain(message.iter()) {
+                let bytes: Vec<u8> = encode_dist(self, term)?
+                    .iter()
+                    .flat_map(Binary::to_bytes)
+                    .collect();
+                if control_len == 0 {
+                    control_len = bytes.len() - 1;
+                }
+                packet.extend_from_slice(&bytes[1..]);
+            }
+            (vec![Binary::from(packet)], 3, control_len)
+        } else {
+            let mut elements = vec![Binary::from(vec![PASS_THROUGH])];
+            elements.extend(encode_dist(self, control)?);
+            if let Some(message) = message {
+                elements.extend(encode_dist(self, &message)?);
+            }
+            (elements, 0, 0)
+        };
+        let packets = if flags & FRAGMENTS != 0 {
+            fragment_packet(elements, sender, header_len, control_len)
+        } else {
+            vec![elements]
+        };
+        Ok(packets)
     }
 
     /// Drain the connection queue under the port lock. The queue takes each
@@ -262,7 +513,7 @@ impl Scheduler {
     /// # Errors
     ///
     /// The errors of [`Self::send_events`].
-    fn dist_port_send(&mut self, port: PortId) -> Result<(), BeamError> {
+    pub(in crate::runtime) fn dist_port_send(&mut self, port: PortId) -> Result<(), BeamError> {
         if self.locked_port == Some(port) {
             self.deferred_dist = true;
             return Ok(());
@@ -274,11 +525,15 @@ impl Scheduler {
                 let Some(name) = dist.controlled_by(Controller::Port(port)) else {
                     return Ok(None);
                 };
-                let Some(elements) = dist.dequeue(&name) else {
+                let Some(output) = dist.dequeue(&name) else {
                     return Ok(None);
                 };
+                let connection = dist.connection_id(&name);
                 drop(dist);
-                let bytes: Vec<u8> = elements.iter().flat_map(Binary::to_bytes).collect();
+                if let Some((sender, key)) = output.spawn_notsup {
+                    self.dist_spawn_notsup(&name, connection, sender, key);
+                }
+                let bytes: Vec<u8> = output.elements.iter().flat_map(Binary::to_bytes).collect();
                 let events = item.inet_mut().map(|tcp| tcp.send_dist(&bytes));
                 if let Some(exit) = self.send_events(port, item, events.unwrap_or_default())? {
                     return Ok(Some(exit));
@@ -302,6 +557,45 @@ impl Scheduler {
         }
         Ok(())
     }
+}
+
+/// Build an exit signal for the flags of the connection (`dist.c:1788-1828`).
+fn exit_control(
+    flags: u64,
+    caller: ProcessId,
+    to: &Term,
+    reason: &Term,
+    priority: SendPriority,
+) -> Option<(Term, Option<Term>)> {
+    let from = Term::Pid(caller);
+    let alias = is_remote_reference(to);
+    let prio = priority == SendPriority::Priority;
+    if (prio || alias) && flags & ALTACT_SIG != 0 {
+        let mut fs = ALTACT_SIG_EXIT;
+        if alias {
+            fs |= ALTACT_SIG_ALIAS;
+        }
+        if prio {
+            fs |= ALTACT_SIG_PRIO;
+        }
+        return Some((
+            Term::tuple(vec![Term::Integer(37), Term::Integer(fs), from, to.clone()]),
+            Some(reason.clone()),
+        ));
+    }
+    if alias {
+        return None;
+    }
+    if flags & EXIT_PAYLOAD != 0 {
+        return Some((
+            Term::tuple(vec![Term::Integer(26), from, to.clone()]),
+            Some(reason.clone()),
+        ));
+    }
+    Some((
+        Term::tuple(vec![Term::Integer(8), from, to.clone(), reason.clone()]),
+        None,
+    ))
 }
 
 /// Return the control message of `erts_dsig_send_msg` (`dist.c:1640-1702`)

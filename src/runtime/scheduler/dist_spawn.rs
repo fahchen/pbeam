@@ -22,6 +22,25 @@ pub(in crate::runtime) const SPAWN_LINK: i64 = 1;
 pub(in crate::runtime) const SPAWN_MONITOR: i64 = 2;
 
 impl Scheduler {
+    /// Deliver the unsupported spawn reply when its pending packet is taken
+    /// (`external.c:6715-6767`).
+    pub(in crate::runtime) fn dist_spawn_notsup(
+        &mut self,
+        node: &Atom,
+        connection: u32,
+        process: ProcessId,
+        reference: MonitorKey,
+    ) {
+        let signal = Signal::SpawnReply {
+            node: node.clone(),
+            reference,
+            flags: 0,
+            result: Term::static_atom("notsup"),
+            connection,
+        };
+        let _ = self.send_signal(None, process, signal);
+    }
+
     /// Start a spawn request of `module:function` with `arity` arguments of
     /// node `node`, as `erts_internal_dist_spawn_request_4` does
     /// (`dist.c:5850-6120`): make the reference, keep a pending monitor with
@@ -148,20 +167,51 @@ impl Scheduler {
             key,
             side: super::dist_table::MonitorSide::Watcher,
         };
-        let mut connection = None;
-        let sent = self.dist_output_monitor(sender, node, Some(monitor), |flags, current| {
-            if flags & DIST_SPAWN == 0 {
-                return None;
-            }
-            connection = Some(current);
-            Some((control.clone(), Some(arguments.clone())))
-        })?;
-        Ok(match (sent, connection) {
-            (false, _) => SpawnSend::NoConnection,
-            (true, Some(_)) => SpawnSend::Sent,
+        let already_connected = self.node.dist().connected(node).is_some();
+        if !already_connected
+            && self
+                .dist_auto_connect(node, |dist, _| {
+                    dist.insert_monitor_now(node, monitor);
+                    dist.enqueue_pending_spawn(
+                        node,
+                        sender,
+                        key,
+                        control.clone(),
+                        arguments.clone(),
+                    );
+                })?
+                .is_some()
+        {
+            return Ok(SpawnSend::Sent);
+        }
+        #[cfg(test)]
+        super::dist_output::after_connected_signal_check();
+        let mut supported = false;
+        let mut queued = false;
+        let pending =
+            self.node
+                .net_kernel()
+                .is_some()
+                .then_some(super::dist_output::PendingOutput::Spawn(
+                    monitor,
+                    control,
+                    arguments,
+                    &mut queued,
+                ));
+        let connection =
+            self.dist_output_with_pending(sender, node, Some(monitor), pending, |flags, _| {
+                if flags & DIST_SPAWN == 0 {
+                    return None;
+                }
+                supported = true;
+                Some((control.clone(), Some(arguments.clone())))
+            })?;
+        Ok(match (connection, queued || supported) {
+            (None, _) => SpawnSend::NoConnection,
+            (Some(_), true) => SpawnSend::Sent,
             // A connection without `DFLAG_SPAWN` drops the request
             // (`dist.c:6089-6093`).
-            (true, None) => SpawnSend::NoSupport,
+            (Some(_), false) => SpawnSend::NoSupport,
         })
     }
 

@@ -37,9 +37,9 @@ impl Scheduler {
     /// Link the current process to the pid `pid` of another node, as
     /// `link_opt` does (`bif.c:263-394`). An active link changes nothing.
     /// Else, with a connection to the node, the link becomes active on the
-    /// connection and the node gets `LINK` (`dist.c:1608-1614`). Without a
-    /// connection the link stays, and the current process gets the link
-    /// exit signal `noconnection` (`bif.c:324-340`), which removes it.
+    /// connection and the node gets `LINK` (`dist.c:1608-1614`). An alive
+    /// node starts a connection when needed. An aborted connection gives the
+    /// link exit signal `noconnection` (`bif.c:324-350`).
     ///
     /// # Examples
     ///
@@ -58,12 +58,29 @@ impl Scheduler {
         if state.is_some_and(LinkState::is_active) {
             return Ok(());
         }
-        let mut used = None;
-        self.dist_output(current, &remote.node(), |_, connection| {
-            used = Some(connection);
-            Some((link_control(LINK, current, pid), None))
+        let node = remote.node();
+        let already_connected = self.node.dist().connected(&node).is_some();
+        let control = link_control(LINK, current, pid);
+        if !already_connected
+            && let Some(connection) = self.dist_auto_connect(&node, |dist, _| {
+                dist.insert_link_now(current, remote);
+                dist.enqueue_pending_link(&node, current, control.clone());
+            })?
+        {
+            self.link_on(current, link, remote, connection);
+            return Ok(());
+        }
+        #[cfg(test)]
+        super::dist_output::after_connected_signal_check();
+        let pending = self
+            .node
+            .net_kernel()
+            .is_some()
+            .then_some(super::dist_output::PendingOutput::Link(remote, &control));
+        let connection = self.dist_output_with_pending(current, &node, None, pending, |_, _| {
+            Some((control.clone(), None))
         })?;
-        let Some(connection) = used else {
+        let Some(connection) = connection else {
             self.current_process_mut().links.insert(
                 link,
                 LinkState {
@@ -186,7 +203,19 @@ impl Scheduler {
                 connection: state.connection,
             },
         );
-        self.dist_output(current, &remote.node(), |_, connection| {
+        let node = remote.node();
+        {
+            let mut dist = self.node.dist();
+            if dist.pending(&node) && dist.connection_id(&node) == state.connection {
+                dist.enqueue_pending_link(
+                    &node,
+                    current,
+                    unlink_control(UNLINK_ID, unlinking, current, pid),
+                );
+                return Ok(());
+            }
+        }
+        self.dist_output(current, &node, |_, connection| {
             (connection == state.connection).then(|| {
                 let control = unlink_control(UNLINK_ID, unlinking, current, pid);
                 (control, None)
@@ -220,7 +249,16 @@ impl Scheduler {
         reason: &Term,
     ) -> Result<(), BeamError> {
         let pid = to.term();
-        self.dist_output(from, &to.node(), |flags, current| {
+        let node = to.node();
+        {
+            let mut dist = self.node.dist();
+            if dist.pending(&node) && dist.connection_id(&node) == connection {
+                let (control, _) = exit_packet(0, &Term::Pid(from), &pid, reason);
+                dist.enqueue_pending_link(&node, from, control);
+                return Ok(());
+            }
+        }
+        self.dist_output(from, &node, |flags, current| {
             (current == connection).then(|| exit_packet(flags, &Term::Pid(from), &pid, reason))
         })?;
         Ok(())

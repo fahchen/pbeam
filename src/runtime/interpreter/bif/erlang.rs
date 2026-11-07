@@ -29,7 +29,7 @@ use crate::runtime::process::{Flush, MonitorKey, Origin, Priority, SpawnReply};
 use crate::runtime::process::{InitialCall, OTHER_PROCESS_INFO_ITEMS};
 use crate::runtime::process::{LinkId, ProcessState, RemotePid};
 use crate::runtime::scheduler::PTAB_SIZE;
-use crate::runtime::scheduler::dist_output::SendPriority;
+use crate::runtime::scheduler::dist_output::{ConnectMode, SendPriority};
 use crate::runtime::scheduler::dist_table::NodeInfo;
 use crate::runtime::scheduler::node::Named;
 use crate::runtime::scheduler::{
@@ -118,13 +118,16 @@ pub(super) fn monitor_node(
 ) -> Result<BifResult, BeamError> {
     // ERTS sets the `badopt` cause before it checks the node and boolean
     // (`dist.c:6489-6509`).
-    let Some(mut options) = options.proper_list() else {
+    let Some(options_list) = options.proper_list() else {
         return Ok(BifResult::badopt());
     };
-    if options.any(
-        |option| !matches!(option, Term::Atom(atom) if atom.is_static("allow_passive_connect")),
-    ) {
-        return Ok(BifResult::badopt());
+    let mut passive = false;
+    for option in options_list {
+        if matches!(option, Term::Atom(atom) if atom.is_static("allow_passive_connect")) {
+            passive = true;
+        } else {
+            return Ok(BifResult::badopt());
+        }
     }
     let Term::Atom(name) = node else {
         return Ok(BifResult::badarg());
@@ -145,21 +148,47 @@ pub(super) fn monitor_node(
     let enabled = matches!(enabled, Term::Atom(atom) if atom.is_static("true"));
     let process = scheduler.current_process().id;
     let node = Arc::clone(scheduler.node());
-    let mut dist = node.dist();
     if enabled {
-        let Some(connection) = dist.monitor_node(name, process) else {
-            return Err(error(
-                "unsupported erlang:monitor_node/2,3 of a node without a connection: see Distribution in docs/erts-differences.md",
-            ));
+        let connected = node.dist().connected(name).is_some();
+        if passive && !connected {
+            return Ok(Trap {
+                module: "erlang",
+                function: "dmonitor_node",
+                arguments: vec![
+                    Term::Atom(name.clone()),
+                    Term::static_atom("true"),
+                    options.clone(),
+                ],
+            });
+        }
+        let connection = if connected {
+            node.dist().monitor_node(name, process)
+        } else {
+            scheduler.dist_auto_connect(name, |dist, _| {
+                dist.monitor_node(name, process);
+            })?
         };
-        scheduler
-            .current_process_mut()
-            .add_node_monitor(name.index(), connection);
+        let connection = connection.or_else(|| node.dist().monitor_node(name, process));
+        if let Some(connection) = connection {
+            scheduler
+                .current_process_mut()
+                .add_node_monitor(name.index(), connection);
+        } else {
+            return Ok(Trap {
+                module: "erlang",
+                function: "dmonitor_node",
+                arguments: vec![
+                    Term::Atom(name.clone()),
+                    Term::static_atom("true"),
+                    options.clone(),
+                ],
+            });
+        }
     } else if let Some(connection) = scheduler
         .current_process_mut()
         .remove_node_monitor(name.index())
     {
-        dist.unmonitor_node(name, process, connection);
+        node.dist().unmonitor_node(name, process, connection);
     }
     Ok(Value(Term::static_atom("true")))
 }
@@ -5364,7 +5393,13 @@ pub(in crate::runtime::interpreter) fn send(
     message: Term,
 ) -> Result<BifResult, BeamError> {
     Ok(
-        match deliver_to(scheduler, to, message.clone(), SendPriority::Normal)? {
+        match deliver_to(
+            scheduler,
+            to,
+            message.clone(),
+            SendPriority::Normal,
+            ConnectMode::Allow,
+        )? {
             Ok(Sent::Local) => local_send_result(scheduler, message),
             Ok(Sent::NoConnect) => Value(message),
             Err(raise) => raise,
@@ -5419,19 +5454,21 @@ pub(super) fn send3(
     let Some(options) = options.proper_list() else {
         return Ok(BifResult::badopt());
     };
-    let (mut connect, mut priority) = (true, SendPriority::Normal);
+    let (mut connect, mut priority) = (ConnectMode::Allow, SendPriority::Normal);
     for option in options {
         match option {
-            Term::Atom(option) if option.is_static("noconnect") => connect = false,
+            Term::Atom(option) if option.is_static("noconnect") => connect = ConnectMode::NoConnect,
             Term::Atom(option) if option.is_static("priority") => priority = SendPriority::Priority,
             Term::Atom(option) if option.is_static("nosuspend") => {}
             _ => return Ok(BifResult::badopt()),
         }
     }
     Ok(
-        match deliver_to(scheduler, to, message.clone(), priority)? {
+        match deliver_to(scheduler, to, message.clone(), priority, connect)? {
             Ok(Sent::Local) => local_send_result(scheduler, Term::static_atom("ok")),
-            Ok(Sent::NoConnect) if !connect => Value(Term::static_atom("noconnect")),
+            Ok(Sent::NoConnect) if connect == ConnectMode::NoConnect => {
+                Value(Term::static_atom("noconnect"))
+            }
             Ok(Sent::NoConnect) => Value(Term::static_atom("ok")),
             Err(raise) => raise,
         },
@@ -5621,6 +5658,7 @@ fn deliver_to(
     to: &Term,
     message: Term,
     priority: SendPriority,
+    connect: ConnectMode,
 ) -> Result<Result<Sent, BifResult>, BeamError> {
     let Some(destination) = destination(to, &scheduler.atoms) else {
         return Ok(Err(BifResult::badarg()));
@@ -5647,7 +5685,7 @@ fn deliver_to(
             None => None,
         },
         Destination::Remote(node) => {
-            if scheduler.dist_send(node, to, &message, priority)? {
+            if scheduler.dist_send(node, to, &message, priority, connect)? {
                 return Ok(Ok(Sent::Local));
             }
             scheduler.send_to_remote_node(node);
