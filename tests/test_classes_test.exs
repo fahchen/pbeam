@@ -272,4 +272,31 @@ defmodule TestClassesReportTest do
     assert output =~
              "runs_bs_match_string_as_pinned_erts: purpose=runtime_integration,erts_comparison; dependencies=erts_process,pipes,filesystem,network,local_socket"
   end
+
+  test "reports numeric conversion and size dependencies", %{directory: directory} do
+    for {target, name} <- [
+          {"float", "keeps_float_map_and_ets_keys_as_pinned_erts"},
+          {"float_test", "raises_badarith_when_fconv_gets_a_term_that_is_not_a_number"},
+          {"integer_to_binary", "converts_integers_to_binaries_as_pinned_erts"},
+          {"list_to_integer", "reads_integers_from_lists_as_pinned_erts"},
+          {"list_to_float", "reads_floats_from_lists_as_pinned_erts"},
+          {"byte_size", "rounds_the_size_of_a_bitstring_literal_up"},
+          {"bit_size", "gives_the_bit_size_like_erts"},
+          {"size", "gives_the_size_of_a_tuple_or_bitstring_like_erts"}
+        ] do
+      {output, status} =
+        report(
+          directory,
+          true,
+          [{name, "matches"}],
+          ["--scope", "integration", "--cases"],
+          target
+        )
+
+      assert status == 0
+
+      assert output =~
+               "#{name}: purpose=runtime_integration,erts_comparison; dependencies=erts_process,pipes,filesystem,network,local_socket"
+    end
+  end
 end
