@@ -230,9 +230,9 @@ defmodule TestClassesReportTest do
     assert status == 0
 
     assert output =~
-             "runs_the_utf16_and_utf32_match_instructions_as_pinned_erts: purpose=runtime_integration; dependencies=network"
+             "runs_the_utf16_and_utf32_match_instructions_as_pinned_erts: purpose=runtime_integration; dependencies=network,local_socket"
 
     assert output =~
-             "runs_bs_match_string_as_pinned_erts: purpose=runtime_integration,erts_comparison; dependencies=erts_process,pipes,filesystem,network"
+             "runs_bs_match_string_as_pinned_erts: purpose=runtime_integration,erts_comparison; dependencies=erts_process,pipes,filesystem,network,local_socket"
   end
 end
