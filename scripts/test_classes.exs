@@ -138,6 +138,7 @@ defmodule TestClasses do
   pbeam-runtime::distribution|links_a_pid_on_the_first_signal_as_pinned_erts|erts_comparison,interoperability|erts_process,pbeam_process,pipes,filesystem,host_commands,network,epmd,erts_peer
   pbeam-runtime::distribution|links_processes_between_erts_and_pbeam_nodes|erts_comparison,interoperability|erts_process,pbeam_process,pipes,filesystem,host_commands,network,epmd,erts_peer
   pbeam-runtime::distribution|lists_node_types_and_mixed_known_order_as_pinned_erts|erts_comparison,interoperability|erts_process,pbeam_process,pipes,filesystem,host_commands,network,epmd,erts_peer
+  pbeam-runtime::distribution|measures_pending_queue_size_on_pinned_erts|erts_comparison,runtime_integration|erts_process,pbeam_process,pipes,filesystem,host_commands,network,epmd
   pbeam-runtime::distribution|monitors_a_connected_node_as_pinned_erts|erts_comparison,interoperability|erts_process,pbeam_process,pipes,filesystem,host_commands,network,epmd,erts_peer,real_time
   pbeam-runtime::distribution|monitors_a_pid_on_the_first_signal_as_pinned_erts|erts_comparison,interoperability|erts_process,pbeam_process,pipes,filesystem,host_commands,network,epmd,erts_peer
   pbeam-runtime::distribution|monitors_a_registered_name_of_another_node_as_pinned_erts|erts_comparison,interoperability|erts_process,pbeam_process,pipes,filesystem,host_commands,network,epmd,erts_peer,real_time
@@ -159,6 +160,7 @@ defmodule TestClasses do
   pbeam-runtime::distribution|reassembles_interleaved_fragments_with_their_own_atom_tables_as_pinned_erts|erts_comparison,runtime_integration|erts_process,pbeam_process,pipes,filesystem,host_commands,network,epmd
   pbeam-runtime::distribution|receives_a_message_from_an_erts_node_as_pinned_erts|erts_comparison,interoperability|erts_process,pbeam_process,pipes,filesystem,host_commands,network,epmd,erts_peer,real_time
   pbeam-runtime::distribution|registers_the_listen_range_and_honours_dist_listen_false|erts_comparison,runtime_integration|erts_process,pbeam_process,pipes,filesystem,host_commands,network,epmd
+  pbeam-runtime::distribution|rejects_dead_aliases_in_pending_signals|erts_comparison,runtime_integration|erts_process,pbeam_process,pipes,filesystem,host_commands,network,epmd
   pbeam-runtime::distribution|rejects_distribution_cache_bad_header|runtime_integration|pbeam_process,erts_process,pipes,host_commands,network,epmd,filesystem
   pbeam-runtime::distribution|rejects_distribution_cache_invalid_utf8|runtime_integration|pbeam_process,erts_process,pipes,host_commands,network,epmd,filesystem
   pbeam-runtime::distribution|rejects_distribution_cache_missing_flags|runtime_integration|pbeam_process,erts_process,pipes,host_commands,network,epmd,filesystem
