@@ -3047,24 +3047,54 @@ fn orders_the_four_pending_signals_as_pinned_erts() {
 }
 
 #[test]
-fn rejects_dead_aliases_in_pending_signals() {
+fn counts_dead_aliases_in_pending_signals_as_pinned_erts() {
     let epmd = Epmd::start();
-    let name = format!("dpenderr{}", std::process::id());
-    for operation in ["send", "exit_signal", "link_exit"] {
+    for (operation, expected) in [
+        ("send", "{ok,266}\n"),
+        ("exit_signal", "{ok,274}\n"),
+        ("link_exit", "{ok,500}\n"),
+    ] {
         let expression = format!("dist_pending_error_probe:main({operation}), halt().");
         let arguments = probe(
-            &["-sname", &name, "-kernel", "logger_level", "none"],
+            &[
+                "-name",
+                "pending_q@localhost",
+                "-kernel",
+                "logger_level",
+                "none",
+            ],
             &expression,
         );
-        assert_eq!(stdout(&erts_erl(&epmd, &arguments)), "ok\n", "{operation}");
-        let output = pbeam_erl(&epmd, &arguments);
-        assert_eq!(output.status.code(), Some(1), "{operation}: {output:?}");
-        assert!(
-            String::from_utf8_lossy(&output.stderr)
-                .contains("unsupported external term of a pid reference whose owner exited"),
-            "{operation}: {output:?}"
+        assert_eq!(
+            stdout(&erts_erl(&epmd, &arguments)),
+            expected,
+            "{operation}"
+        );
+        assert_eq!(
+            stdout(&pbeam_erl(&epmd, &arguments)),
+            expected,
+            "{operation}"
         );
     }
+}
+
+#[test]
+fn records_dead_alias_pending_delivery_difference() {
+    // The External term format row and #1619 record the missing owner pid.
+    let epmd = Epmd::start();
+    let name = format!("dpenderr{}", std::process::id());
+    let arguments = probe(
+        &["-sname", &name, "-kernel", "logger_level", "none"],
+        "dist_pending_error_probe:deliver(), halt().",
+    );
+    assert_eq!(stdout(&erts_erl(&epmd, &arguments)), "ok\n");
+    let output = pbeam_erl(&epmd, &arguments);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("unsupported external term of a pid reference whose owner exited"),
+        "{output:?}"
+    );
 }
 
 #[test]
