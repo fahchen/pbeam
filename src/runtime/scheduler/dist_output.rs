@@ -435,7 +435,8 @@ impl Scheduler {
                         &mut dist,
                         node,
                         PendingSignal::Link(sender, control.clone()),
-                    )?;
+                    )
+                    .expect("a link control holds only an integer and pids");
                 }
                 PendingOutput::Monitor(monitor, control) => {
                     dist.insert_monitor_now(node, monitor);
@@ -443,7 +444,8 @@ impl Scheduler {
                         &mut dist,
                         node,
                         PendingSignal::Monitor(sender, control.clone()),
-                    )?;
+                    )
+                    .expect("a monitor control holds a target and the watcher's live reference");
                 }
                 PendingOutput::Spawn(monitor, control, arguments, queued) => {
                     dist.insert_monitor_now(node, monitor);

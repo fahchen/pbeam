@@ -218,7 +218,8 @@ impl Scheduler {
                         current,
                         unlink_control(UNLINK_ID, unlinking, current, pid),
                     ),
-                )?;
+                )
+                .expect("an unlink control holds only an integer and pids");
                 return Ok(());
             }
         }

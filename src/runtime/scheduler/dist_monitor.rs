@@ -377,7 +377,8 @@ impl Scheduler {
                     &mut dist,
                     &node,
                     super::dist_table::PendingSignal::Monitor(process, control),
-                )?;
+                )
+                .expect("a demonitor control holds pids and the watcher's live reference");
                 return Ok(());
             }
         }
