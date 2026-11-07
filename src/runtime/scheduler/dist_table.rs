@@ -105,6 +105,8 @@ struct Entry {
     output: VecDeque<DistOutput>,
     /// Signals held until the connection flags are known.
     pending_signals: VecDeque<PendingSignal>,
+    /// Size of pending signals, including ERTS iovec allocation overhead.
+    pending_queue_size: u64,
     /// The queue size of the packets in `output` (`dep->total_qsize`, see
     /// [`PACKET_OVERHEAD`]).
     queue_size: u64,
@@ -335,6 +337,7 @@ impl DistTable {
                 get_size: false,
                 output: VecDeque::new(),
                 pending_signals: VecDeque::new(),
+                pending_queue_size: 0,
                 queue_size: 0,
                 out: 0,
                 notify: false,
@@ -769,70 +772,18 @@ impl DistTable {
         Some((entry.flags, entry.controller?, entry.connection_id))
     }
 
-    /// Queue a send while the entry is pending.
-    pub(super) fn enqueue_pending_send(
-        &mut self,
-        name: &Atom,
-        sender: ProcessId,
-        to: Term,
-        message: Term,
-        priority: super::dist_output::SendPriority,
-    ) {
-        self.entry_mut(name)
-            .pending_signals
-            .push_back(PendingSignal::Send(sender, to, message, priority));
-    }
-
-    /// Queue a monitor on the pending connection.
-    pub(super) fn enqueue_pending_monitor(
-        &mut self,
-        name: &Atom,
-        sender: ProcessId,
-        control: Term,
-    ) {
-        self.entry_mut(name)
-            .pending_signals
-            .push_back(PendingSignal::Monitor(sender, control));
-    }
-
-    /// Queue a link on the pending connection.
-    pub(super) fn enqueue_pending_link(&mut self, name: &Atom, sender: ProcessId, control: Term) {
-        self.entry_mut(name)
-            .pending_signals
-            .push_back(PendingSignal::Link(sender, control));
-    }
-
-    /// Queue a spawn request on the pending connection.
-    pub(super) fn enqueue_pending_spawn(
-        &mut self,
-        name: &Atom,
-        sender: ProcessId,
-        key: MonitorKey,
-        control: Term,
-        arguments: Term,
-    ) {
-        self.entry_mut(name)
-            .pending_signals
-            .push_back(PendingSignal::Spawn(sender, key, control, arguments));
-    }
-
-    /// Queue an exit signal on the pending connection.
-    pub(super) fn enqueue_pending_exit(
-        &mut self,
-        name: &Atom,
-        sender: ProcessId,
-        to: Term,
-        reason: Term,
-        priority: super::dist_output::SendPriority,
-    ) {
-        self.entry_mut(name)
-            .pending_signals
-            .push_back(PendingSignal::Exit(sender, to, reason, priority));
+    /// Queue a signal and its ERTS allocation size while the entry is pending.
+    pub(super) fn enqueue_pending(&mut self, name: &Atom, signal: PendingSignal, size: u64) {
+        let entry = self.entry_mut(name);
+        entry.pending_signals.push_back(signal);
+        entry.pending_queue_size += size;
     }
 
     /// Take pending signals while the entry lock is held.
     pub(super) fn take_pending_signals(&mut self, name: &Atom) -> VecDeque<PendingSignal> {
-        std::mem::take(&mut self.entry_mut(name).pending_signals)
+        let entry = self.entry_mut(name);
+        entry.pending_queue_size = 0;
+        std::mem::take(&mut entry.pending_signals)
     }
 
     /// Put the packet `elements` at the end of the output queue of the
@@ -887,7 +838,7 @@ impl DistTable {
     /// (`dep->out` and `dep->total_qsize`, `dist.c:4507-4508`).
     pub(in crate::runtime) fn output(&self, name: &Atom) -> (u64, u64) {
         let entry = &self.entries[&name.index()];
-        (entry.out, entry.queue_size)
+        (entry.out, entry.queue_size + entry.pending_queue_size)
     }
 
     /// Return the entry of `name`, which [`Self::insert`] made.
@@ -1261,6 +1212,7 @@ impl Entry {
         self.get_size = false;
         self.output.clear();
         self.pending_signals.clear();
+        self.pending_queue_size = 0;
         self.queue_size = 0;
         self.notify = false;
         self.controller = None;
@@ -1273,7 +1225,7 @@ impl Entry {
 /// Return the queue size of the packet `elements` (`size_obuf`,
 /// `dist.c:1255-1270`): its bytes, [`PACKET_OVERHEAD`], and
 /// [`ELEMENT_OVERHEAD`] for each element and the empty first element.
-fn queue_size(elements: &[Binary]) -> u64 {
+pub(super) fn queue_size(elements: &[Binary]) -> u64 {
     let bytes: usize = elements.iter().map(|element| element.bit_size() / 8).sum();
     let count = elements.len() + 1;
     PACKET_OVERHEAD

@@ -62,9 +62,13 @@ impl Scheduler {
         let already_connected = self.node.dist().connected(&node).is_some();
         let control = link_control(LINK, current, pid);
         if !already_connected
-            && let Some(connection) = self.dist_auto_connect(&node, |dist, _| {
+            && let Some(connection) = self.dist_auto_connect(&node, |scheduler, dist, _| {
                 dist.insert_link_now(current, remote);
-                dist.enqueue_pending_link(&node, current, control.clone());
+                scheduler.enqueue_pending(
+                    dist,
+                    &node,
+                    super::dist_table::PendingSignal::Link(current, control.clone()),
+                )
             })?
         {
             self.link_on(current, link, remote, connection);
@@ -207,11 +211,15 @@ impl Scheduler {
         {
             let mut dist = self.node.dist();
             if dist.pending(&node) && dist.connection_id(&node) == state.connection {
-                dist.enqueue_pending_link(
+                self.enqueue_pending(
+                    &mut dist,
                     &node,
-                    current,
-                    unlink_control(UNLINK_ID, unlinking, current, pid),
-                );
+                    super::dist_table::PendingSignal::Link(
+                        current,
+                        unlink_control(UNLINK_ID, unlinking, current, pid),
+                    ),
+                )
+                .expect("an unlink control holds only an integer and pids");
                 return Ok(());
             }
         }
@@ -254,7 +262,12 @@ impl Scheduler {
             let mut dist = self.node.dist();
             if dist.pending(&node) && dist.connection_id(&node) == connection {
                 let (control, _) = exit_packet(0, &Term::Pid(from), &pid, reason);
-                dist.enqueue_pending_link(&node, from, control);
+                self.enqueue_pending(
+                    &mut dist,
+                    &node,
+                    super::dist_table::PendingSignal::Link(from, control),
+                )
+                .expect("a pending link exit contains no match context");
                 return Ok(());
             }
         }

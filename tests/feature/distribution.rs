@@ -3047,6 +3047,88 @@ fn orders_the_four_pending_signals_as_pinned_erts() {
 }
 
 #[test]
+fn counts_dead_aliases_in_pending_signals_as_pinned_erts() {
+    let epmd = Epmd::start();
+    for (operation, expected) in [
+        ("send", "{ok,266}\n"),
+        ("exit_signal", "{ok,274}\n"),
+        ("link_exit", "{ok,500}\n"),
+    ] {
+        let expression = format!("dist_pending_error_probe:main({operation}), halt().");
+        let arguments = probe(
+            &[
+                "-name",
+                "pending_q@localhost",
+                "-kernel",
+                "logger_level",
+                "none",
+            ],
+            &expression,
+        );
+        assert_eq!(
+            stdout(&erts_erl(&epmd, &arguments)),
+            expected,
+            "{operation}"
+        );
+        assert_eq!(
+            stdout(&pbeam_erl(&epmd, &arguments)),
+            expected,
+            "{operation}"
+        );
+    }
+}
+
+#[test]
+fn records_dead_alias_pending_delivery_difference() {
+    // The External term format row and #1619 record the missing owner pid.
+    let epmd = Epmd::start();
+    let name = format!("dpenderr{}", std::process::id());
+    let arguments = probe(
+        &["-sname", &name, "-kernel", "logger_level", "none"],
+        "dist_pending_error_probe:deliver(), halt().",
+    );
+    assert_eq!(stdout(&erts_erl(&epmd, &arguments)), "ok\n");
+    let output = pbeam_erl(&epmd, &arguments);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("unsupported external term of a pid reference whose owner exited"),
+        "{output:?}"
+    );
+}
+
+#[test]
+fn measures_pending_queue_size_on_pinned_erts() {
+    let epmd = Epmd::start();
+    let arguments = probe(
+        &[
+            "-name",
+            "pending_q@localhost",
+            "-kernel",
+            "logger_level",
+            "none",
+        ],
+        "dist_pending_size_probe:main(), halt().",
+    );
+    let expected = "[0,230,460,214,254,309,220,1267]\n";
+    assert_eq!(stdout(&erts_erl(&epmd, &arguments)), expected);
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), expected);
+    let arguments = probe(
+        &[
+            "-name",
+            "pending_q@localhost",
+            "-kernel",
+            "logger_level",
+            "none",
+        ],
+        "dist_pending_size_probe:more(), halt().",
+    );
+    let expected = "[213,458,688,932,1179,1425]\n";
+    assert_eq!(stdout(&erts_erl(&epmd, &arguments)), expected);
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), expected);
+}
+
+#[test]
 fn orders_all_five_pending_signal_packets_as_pinned_erts() {
     let epmd = Epmd::start();
     let name = format!("dorder{}", std::process::id());

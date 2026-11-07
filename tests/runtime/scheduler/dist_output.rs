@@ -89,7 +89,10 @@ fn rejects_auto_connect_when_the_connection_changes_before_its_lock() {
     let mut queued = false;
     assert_eq!(
         scheduler
-            .dist_auto_connect(&name, |_, _| queued = true)
+            .dist_auto_connect(&name, |_, _, _| {
+                queued = true;
+                Ok(())
+            })
             .unwrap(),
         None
     );
@@ -103,7 +106,10 @@ fn rejects_auto_connect_when_the_connection_changes_before_its_lock() {
     assert!(node.is_going_down());
     assert_eq!(
         scheduler
-            .dist_auto_connect(&name, |_, _| queued = true)
+            .dist_auto_connect(&name, |_, _, _| {
+                queued = true;
+                Ok(())
+            })
             .unwrap(),
         None
     );
@@ -114,7 +120,10 @@ fn rejects_auto_connect_when_the_connection_changes_before_its_lock() {
     scheduler.node.set_exiting(ProcessId(1));
     assert_eq!(
         scheduler
-            .dist_auto_connect(&name, |_, _| queued = true)
+            .dist_auto_connect(&name, |_, _, _| {
+                queued = true;
+                Ok(())
+            })
             .unwrap(),
         None
     );
@@ -361,6 +370,80 @@ fn noconnect_send_joins_a_connection_started_after_the_idle_check() {
             .unwrap()
             .unwrap();
     assert_eq!(delivered, message);
+}
+
+#[test]
+fn queues_a_dead_alias_when_a_signal_joins_a_new_pending_connection() {
+    // A fixture cannot force a new pending connection between the first
+    // connection check and the output lock. The dead alias is a legal term.
+    let mut scheduler = scheduler_with_kernel();
+    let node = scheduler.atoms.put("error_race@nohost").unwrap();
+    let node_ref = Arc::clone(&scheduler.node);
+    {
+        let mut dist = node_ref.dist();
+        dist.insert(&node, Reference(8), 0);
+        dist.new_connection(&node);
+    }
+    let reference = Reference::ordinary(9).unwrap().pid_reference();
+    node_ref.register_alias(reference, ProcessId(2));
+    node_ref.remove_aliases(ProcessId(2));
+    let alias = Term::Reference(reference);
+    let remote = RemotePid {
+        node: node.index(),
+        creation: 1,
+        number: 1,
+        serial: 0,
+    };
+    let target = remote.term();
+    let arguments = Term::list_from(vec![alias.clone()]);
+    let control = Term::tuple(vec![
+        Term::Integer(29),
+        Term::Reference(Reference(10)),
+        Term::Pid(ProcessId(0)),
+        Term::Pid(ProcessId(0)),
+        Term::tuple(vec![
+            Term::static_atom("erlang"),
+            Term::static_atom("node"),
+            Term::Integer(1),
+        ]),
+        Term::nil(),
+    ]);
+    let monitor = super::super::dist_table::DistMonitor {
+        process: ProcessId(0),
+        remote: None,
+        key: MonitorKey::Local(Reference(10)),
+        side: super::super::dist_table::MonitorSide::Watcher,
+    };
+    let mut queued = false;
+    for operation in 0..3 {
+        let pending = match operation {
+            0 => super::PendingOutput::Send(&target, &alias, super::SendPriority::Normal),
+            1 => super::PendingOutput::Exit(&target, &alias, super::SendPriority::Normal),
+            _ => super::PendingOutput::Spawn(monitor, &control, &arguments, &mut queued),
+        };
+        let result = scheduler.dist_output_with_pending(
+            ProcessId(0),
+            &node,
+            None,
+            Some(pending),
+            |_, _| unreachable!(),
+        );
+        assert_eq!(result.unwrap(), Some(1));
+        assert!(node_ref.dist().output(&node).1 > 0);
+    }
+    assert!(queued);
+    let mut dist = node_ref.dist();
+    assert!(
+        dist.connect(&node, Controller::Process(ProcessId(0)), 0)
+            .is_some()
+    );
+    let error = scheduler
+        .dist_flush_pending(&mut dist, &node, 0)
+        .unwrap_err();
+    assert!(
+        format!("{error:?}")
+            .contains("unsupported external term of a pid reference whose owner exited")
+    );
 }
 
 #[test]
