@@ -196,22 +196,37 @@ ordering_loop() ->
     end.
 
 ordering_client(Server) ->
-    ok = net_kernel:monitor_nodes(true, #{node_type => all}),
-    %% A loaded runner needs more than thirty seconds for one connect and
-    %% teardown. The whole loop still ends well inside the test's time budget.
-    Check = fun(_) ->
-                    _ = net_kernel:connect_node(Server),
-                    receive
-                        {nodeup, Server, _} ->
-                            receive {nodedown, Server, _} -> ok after 120000 -> down_timeout end;
-                        {nodedown, Server, _} -> down_first
-                    after 120000 -> up_timeout
-                    end
-            end,
-    %% Four races still catch an inverted nodeup and nodedown. A loaded CI
-    %% runner cannot finish twelve connect and teardown races inside the test
-    %% budget, and a long loop loses one event to the runner's own timeouts.
-    io:format("~p~n", [[Check(N) || N <- lists:seq(1, 4)]]).
+    Parent = self(),
+    {Worker, Ref} = spawn_monitor(fun() ->
+        ok = net_kernel:monitor_nodes(true, #{node_type => all}),
+        lists:foreach(fun(N) ->
+            Parent ! {phase, N, connect},
+            _ = net_kernel:connect_node(Server),
+            Parent ! {phase, N, nodeup},
+            receive
+                {nodeup, Server, _} ->
+                    Parent ! {phase, N, nodedown},
+                    receive {nodedown, Server, _} -> Parent ! {result, N, ok} end;
+                {nodedown, Server, _} -> Parent ! {result, N, down_first}
+            end
+        end, lists:seq(1, 4))
+    end),
+    erlang:send_after(90000, self(), ordering_timeout),
+    ordering_results(Worker, Ref, 1, start, []).
+
+ordering_results(Worker, Ref, N, Phase, Results) ->
+    receive
+        {phase, N, Next} -> ordering_results(Worker, Ref, N, Next, Results);
+        {result, N, ok} when N =:= 4 ->
+            io:format("~p~n", [lists:reverse([ok | Results])]);
+        {result, N, ok} -> ordering_results(Worker, Ref, N + 1, start, [ok | Results]);
+        {result, N, Error} -> io:format("~p~n", [{N, Phase, Error}]);
+        {'DOWN', Ref, process, Worker, Reason} ->
+            io:format("~p~n", [{N, Phase, {worker_exit, Reason}}]);
+        ordering_timeout ->
+            exit(Worker, kill),
+            io:format("~p~n", [{N, Phase, timeout}])
+    end.
 
 monitor_local_events() ->
     ok = net_kernel:monitor_nodes(true, #{node_type => all, connection_id => true, nodedown_reason => true}),

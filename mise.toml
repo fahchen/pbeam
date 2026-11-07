@@ -28,6 +28,8 @@ run = [
   "cd fixtures/exqlite && mix format --check-formatted",
   "cd fixtures/fs_notify && mix format --check-formatted",
   "mix format --check-formatted 'examples/*/*.ex' 'fixtures/*/*.ex'",
+  "mix format --check-formatted scripts/test_classes.exs tests/test_classes_test.exs",
+  "elixir tests/test_classes_test.exs",
   "cargo fmt --all -- --check",
   "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings",
 ]

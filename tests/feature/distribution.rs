@@ -13,7 +13,7 @@ use std::{
     process::{Command, Output, Stdio},
     sync::{Arc, Mutex, mpsc},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[expect(
@@ -315,12 +315,12 @@ fn applies_auto_connect_policy_to_name_sends_as_pinned_erts() {
                 &["-sname", &server_name, "-setcookie", "ck"],
                 "register(pending_receiver,self()), io:format(\"~s~n\",[node()]), \
                  receive {initial,P} -> P ! initial_ack; {final,P} -> P ! final_ack; _ -> halt(3) end, \
-                 receive {final,P2} -> P2 ! final_ack; _ -> halt(4) after 5000 -> ok end, halt().",
+                 receive {final,P2} -> P2 ! final_ack; Unexpected -> io:format(standard_error, \"policy server unexpected: ~p~n\", [Unexpected]), halt(4) after 5000 -> io:format(standard_error, \"policy server timed out~n\"), ok end, halt().",
             );
             let first = if policy == "once" {
                 "{pending_receiver,N} ! {initial,self()}, \
                  receive initial_ack -> ok after 5000 -> halt(5) end, \
-                 true=erlang:disconnect_node(N), timer:sleep(200),"
+                 case erlang:disconnect_node(N) of true -> ok; Disconnect -> error({disconnect_failed,Disconnect}) end, timer:sleep(200),"
             } else {
                 ""
             };
@@ -334,7 +334,7 @@ fn applies_auto_connect_policy_to_name_sends_as_pinned_erts() {
                  Req=spawn_request(N,erlang,node,[],[]), \
                  receive {{spawn_reply,Req,error,noconnection}} -> ok after 5000 -> halt(9) end, \
                  sys:get_state(net_kernel), \
-                 false=lists:member(N,nodes()), true=net_kernel:connect_node(N), \
+                 false=lists:member(N,nodes()), case net_kernel:connect_node(N) of true -> ok; Connect -> error({{connect_failed,Connect}}) end, \
                  {{pending_receiver,N}} ! {{final,self()}}, \
                  receive final_ack -> io:format(\"ok~n\") after 5000 -> halt(6) end, halt().",
                 server.line()
@@ -3652,8 +3652,72 @@ fn orders_node_events_when_peer_disconnects_at_connect() {
         &expression,
     );
     let expected = "[ok,ok,ok,ok]\n";
-    assert_eq!(stdout(&erts_erl(&epmd, &arguments)), expected);
-    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), expected);
+    for pbeam in [false, true] {
+        let mut command = if pbeam {
+            let (root, bindir) = emulator_flags();
+            let mut command = Command::new(env!("CARGO_BIN_EXE_pbeam"));
+            command
+                .args(["erl", "--root", &root, "--bindir"])
+                .arg(bindir)
+                .arg("--preloaded")
+                .arg(pinned_beam_path("erlang").parent().unwrap())
+                .arg("--");
+            command
+        } else {
+            Command::new("erl")
+        };
+        let mut child = command
+            .args(["-start_epmd", "false"])
+            .args(&arguments)
+            .env("ERL_EPMD_PORT", epmd.port())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let pipes: [Box<dyn Read + Send>; 2] = [
+            Box::new(child.stdout.take().unwrap()),
+            Box::new(child.stderr.take().unwrap()),
+        ];
+        for (index, mut pipe) in pipes.into_iter().enumerate() {
+            let sender = sender.clone();
+            thread::spawn(move || {
+                let mut bytes = Vec::new();
+                let result = pipe.read_to_end(&mut bytes);
+                let _ = sender.send((index, result, bytes));
+            });
+        }
+        let deadline = Instant::now() + Duration::from_secs(110);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!(
+                    "ordering client deadline expired before fixture diagnostics: pbeam={pbeam}"
+                );
+            }
+            thread::sleep(Duration::from_millis(50));
+        };
+        let first = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+        let second = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            first.1.is_ok() && second.1.is_ok(),
+            "ordering output read failed: {first:?} {second:?}"
+        );
+        let mut output = [Vec::new(), Vec::new()];
+        output[first.0] = first.2;
+        output[second.0] = second.2;
+        assert!(
+            status.success() && output[0] == expected.as_bytes() && output[1].is_empty(),
+            "pbeam={pbeam} status={status} stdout={} stderr={}",
+            String::from_utf8_lossy(&output[0]),
+            String::from_utf8_lossy(&output[1])
+        );
+    }
 }
 
 #[test]
