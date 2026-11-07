@@ -541,9 +541,9 @@ The owner opened [m13] Foundation seams ([#908](https://github.com/fahchen/pbeam
 
 ### Give the one-file executable an epmd module
 
-- **Now:** `pbeam erl` starts `epmd` from `PATH`. A one-file executable has no sibling `epmd` binary, and a host without OTP has no `epmd`. ADR 0002 decides that the one-file executable uses the pinned OTP `-epmd_module` with a fixed name-to-endpoint map and no daemon.
+- **Now:** `pbeam erl` starts `epmd` from `PATH` for a named node unless `-start_epmd false` or `-no_epmd` is given. A one-file executable has no sibling `epmd` binary, and a host without OTP has no `epmd`. ADR 0002 decides that the one-file executable uses the pinned OTP `-epmd_module` with a fixed name-to-endpoint map and no daemon.
 - **Option:** add a connect-only module like `Server.Epmd` of redbug-cli, install it with `-start_epmd false -epmd_module`, and keep the `PATH` behavior of `pbeam erl`.
-- **Evidence:** `server/lib/server/epmd.ex` at redbug-cli returns a pinned `{ok, Ip, Port, Version}` from `address_please/3` and never registers in a real epmd. `lib/kernel/src/erl_epmd.erl:57-60` is its export list at `OTP-29.1.1`. PR #1539 merged as `5c8d29a3` for #1419 connects PBeam to a pinned-ERTS peer over an SSH tunnel. Its test starts an epmd and passes the port to both nodes, so it gives no evidence about a host without one.
+- **Evidence:** `server/lib/server/epmd.ex` at redbug-cli returns a pinned `{ok, Ip, Port, Version}` from `address_please/3` and never registers in a real epmd. `lib/kernel/src/erl_epmd.erl:57-60` is the export list of OTP `erl_epmd` at `OTP-29.1.1`. PR #1539 merged as `5c8d29a3` for #1419 proves a TCP echo over an SSH tunnel to a pinned-ERTS node. Its test starts an epmd, so it gives no evidence about a host without one, and it does not test distribution through the tunnel.
 - **Trigger:** a one-file executable needs to find a node by name. No such consumer exists now, so no field or configuration was added.
 - **Source:** ADR 0002, owner decision of 2026-11-06 through the standing capability-program authorization.
 
