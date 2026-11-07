@@ -7,10 +7,10 @@
 
 use std::{
     ffi::OsStr,
-    io::{Read, Write},
+    io::{BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
     path::PathBuf,
-    process::{Command, Output, Stdio},
+    process::{Child, Command, Output, Stdio},
     sync::{Arc, Mutex, mpsc},
     thread,
     time::{Duration, Instant},
@@ -689,6 +689,102 @@ fn connects_to_an_erts_node_as_a_hidden_node_as_pinned_erts() {
     assert_eq!(stdout(&pbeam_erl(&epmd, &client(&pbeam, "bad"))), refused);
 }
 
+/// A TLS probe node with captured output and a bounded wait.
+struct TlsProbeNode {
+    child: Child,
+    first_line: mpsc::Receiver<Vec<u8>>,
+    stdout: thread::JoinHandle<Vec<u8>>,
+    stderr: thread::JoinHandle<Vec<u8>>,
+}
+
+impl TlsProbeNode {
+    /// Start a node and drain both output streams while it runs.
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "the probe selects one of two runtimes"
+    )]
+    fn start(pbeam: bool, epmd: &Epmd, arguments: &[&str], expression: &str) -> Self {
+        let mut command = if pbeam {
+            let (root, bindir) = emulator_flags();
+            let mut command = Command::new(env!("CARGO_BIN_EXE_pbeam"));
+            command
+                .args(["erl", "--root", &root, "--bindir"])
+                .arg(bindir)
+                .arg("--preloaded")
+                .arg(pinned_beam_path("erlang").parent().unwrap())
+                .args(["--", "-start_epmd", "false"]);
+            command
+        } else {
+            Command::new("erl")
+        };
+        let mut child = command
+            .arg("-noshell")
+            .args(arguments)
+            .args(["-eval", expression])
+            .env("ERL_EPMD_PORT", epmd.port())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let mut stderr = child.stderr.take().unwrap();
+        let (sender, first_line) = mpsc::channel();
+        let stdout = thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            let mut bytes = Vec::new();
+            if reader.read_until(b'\n', &mut bytes).is_ok() && !bytes.is_empty() {
+                let _ = sender.send(bytes.clone());
+            }
+            reader.read_to_end(&mut bytes).unwrap();
+            bytes
+        });
+        let stderr = thread::spawn(move || {
+            let mut bytes = Vec::new();
+            stderr.read_to_end(&mut bytes).unwrap();
+            bytes
+        });
+        Self {
+            child,
+            first_line,
+            stdout,
+            stderr,
+        }
+    }
+
+    /// Wait for exit, or kill the node after the timeout, and collect its output.
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "a failed peer requires immediate termination"
+    )]
+    fn finish(mut self, kill: bool) -> (Output, bool) {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut timed_out = false;
+        if kill {
+            let _ = self.child.kill();
+        }
+        let status = loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                timed_out = true;
+                let _ = self.child.kill();
+                break self.child.wait().unwrap();
+            }
+            thread::sleep(Duration::from_millis(20));
+        };
+        (
+            Output {
+                status,
+                stdout: self.stdout.join().unwrap(),
+                stderr: self.stderr.join().unwrap(),
+            },
+            timed_out,
+        )
+    }
+}
+
 #[test]
 fn connects_over_tls_in_both_directions_as_pinned_erts() {
     let epmd = Epmd::start();
@@ -727,14 +823,22 @@ fn connects_over_tls_in_both_directions_as_pinned_erts() {
             options_path,
         ];
         let server_expression = "register(tls_probe, self()), io:format(\"~s~n\", [node()]), receive stop -> io:format(\"stopped~n\"), halt() after 60000 -> halt(2) end.";
-        let server = if server_pbeam {
-            pbeam_node(&epmd, &server_args, server_expression)
-        } else {
-            ErtsNode::start(&epmd, &server_args, server_expression)
+        let server = TlsProbeNode::start(server_pbeam, &epmd, &server_args, server_expression);
+        let server_line = server.first_line.recv_timeout(Duration::from_secs(60));
+        let node = match server_line {
+            Ok(line) => String::from_utf8_lossy(&line).trim_end().to_owned(),
+            Err(error) => {
+                let (output, timed_out) = server.finish(true);
+                panic!(
+                    "server startup: {error}; timed out: {timed_out}; status: {}; stdout: {:?}; stderr: {:?}; raw output: {output:?}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
         };
         let expression = format!(
-            "N = '{}', R = {{net_adm:ping(N), erpc:call(N, erlang, length, [[a,b,c]])}}, {{tls_probe,N}} ! stop, io:format(\"~w~n\", [R]), halt().",
-            server.line()
+            "N = '{node}', R = {{net_adm:ping(N), erpc:call(N, erlang, length, [[a,b,c]])}}, {{tls_probe,N}} ! stop, io:format(\"~w~n\", [R]), halt()."
         );
         let client_name = format!("tlscli{server_pbeam}{client_pbeam}{id}");
         let client_args = [
@@ -749,14 +853,31 @@ fn connects_over_tls_in_both_directions_as_pinned_erts() {
             "-ssl_dist_optfile",
             options_path,
         ];
-        let client = if client_pbeam {
-            pbeam_node(&epmd, &client_args, &expression)
-        } else {
-            ErtsNode::start(&epmd, &client_args, &expression)
-        };
-        let result = client.line();
-        assert_eq!(server.line(), "stopped");
-        result
+        let client = TlsProbeNode::start(client_pbeam, &epmd, &client_args, &expression);
+        let (client_output, client_timeout) = client.finish(false);
+        let client_ok = !client_timeout
+            && client_output.status.success()
+            && client_output.stdout == b"{pong,3}\n"
+            && client_output.stderr.is_empty();
+        let (server_output, server_timeout) = server.finish(!client_ok);
+        assert!(
+            client_ok
+                && !server_timeout
+                && server_output.status.success()
+                && server_output.stdout == format!("{node}\nstopped\n").as_bytes()
+                && server_output.stderr.is_empty(),
+            "server_pbeam={server_pbeam}, client_pbeam={client_pbeam}; server timed out: {server_timeout}; status: {}; stdout: {:?}; stderr: {:?}; client timed out: {client_timeout}; status: {}; stdout: {:?}; stderr: {:?}; raw server: {server_output:?}; raw client: {client_output:?}",
+            server_output.status,
+            String::from_utf8_lossy(&server_output.stdout),
+            String::from_utf8_lossy(&server_output.stderr),
+            client_output.status,
+            String::from_utf8_lossy(&client_output.stdout),
+            String::from_utf8_lossy(&client_output.stderr)
+        );
+        String::from_utf8(client_output.stdout)
+            .unwrap()
+            .trim_end()
+            .to_owned()
     };
     let expected = run(false, false);
     assert_eq!(expected, "{pong,3}");
