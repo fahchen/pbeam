@@ -140,6 +140,7 @@ pub(super) enum PendingSignal {
     Monitor(ProcessId, Term),
     Link(ProcessId, Term),
     Spawn(ProcessId, Term, Term),
+    Exit(ProcessId, Term, Term, super::dist_output::SendPriority),
 }
 
 /// An incomplete distribution message and its own atom translation table.
@@ -805,6 +806,20 @@ impl DistTable {
         self.entry_mut(name)
             .pending_signals
             .push_back(PendingSignal::Spawn(sender, control, arguments));
+    }
+
+    /// Queue an exit signal on the pending connection.
+    pub(super) fn enqueue_pending_exit(
+        &mut self,
+        name: &Atom,
+        sender: ProcessId,
+        to: Term,
+        reason: Term,
+        priority: super::dist_output::SendPriority,
+    ) {
+        self.entry_mut(name)
+            .pending_signals
+            .push_back(PendingSignal::Exit(sender, to, reason, priority));
     }
 
     /// Take pending signals while the entry lock is held.

@@ -222,31 +222,33 @@ impl Scheduler {
         priority: SendPriority,
     ) -> Result<bool, BeamError> {
         let caller = self.current_process().id;
-        let from = Term::Pid(caller);
-        let alias = is_remote_reference(to);
-        let prio = priority == SendPriority::Priority;
+        if self.node.net_kernel().is_some() {
+            let node_ref = Arc::clone(&self.node);
+            let mut dist = node_ref.dist();
+            if dist.pending(node) {
+                dist.enqueue_pending_exit(node, caller, to.clone(), reason.clone(), priority);
+                return Ok(true);
+            }
+            let idle = dist.connected(node).is_none();
+            drop(dist);
+            if idle
+                && self
+                    .dist_auto_connect(node, |dist, _| {
+                        dist.enqueue_pending_exit(
+                            node,
+                            caller,
+                            to.clone(),
+                            reason.clone(),
+                            priority,
+                        );
+                    })?
+                    .is_some()
+            {
+                return Ok(true);
+            }
+        }
         self.dist_output(caller, node, |flags, _| {
-            if (prio || alias) && flags & ALTACT_SIG != 0 {
-                let mut fs = ALTACT_SIG_EXIT;
-                if alias {
-                    fs |= ALTACT_SIG_ALIAS;
-                }
-                if prio {
-                    fs |= ALTACT_SIG_PRIO;
-                }
-                let control =
-                    Term::tuple(vec![Term::Integer(37), Term::Integer(fs), from, to.clone()]);
-                return Some((control, Some(reason.clone())));
-            }
-            if alias {
-                return None;
-            }
-            if flags & EXIT_PAYLOAD != 0 {
-                let control = Term::tuple(vec![Term::Integer(26), from, to.clone()]);
-                return Some((control, Some(reason.clone())));
-            }
-            let control = Term::tuple(vec![Term::Integer(8), from, to.clone(), reason.clone()]);
-            Some((control, None))
+            exit_control(flags, caller, to, reason, priority)
         })
     }
 
@@ -336,6 +338,15 @@ impl Scheduler {
                 ),
                 super::dist_table::PendingSignal::Spawn(sender, control, arguments) => {
                     (sender, control, Some(arguments))
+                }
+                super::dist_table::PendingSignal::Exit(sender, to, reason, priority) => {
+                    let Some((control, message)) =
+                        exit_control(flags, sender, &to, &reason, priority)
+                    else {
+                        dist.enqueue(node, Vec::new());
+                        continue;
+                    };
+                    (sender, control, message)
                 }
                 super::dist_table::PendingSignal::Monitor(sender, control)
                 | super::dist_table::PendingSignal::Link(sender, control) => {
@@ -440,6 +451,45 @@ impl Scheduler {
         }
         Ok(())
     }
+}
+
+/// Build an exit signal for the flags of the connection (`dist.c:1788-1828`).
+fn exit_control(
+    flags: u64,
+    caller: ProcessId,
+    to: &Term,
+    reason: &Term,
+    priority: SendPriority,
+) -> Option<(Term, Option<Term>)> {
+    let from = Term::Pid(caller);
+    let alias = is_remote_reference(to);
+    let prio = priority == SendPriority::Priority;
+    if (prio || alias) && flags & ALTACT_SIG != 0 {
+        let mut fs = ALTACT_SIG_EXIT;
+        if alias {
+            fs |= ALTACT_SIG_ALIAS;
+        }
+        if prio {
+            fs |= ALTACT_SIG_PRIO;
+        }
+        return Some((
+            Term::tuple(vec![Term::Integer(37), Term::Integer(fs), from, to.clone()]),
+            Some(reason.clone()),
+        ));
+    }
+    if alias {
+        return None;
+    }
+    if flags & EXIT_PAYLOAD != 0 {
+        return Some((
+            Term::tuple(vec![Term::Integer(26), from, to.clone()]),
+            Some(reason.clone()),
+        ));
+    }
+    Some((
+        Term::tuple(vec![Term::Integer(8), from, to.clone(), reason.clone()]),
+        None,
+    ))
 }
 
 /// Return the control message of `erts_dsig_send_msg` (`dist.c:1640-1702`)
