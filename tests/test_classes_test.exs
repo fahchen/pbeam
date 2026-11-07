@@ -17,7 +17,14 @@ defmodule TestClassesReportTest do
     %{directory: directory}
   end
 
-  defp report(directory, target, cases, arguments \\ [], integration_target \\ "arith") do
+  defp report(
+         directory,
+         target,
+         cases,
+         arguments \\ [],
+         integration_target \\ "arith",
+         script \\ "scripts/test_classes.exs"
+       ) do
     unit = Enum.chunk_every(arguments, 2, 1, :discard) |> Enum.any?(&(&1 == ["--scope", "unit"]))
 
     integration =
@@ -68,7 +75,7 @@ defmodule TestClassesReportTest do
     File.write!(metadata_path, :json.encode(metadata))
     File.write!(list_path, :json.encode(list))
 
-    System.cmd("elixir", ["scripts/test_classes.exs"] ++ arguments ++ [metadata_path, list_path],
+    System.cmd("elixir", [script] ++ arguments ++ [metadata_path, list_path],
       stderr_to_stdout: true
     )
   end
@@ -161,11 +168,15 @@ defmodule TestClassesReportTest do
   end
 
   test "strict unit report rejects an unreviewed case", %{directory: directory} do
-    cases = [
-      {"runtime::dirty::tests::drops_a_finish_that_did_not_run_on_a_dirty_io_thread", "matches"}
-    ]
+    name = "runtime::unreviewed_for_test"
+    script = Path.join(directory, "test_classes.exs")
+    File.cp!("scripts/test_classes.exs", script)
+    File.write!(Path.join(directory, "test_unit_classes.txt"), "pbeam-runtime|#{name}||unknown\n")
+    cases = [{name, "matches"}]
 
-    {output, status} = report(directory, true, cases, ["--scope", "unit", "--strict"])
+    {output, status} =
+      report(directory, true, cases, ["--scope", "unit", "--strict"], "arith", script)
+
     assert status != 0
     assert output =~ "Cases with unknown purpose or dependencies: 1; unrecorded: 0"
   end
@@ -311,16 +322,16 @@ defmodule TestClassesReportTest do
     assert status == 0
 
     assert output =~
-             "looks_up_a_key_in_a_loop_as_pinned_erts: purpose=runtime_integration,erts_comparison; dependencies=erts_process,pipes,filesystem,network,local_socket; selected=true"
+             "looks_up_a_key_in_a_loop_as_pinned_erts: purpose=runtime_integration,erts_comparison; dependencies=erts_process,pipes,filesystem,network,local_socket,native_library; selected=true"
 
     assert output =~
-             "orders_the_alias_keys_of_an_ordered_set: purpose=runtime_integration; dependencies=erts_process_may_be_conditional,pipes,filesystem,network,local_socket; selected=true"
+             "orders_the_alias_keys_of_an_ordered_set: purpose=runtime_integration; dependencies=erts_process_may_be_conditional,pipes,filesystem,network,local_socket,native_library; selected=true"
 
     assert output =~
-             "records_the_ets_program_cost: purpose=runtime_integration,measurement; dependencies=network,local_socket; selected=false"
+             "records_the_ets_program_cost: purpose=runtime_integration,measurement; dependencies=network,local_socket,native_library; selected=false"
 
     assert output =~
-             "traps_the_delete_of_a_large_table_as_pinned_erts: purpose=runtime_integration,erts_comparison; dependencies=erts_process,pipes,filesystem,network,local_socket,real_time; selected=true"
+             "traps_the_delete_of_a_large_table_as_pinned_erts: purpose=runtime_integration,erts_comparison; dependencies=erts_process,pipes,filesystem,network,local_socket,real_time,native_library; selected=true"
 
     {waits, status} =
       report(
@@ -355,6 +366,12 @@ defmodule TestClassesReportTest do
     name = "pbeam-runtime::net stops_the_run_at_a_network_namespace"
     assert mac =~ "platform excluded: " <> name
     assert linux =~ "not listed on this platform: " <> name
+    apple = "pbeam-runtime::tcp_inet stops_the_run_for_a_linger_time_on_macos"
+    assert linux =~ "platform excluded: " <> apple
+    assert mac =~ "not listed on this platform: " <> apple
+    non_linux = "pbeam-runtime::init_boot receives_with_the_flag_errqueue_as_pinned_erts"
+    assert linux =~ "platform excluded: " <> non_linux
+    assert mac =~ "not listed on this platform: " <> non_linux
   end
 
   test "distinguishes live ERTS comparison from a recorded result", %{directory: directory} do
@@ -373,5 +390,176 @@ defmodule TestClassesReportTest do
 
     assert output =~
              "runs_bs_match_string_as_pinned_erts: purpose=runtime_integration,erts_comparison; dependencies=erts_process,pipes,filesystem,network,local_socket"
+  end
+
+  test "reports host commands only for type cases that start a port", %{directory: directory} do
+    cases = [
+      {"runs_is_number_in_a_guard_as_pinned_erts", "matches"},
+      {"runs_is_record_2_and_3_in_a_body_through_a_fun_and_through_apply_as_pinned_erts",
+       "matches"}
+    ]
+
+    {output, status} =
+      report(
+        directory,
+        true,
+        cases,
+        ["--scope", "integration", "--cases", "--dependency", "host_commands"],
+        "type_test"
+      )
+
+    assert status == 0
+    assert output =~ "runs_is_number_in_a_guard_as_pinned_erts: purpose="
+
+    refute output =~
+             "runs_is_record_2_and_3_in_a_body_through_a_fun_and_through_apply_as_pinned_erts: purpose="
+  end
+
+  test "reports numeric conversion and size dependencies", %{directory: directory} do
+    for {target, name} <- [
+          {"float", "keeps_float_map_and_ets_keys_as_pinned_erts"},
+          {"float_test", "raises_badarith_when_fconv_gets_a_term_that_is_not_a_number"},
+          {"integer_to_binary", "converts_integers_to_binaries_as_pinned_erts"},
+          {"list_to_integer", "reads_integers_from_lists_as_pinned_erts"},
+          {"list_to_float", "reads_floats_from_lists_as_pinned_erts"},
+          {"byte_size", "rounds_the_size_of_a_bitstring_literal_up"},
+          {"bit_size", "gives_the_bit_size_like_erts"},
+          {"size", "gives_the_size_of_a_tuple_or_bitstring_like_erts"}
+        ] do
+      {output, status} =
+        report(
+          directory,
+          true,
+          [{name, "matches"}],
+          ["--scope", "integration", "--cases"],
+          target
+        )
+
+      assert status == 0
+
+      assert output =~
+               "#{name}: purpose=runtime_integration,erts_comparison; dependencies=erts_process,pipes,filesystem,network,local_socket"
+    end
+  end
+
+  test "distinguishes inet local sockets, IPv4 sockets, and fake option callbacks", %{
+    directory: directory
+  } do
+    cases = [
+      {"runtime::port::inet::stream::tests::fills_one_buffer_for_a_receive_in_many_reads",
+       "matches"},
+      {"runtime::port::inet::datagram::tests::reads_no_datagram_without_a_receive", "matches"},
+      {"runtime::port::inet::tests::sets_tos_and_priority_again_after_another_option", "matches"}
+    ]
+
+    {output, status} =
+      report(directory, true, cases, ["--scope", "unit", "--cases", "--platform", "linux"])
+
+    assert status == 0
+
+    assert output =~
+             "fills_one_buffer_for_a_receive_in_many_reads: purpose=host_integration; dependencies=network,local_socket; selected=true"
+
+    assert output =~
+             "reads_no_datagram_without_a_receive: purpose=host_integration; dependencies=network; selected=true"
+
+    assert output =~
+             "sets_tos_and_priority_again_after_another_option: purpose=pure_logic; dependencies=none; selected=true"
+  end
+
+  test "reports loader dependencies at the parsing boundary", %{directory: directory} do
+    cases = [
+      {"rejects_truncated_container", "matches"},
+      {"rejects_wrong_container_identity", "matches"},
+      {"rejects_duplicate_and_missing_required_chunks", "matches"}
+    ]
+
+    {output, status} =
+      report(directory, true, cases, ["--scope", "integration", "--cases"], "constant")
+
+    assert status == 0
+
+    assert output =~
+             "rejects_truncated_container: purpose=pure_logic; dependencies=none; selected=true"
+
+    assert output =~
+             "rejects_wrong_container_identity: purpose=pure_logic; dependencies=filesystem; selected=true"
+
+    assert output =~
+             "rejects_duplicate_and_missing_required_chunks: purpose=pure_logic; dependencies=filesystem,native_library; selected=true"
+
+    {native, status} =
+      report(
+        directory,
+        true,
+        cases,
+        ["--scope", "integration", "--cases", "--dependency", "native_library"],
+        "constant"
+      )
+
+    assert status == 0
+    assert native =~ "rejects_duplicate_and_missing_required_chunks: purpose="
+    refute native =~ "rejects_wrong_container_identity: purpose="
+    refute native =~ "rejects_truncated_container: purpose="
+  end
+
+  test "reports fixture opcode byte checks as filesystem test helpers", %{directory: directory} do
+    cases = [{"arith_probe_has_the_gc_bif1_and_gc_bif2_bytes", "matches"}]
+
+    {output, status} =
+      report(directory, true, cases, ["--scope", "integration", "--cases"], "fixture_opcodes")
+
+    assert status == 0
+    assert output =~ "purpose=test_helper; dependencies=filesystem; selected=true"
+  end
+
+  test "reports binary construction reference and dependency differences", %{directory: directory} do
+    cases = [
+      {"builds_string_and_binary_segments_as_pinned_erts", "matches"},
+      {"rejects_an_allocation_list_that_erts_rejects", "matches"},
+      {"raises_badarg_with_the_erts_error_info_for_an_append_segment", "matches"},
+      {"formats_the_erts_error_info_for_an_append_segment_as_the_reference", "matches"},
+      {"stops_at_an_append_segment_that_is_not_the_first_segment", "matches"},
+      {"uses_no_reduction_for_a_private_append_as_the_pinned_erts_on_arm64", "matches"}
+    ]
+
+    {output, status} =
+      report(directory, true, cases, ["--scope", "integration", "--cases"], "bs_create_bin")
+
+    assert status == 0
+
+    assert output =~
+             "builds_string_and_binary_segments_as_pinned_erts: purpose=runtime_integration,erts_comparison; dependencies=erts_process,pipes,filesystem,network,local_socket"
+
+    assert output =~
+             "rejects_an_allocation_list_that_erts_rejects: purpose=runtime_integration,erts_comparison; dependencies=erts_process,pipes,filesystem,native_library;"
+
+    assert output =~
+             "raises_badarg_with_the_erts_error_info_for_an_append_segment: purpose=runtime_integration; dependencies=network,local_socket,native_library;"
+
+    assert output =~
+             "formats_the_erts_error_info_for_an_append_segment_as_the_reference: purpose=erts_only; dependencies=erts_process,pipes,filesystem;"
+
+    assert output =~
+             "stops_at_an_append_segment_that_is_not_the_first_segment: purpose=runtime_integration,erts_reference; dependencies=erts_process,pipes,filesystem,network,local_socket,native_library;"
+
+    assert output =~
+             "uses_no_reduction_for_a_private_append_as_the_pinned_erts_on_arm64: purpose=runtime_integration,erts_comparison; dependencies=erts_process_may_be_conditional,pipes,filesystem,network,local_socket,native_library;"
+
+    {filtered, status} =
+      report(
+        directory,
+        true,
+        cases,
+        ["--scope", "integration", "--cases", "--purpose", "erts_only"],
+        "bs_create_bin"
+      )
+
+    assert status == 0
+
+    assert filtered =~
+             "formats_the_erts_error_info_for_an_append_segment_as_the_reference: purpose=erts_only"
+
+    refute filtered =~ "rejects_an_allocation_list_that_erts_rejects: purpose="
   end
 end
