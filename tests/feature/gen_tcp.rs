@@ -22,6 +22,9 @@ mod boot;
 )]
 #[path = "../common/mod.rs"]
 mod common;
+#[expect(dead_code, reason = "this test uses the isolated epmd helper")]
+#[path = "../common/peer.rs"]
+mod peer;
 
 use boot::{BOOT_MODULES, boot_beam, otp_root};
 use common::pinned_beam_path;
@@ -233,6 +236,95 @@ fn connects_ipv6_sockets_and_binds_the_address_tags_as_pinned_erts() {
          [ok,{ok,[{tclass,8},{recvtclass,true}]}],[]]\n"
         .replace("ONLY", &only.to_string());
     assert_connect_runs("ipv6", &expected);
+}
+
+#[test]
+fn starts_tls_distribution_as_pinned_erts() {
+    // The certificate and key are test data, not credentials.
+    let tls = std::fs::canonicalize("fixtures/gen_tcp/tls").unwrap();
+    let cert = tls.join("ca.pem");
+    let key = tls.join("key.pem");
+    let options = std::env::temp_dir().join(format!("pbeam-tls-{}.config", std::process::id()));
+    std::fs::write(
+        &options,
+        format!(
+            "[{{server,[{{certfile,{0:?}}},{{keyfile,{1:?}}},{{cacertfile,{0:?}}}]}},{{client,[{{cacertfile,{0:?}}}]}}].\n",
+            cert.to_str().unwrap(),
+            key.to_str().unwrap()
+        ),
+    )
+    .unwrap();
+    let bindir_output = Command::new("erl")
+        .args([
+            "+S",
+            "1",
+            "-noshell",
+            "-eval",
+            "{ok,[[B]]}=init:get_argument(bindir),io:put_chars(B),halt().",
+        ])
+        .output()
+        .unwrap();
+    assert!(bindir_output.status.success(), "{bindir_output:?}");
+    let bindir = String::from_utf8(bindir_output.stdout).unwrap();
+    let preloaded = pinned_beam_path("erlang");
+    let expression = "#{name := N,started := static,name_domain := shortnames,name_type := static} = net_kernel:get_state(), true = N =:= node(), true = lists:prefix(\"pbeam_tls_1569@\", atom_to_list(N)), io:format(\"~w~n\", [{node_registered,application:ensure_all_started(ssl)}]), halt().";
+    let epmd = peer::Epmd::start();
+    let mut erts = Command::new("erl");
+    let mut pbeam = Command::new(env!("CARGO_BIN_EXE_pbeam"));
+    pbeam
+        .args(["erl", "--root"])
+        .arg(otp_root())
+        .args(["--bindir", &bindir, "--preloaded"])
+        .arg(preloaded.parent().unwrap())
+        .arg("--");
+    for (name, command) in [("ERTS", &mut erts), ("PBeam", &mut pbeam)] {
+        let child = command
+            .args([
+                "+S",
+                "1",
+                "-start_epmd",
+                "false",
+                "-sname",
+                "pbeam_tls_1569",
+                "-proto_dist",
+                "inet_tls",
+                "-ssl_dist_optfile",
+            ])
+            .arg(&options)
+            .args(["-noshell", "-eval", expression])
+            .env("ERL_EPMD_PORT", epmd.port())
+            .env("TERM", "dumb")
+            .env("LC_ALL", "C.UTF-8")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let (done, finished) = mpsc::channel::<()>();
+        let watchdog = thread::spawn(move || {
+            if finished.recv_timeout(Duration::from_secs(60)).is_err() {
+                kill(pid);
+            }
+        });
+        let output = child.wait_with_output().unwrap();
+        let _ = done.send(());
+        watchdog.join().unwrap();
+        assert_eq!(
+            (
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout).as_ref(),
+                String::from_utf8_lossy(&output.stderr).as_ref()
+            ),
+            (
+                Some(0),
+                "{node_registered,{ok,[crypto,asn1,public_key,ssl]}}\n",
+                ""
+            ),
+            "{name}"
+        );
+    }
+    std::fs::remove_file(options).unwrap();
 }
 
 #[test]
