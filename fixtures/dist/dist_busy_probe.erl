@@ -47,7 +47,29 @@ nosuspend() ->
     Third = erlang:send({sink, Node}, after_drain, [nosuspend]),
     Mid = hysteresis(),
     Pending = pending(),
-    io:format("~w~n", [{First, Before >= 1048576, Second, Before =:= After, Third, Mid, Pending}]).
+    Boundaries = [boundary(Size) || Size <- [524287, 524288, 524289]],
+    io:format("~w~n", [{First, Before >= 1048576, Second, Before =:= After, Third, Mid, Pending, Boundaries}]).
+
+boundary(Size) ->
+    Parent = self(),
+    spawn(fun() -> Parent ! {boundary_result, boundary_controller(Size)} end),
+    receive {boundary_result, Result} -> Result after 2000 -> timeout end.
+
+boundary_controller(Target) ->
+    Node = boundary_probe@nohost,
+    Handle = erts_internal:new_connection(Node),
+    Flags = element(3, erts_internal:get_dflags()),
+    {ok, Handle} = erts_internal:create_dist_channel(Node, self(), {Flags, 1}),
+    ok = erlang:send({sink, Node}, binary:copy(<<1>>, 1024), [nosuspend]),
+    {ok, _, _, Calibration} = erlang:dist_get_stat(Handle),
+    _ = erlang:dist_ctrl_get_data(Handle),
+    Overhead = Calibration - 1024,
+    ok = erlang:send({sink, Node}, binary:copy(<<1>>, 600000), [nosuspend]),
+    ok = erlang:send({sink, Node}, binary:copy(<<1>>, Target - Overhead), [nosuspend]),
+    _ = erlang:dist_ctrl_get_data(Handle),
+    {ok, _, _, Size} = erlang:dist_get_stat(Handle),
+    Result = erlang:send({sink, Node}, extra, [nosuspend]),
+    {Size, Result}.
 
 pending() ->
     Node = pending_busy_probe@nohost,

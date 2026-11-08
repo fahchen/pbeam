@@ -3349,7 +3349,7 @@ fn rejects_nosuspend_at_the_distribution_watermark_as_pinned_erts() {
         &["-sname", &name, "-kernel", "logger_level", "none"],
         "dist_busy_probe:nosuspend(), halt().",
     );
-    let expected = "{ok,true,nosuspend,true,ok,{true,nosuspend},{nosuspend,true}}\n";
+    let expected = "{ok,true,nosuspend,true,ok,{true,nosuspend},{nosuspend,true},[{524287,ok},{524288,nosuspend},{524289,nosuspend}]}\n";
     assert_eq!(stdout(&erts_erl(&epmd, &arguments)), expected);
     assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), expected);
 }
