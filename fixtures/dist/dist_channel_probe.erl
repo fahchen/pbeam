@@ -7,7 +7,7 @@
          trace_token/1, monitor_op/0, demonitor_name/0, demonitor_ref/0,
          atom_cache/0, fragment_interleaving/0, fragment_reconnect/0,
          fragment_output/0, fragment_large_control/0, output/0, port_output/0,
-         alias_ext/0, dead_alias/1, exit_input/0, link_input/0,
+         alias_ext/0, dead_alias/1, dead_alias_ext/0, exit_input/0, link_input/0,
          link_noconnection/0, altact_op/0, altact_input/0, altact_token/0, spawn_bad_ref/0, spawn_bad_from/0,
          spawn_bad_from_local/0,
          spawn_bad_leader/0, spawn_bad_mfa/0, spawn_bad_arity/0,
@@ -503,9 +503,9 @@ alias_ext() ->
                  binary_to_term(term_to_binary(Monitor)) =:= Monitor,
                  binary_to_term(term_to_binary({A, Monitor}, [local])) =:= {A, Monitor}]).
 
-%% The external term of an alias of a process that exited, which holds
-%% the pid of the owner in ERTS and which PBeam does not keep: in
-%% term_to_binary/1, external_size/1, and a message to another node.
+%% The external term of an alias of a process that exited, which keeps
+%% the pid of the owner: in term_to_binary/1, external_size/1, and a
+%% message to another node.
 dead_alias(Use) ->
     Parent = self(),
     {Pid, Ref} = spawn_monitor(fun() -> Parent ! {self(), alias()} end),
@@ -519,6 +519,32 @@ dead_alias(Use) ->
             {ok, _} = erts_internal:create_dist_channel(zz@nohost, self(), {mandatory(), 1}),
             remote_pid(zz@nohost) ! A
     end.
+
+%% A dead owner keeps the two pid words of a pid reference. The fixed bytes
+%% come from `ERL_FLAGS='+S 1' mise run erts-eval` on OTP 29.1.1; a decode
+%% and a second encode preserve them (`external.c:3642-3668`, `4828-4839`).
+dead_alias_ext() ->
+    Parent = self(),
+    {Pid, Monitor} = spawn_monitor(fun() -> Parent ! {alias, self(), alias([explicit_unalias])} end),
+    receive {'DOWN', Monitor, process, Pid, _} -> ok end,
+    Alias = receive {alias, Pid, A} -> A end,
+    Bytes = term_to_binary(Alias),
+    Decoded = binary_to_term(Bytes),
+    Fixed = <<131, 90, 0, 5, 119, 13, 110, 111, 110, 111, 100, 101, 64, 110, 111, 104, 111, 115, 116,
+              0, 0, 0, 0, 0, 1, 27, 160, 133, 221, 0, 1, 26, 215, 30, 45, 0, 0, 41, 131, 0, 0, 0, 0>>,
+    FixedRef = binary_to_term(Fixed),
+    Checks = [not is_process_alive(Pid),
+              is_reference(Alias),
+              byte_size(Bytes) =:= 43,
+              binary:part(Bytes, 0, 4) =:= <<131, 90, 0, 5>>,
+              binary:part(Bytes, byte_size(Bytes) - 8, 8) =/= <<0:64>>,
+              erlang:external_size(Alias) =:= byte_size(Bytes),
+              Decoded =:= Alias,
+              term_to_binary(Decoded) =:= Bytes,
+              is_reference(FixedRef),
+              term_to_binary(FixedRef) =:= Fixed,
+              binary_to_term(term_to_binary(FixedRef)) =:= FixedRef],
+    io:format("~w~n", [{Checks, Fixed}]).
 
 %% A packet on a connection with DFLAG_DIST_HDR_ATOM_CACHE.
 atom_cache() ->

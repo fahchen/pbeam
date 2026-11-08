@@ -18,7 +18,7 @@ main(Operation) ->
     {ok, _, _, After} = erlang:dist_get_stat(Handle),
     io:format("~w~n", [{ok, After - Before}]).
 
-%% The External term format row and #1619 record the missing owner at delivery.
+%% A dead alias stays encodable at delivery.
 deliver() ->
     Alias = dead_alias(),
     Node = pending_delivery@nohost,
