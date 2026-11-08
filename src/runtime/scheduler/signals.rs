@@ -1417,6 +1417,15 @@ impl Scheduler {
             process.mailbox.remove(node);
             return 2;
         };
+        if process
+            .monitors
+            .get(&key)
+            .and_then(|origin| origin.monitor.as_ref())
+            .is_some_and(|monitor| monitor.spawn.is_some())
+        {
+            process.mailbox.remove(node);
+            return 2;
+        }
         if mode == AliasMode::ReplyDemonitor
             && let Some(origin) = process.monitors.remove(&key)
             && let Some(monitor) = origin.monitor

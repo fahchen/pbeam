@@ -15,7 +15,7 @@
          reply_bad_flags/0, reply_bad_result/0, group_leader_bad/0,
          group_leader_bad_to/0, group_leader_external_to/0,
          spawn_notsup/0, spawn_lost/0, spawn_options/0, received_spawn_state/1,
-         spawn_reply_unknown/0, spawn_reply_ordinary_monitor/0,
+         spawn_reply_unknown/0, spawn_reply_ordinary_monitor/0, spawn_pending_alias/0,
          spawn_lost_suppressed/0, spawn_local_leader/0,
          group_leader_packet/0,
          monitor_down_unknown/0, spawn_local_ref/0, spawn_bad_local_leader/0,
@@ -960,6 +960,33 @@ spawn_reply_ordinary_monitor() ->
            end,
     io:format("spawn_reply_ordinary_monitor: ~p~n", [[{Down, Connected}]]),
     Ctrl ! stop.
+
+%% A spawn alias is inactive until the spawn reply (`erl_proc_sig_queue.c:6030-6041`).
+spawn_pending_alias() ->
+    logger:set_primary_config(level, none),
+    Node = pa@nohost,
+    Parent = self(),
+    erts_internal:new_connection(Node),
+    Ctrl = spawn(fun() ->
+        receive {reply, DH, Ref} ->
+            erlang:dist_ctrl_put_data(DH, packet_only({31, Ref, Parent, 2, remote_pid(Node)})),
+            receive stop -> ok after 5000 -> timeout end
+        end
+    end),
+    {message, Setup} = erts_internal:create_dist_channel(Node, Ctrl,
+                                    {mandatory() bor (1 bsl 32), 1}),
+    DH = receive {Setup, Handle} -> Handle after 5000 -> timeout end,
+    Ref = erts_internal:dist_spawn_request(Node, {erlang, node, []},
+                    [{monitor, [{alias, reply_demonitor}]}], spawn_request),
+    Ref ! early,
+    Early = receive early -> delivered after 200 -> dropped end,
+    Ctrl ! {reply, DH, Ref},
+    Reply = receive {spawn_reply, Ref, ok, _} -> ok after 5000 -> timeout end,
+    Ref ! late,
+    Late = receive late -> delivered after 5000 -> timeout end,
+    Active = erlang:unalias(Ref),
+    Ctrl ! stop,
+    io:format("spawn_pending_alias: ~p~n", [{Early, Reply, Late, Active}]).
 
 %% A spawn request whose error message is suppressed gives no message when
 %% its connection ends (`erl_proc_sig_queue.c:4877-4900`).

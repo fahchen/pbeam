@@ -2411,6 +2411,10 @@ fn spawns_a_request_over_a_channel_as_pinned_erts() {
     for (function, expected) in [
         ("spawn_notsup", "spawn_notsup: notsup\n"),
         ("spawn_lost", "spawn_lost: noconnection\n"),
+        (
+            "spawn_pending_alias",
+            "spawn_pending_alias: {dropped,ok,delivered,false}\n",
+        ),
         ("spawn_lost_suppressed", "spawn_lost_suppressed: none\n"),
         ("spawn_reply_unknown", "spawn_reply_unknown: true\n"),
         (
