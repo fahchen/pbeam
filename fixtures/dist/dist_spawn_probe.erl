@@ -4,7 +4,8 @@
 %% erl_process.c:12440-12530, dist.c:5850-6260).
 -module(dist_spawn_probe).
 -export([server/0, client/1, leader/1, options/1, flags/1, demonitor/1,
-         report/1, report_flags/1, wait/1, alias_wait/1, leader_target/1, boom/0]).
+         report/1, report_flags/1, wait/1, alias_wait/1, alias_order_sender/1,
+         leader_target/1, boom/0]).
 
 server() ->
     io:format("~s~n", [node()]),
@@ -192,6 +193,8 @@ options(Server) ->
     AliasLifetime = [spawn_alias_lifetime(Server, Mode, End) ||
                      Mode <- [explicit_unalias, demonitor, reply_demonitor],
                      End <- [down, demonitor]],
+    AliasOrder = [spawn_alias_order(Server, Mode) || Mode <-
+                  [explicit_unalias, demonitor, reply_demonitor]],
     process_flag(trap_exit, true),
     LinkRef = spawn_request(Server, dist_spawn_probe, wait, [self()], [{link, [priority]}]),
     LinkPid = receive {spawn_reply, LinkRef, ok, LP} -> LP after 5000 -> timeout end,
@@ -228,7 +231,7 @@ options(Server) ->
                 {monitor_tag, MonitorTag}, {combined_monitor_tag, CombinedTag}, {reply_yes, ReplyYes},
                 {no_connection, NoConnection}, {no_receiver, NoReceiver},
                 {monitor_priority, PriorityFirst}, {monitor_alias, Alias},
-                {alias_lifetime, AliasLifetime},
+                {alias_lifetime, AliasLifetime}, {alias_order, AliasOrder},
                 {link_priority, LinkFirst},
                 {remote_leader, {LeaderConnected, LeaderSeen, Three, LeaderPending, LeaderSeenPending}}]]),
     ok.
@@ -244,6 +247,37 @@ spawn_alias(Server, Mode) ->
     erlang:demonitor(Ref, [flush]),
     Pid ! stop,
     {Mode, Message, Active}.
+
+spawn_alias_order(Server, Mode) ->
+    Ref = spawn_request(Server, ?MODULE, alias_order_sender, [self()],
+                        [{monitor, [{alias, Mode}]}]),
+    Pid = receive {spawn_reply, Ref, ok, P} -> P after 5000 -> timeout end,
+    ok = receive {started, Pid} -> ok after 5000 -> timeout end,
+    Pid ! {send_order, Ref},
+    Messages = alias_order_messages([]),
+    erlang:demonitor(Ref, [flush]),
+    erlang:unalias(Ref),
+    Pid ! stop,
+    {Mode, Messages}.
+
+alias_order_messages(Acc) ->
+    receive
+        {ordered, done} -> lists:reverse(Acc);
+        {ordered, Message} -> alias_order_messages([Message | Acc])
+    after 5000 -> timeout
+    end.
+
+alias_order_sender(Parent) ->
+    Parent ! {started, self()},
+    receive {send_order, Ref} ->
+        Parent ! {ordered, ordinary1},
+        Ref ! {ordered, alias1},
+        Parent ! {ordered, ordinary2},
+        Ref ! {ordered, alias2},
+        Parent ! {ordered, done}
+    after 5000 -> timeout
+    end,
+    receive stop -> ok after 5000 -> timeout end.
 
 spawn_alias_lifetime(Server, Mode, End) ->
     Ref = spawn_request(Server, dist_spawn_probe, wait, [self()],
