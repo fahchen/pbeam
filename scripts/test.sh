@@ -33,8 +33,24 @@ else
     find "$deps" -maxdepth 1 -type f -perm -u+x ! -name '*.*' -delete
   fi
   # CI sets PBEAM_TEST_PARTITION, such as slice:1/4, to run one part of the tests in each job. The report then covers only that part, and the last CI job checks the reports of all parts together.
+  frequency_args=()
+  # Only source-only pull requests use the reduced set. All other events and
+  # changes run the full set, including changes to fixtures and tool pins.
+  if [[ "${PBEAM_CI_EVENT:-}" == pull_request ]]; then
+    paths=$(git diff --no-renames --name-only "$PBEAM_CI_BASE...$PBEAM_CI_HEAD")
+    if [[ -n "$paths" ]] && ! grep -qvE '^src/.*\.rs$' <<<"$paths"; then
+      frequency_filter=$(python3 scripts/ci_frequency.py filter)
+      frequency_args=(-E "$frequency_filter")
+    fi
+  fi
+  if [[ ${#frequency_args[@]} -eq 0 ]]; then
+    echo 'CI frequency: full test set'
+  else
+    echo 'CI frequency: reduced ERTS-only reference checks'
+  fi
   cargo llvm-cov nextest --locked --workspace --all-features --no-clean \
     --status-level slow --final-status-level slow --no-fail-fast \
+    "${frequency_args[@]}" \
     ${PBEAM_TEST_PARTITION:+--partition "$PBEAM_TEST_PARTITION"} \
     --cobertura --output-path target/coverage.xml
   # One CI partition checks each inventory against the compiled test list.
@@ -48,6 +64,10 @@ else
       export LLVM_PROFILE_FILE="$list_dir/list-%p-%8m.profraw"
       cargo nextest list --locked --workspace --all-features --profile ci \
         --target-dir "$cov_dir" --message-format json >"$list_dir/tests.json"
+      cargo nextest list --locked --workspace --all-features --profile ci \
+        --target-dir "$cov_dir" --message-format json \
+        -E "$(python3 scripts/ci_frequency.py filter)" >"$list_dir/reduced.json"
+      python3 scripts/ci_frequency.py verify "$list_dir/tests.json" "$list_dir/reduced.json"
       for scope in feature unit integration; do
         mise exec -- elixir scripts/test_classes.exs --strict --scope "$scope" "$list_dir/metadata.json" "$list_dir/tests.json"
       done

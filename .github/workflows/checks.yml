@@ -5,6 +5,8 @@ on:
     branches: [main]
   push:
     branches: [main]
+  schedule:
+    - cron: "23 3 * * *"
 
 permissions:
   contents: read
@@ -154,6 +156,9 @@ jobs:
           NEXTEST_PROFILE: ci
           PBEAM_TEST_PARTITION: slice:${{ matrix.partition }}/${{ strategy.job-total }}
           PBEAM_FIXTURE_MODE: prepare
+          PBEAM_CI_EVENT: ${{ github.event_name }}
+          PBEAM_CI_BASE: ${{ github.event.pull_request.base.sha }}
+          PBEAM_CI_HEAD: ${{ github.event.pull_request.head.sha }}
         run: mise run test
 
       - name: Keep the coverage report

@@ -753,6 +753,7 @@ pbeam-runtime|runtime::port::inet::stream::tests::ends_an_active_socket_at_a_fai
 pbeam-runtime|runtime::port::inet::stream::tests::ends_the_busy_send_and_its_waiters_at_a_failed_write|host_integration|network,local_socket
 pbeam-runtime|runtime::port::inet::stream::tests::ends_the_busy_send_and_its_waiters_at_the_end_of_the_connection|host_integration|network,local_socket
 pbeam-runtime|runtime::port::inet::stream::tests::ends_the_socket_when_a_waiting_shutdown_fails|host_integration|network
+pbeam-runtime|runtime::port::inet::stream::tests::delays_distribution_packets_until_the_output_step|host_integration|network,local_socket
 pbeam-runtime|runtime::port::inet::stream::tests::fails_a_distribution_packet_after_a_shutdown_that_waits_for_the_queue|host_integration|network,local_socket
 pbeam-runtime|runtime::port::inet::stream::tests::fills_one_buffer_for_a_receive_in_many_reads|host_integration|network,local_socket
 pbeam-runtime|runtime::port::inet::stream::tests::gives_the_error_of_a_shutdown_without_a_connection_or_with_a_wrong_request|host_integration|network,local_socket
@@ -806,6 +807,7 @@ pbeam-runtime|runtime::scheduler::dist_output::tests::closes_a_distribution_port
 pbeam-runtime|runtime::scheduler::dist_output::tests::drops_a_queued_drain_after_the_controller_is_detached|runtime_integration|network,local_socket
 pbeam-runtime|runtime::scheduler::dist_output::tests::exit_link_and_monitor_join_a_new_pending_connection|runtime_integration|network,local_socket
 pbeam-runtime|runtime::scheduler::dist_output::tests::noconnect_send_joins_a_connection_started_after_the_idle_check|runtime_integration|network,local_socket
+pbeam-runtime|runtime::scheduler::dist_output::tests::nosuspend_send_rejects_busy_connection_started_after_idle_check|runtime_integration|network,local_socket
 pbeam-runtime|runtime::scheduler::dist_output::tests::queues_a_dead_alias_when_a_signal_joins_a_new_pending_connection|runtime_integration|none
 pbeam-runtime|runtime::scheduler::dist_output::tests::rejects_auto_connect_when_the_connection_changes_before_its_lock|runtime_integration|network,local_socket
 pbeam-runtime|runtime::scheduler::dist_output::tests::spawn_joins_a_new_pending_connection_after_the_connected_check|runtime_integration|network,local_socket

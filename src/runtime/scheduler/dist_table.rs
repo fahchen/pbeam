@@ -110,6 +110,8 @@ struct Entry {
     /// The queue size of the packets in `output` (`dep->total_qsize`, see
     /// [`PACKET_OVERHEAD`]).
     queue_size: u64,
+    /// The connection remains busy until its queue falls below half the limit.
+    output_busy: bool,
     /// The count of the packets that the controller took (`dep->out`).
     out: u64,
     /// Whether `erlang:dist_ctrl_get_data_notification/1` asked for the
@@ -340,6 +342,7 @@ impl DistTable {
                 pending_signals: VecDeque::new(),
                 pending_queue_size: 0,
                 queue_size: 0,
+                output_busy: false,
                 out: 0,
                 notify: false,
                 order,
@@ -778,6 +781,7 @@ impl DistTable {
         let entry = self.entry_mut(name);
         entry.pending_signals.push_back(signal);
         entry.pending_queue_size += size;
+        entry.output_busy |= entry.queue_size + entry.pending_queue_size >= 1_048_576;
     }
 
     /// Take pending signals while the entry lock is held.
@@ -796,6 +800,7 @@ impl DistTable {
     pub(in crate::runtime) fn enqueue(&mut self, name: &Atom, elements: Vec<Binary>) -> bool {
         let entry = self.entry_mut(name);
         entry.queue_size += queue_size(&elements);
+        entry.output_busy |= entry.queue_size + entry.pending_queue_size >= 1_048_576;
         entry.output.push_back(DistOutput {
             elements,
             spawn_notsup: None,
@@ -807,6 +812,7 @@ impl DistTable {
     pub(super) fn enqueue_spawn_notsup(&mut self, name: &Atom, sender: ProcessId, key: MonitorKey) {
         let entry = self.entry_mut(name);
         entry.queue_size += queue_size(&[]);
+        entry.output_busy |= entry.queue_size + entry.pending_queue_size >= 1_048_576;
         entry.output.push_back(DistOutput {
             elements: Vec::new(),
             spawn_notsup: Some((sender, key)),
@@ -820,6 +826,9 @@ impl DistTable {
         let entry = self.entry_mut(name);
         let output = entry.output.pop_front()?;
         entry.queue_size -= queue_size(&output.elements);
+        if entry.queue_size + entry.pending_queue_size < 1_048_576 / 2 {
+            entry.output_busy = false;
+        }
         entry.out += 1;
         Some(output)
     }
@@ -833,6 +842,11 @@ impl DistTable {
         let entry = self.entry_mut(name);
         entry.notify = entry.output.is_empty();
         !entry.notify
+    }
+
+    /// Return whether the connection is in its output busy state.
+    pub(super) fn output_busy(&self, name: &Atom) -> bool {
+        self.entries[&name.index()].output_busy
     }
 
     /// Return the output count and the queue size of the entry of `name`
@@ -1215,6 +1229,7 @@ impl Entry {
         self.pending_signals.clear();
         self.pending_queue_size = 0;
         self.queue_size = 0;
+        self.output_busy = false;
         self.notify = false;
         self.controller = None;
         self.links.clear();

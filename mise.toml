@@ -30,6 +30,7 @@ run = [
   "mix format --check-formatted 'examples/*/*.ex' 'fixtures/*/*.ex'",
   "mix format --check-formatted scripts/test_classes.exs tests/test_classes_test.exs",
   "elixir tests/test_classes_test.exs",
+  "python3 tests/test_ci_frequency.py",
   "cargo fmt --all -- --check",
   "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings",
 ]
