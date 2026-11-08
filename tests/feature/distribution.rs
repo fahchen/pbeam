@@ -2592,7 +2592,16 @@ fn reads_the_options_of_a_spawn_request_as_pinned_erts() {
         erts.chars()
             .filter(|c| !c.is_whitespace())
             .collect::<String>()
-            .contains("received_states:[{1,ordinary},{1,ordinary},{1,ordinary},{1,ordinary}]"),
+            .contains("received_states:[{1,ordinary},{1,ordinary},{1,ordinary},{1,ordinary},{1,ordinary},{1,ordinary},{1,ordinary}]"),
+        "{erts}"
+    );
+    let packets = "{{31,true,true,3,true},{21,true,true,true,normal}}";
+    let expected = format!("received_packets:[{}]", [packets; 7].join(","));
+    assert!(
+        erts.chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+            .contains(&expected),
         "{erts}"
     );
     let pbeam = stdout(&pbeam_erl(&epmd, &arguments));

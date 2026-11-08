@@ -887,31 +887,62 @@ spawn_options() ->
     [show(Tag, [request(list_to_atom("so" ++ integer_to_list(N) ++ "@nohost"),
                         Options)])
      || {N, {Tag, Options}} <- lists:zip(lists:seq(1, length(Cases)), Cases)],
-    States = [request_state(list_to_atom("state" ++ integer_to_list(N) ++ "@nohost"), Options)
-              || {N, Options} <- lists:zip(lists:seq(1, 4),
-                  [[link, monitor], [{link, [priority]}, monitor],
-                   [link, {monitor, [priority]}],
-                   [link, {monitor, [{alias, demonitor}]}]])],
-    show(received_states, States),
+    StateResults = [request_state(list_to_atom("state" ++ integer_to_list(N) ++ "@nohost"), Options)
+                    || {N, Options} <- lists:zip(lists:seq(1, 7),
+                        [[link, monitor], [{link, [priority]}, monitor],
+                         [link, {monitor, [priority]}],
+                         [link, {monitor, [{alias, demonitor}]}],
+                         [link, {monitor, [{alias, explicit_unalias}]}],
+                         [link, {monitor, [{alias, reply_demonitor}]}],
+                         [link, {monitor, [priority, {alias, demonitor}]}]])],
+    show(received_states, [State || {State, _, _} <- StateResults]),
+    show(received_packets, [{Reply, Down} || {_, Reply, Down} <- StateResults]),
     ok.
 
 request_state(Node, Options) ->
     Parent = self(),
     Ctrl = spawn(fun() ->
         erts_internal:new_connection(Node),
-        {ok, DH} = erts_internal:create_dist_channel(Node, self(), {mandatory(), 1}),
+        {ok, DH} = erts_internal:create_dist_channel(Node, self(), {mandatory() bor 16#28, 1}),
         Control = {29, remote_ref(Node), remote_pid(Node), remote_pid(Node),
                    {?MODULE, received_spawn_state, 1}, Options},
         erlang:dist_ctrl_put_data(DH, packet(Control, [Parent])),
         receive {exit_child, Pid} ->
-            erlang:dist_ctrl_put_data(DH, packet_only({3, remote_pid(Node), Pid, boom}))
+            Reply = await_control(DH, 100),
+            erlang:dist_ctrl_put_data(DH, packet_only({3, remote_pid(Node), Pid, boom})),
+            Down = await_control(DH, 100),
+            Parent ! {packets, self(), received_reply(Reply, Node, Pid),
+                      received_down(Down, Node, Pid)}
         after 5000 -> timeout end,
         receive stop -> ok after 5000 -> timeout end
     end),
     receive {spawn_ready, Pid} -> Ctrl ! {exit_child, Pid} after 5000 -> timeout end,
     Result = receive {spawn_state, State} -> State after 5000 -> timeout end,
+    {Reply, Down} = receive {packets, Ctrl, R, D} -> {R, D} after 5000 -> {timeout, timeout} end,
     Ctrl ! stop,
-    Result.
+    {Result, Reply, Down}.
+
+await_control(_DH, 0) -> timeout;
+await_control(DH, N) ->
+    case erlang:dist_ctrl_get_data(DH) of
+        none -> receive after 20 -> ok end, await_control(DH, N - 1);
+        Data -> decode_control(Data)
+    end.
+
+decode_control({ok, Data}) -> decode_control(Data);
+decode_control({_Size, Data}) -> decode_control(Data);
+decode_control(Data) when is_list(Data) -> decode_control(iolist_to_binary(Data));
+decode_control(<<112, Rest/binary>>) ->
+    {Control, _Used} = binary_to_term(Rest, [used]),
+    Control.
+
+received_reply({31, Ref, From, Flags, Pid}, Node, Pid) ->
+    {31, Ref =:= remote_ref(Node), From =:= remote_pid(Node), Flags, true};
+received_reply(Other, _Node, _Pid) -> Other.
+
+received_down({21, Pid, To, Ref, Reason}, Node, Pid) ->
+    {21, true, To =:= remote_pid(Node), Ref =:= remote_ref(Node), Reason};
+received_down(Other, _Node, _Pid) -> Other.
 
 received_spawn_state(Parent) ->
     process_flag(trap_exit, true),
