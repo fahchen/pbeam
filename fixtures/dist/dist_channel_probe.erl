@@ -1445,6 +1445,11 @@ altact_input() ->
     Case(msg_no_name, fun() -> PutMsg({37, 8, From, no_such_name}, gone) end),
     Case(msg_alias, fun() -> PutMsg({37, 4, From, Alias}, aliased) end),
     Case(msg_no_alias, fun() -> PutMsg({37, 4, From, make_ref()}, no_alias) end),
+    %% A reference of another node is no local alias: ERTS finds no pid for
+    %% it (erl_bif_unique.h:279-286) and drops the packet
+    %% (erl_proc_sig_queue.c:2311-2331), so the connection stays up.
+    Case(msg_external_ref, fun() -> PutMsg({37, 4, From, remote_ref(zz@nohost)}, dropped) end),
+    Case(after_external_ref, fun() -> PutMsg({37, 0, From, Self}, up) end),
     Case(msg_dead, fun() -> PutMsg({37, 0, From, Dead}, dead) end),
     Case(exit_pid, fun() -> PutMsg({37, 16, From, Self}, boom) end),
     Case(exit_name, fun() -> PutMsg({37, 16 bor 8, From, altact_name}, named_exit) end),

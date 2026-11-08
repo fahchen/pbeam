@@ -560,9 +560,13 @@ impl Scheduler {
             if flags & ALTACT_NAME != 0 || !external_id::is_reference(to) {
                 return Err(error(REJECTED));
             }
-            let reference = to
-                .reference()
-                .expect("the control message holds a reference");
+            // A reference of another node has no local pid: `erts_get_pid_of_ref`
+            // gives `am_undefined` for it (`erl_bif_unique.h:279-286`), so
+            // `erts_proc_sig_send_dist_altact_msg` drops the packet
+            // (`erl_proc_sig_queue.c:2311-2331`).
+            let Some(reference) = to.reference() else {
+                return Ok(());
+            };
             let owner = self
                 .node
                 .alias_owner(reference)

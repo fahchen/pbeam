@@ -453,6 +453,13 @@ fn runs_the_bifs_of_a_process_controller_as_pinned_erts() {
         erts.contains("exit_pid: [{'EXIT',{pid,zz@nohost},boom}]\n"),
         "{erts}"
     );
+    // A reference of another node has no local pid, so ERTS drops the
+    // packet and keeps the connection (erl_bif_unique.h:279-286,
+    // erl_proc_sig_queue.c:2311-2331).
+    assert!(
+        erts.contains("msg_external_ref: []\n") && erts.contains("after_external_ref: [up]\n"),
+        "{erts}"
+    );
     assert_eq!(stdout(&pbeam_erl(&epmd, &altact)), erts);
     // A DEMONITOR_P for a name finds no monitor of the connection and
     // removes nothing (dist.c:2441-2457).
