@@ -195,7 +195,10 @@ remote() -> hd(ids()).
 
 old_monitor() -> erlang:monitor(port, binary_to_term(<<131, 89, 100, 13:16, "nonode@nohost", 8:32, 7:32>>)).
 old_process_monitor() -> erlang:monitor(process, lists:last(ids())).
-group_leader() -> erlang:group_leader(self(), remote()).
+group_leader() ->
+    Result = erlang:group_leader(self(), remote()),
+    io:format("group_leader: ~p~n", [Result]),
+    Result.
 group_leader_leader() ->
     Leader = erlang:group_leader(),
     Remote = remote(),

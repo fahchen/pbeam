@@ -215,14 +215,33 @@ fn spawn_joins_a_new_pending_connection_after_the_connected_check() {
     assert_eq!(fields[0].small_integer(), Some(29));
 }
 
+fn queue_group_leader_during_reconnect(
+    scheduler: &mut Scheduler,
+    node: &crate::term::Atom,
+    target: &Term,
+) {
+    after_connected_signal_check();
+    let sender = ProcessId(0);
+    let control = Term::tuple(vec![Term::Integer(7), Term::Pid(sender), target.clone()]);
+    scheduler
+        .dist_output_with_pending(
+            sender,
+            node,
+            None,
+            Some(super::PendingOutput::GroupLeader(&control)),
+            |_, _| panic!("the connection is pending"),
+        )
+        .unwrap();
+}
+
 #[test]
 fn exit_link_and_monitor_join_a_new_pending_connection() {
     // A compiled fixture cannot pause between the connected check and the
     // output lock. Force a disconnect and a new pending connection there.
-    // Pinned OTP emits [8,1,19] for exit, link, and monitor on a pending
-    // connection (dist.c:3247-3255, bif.c:342-350, 851-857, 1812-1823).
+    // Pinned OTP emits [8,1,19,7] for exit, link, monitor, and group leader
+    // (dist.c:3247-3255, bif.c:342-350, 851-857, 1812-1823, 4943-4963).
     let mut operations = Vec::new();
-    for operation in 0..3 {
+    for operation in 0..4 {
         let mut scheduler = scheduler_with_kernel();
         let node = scheduler.atoms.put("signal_race@nohost").unwrap();
         let remote = RemotePid {
@@ -264,7 +283,7 @@ fn exit_link_and_monitor_join_a_new_pending_connection() {
                 );
             }
             1 => scheduler.dist_link(&target).unwrap(),
-            _ => {
+            2 => {
                 let options = MonitorOptions {
                     alias: None,
                     tag: Term::static_atom("DOWN"),
@@ -274,6 +293,7 @@ fn exit_link_and_monitor_join_a_new_pending_connection() {
                     .monitor(&MonitorTarget::RemoteProcess(remote), options)
                     .unwrap();
             }
+            _ => queue_group_leader_during_reconnect(&mut scheduler, &node, &target),
         }
         let mut dist = shared.dist();
         assert!(
@@ -300,8 +320,14 @@ fn exit_link_and_monitor_join_a_new_pending_connection() {
             panic!("control is a tuple");
         };
         operations.push(fields[0].small_integer().unwrap());
+        if operation == 3 {
+            assert_eq!(
+                fields.as_ref(),
+                &[Term::Integer(7), Term::Pid(ProcessId(0)), target]
+            );
+        }
     }
-    assert_eq!(operations, [8, 1, 19]);
+    assert_eq!(operations, [8, 1, 19, 7]);
 }
 
 #[test]

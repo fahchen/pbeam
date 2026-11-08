@@ -916,6 +916,7 @@ pub(super) fn dist_spawn_request(
     let arguments_len = i64::try_from(arguments_list.count()).unwrap_or(i64::MAX);
     let arguments_list = arguments.clone();
     let mut link = false;
+    let mut link_priority = false;
     let mut monitor = None;
     let mut reply_tag = Term::static_atom("spawn_reply");
     let mut reply = SpawnReply {
@@ -928,7 +929,11 @@ pub(super) fn dist_spawn_request(
         match option {
             Term::Atom(name) if name.is_static("link") => link = true,
             Term::Atom(name) if name.is_static("monitor") => {
-                monitor = Some(Term::static_atom("DOWN"));
+                monitor.get_or_insert_with(|| crate::runtime::scheduler::MonitorOptions {
+                    tag: Term::static_atom("DOWN"),
+                    priority: false,
+                    alias: None,
+                });
             }
             Term::Tuple(fields) => match fields.as_ref() {
                 [Term::Atom(name), value] if name.is_static("reply_tag") => {
@@ -952,7 +957,7 @@ pub(super) fn dist_spawn_request(
                     reply = policy;
                 }
                 [Term::Atom(name), value] if name.is_static("monitor") => {
-                    let Some((tag, priority, alias)) = monitor_option(value) else {
+                    let Some(options) = super::erlang::monitor_options(value) else {
                         // A bad `monitor` option is `badarg` for a spawn
                         // and a `badopt` reply for a spawn request.
                         if spawn_opt {
@@ -961,24 +966,13 @@ pub(super) fn dist_spawn_request(
                         badopt = true;
                         break;
                     };
-                    if priority {
-                        return Err(error(
-                            "unsupported monitor option priority: see \"Distribution\" in docs/erts-differences.md",
-                        ));
-                    }
-                    if alias {
-                        return Err(error(
-                            "unsupported spawn monitor option alias: see \"Distribution\" in docs/erts-differences.md",
-                        ));
-                    }
-                    monitor = Some(tag);
+                    monitor = Some(options);
                 }
                 [Term::Atom(name), value] if name.is_static("link") => match link_option(value) {
                     LinkOption::Ok => link = true,
                     LinkOption::Priority => {
-                        return Err(error(
-                            "unsupported link option priority: see \"Distribution\" in docs/erts-differences.md",
-                        ));
+                        link = true;
+                        link_priority = true;
                     }
                     LinkOption::Invalid if spawn_opt => return badarg(),
                     LinkOption::Invalid => {
@@ -1017,7 +1011,13 @@ pub(super) fn dist_spawn_request(
         monitor.as_ref(),
         &reply_tag,
         reply,
-        if link { SpawnLink::Yes } else { SpawnLink::No },
+        if link_priority {
+            SpawnLink::Priority
+        } else if link {
+            SpawnLink::Yes
+        } else {
+            SpawnLink::No
+        },
     );
     let (reference, monitored) = request?;
     let value = if spawn_opt {
@@ -1060,36 +1060,6 @@ fn link_option(options: &Term) -> LinkOption {
     } else {
         LinkOption::Ok
     }
-}
-
-/// Read the options of a `{monitor, Options}` spawn option as
-/// `erts_monitor_opts` does (`bif.c:702-780`): the tag, whether the
-/// options name `priority`, and whether they name `alias`.
-fn monitor_option(options: &Term) -> Option<(Term, bool, bool)> {
-    let mut tag = Term::static_atom("DOWN");
-    let mut priority = false;
-    let mut alias = false;
-    for option in options.proper_list()? {
-        match option {
-            Term::Atom(name) if name.is_static("priority") => priority = true,
-            Term::Tuple(fields) => match fields.as_ref() {
-                [Term::Atom(name), value] if name.is_static("tag") => tag = value.clone(),
-                [Term::Atom(name), mode] if name.is_static("alias") => {
-                    let known = matches!(mode, Term::Atom(mode)
-                        if mode.is_static("explicit_unalias")
-                            || mode.is_static("demonitor")
-                            || mode.is_static("reply_demonitor"));
-                    if !known {
-                        return None;
-                    }
-                    alias = true;
-                }
-                _ => return None,
-            },
-            _ => return None,
-        }
-    }
-    Some((tag, priority, alias))
 }
 
 /// Read the value of a `{reply, Value}` spawn option as

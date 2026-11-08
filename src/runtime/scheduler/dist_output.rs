@@ -75,6 +75,7 @@ pub(super) enum PendingOutput<'a> {
     Send(&'a Term, &'a Term, SendPriority),
     Exit(&'a Term, &'a Term, SendPriority),
     Link(RemotePid, &'a Term),
+    GroupLeader(&'a Term),
     Monitor(super::dist_table::DistMonitor, &'a Term),
     Spawn(
         super::dist_table::DistMonitor,
@@ -124,9 +125,9 @@ impl Scheduler {
                 *priority,
             )
             .expect("a pending exit has a control"),
-            PendingSignal::Link(_, control) | PendingSignal::Monitor(_, control) => {
-                (control.clone(), None)
-            }
+            PendingSignal::Link(_, control)
+            | PendingSignal::Monitor(_, control)
+            | PendingSignal::GroupLeader(_, control) => (control.clone(), None),
             PendingSignal::Spawn(_, _, control, arguments) => {
                 (control.clone(), Some(arguments.clone()))
             }
@@ -400,6 +401,41 @@ impl Scheduler {
             .map(|connection| connection.is_some())
     }
 
+    /// Send a group leader change to the target node (`bif.c:4943-4963`).
+    pub(in crate::runtime) fn dist_group_leader(
+        &mut self,
+        leader: &Term,
+        target: &Term,
+    ) -> Result<(), BeamError> {
+        let remote = RemotePid::of(target).expect("a remote target is a pid");
+        let node = remote.node();
+        let sender = self.current_process().id;
+        let control = Term::tuple(vec![Term::Integer(7), leader.clone(), target.clone()]);
+        if self.node.net_kernel().is_some()
+            && self.node.dist().connected(&node).is_none()
+            && self
+                .dist_auto_connect(&node, |scheduler, dist, _| {
+                    scheduler.enqueue_pending(
+                        dist,
+                        &node,
+                        PendingSignal::GroupLeader(sender, control.clone()),
+                    )
+                })?
+                .is_some()
+        {
+            return Ok(());
+        }
+        let pending = self
+            .node
+            .net_kernel()
+            .is_some()
+            .then_some(PendingOutput::GroupLeader(&control));
+        self.dist_output_with_pending(sender, &node, None, pending, |_, _| {
+            Some((control.clone(), None))
+        })?;
+        Ok(())
+    }
+
     /// Decide whether to enqueue a pending signal under the same lock that
     /// checks for a connected controller (`dist.c:3247-3255`).
     pub(super) fn dist_output_with_pending(
@@ -441,6 +477,14 @@ impl Scheduler {
                         PendingSignal::Link(sender, control.clone()),
                     )
                     .expect("a link control holds only an integer and pids");
+                }
+                PendingOutput::GroupLeader(control) => {
+                    self.enqueue_pending(
+                        &mut dist,
+                        node,
+                        PendingSignal::GroupLeader(sender, control.clone()),
+                    )
+                    .expect("a group leader control holds only an integer and pids");
                 }
                 PendingOutput::Monitor(monitor, control) => {
                     dist.insert_monitor_now(node, monitor);
@@ -544,7 +588,10 @@ impl Scheduler {
                     }
                     (sender, control, None)
                 }
-                super::dist_table::PendingSignal::Link(sender, control) => (sender, control, None),
+                super::dist_table::PendingSignal::Link(sender, control)
+                | super::dist_table::PendingSignal::GroupLeader(sender, control) => {
+                    (sender, control, None)
+                }
             };
             for packet in self.dist_encode_packets(dist, sender, node, flags, &control, message)? {
                 dist.enqueue(node, packet);

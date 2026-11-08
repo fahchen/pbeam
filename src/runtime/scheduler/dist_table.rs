@@ -148,6 +148,7 @@ pub(super) enum PendingSignal {
     Send(ProcessId, Term, Term, super::dist_output::SendPriority),
     Monitor(ProcessId, Term),
     Link(ProcessId, Term),
+    GroupLeader(ProcessId, Term),
     Spawn(ProcessId, MonitorKey, Term, Term),
     Exit(ProcessId, Term, Term, super::dist_output::SendPriority),
 }

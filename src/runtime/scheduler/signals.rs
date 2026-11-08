@@ -806,6 +806,7 @@ impl Scheduler {
                         LinkState {
                             unlinking: 0,
                             connection,
+                            priority: false,
                         },
                     );
                 }
@@ -1116,6 +1117,9 @@ impl Scheduler {
             }
         }
         let process = self.processes.get_mut(id).expect("the process is alive");
+        let priority = link
+            .and_then(|link| process.links.get(&link))
+            .is_some_and(|state| state.priority && state.is_active());
         let active = match alias {
             Some(alias) => process
                 .monitors
@@ -1131,7 +1135,12 @@ impl Scheduler {
         let kill = !linked && reason == Term::static_atom("kill");
         if active && !kill && process.trap_exit {
             let message = Term::tuple(vec![Term::static_atom("EXIT"), from, reason]);
-            process.mailbox.convert(walk, node, message);
+            if priority {
+                process.mailbox.remove(node);
+                process.mailbox.push_priority(message);
+            } else {
+                process.mailbox.convert(walk, node, message);
+            }
             self.activate(id);
             return Handled::Continue(1);
         }
@@ -1233,7 +1242,11 @@ impl Scheduler {
     /// give the caller its `{Tag, Ref, ok, Pid}` or `{Tag, Ref, error,
     /// Reason}` message, and keep the monitor and the link that `flags`
     /// names.
-    #[expect(clippy::too_many_arguments, reason = "the fields of the packet")]
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "the fields and branches of the spawn reply"
+    )]
     fn handle_spawn_reply(
         &mut self,
         id: ProcessId,
@@ -1270,6 +1283,7 @@ impl Scheduler {
         // with the reason `abandoned` (`erl_proc_sig_queue.c:5773-5840`).
         let mut exit_result: Result<bool, BeamError> = Ok(false);
         let abandoned = monitor.abandoned;
+        let link_priority = monitor.spawn_link_priority;
         let reply_tag = monitor.item.clone();
         if let Term::Atom(reason) = result {
             // The pending request leaves the monitor list of its connection
@@ -1366,6 +1380,13 @@ impl Scheduler {
             // (`erl_proc_sig_queue.c:5785-5840`).
             if !abandoned && flags & super::dist_spawn::SPAWN_LINK != 0 {
                 self.link_on(id, LinkId::Remote(remote), remote, connection);
+                self.processes
+                    .get_mut(id)
+                    .expect("the process is alive")
+                    .links
+                    .get_mut(&LinkId::Remote(remote))
+                    .expect("the spawn reply installed the link")
+                    .priority = link_priority;
             }
         }
         let _ = exit_result?;
@@ -1400,16 +1421,22 @@ impl Scheduler {
             process.mailbox.remove(node);
             return 2;
         };
+        if process
+            .monitors
+            .get(&key)
+            .and_then(|origin| origin.monitor.as_ref())
+            .is_some_and(|monitor| monitor.spawn.is_some())
+        {
+            process.mailbox.remove(node);
+            return 2;
+        }
         if mode == AliasMode::ReplyDemonitor
             && let Some(origin) = process.monitors.remove(&key)
             && let Some(monitor) = origin.monitor
         {
-            // The target of a process or a port monitor also loses it
-            // (`erl_proc_sig_queue.c:6064-6107`). An alias monitor watches a
-            // local process or a port, so the removal sends no packet, and
-            // the only error source of the removal cannot fail.
+            // The removal also sends a demonitor packet for a remote target.
             self.end_monitor(id, key, &monitor)
-                .expect("the removal of a local monitor does not fail");
+                .expect("the monitored target can be encoded");
         }
         let process = self.processes.get_mut(id).expect("the process is alive");
         process.mailbox.convert(walk, node, message);

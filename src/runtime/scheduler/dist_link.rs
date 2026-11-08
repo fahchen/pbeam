@@ -90,6 +90,7 @@ impl Scheduler {
                 LinkState {
                     unlinking: 0,
                     connection: 0,
+                    priority: false,
                 },
             );
             let exit = Signal::Exit {
@@ -134,6 +135,7 @@ impl Scheduler {
                 LinkState {
                     unlinking: 0,
                     connection,
+                    priority: false,
                 },
             );
         if !self.node.dist().insert_link(process, remote, connection) {
@@ -205,6 +207,7 @@ impl Scheduler {
             LinkState {
                 unlinking,
                 connection: state.connection,
+                priority: state.priority,
             },
         );
         let node = remote.node();

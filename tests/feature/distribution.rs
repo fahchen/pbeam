@@ -569,26 +569,10 @@ fn stops_at_a_part_of_a_channel_that_pbeam_does_not_have() {
         ]
         .map(|call| (call.to_owned(), rejected)),
     );
-    // PBeam does not implement the priority option of a monitor or a link and
-    // the alias option of a monitor (`bif.c:675-780`).
-    cases.extend([
-        (
-            "spawn_monitor_priority()".to_owned(),
-            "unsupported monitor option priority",
-        ),
-        (
-            "spawn_monitor_alias()".to_owned(),
-            "unsupported spawn monitor option alias",
-        ),
-        (
-            "spawn_link_priority()".to_owned(),
-            "unsupported link option priority",
-        ),
-        (
-            "spawn_scheduler()".to_owned(),
-            "unsupported spawn option Tuple([Atom(\"scheduler\"), Integer(1)])",
-        ),
-    ]);
+    cases.extend([(
+        "spawn_scheduler()".to_owned(),
+        "unsupported spawn option Tuple([Atom(\"scheduler\"), Integer(1)])",
+    )]);
     cases.extend([12, 13, 18, 25, 27].map(|op| {
         (
             format!("trace_token({op})"),
@@ -2408,7 +2392,11 @@ fn shows_the_options_of_a_spawn_as_pinned_erts() {
         "{erts}"
     );
     assert!(
-        erts.ends_with("{no_connection,none},{no_receiver,none}]\n"),
+        erts.contains("{combined_monitor_tag,{mine,process,normal}}"),
+        "{erts}"
+    );
+    assert!(
+        erts.ends_with("{no_connection,none},{no_receiver,none},{monitor_priority,down},{monitor_alias,[{explicit_unalias,received,true},{demonitor,received,true},{reply_demonitor,received,false}]},{alias_lifetime,[{explicit_unalias,down,delivered,true},{explicit_unalias,demonitor,delivered,true},{demonitor,down,dropped,false},{demonitor,demonitor,dropped,false},{reply_demonitor,down,dropped,false},{reply_demonitor,demonitor,dropped,false}]},{alias_order,[{explicit_unalias,[ordinary1,alias1,ordinary2,alias2]},{demonitor,[ordinary1,alias1,ordinary2,alias2]},{reply_demonitor,[ordinary1,alias1,ordinary2]}]},{link_priority,exit_signal},{remote_leader,{true,true,badarg,true,true}}]\n"),
         "{erts}"
     );
     assert_eq!(stdout(&pbeam_erl(&epmd, &client)), erts);
@@ -2427,6 +2415,18 @@ fn spawns_a_request_over_a_channel_as_pinned_erts() {
     for (function, expected) in [
         ("spawn_notsup", "spawn_notsup: notsup\n"),
         ("spawn_lost", "spawn_lost: noconnection\n"),
+        (
+            "spawn_priority_packets",
+            "spawn_priority_packets: [{29,true,true,true,{erlang,node,0},[monitor],[]},{29,true,true,true,{erlang,node,0},[link],[]}]\n",
+        ),
+        (
+            "spawn_pending_alias",
+            "spawn_pending_alias: {dropped,ok,delivered,false}\n",
+        ),
+        (
+            "spawn_abandon_alias",
+            "spawn_abandon_alias: {true,dropped,false,dropped}\n",
+        ),
         ("spawn_lost_suppressed", "spawn_lost_suppressed: none\n"),
         ("spawn_reply_unknown", "spawn_reply_unknown: true\n"),
         (
@@ -2592,6 +2592,22 @@ fn reads_the_options_of_a_spawn_request_as_pinned_erts() {
             "{tag}\n{erts}"
         );
     }
+    assert!(
+        erts.chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+            .contains("received_states:[{1,ordinary},{1,ordinary},{1,ordinary},{1,ordinary},{1,ordinary},{1,ordinary},{1,ordinary}]"),
+        "{erts}"
+    );
+    let packets = "{{31,true,true,3,true},{21,true,true,true,normal}}";
+    let expected = format!("received_packets:[{}]", [packets; 7].join(","));
+    assert!(
+        erts.chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+            .contains(&expected),
+        "{erts}"
+    );
     let pbeam = stdout(&pbeam_erl(&epmd, &arguments));
     assert_eq!(pbeam, erts);
 }
