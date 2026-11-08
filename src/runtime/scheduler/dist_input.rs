@@ -263,12 +263,13 @@ impl Scheduler {
             (Some(37), [_, flags, from, to, ..]) => {
                 self.net_altact_signal(from, flags, to, items.len(), message, cache.as_deref())
             }
-            (Some(37), _) => Err(error(REJECTED)),
             (Some(12 | 13 | 16 | 18 | 23 | 25 | 27 | 30 | 32 | 34), _) => Err(error(TRACE_TOKEN)),
             // ERTS reads the operation as unsigned (`unsigned_val`,
             // dist.c:2223), so a negative one is not valid (dist.c:3131-3132).
             // `UNLINK` (4) is not valid since OTP 26 (dist.c:2277-2282).
-            (Some(1..=4 | 6 | 8 | 22 | 24 | 26 | 33 | 35 | 36) | None, _) => Err(error(REJECTED)),
+            (Some(1..=4 | 6 | 8 | 22 | 24 | 26 | 33 | 35 | 36 | 37) | None, _) => {
+                Err(error(REJECTED))
+            }
             (Some(operation), _) if operation < 0 => Err(error(REJECTED)),
             (Some(operation), _) => Err(error(format!(
                 "unsupported distribution operation {operation}: see \"Distribution\" in docs/erts-differences.md"
@@ -526,10 +527,6 @@ impl Scheduler {
     ///
     /// A control message that ERTS rejects (see [`REJECTED`]), a control
     /// message with a trace token, and a term that PBeam cannot hold.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the arguments are the elements of the control message"
-    )]
     fn net_altact_signal(
         &mut self,
         from: &Term,

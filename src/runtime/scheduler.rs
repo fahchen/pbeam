@@ -3973,7 +3973,8 @@ impl Scheduler {
             vec![Term::Pid(id), reason.clone()]
         };
         let message = self.error_log_report(id, format, args)?;
-        self.dispatch_system_logger(id, message, true)
+        self.dispatch_system_logger(id, message, true);
+        Ok(())
     }
 
     /// Send the error report of a send that drops `message` to `to`, an
@@ -4008,7 +4009,8 @@ impl Scheduler {
         );
         let text = Term::list_from(text.into_iter().map(|byte| Term::Integer(byte.into())));
         let message = self.error_log_report(id, "~s~n", vec![text])?;
-        self.dispatch_system_logger(id, message, false)
+        self.dispatch_system_logger(id, message, false);
+        Ok(())
     }
 
     /// Return the error report `{log, error, Format, Args, Metadata}` of the
@@ -4079,18 +4081,13 @@ impl Scheduler {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// scheduler.dispatch_system_logger(id, report, true)?;
+    /// scheduler.dispatch_system_logger(id, report, true);
     /// ```
-    ///
-    /// # Errors
-    ///
-    /// The write to the standard error reports nothing.
-    fn dispatch_system_logger(
-        &mut self,
-        id: ProcessId,
-        message: Term,
-        exiting: bool,
-    ) -> Result<(), BeamError> {
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "the dispatcher treats a sender that left the process table differently"
+    )]
+    fn dispatch_system_logger(&mut self, id: ProcessId, message: Term, exiting: bool) {
         // The dispatcher runs after the exit of an exiting sender, so that
         // sender is a process that does not exist. An exiting process does
         // not take the message either (`erts_whereis_process`, register.c:356).
@@ -4108,7 +4105,7 @@ impl Scheduler {
                 self.whereis("logger")
             }
             logger if logger == Term::static_atom("logger") => self.whereis("logger"),
-            _ => return Ok(()),
+            _ => return,
         };
         match target {
             Some(target) if live(self, target) => self.send_message(id, target, message),
@@ -4121,7 +4118,6 @@ impl Scheduler {
                 let _ = std::io::Write::write_all(&mut std::io::stderr(), &text);
             }
         }
-        Ok(())
     }
 
     /// Run the exit of the current process, as `erts_do_exit_process` and

@@ -1228,15 +1228,15 @@ pub(super) fn binary_to_term(
         ets: &context.scheduler.ets,
         nodes: Vec::new(),
     };
-    let decoded = decoder.decode_input(seed);
+    let result = decoder.decode_input(seed);
     // ERTS makes the entry of each node of a decoded identifier
     // (`external.c:3132-3138`), which `erlang:nodes(known)` gives while a
     // term refers to it. The bytes that ERTS rejects make no entry, because
     // the decode freed each term of the failed input.
-    if decoded.is_ok() {
+    if result.is_ok() {
         context.scheduler.decode_known_nodes(&decoder.nodes);
     }
-    match decoded {
+    match result {
         Ok((term, used_bytes)) if used => Ok(Value(Term::tuple(vec![
             term,
             Term::Integer(to_i64(used_bytes)),
