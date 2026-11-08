@@ -1242,7 +1242,11 @@ impl Scheduler {
     /// give the caller its `{Tag, Ref, ok, Pid}` or `{Tag, Ref, error,
     /// Reason}` message, and keep the monitor and the link that `flags`
     /// names.
-    #[expect(clippy::too_many_arguments, reason = "the fields of the packet")]
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "the fields and branches of the spawn reply"
+    )]
     fn handle_spawn_reply(
         &mut self,
         id: ProcessId,
@@ -1376,13 +1380,13 @@ impl Scheduler {
             // (`erl_proc_sig_queue.c:5785-5840`).
             if !abandoned && flags & super::dist_spawn::SPAWN_LINK != 0 {
                 self.link_on(id, LinkId::Remote(remote), remote, connection);
-                if let Some(state) = self
-                    .processes
+                self.processes
                     .get_mut(id)
-                    .and_then(|p| p.links.get_mut(&LinkId::Remote(remote)))
-                {
-                    state.priority = link_priority;
-                }
+                    .expect("the process is alive")
+                    .links
+                    .get_mut(&LinkId::Remote(remote))
+                    .expect("the spawn reply installed the link")
+                    .priority = link_priority;
             }
         }
         let _ = exit_result?;

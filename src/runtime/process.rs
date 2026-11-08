@@ -422,6 +422,10 @@ pub(super) struct RemoteWatcher {
 
 /// The monitor of an [`Origin`]: what the watcher needs to make the
 /// `DOWN` message and to remove the monitor.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the flags of an ERTS monitor"
+)]
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct OriginMonitor {
     /// Whether a monitor DOWN is a priority message (`ERTS_ML_FLG_PRIO_ML`).
