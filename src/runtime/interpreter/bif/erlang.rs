@@ -5449,7 +5449,7 @@ pub(super) fn send3(
             Term::Atom(option) if option.is_static("noconnect") => connect = ConnectMode::NoConnect,
             Term::Atom(option) if option.is_static("priority") => priority = SendPriority::Priority,
             Term::Atom(option) if option.is_static("nosuspend") => {
-                nosuspend = SuspendMode::NoSuspend
+                nosuspend = SuspendMode::NoSuspend;
             }
             _ => return Ok(BifResult::badopt()),
         }
