@@ -365,6 +365,22 @@ fn applies_auto_connect_policy_to_name_sends_as_pinned_erts() {
 }
 
 #[test]
+fn gives_the_node_of_a_decoded_identifier_to_nodes_known_as_pinned_erts() {
+    // binary_to_term/1 makes a not-connected dist entry of the node of each
+    // decoded identifier, which nodes(known) gives, and no entry for the
+    // local node (external.c:3132-3138).
+    let epmd = Epmd::start();
+    let name = format!("dbtk{}", std::process::id());
+    let arguments = probe(
+        &["-sname", &name],
+        "dist_channel_probe:binary_to_term_known(), halt().",
+    );
+    let erts = stdout(&erts_erl(&epmd, &arguments));
+    assert!(erts.contains("nonode@nohost,zz@nohost],"), "{erts}");
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), erts);
+}
+
+#[test]
 fn answers_an_identifier_of_an_old_incarnation_as_pinned_erts() {
     // A monitor of a pid or a port of an old incarnation of the local node
     // gives a DOWN message with noproc at once (bif.c:811-825, 925-935),

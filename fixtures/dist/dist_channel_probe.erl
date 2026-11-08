@@ -25,7 +25,8 @@
          spawn_bad_mfa_fields/0,
          spawn_bad_arguments_list/0,
          spawn_scheduler/0,
-         dflag_unicode_io/0, old_incarnation_monitor/0, old_incarnation_send/0]).
+         dflag_unicode_io/0, old_incarnation_monitor/0, old_incarnation_send/0,
+         binary_to_term_known/0]).
 
 main() ->
     %% net_kernel reports the dist_ctrlr message of a connection that it
@@ -1364,6 +1365,25 @@ report_metadata(Metadata, Sender) ->
      {gl, maps:get(gl, Metadata) =:= group_leader()},
      {pid, maps:get(pid, Metadata) =:= Sender},
      {time, is_integer(maps:get(time, Metadata))}].
+
+%% `binary_to_term/1` makes a not-connected dist entry of the node of each
+%% decoded identifier, which `erlang:nodes(known)` gives while a term
+%% refers to it, and no entry for the local node (external.c:3132-3138).
+binary_to_term_known() ->
+    logger:set_primary_config(level, none),
+    Before = lists:sort(nodes(known)),
+    Pid = binary_to_term(<<131, 88, 118, 9:16, "zz@nohost", 1:32, 0:32, 7:32>>),
+    WithPid = lists:sort(nodes(known)),
+    Port = binary_to_term(<<131, 89, 118, 9:16, "yy@nohost", 4:32, 5:32>>),
+    WithPort = lists:sort(nodes(known)),
+    Ref = binary_to_term(<<131, 90, 3:16, 118, 9:16, "xx@nohost", 2:32, 1:32, 2:32, 3:32>>),
+    WithRef = lists:sort(nodes(known)),
+    %% An identifier of another incarnation of the local node adds nothing.
+    Name = atom_to_binary(node()),
+    Old = binary_to_term(<<131, 88, 118, (byte_size(Name)):16, Name/binary,
+                           1:32, 0:32, 0:32>>),
+    show(binary_to_term, [Before, node(Pid), WithPid, node(Port), WithPort,
+                          node(Ref), WithRef, node(Old), lists:sort(nodes(known))]).
 
 %% The messages of the mailbox, after `Timeout` milliseconds of quiet.
 drain(Timeout) ->

@@ -156,6 +156,7 @@ fn decode_full(atoms: &AtomTable, bytes: &[u8], policy: AtomPolicy) -> Result<Te
         atoms,
         code: &CodeTable::default(),
         ets: &crate::runtime::ets::NodeTables::default(),
+        nodes: Vec::new(),
     }
     .decode_input(SEED)
     .map(|(term, _)| term)
@@ -815,6 +816,7 @@ fn decodes_local_terms_with_their_block_hash() {
             atoms: &atoms,
             code: &CodeTable::default(),
             ets: &crate::runtime::ets::NodeTables::default(),
+            nodes: Vec::new(),
         }
         .decode_input(SEED)
         .unwrap()
@@ -833,6 +835,7 @@ fn decodes_local_terms_with_their_block_hash() {
             atoms: &atoms,
             code: &CodeTable::default(),
             ets: &crate::runtime::ets::NodeTables::default(),
+            nodes: Vec::new(),
         }
         .decode_input(SEED),
         Err(DecodeError::Badarg)
@@ -1173,6 +1176,7 @@ fn keeps_the_decoder_guards_behind_the_validation() {
             atoms: &atoms,
             code: &CodeTable::default(),
             ets: &crate::runtime::ets::NodeTables::default(),
+            nodes: Vec::new(),
         }
         .term()
     };
