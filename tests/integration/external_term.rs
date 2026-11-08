@@ -12,6 +12,14 @@ use pbeam_runtime::{BeamProgram, Term};
 
 const PROBE: &[u8] = include_bytes!("../../fixtures/external_term/external_term_probe.beam");
 
+/// `term_to_binary/1` of an `alias([explicit_unalias])` whose owner exited,
+/// measured on OTP 29.1.1 with `mise run erts-eval`. The last eight bytes
+/// hold the pid word of the dead owner (`external.c:3642-3668`).
+const DEAD_OWNER_REFERENCE: [u8; 43] = [
+    131, 90, 0, 5, 119, 13, 110, 111, 110, 111, 100, 101, 64, 110, 111, 104, 111, 115, 116, 0, 0,
+    0, 0, 0, 3, 71, 26, 53, 141, 0, 2, 224, 150, 47, 5, 0, 0, 41, 131, 0, 0, 0, 0,
+];
+
 /// Return the fixture program with the pinned `erlang` module.
 fn load() -> BeamProgram {
     let erlang = pinned_beam("erlang");
@@ -184,6 +192,20 @@ fn runs_term_to_binary_options_as_pinned_erts() {
         decoded,
         Term::tuple(vec![atom(&program, "x"), binary(&[1, 2])])
     );
+}
+
+#[test]
+fn round_trips_a_reference_whose_owner_exited_as_pinned_erts() {
+    // The pinned ERTS keeps the two pid words of a dead owner in the
+    // reference, so `term_to_binary/1`, `binary_to_term/1`, and a second
+    // encode all preserve the five reference numbers
+    // (`external.c:3642-3668`, `4828-4839`).
+    let program = load();
+    let expected = Term::tuple(vec![
+        Term::list_from(vec![atom(&program, "true"); 10]),
+        binary(&DEAD_OWNER_REFERENCE),
+    ]);
+    assert_eq!(run(&program, "dead_owner_reference"), expected);
 }
 
 #[test]
