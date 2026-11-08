@@ -405,6 +405,16 @@ fn runs_the_bifs_of_a_process_controller_as_pinned_erts() {
     let erts = stdout(&erts_erl(&epmd, &exit_input));
     assert!(erts.contains("[ok,{down,killed}]"), "{erts}");
     assert_eq!(stdout(&pbeam_erl(&epmd, &exit_input)), erts);
+    // ALTACT_SIG_SEND gives a message to a pid, a name, and an alias, and
+    // an exit signal, and drops a target that is not alive without a
+    // decode (dist.c:2580-2686, erl_proc_sig_queue.c:2314-2331).
+    let altact = probe(
+        &["-sname", &name],
+        "dist_channel_probe:altact_input(), halt().",
+    );
+    let erts = stdout(&erts_erl(&epmd, &altact));
+    assert!(erts.contains("exit_pid: [{'EXIT',{pid,zz@nohost},boom}]\n"), "{erts}");
+    assert_eq!(stdout(&pbeam_erl(&epmd, &altact)), erts);
     // A DEMONITOR_P for a name finds no monitor of the connection and
     // removes nothing (dist.c:2441-2457).
     let demonitor = probe(
@@ -535,10 +545,7 @@ fn stops_at_a_part_of_a_channel_that_pbeam_does_not_have() {
         ("message()".to_owned(), rejected),
         ("port_message()".to_owned(), rejected),
         ("monitor_op()".to_owned(), rejected),
-        (
-            "altact_op()".to_owned(),
-            "unsupported distribution operation 37",
-        ),
+        ("altact_op()".to_owned(), rejected),
         ("demonitor_ref()".to_owned(), rejected),
         ("deliver_port()".to_owned(), deliver),
         ("deliver_udp()".to_owned(), deliver),
@@ -579,10 +586,14 @@ fn stops_at_a_part_of_a_channel_that_pbeam_does_not_have() {
             "unsupported distribution message with a trace token",
         )
     }));
+    cases.push((
+        "altact_token()".to_owned(),
+        "unsupported distribution message with a trace token",
+    ));
     cases.extend(
         [
             1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
-            26, 27,
+            26, 27, 28, 29, 30, 31, 32, 33, 34, 35,
         ]
         .map(|n| (format!("reject({n})"), rejected)),
     );

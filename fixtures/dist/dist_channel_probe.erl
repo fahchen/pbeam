@@ -8,7 +8,7 @@
          atom_cache/0, fragment_interleaving/0, fragment_reconnect/0,
          fragment_output/0, fragment_large_control/0, output/0, port_output/0,
          alias_ext/0, dead_alias/1, exit_input/0, link_input/0,
-         link_noconnection/0, altact_op/0, spawn_bad_ref/0, spawn_bad_from/0,
+         link_noconnection/0, altact_op/0, altact_input/0, altact_token/0, spawn_bad_ref/0, spawn_bad_from/0,
          spawn_bad_from_local/0,
          spawn_bad_leader/0, spawn_bad_mfa/0, spawn_bad_arity/0,
          spawn_bad_arguments/0, reply_bad_to/0, reply_bad_ref/0,
@@ -443,7 +443,21 @@ reject(N) ->
                  24 -> packet_only({24, remote_pid(yy@nohost), self()});
                  25 -> packet_only({4, From, self()});
                  26 -> packet_only({3, From, self()});
-                 27 -> packet_only({1, remote_ref(zz@nohost), self()})
+                 27 -> packet_only({1, remote_ref(zz@nohost), self()});
+                 %% ALTACT_SIG_SEND rejects the arity 3 (altact_op/0), flags
+                 %% that are not a non-negative integer, a sender that is
+                 %% not a pid, a token flag without the token, an alias that
+                 %% is not a reference, an alias with the name flag, a name
+                 %% that is not an atom, and a target that is not a pid, a
+                 %% reference, or an atom (dist.c:2609-2674).
+                 28 -> packet_only({37, foo, From, self()});
+                 29 -> packet_only({37, -1, From, self()});
+                 30 -> packet_only({37, 0, foo, self()});
+                 31 -> packet_only({37, 2, From, self()});
+                 32 -> packet_only({37, 4, From, self()});
+                 33 -> packet_only({37, 12, From, remote_ref(zz@nohost)});
+                 34 -> packet_only({37, 8, From, self()});
+                 35 -> packet_only({37, 0, From, {a, b}})
              end,
     erlang:dist_ctrl_put_data(DH, Packet).
 
@@ -1284,13 +1298,59 @@ remote_pid(Node) ->
     Name = atom_to_binary(Node),
     binary_to_term(<<131, 88, 118, (byte_size(Name)):16, Name/binary, 1:32, 0:32, 1:32>>).
 
-%% A packet of an operation that ERTS defines and PBeam does not implement,
-%% `DOP_ALTACT_SIG_SEND` (dist.h:182): the node stops the run with a runtime
-%% error that names the operation.
+%% A packet of the operation `DOP_ALTACT_SIG_SEND` with the arity 3 that
+%% ERTS rejects (`dist.c:2615-2616`), `dist.h:182`.
 altact_op() ->
     erts_internal:new_connection(zz@nohost),
     {ok, DH} = erts_internal:create_dist_channel(zz@nohost, self(), {mandatory(), 1}),
     erlang:dist_ctrl_put_data(DH, packet_only({37, 0, self()})).
+
+%% `ALTACT_SIG_SEND` (37) gives a message to a local pid, to a registered
+%% name, and to an alias, and an exit signal, with the flags of
+%% dist.h:188-192 (dist.c:2580-2686). A name that no process has, a
+%% reference that is not an alias, and a pid that is not alive drop the
+%% packet without a decode.
+altact_input() ->
+    logger:set_primary_config(level, none),
+    process_flag(trap_exit, true),
+    M = mandatory(),
+    erts_internal:new_connection(zz@nohost),
+    {ok, DH} = erts_internal:create_dist_channel(zz@nohost, self(), {M, 1}),
+    register(altact_name, self()),
+    From = remote_pid(zz@nohost),
+    Self = self(),
+    Alias = alias(),
+    {Dead, DeadRef} = spawn_monitor(fun() -> ok end),
+    receive {'DOWN', DeadRef, _, _, _} -> ok end,
+    PutMsg = fun(Control, Msg) -> ok = erlang:dist_ctrl_put_data(DH, packet(Control, Msg)) end,
+    Drain = fun D() -> receive Msg -> [anon(Msg) | D()] after 0 -> [] end end,
+    Case = fun(Tag, Fun) -> Fun(), show(Tag, Drain()) end,
+    Case(msg_pid, fun() -> PutMsg({37, 0, From, Self}, plain) end),
+    %% ERTS reads a fifth element only with the token flag (dist.c:2641-2649).
+    Case(msg_extra, fun() -> PutMsg({37, 0, From, Self, ignored}, extra) end),
+    Case(msg_prio, fun() -> PutMsg({37, 1, From, Self}, prio) end),
+    Case(msg_name, fun() -> PutMsg({37, 8, From, altact_name}, named) end),
+    Case(msg_no_name, fun() -> PutMsg({37, 8, From, no_such_name}, gone) end),
+    Case(msg_alias, fun() -> PutMsg({37, 4, From, Alias}, aliased) end),
+    Case(msg_no_alias, fun() -> PutMsg({37, 4, From, make_ref()}, no_alias) end),
+    Case(msg_dead, fun() -> PutMsg({37, 0, From, Dead}, dead) end),
+    Case(exit_pid, fun() -> PutMsg({37, 16, From, Self}, boom) end),
+    Case(exit_name, fun() -> PutMsg({37, 16 bor 8, From, altact_name}, named_exit) end),
+    Case(exit_alias, fun() -> PutMsg({37, 16 bor 4, From, Alias}, alias_exit) end),
+    Case(exit_no_alias, fun() -> PutMsg({37, 16 bor 4, From, make_ref()}, no_alias) end),
+    Case(exit_dead, fun() -> PutMsg({37, 16, From, Dead}, dead) end),
+    %% The connection keeps the packets of a target that is not alive.
+    Case(after_dead, fun() -> PutMsg({37, 0, From, Self}, alive) end),
+    ok.
+
+%% `ALTACT_SIG_SEND` with the token flag carries the trace token of a
+%% sequence, which ERTS stores with the message (dist.c:2641-2649). PBeam
+%% has no sequential tracing, so the node stops the run.
+altact_token() ->
+    erts_internal:new_connection(zz@nohost),
+    {ok, DH} = erts_internal:create_dist_channel(zz@nohost, self(), {mandatory(), 1}),
+    From = remote_pid(zz@nohost),
+    erlang:dist_ctrl_put_data(DH, packet({37, 2, From, self(), {0, [], 0, From, 0}}, token)).
 
 %% The element sizes, the control message, and the message of a packet,
 %% with the pid of the caller as self, each local reference as ref, and
