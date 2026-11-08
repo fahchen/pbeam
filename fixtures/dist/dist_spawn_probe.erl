@@ -155,6 +155,15 @@ options(Server) ->
                                           [{monitor, []}])),
     MonitorTag = received(spawn_request(Server, erlang, node, [],
                                         [{monitor, [{tag, mine}]}])),
+    CombinedRef = spawn_request(Server, dist_spawn_probe, wait, [self()],
+                                [{monitor, [{tag, mine}]}, monitor]),
+    CombinedPid = receive {spawn_reply, CombinedRef, ok, CP} -> CP after 5000 -> timeout end,
+    ok = receive {started, CombinedPid} -> ok after 5000 -> timeout end,
+    CombinedPid ! stop,
+    CombinedTag = receive {Tag, CombinedRef, process, CombinedPid, normal} ->
+                              {Tag, process, normal}
+                  after 5000 -> timeout
+                  end,
     ReplyYes = received(spawn_request(Server, erlang, node, [], [{reply, yes}])),
     Host = lists:nth(2, string:split(atom_to_list(Server), "@")),
     Missing = list_to_atom("none@" ++ Host),
@@ -216,7 +225,7 @@ options(Server) ->
                 {bad_monitor_alias, BadMonitorAlias},
                 {bad_monitor_tag, BadMonitorTag}, {bad_tuple, BadTuple},
                 {link_empty, LinkEmpty}, {monitor_empty, MonitorEmpty},
-                {monitor_tag, MonitorTag}, {reply_yes, ReplyYes},
+                {monitor_tag, MonitorTag}, {combined_monitor_tag, CombinedTag}, {reply_yes, ReplyYes},
                 {no_connection, NoConnection}, {no_receiver, NoReceiver},
                 {monitor_priority, PriorityFirst}, {monitor_alias, Alias},
                 {alias_lifetime, AliasLifetime},

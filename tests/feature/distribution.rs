@@ -2392,6 +2392,10 @@ fn shows_the_options_of_a_spawn_as_pinned_erts() {
         "{erts}"
     );
     assert!(
+        erts.contains("{combined_monitor_tag,{mine,process,normal}}"),
+        "{erts}"
+    );
+    assert!(
         erts.ends_with("{no_connection,none},{no_receiver,none},{monitor_priority,down},{monitor_alias,[{explicit_unalias,received,true},{demonitor,received,true},{reply_demonitor,received,false}]},{alias_lifetime,[{explicit_unalias,down,delivered,true},{explicit_unalias,demonitor,delivered,true},{demonitor,down,dropped,false},{demonitor,demonitor,dropped,false},{reply_demonitor,down,dropped,false},{reply_demonitor,demonitor,dropped,false}]},{link_priority,exit_signal},{remote_leader,{true,true,badarg,true,true}}]\n"),
         "{erts}"
     );

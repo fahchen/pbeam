@@ -929,13 +929,11 @@ pub(super) fn dist_spawn_request(
         match option {
             Term::Atom(name) if name.is_static("link") => link = true,
             Term::Atom(name) if name.is_static("monitor") => {
-                let options =
-                    monitor.get_or_insert_with(|| crate::runtime::scheduler::MonitorOptions {
-                        tag: Term::static_atom("DOWN"),
-                        priority: false,
-                        alias: None,
-                    });
-                options.tag = Term::static_atom("DOWN");
+                monitor.get_or_insert_with(|| crate::runtime::scheduler::MonitorOptions {
+                    tag: Term::static_atom("DOWN"),
+                    priority: false,
+                    alias: None,
+                });
             }
             Term::Tuple(fields) => match fields.as_ref() {
                 [Term::Atom(name), value] if name.is_static("reply_tag") => {
