@@ -1443,14 +1443,31 @@ fn keeps_a_group_leader_of_another_node_as_pinned_erts() {
 
 #[test]
 fn stops_with_a_runtime_error_for_each_signal_to_another_node() {
-    // A group leader of a pid of another node needs a connection
-    // (bif.c:4942-4964); a monitor of an old incarnation of the local node
+    // A group leader change to a pid of another node returns true on a node
+    // without a connection (bif.c:4942-4957). A monitor of an old incarnation
+    // of the local node
     // needs state that PBeam does not keep (bif.c:811-825, 925-935); a send
     // to an old incarnation of the local node logs an error report
     // (bif.c:2489-2503). A monitor of a pid
     // of another node no longer stops the run: it ends at once with the
     // `DOWN` message `noconnection` on a node without a connection, as ERTS
     // does (bif.c:842-849, #1493).
+    let erts = run(&mut erts_probe(
+        REMOTE_ID_PROBE,
+        "remote_id_probe",
+        "group_leader",
+        &[],
+    ));
+    assert_eq!(erts, "group_leader: true\n");
+    assert_eq!(
+        run(&mut pbeam_probe(
+            REMOTE_ID_PROBE,
+            "remote_id_probe",
+            "group_leader",
+            &[]
+        )),
+        erts
+    );
     for (function, expected) in [
         (
             "old_monitor",
@@ -1459,10 +1476,6 @@ fn stops_with_a_runtime_error_for_each_signal_to_another_node() {
         (
             "old_process_monitor",
             "unsupported erlang:monitor/2,3 of a pid or a port of an old incarnation",
-        ),
-        (
-            "group_leader",
-            "unsupported erlang:group_leader/2 with a pid of another node",
         ),
         (
             "other_scheduler",
