@@ -1060,6 +1060,31 @@ fn checks_the_process_arguments_before_the_capability() {
 }
 
 #[test]
+fn remote_group_leader_propagates_a_full_atom_table_error() {
+    // A compiled fixture reaches the denied remote target after the host
+    // fills the table. ERTS exits when its atom table is full, and has no
+    // capability policy; PBeam returns the atom-table error to its host.
+    let fixture = include_bytes!("../../fixtures/capability/full_atom_remote_leader.beam");
+    let program = BeamProgram::load(&[fixture]).unwrap();
+    assert!(program.atom("capability_denied").is_none());
+    program.put_atom("b@host").unwrap();
+    let mut index = 0u32;
+    while program
+        .put_atom(&format!("full_remote_leader_{index}"))
+        .is_ok()
+    {
+        index += 1;
+    }
+    let error = program
+        .execute_with_policy("full_atom_remote_leader", "run", &[], &Grants(vec![]))
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "no more index entries in atom_tab (max=1048576)"
+    );
+}
+
+#[test]
 fn checks_the_port_arguments_before_the_capability() {
     // `erlang:port_connect/2` checks the pid, and `erlang:port_info/2` the
     // item, before the `port` capability (erl_bif_port.c:438-595).

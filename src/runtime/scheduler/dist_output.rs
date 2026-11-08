@@ -483,7 +483,8 @@ impl Scheduler {
                         &mut dist,
                         node,
                         PendingSignal::GroupLeader(sender, control.clone()),
-                    )?;
+                    )
+                    .expect("a group leader control holds only an integer and pids");
                 }
                 PendingOutput::Monitor(monitor, control) => {
                     dist.insert_monitor_now(node, monitor);
