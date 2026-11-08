@@ -274,6 +274,15 @@ pub(super) enum MonitorTarget {
     PortName(Atom),
     /// The `port` type with a port.
     Port(PortId),
+    /// An identifier of an old incarnation of the local node, with the type
+    /// `process` or `port` that the caller gave: ERTS sends a `DOWN` message
+    /// with `noproc` at once (`bif.c:811-825`, `925-935`).
+    OldIncarnation {
+        /// The type of the monitor: `process` or `port`.
+        kind: &'static str,
+        /// The pid or the port of the old incarnation.
+        target: Term,
+    },
 }
 
 /// The options of `erlang:monitor/3`, after the BIF checked them as ERTS
@@ -3516,6 +3525,7 @@ impl Scheduler {
                     .expect("a remote target names a pid or a name")
                     .item(),
             ),
+            MonitorTarget::OldIncarnation { kind, target } => (*kind, None, target.clone()),
         };
         if id == Some(watcher) {
             return Ok(reference);
@@ -3958,10 +3968,73 @@ impl Scheduler {
         } else {
             "Error in process ~p with exit value:~n~p~n"
         };
+        let args = if alive {
+            vec![Term::Pid(id), Term::Atom(node), reason.clone()]
+        } else {
+            vec![Term::Pid(id), reason.clone()]
+        };
+        let message = self.error_log_report(id, format, args)?;
+        self.dispatch_system_logger(id, message, true);
+        Ok(())
+    }
+
+    /// Send the error report of a send that drops `message` to `to`, an
+    /// identifier of an old incarnation of the local node, as `do_send` does
+    /// (`bif.c:2489-2503`, `2537-2550`). The text gives the message, the
+    /// sender pid, the target, the creation of the target, and the creation
+    /// of the local node, and `erts_send_error_to_logger` gives the text to
+    /// the system logger as `{log, error, "~s~n", [Text], Metadata}`
+    /// (`utils.c:846-878`, `1011-1017`).
+    pub(super) fn send_old_incarnation_report(
+        &mut self,
+        to: &Term,
+        creation: u32,
+        message: &Term,
+    ) -> Result<(), BeamError> {
+        let id = self.current_process().id;
+        let mut text = b"Discarding message ".to_vec();
+        text.extend(print_term(message, &self.atoms));
+        text.extend_from_slice(b" from ");
+        text.extend(print_term(&Term::Pid(id), &self.atoms));
+        text.extend_from_slice(b" to ");
+        text.extend(print_term(to, &self.atoms));
+        text.extend_from_slice(
+            format!(
+                " in an old incarnation ({creation}) of this node ({})\n",
+                self.atoms.this_node().1
+            )
+            .as_bytes(),
+        );
+        let text = Term::list_from(text.into_iter().map(|byte| Term::Integer(byte.into())));
+        let message = self.error_log_report(id, "~s~n", vec![text])?;
+        self.dispatch_system_logger(id, message, false);
+        Ok(())
+    }
+
+    /// Return the error report `{log, error, Format, Args, Metadata}` of the
+    /// process `id`, as `erts_send_error_to_logger` builds it
+    /// (`utils.c:770-878`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let report = scheduler.error_log_report(id, "~s~n", vec![text])?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// A new `gl` atom in a full atom table gives the error of
+    /// `AtomTable::put`.
+    fn error_log_report(
+        &mut self,
+        id: ProcessId,
+        format: &str,
+        args: Vec<Term>,
+    ) -> Result<Term, BeamError> {
         // `gl` is not a static atom; ERTS makes it at its first use
         // (`ERTS_MAKE_AM`, utils.c:846). A full atom table fails the run.
         let gl = self.atoms.put("gl")?;
-        let process = self.current_process();
+        let group_leader = self.current_process().group_leader.clone();
         let metadata = crate::term::Map::from_pairs(
             vec![
                 (
@@ -3977,7 +4050,7 @@ impl Scheduler {
                         .expect("atom keys fit each map form"),
                     ),
                 ),
-                (Term::Atom(gl), process.group_leader.clone()),
+                (Term::Atom(gl), group_leader),
                 (Term::static_atom("pid"), Term::Pid(id)),
                 (
                     Term::static_atom("time"),
@@ -3987,22 +4060,37 @@ impl Scheduler {
             &self.atoms,
         )
         .expect("atom keys fit each map form");
-        let message = Term::tuple(vec![
+        Ok(Term::tuple(vec![
             Term::static_atom("log"),
             Term::static_atom("error"),
             Term::list_from(format.bytes().map(|byte| Term::Integer(byte.into()))),
-            Term::list_from(if alive {
-                vec![Term::Pid(id), Term::Atom(node), reason.clone()]
-            } else {
-                vec![Term::Pid(id), reason.clone()]
-            }),
+            Term::list_from(args),
             Term::Map(metadata),
-        ]);
-        // The dispatcher runs after the exit of the sender, so the sender is
-        // a process that does not exist. An exiting process does not take
-        // the message either (`erts_whereis_process`, register.c:356).
+        ]))
+    }
+
+    /// Give the error report `message` of the process `id` to the system
+    /// logger, as `erts_queue_error_logger_message` and its dispatcher give
+    /// it (`utils.c:846-857`, `erl_trace.c:2780-2824`). `exiting` tells that
+    /// the sender has left the process table already, as the sender of the
+    /// report of an uncaught exception has, so that the dispatcher finds no
+    /// process at its pid (`erl_trace.c:2796-2800`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.dispatch_system_logger(id, report, true);
+    /// ```
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "the dispatcher treats a sender that left the process table differently"
+    )]
+    fn dispatch_system_logger(&mut self, id: ProcessId, message: Term, exiting: bool) {
+        // The dispatcher runs after the exit of an exiting sender, so that
+        // sender is a process that does not exist. An exiting process does
+        // not take the message either (`erts_whereis_process`, register.c:356).
         let live = |scheduler: &Self, target: ProcessId| {
-            target != id
+            (!exiting || target != id)
                 && match scheduler.processes.get(target) {
                     Some(process) => process.exiting.is_none(),
                     None => scheduler.node.live_owner(target).is_some(),
@@ -4015,7 +4103,7 @@ impl Scheduler {
                 self.whereis("logger")
             }
             logger if logger == Term::static_atom("logger") => self.whereis("logger"),
-            _ => return Ok(()),
+            _ => return,
         };
         match target {
             Some(target) if live(self, target) => self.send_message(id, target, message),
@@ -4028,7 +4116,6 @@ impl Scheduler {
                 let _ = std::io::Write::write_all(&mut std::io::stderr(), &text);
             }
         }
-        Ok(())
     }
 
     /// Run the exit of the current process, as `erts_do_exit_process` and

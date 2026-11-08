@@ -1829,13 +1829,19 @@ pub(super) fn monitor(
         ("process", Term::External(_))
             if old_incarnation(target, &context.scheduler.atoms) && pid_parts(target).is_some() =>
         {
-            Some(Err(old_monitor_unsupported()))
+            Some(Ok(MonitorTarget::OldIncarnation {
+                kind: "process",
+                target: target.clone(),
+            }))
         }
         ("port", Term::External(_))
             if old_incarnation(target, &context.scheduler.atoms)
                 && port_number(target).is_some() =>
         {
-            Some(Err(old_monitor_unsupported()))
+            Some(Ok(MonitorTarget::OldIncarnation {
+                kind: "port",
+                target: target.clone(),
+            }))
         }
         // ERTS monitors a pid of another node over the connection of that
         // node (`bif.c:830-863`, `857`, `dist.c:1543-1547`).
@@ -1875,21 +1881,6 @@ pub(super) fn monitor(
     let target = target?;
     let reference = scheduler.monitor(&target, options)?;
     Ok(Value(Term::Reference(reference)))
-}
-
-/// Return the runtime error of `erlang:monitor/2,3` of a pid or a port of an
-/// old incarnation of the local node, where ERTS sends a `DOWN` message
-/// with `noproc` (row "Distribution" of `docs/erts-differences.md`).
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// return Err(old_monitor_unsupported());
-/// ```
-fn old_monitor_unsupported() -> BeamError {
-    error(
-        "unsupported erlang:monitor/2,3 of a pid or a port of an old incarnation of the local node: see \"Distribution\" in docs/erts-differences.md",
-    )
 }
 
 /// Read the options of `erlang:monitor/3` as ERTS `erts_monitor_opts`
@@ -5556,7 +5547,7 @@ enum Destination<'a> {
     /// A pid, a port, or a reference of an old incarnation of the local
     /// node: ERTS logs an error report and drops the message
     /// (`bif.c:2489-2503`, `2537-2549`).
-    OldIncarnation,
+    OldIncarnation(&'a crate::term::ExternalId),
 }
 
 /// Return the destination of `to`, or `None` for a term that `do_send`
@@ -5583,7 +5574,7 @@ fn destination<'a>(to: &'a Term, atoms: &AtomTable) -> Option<Destination<'a>> {
         Term::Resource(resource) => Destination::Alias(resource.reference()),
         Term::Atom(name) => Destination::Name(name),
         Term::Port(id) => Destination::Port(*id),
-        Term::External(id) if id.node == this => Destination::OldIncarnation,
+        Term::External(id) if id.node == this => Destination::OldIncarnation(id),
         // A port of another node raises `badarg` (`bif.c:2537-2695`).
         Term::External(id) if port_number(to).is_none() => Destination::Remote(&id.node),
         Term::Tuple(elements) => match elements.as_ref() {
@@ -5693,10 +5684,11 @@ fn deliver_to(
             return Ok(Ok(Sent::NoConnect));
         }
         Destination::Port(id) => return port_send(scheduler, id, &message),
-        Destination::OldIncarnation => {
-            return Err(error(
-                "unsupported send to a pid, a port, or a reference of an old incarnation of the local node: ERTS logs an error report: see \"Distribution\" in docs/erts-differences.md",
-            ));
+        // ERTS logs an error report and drops the message
+        // (`bif.c:2489-2503`, `2537-2550`).
+        Destination::OldIncarnation(remote) => {
+            scheduler.send_old_incarnation_report(to, remote.creation, &message)?;
+            return Ok(Ok(Sent::Local));
         }
     };
     if let Some(target) = target {

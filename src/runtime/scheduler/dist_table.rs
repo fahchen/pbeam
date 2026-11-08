@@ -280,14 +280,17 @@ impl DistTable {
         }
     }
 
-    /// Add or refresh a send-only entry in the shared not-connected list.
+    /// Add or refresh a not-connected entry in the shared not-connected
+    /// list, as `erts_find_or_insert_dist_entry` finds or inserts it for a
+    /// send (`bif.c:2656-2666`) and for a decoded identifier
+    /// (`external.c:3132-3138`).
     ///
     /// # Examples
     ///
     /// ```rust,ignore
-    /// table.send_known(&name, now);
+    /// table.insert_known(&name, now);
     /// ```
-    pub(in crate::runtime) fn send_known(&mut self, name: &Atom, now: i64) {
+    pub(in crate::runtime) fn insert_known(&mut self, name: &Atom, now: i64) {
         self.expire_known(now);
         if !self.entries.contains_key(&name.index())
             && self.known.send_ordered(name, self.next_order, now)

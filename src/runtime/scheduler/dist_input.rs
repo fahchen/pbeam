@@ -8,9 +8,15 @@ use super::{
     dist_table::{Controller, DistFragment},
     node::Named,
 };
+use num_bigint::Sign;
+
 use crate::{
     error::{BeamError, error},
-    runtime::{interpreter::bif::decode_dist, process::LinkId, signal::Signal},
+    runtime::{
+        interpreter::bif::decode_dist,
+        process::{LinkId, RemotePid},
+        signal::Signal,
+    },
     term::{
         Atom, Term,
         external_id::{self, ExternalData},
@@ -32,9 +38,24 @@ const DIST_HEADERS: [u8; 3] = *b"DEF";
 const ATOM_CACHE: u64 = 0x2000;
 const FRAGMENTS: u64 = 0x0080_0000;
 
+/// The least significant bits of the flags of `ALTACT_SIG_SEND`
+/// (`ERTS_DOP_ALTACT_SIG_FLG_*`, `dist.h:188-192`). The bit
+/// `ERTS_DOP_ALTACT_SIG_FLG_PRIO` of a message has no effect, because PBeam
+/// has no priority messages (row "Signal queue" in
+/// `docs/erts-differences.md`).
+const ALTACT_TOKEN: u8 = 1 << 1;
+const ALTACT_ALIAS: u8 = 1 << 2;
+const ALTACT_NAME: u8 = 1 << 3;
+const ALTACT_EXIT: u8 = 1 << 4;
+
 /// The runtime error of a packet that ERTS rejects: ERTS logs it and ends
 /// the connection (`dist.c:3144-3165`).
 pub(super) const REJECTED: &str = "unsupported distribution message that ERTS rejects: ERTS ends the connection: see \"Distribution\" in docs/erts-differences.md";
+
+/// The runtime error of a control message that carries a trace token, which
+/// needs the sequential tracing of m27-e3 (see row "Distribution" in
+/// `docs/erts-differences.md`).
+pub(super) const TRACE_TOKEN: &str = "unsupported distribution message with a trace token: see \"Distribution\" in docs/erts-differences.md";
 
 /// The body and atom translation table of a distribution header.
 type AtomHeader<'a> = (&'a [u8], Vec<Atom>);
@@ -45,6 +66,30 @@ type Reassembled = (Vec<u8>, Vec<Atom>);
 #[cfg(test)]
 #[path = "../../../tests/runtime/scheduler/dist_input.rs"]
 mod tests;
+
+/// Return the least significant byte of the flags of an `ALTACT_SIG_SEND`
+/// control message, as `erts_net_message` reads them (`dist.c:2609-2634`):
+/// `None` for a term that is not a non-negative integer. ERTS accepts a
+/// bignum of any size.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(altact_flags(&Term::Integer(8)), Some(8));
+/// assert_eq!(altact_flags(&Term::Integer(-1)), None);
+/// assert_eq!(altact_flags(&Term::static_atom("foo")), None);
+/// ```
+fn altact_flags(flags: &Term) -> Option<u8> {
+    let low = match flags {
+        Term::Integer(value) if *value >= 0 => *value & 0xff,
+        Term::BigInt(value) if value.sign() != Sign::Minus => {
+            let digit = value.iter_u64_digits().next().unwrap_or(0) & 0xff;
+            i64::try_from(digit).expect("a byte fits an i64")
+        }
+        _ => return None,
+    };
+    u8::try_from(low).ok()
+}
 
 impl Scheduler {
     /// Give the packet `packet` with data of a connection with the flags
@@ -215,13 +260,16 @@ impl Scheduler {
                 self.net_spawn_reply(node, connection, reference, to, flags, result)
             }
             (Some(7), [_, leader, to]) => self.net_group_leader(leader, to),
-            (Some(12 | 13 | 16 | 18 | 23 | 25 | 27 | 34), _) => Err(error(
-                "unsupported distribution message with a trace token: see \"Distribution\" in docs/erts-differences.md",
-            )),
+            (Some(37), [_, flags, from, to, ..]) => {
+                self.net_altact_signal(from, flags, to, items.len(), message, cache.as_deref())
+            }
+            (Some(12 | 13 | 16 | 18 | 23 | 25 | 27 | 30 | 32 | 34), _) => Err(error(TRACE_TOKEN)),
             // ERTS reads the operation as unsigned (`unsigned_val`,
             // dist.c:2223), so a negative one is not valid (dist.c:3131-3132).
             // `UNLINK` (4) is not valid since OTP 26 (dist.c:2277-2282).
-            (Some(1..=4 | 6 | 8 | 22 | 24 | 26 | 33 | 35 | 36) | None, _) => Err(error(REJECTED)),
+            (Some(1..=4 | 6 | 8 | 22 | 24 | 26 | 33 | 35 | 36 | 37) | None, _) => {
+                Err(error(REJECTED))
+            }
             (Some(operation), _) if operation < 0 => Err(error(REJECTED)),
             (Some(operation), _) => Err(error(format!(
                 "unsupported distribution operation {operation}: see \"Distribution\" in docs/erts-differences.md"
@@ -448,6 +496,131 @@ impl Scheduler {
             Term::External(id) if remote_pid(to) && id.node == self.atoms.this_node().0 => Ok(()),
             _ => Err(error(REJECTED)),
         }
+    }
+
+    /// Give an `ALTACT_SIG_SEND` (37) control message to its target, as the
+    /// case of `erts_net_message` does (`dist.c:2580-2686`): the least
+    /// significant bits of `dist.h:188-192` give a priority message, a trace
+    /// token, an alias, a registered name, and an exit signal. A token needs
+    /// the sequential tracing of m27-e3, so a message that carries one keeps
+    /// the runtime error of the trace-token forms (row "Distribution" in
+    /// `docs/erts-differences.md`). The flag `PRIO` changes nothing, because
+    /// PBeam has no priority messages (row "Signal queue").
+    ///
+    /// A target of the flag `ALIAS` is a reference of a local process, which
+    /// gets the signal as [`Signal::AliasMessage`] or with the alias of
+    /// [`Signal::Exit`], and drops it when the alias is not active then
+    /// (`erl_proc_sig_queue.c:2314-2331`, `4659-4672`). A target of the flag
+    /// `NAME` is a registered name, and a name that no local process has
+    /// drops the packet without a decode (`dist.c:2655-2668`). A pid that is
+    /// not a live local process drops it without a decode
+    /// (`dist.c:2675-2684`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// let control = Term::tuple(vec![Term::Integer(37), Term::Integer(0), from, to]);
+    /// scheduler.net_altact_signal(&from, &flags, &to, 4, b"", None)?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// A control message that ERTS rejects (see [`REJECTED`]), a control
+    /// message with a trace token, and a term that PBeam cannot hold.
+    fn net_altact_signal(
+        &mut self,
+        from: &Term,
+        flags: &Term,
+        to: &Term,
+        arity: usize,
+        message: &[u8],
+        cache: Option<&[Atom]>,
+    ) -> Result<(), BeamError> {
+        // ERTS reads the flags as a non-negative integer of any size and
+        // uses its least significant byte (`dist.c:2609-2634`).
+        let Some(flags) = altact_flags(flags) else {
+            return Err(error(REJECTED));
+        };
+        let from_link = match from {
+            Term::Pid(id) => LinkId::Process(*id),
+            _ if external_id::pid_parts(from).is_some() => {
+                LinkId::Remote(RemotePid::of(from).expect("a pid of another node"))
+            }
+            _ => return Err(error(REJECTED)),
+        };
+        if flags & ALTACT_TOKEN != 0 {
+            if arity < 5 {
+                return Err(error(REJECTED));
+            }
+            return Err(error(TRACE_TOKEN));
+        }
+        // The local process that gets the signal, and the alias of the
+        // reference that it went through.
+        let (target, alias) = if flags & ALTACT_ALIAS != 0 {
+            if flags & ALTACT_NAME != 0 || !external_id::is_reference(to) {
+                return Err(error(REJECTED));
+            }
+            // A reference of another node has no local pid: `erts_get_pid_of_ref`
+            // gives `am_undefined` for it (`erl_bif_unique.h:279-286`), so
+            // `erts_proc_sig_send_dist_altact_msg` drops the packet
+            // (`erl_proc_sig_queue.c:2311-2331`).
+            let Some(reference) = to.reference() else {
+                return Ok(());
+            };
+            let owner = self
+                .node
+                .alias_owner(reference)
+                .filter(|owner| self.node.live_owner(*owner).is_some());
+            (owner, Some(reference))
+        } else if flags & ALTACT_NAME != 0 {
+            let Term::Atom(name) = to else {
+                return Err(error(REJECTED));
+            };
+            let owner = match self.name_owner(self.atoms.name_of(name)) {
+                Some(Named::Process(target)) => Some(target),
+                _ => None,
+            };
+            (owner, None)
+        } else {
+            match to {
+                Term::Pid(target) => (self.node.live_owner(*target).map(|_| *target), None),
+                // ERTS reads the reference of the owner of a target that is
+                // not a local pid (`erl_proc_sig_queue.c:2314-2331`), so a
+                // pid of another node is no target: PBeam drops the packet.
+                _ if external_id::pid_parts(to).is_some() => (None, None),
+                _ => return Err(error(REJECTED)),
+            }
+        };
+        let Some(target) = target else {
+            return Ok(());
+        };
+        if flags & ALTACT_EXIT != 0 {
+            let reason = self.dist_message(message, cache)?;
+            let signal = match alias {
+                Some(alias) => Signal::Exit {
+                    from: from_link,
+                    reason,
+                    linked: false,
+                    normal_kills: false,
+                    alias: Some(alias),
+                },
+                None => Signal::DistExit {
+                    from: from.clone(),
+                    reason,
+                },
+            };
+            let _ = self.send_signal(None, target, signal);
+            return Ok(());
+        }
+        let message = self.dist_message(message, cache)?;
+        match alias {
+            Some(alias) => {
+                let signal = Signal::AliasMessage { alias, message };
+                let _ = self.send_signal(None, target, signal);
+            }
+            None => self.port_send(target, message),
+        }
+        Ok(())
     }
 
     /// Decode the message `bytes` after the control message.

@@ -365,6 +365,42 @@ fn applies_auto_connect_policy_to_name_sends_as_pinned_erts() {
 }
 
 #[test]
+fn gives_the_node_of_a_decoded_identifier_to_nodes_known_as_pinned_erts() {
+    // binary_to_term/1 makes a not-connected dist entry of the node of each
+    // decoded identifier, which nodes(known) gives, and no entry for the
+    // local node (external.c:3132-3138).
+    let epmd = Epmd::start();
+    let name = format!("dbtk{}", std::process::id());
+    let arguments = probe(
+        &["-sname", &name],
+        "dist_channel_probe:binary_to_term_known(), halt().",
+    );
+    let erts = stdout(&erts_erl(&epmd, &arguments));
+    assert!(erts.contains("nonode@nohost,zz@nohost],"), "{erts}");
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), erts);
+}
+
+#[test]
+fn answers_an_identifier_of_an_old_incarnation_as_pinned_erts() {
+    // A monitor of a pid or a port of an old incarnation of the local node
+    // gives a DOWN message with noproc at once (bif.c:811-825, 925-935),
+    // and a send to one drops the message with the error report of
+    // erts_send_error_to_logger (bif.c:2489-2503, 2537-2550, utils.c:846-878).
+    let epmd = Epmd::start();
+    let name = format!("dold{}", std::process::id());
+    for (function, expected) in [
+        ("old_incarnation_monitor", "noproc"),
+        ("old_incarnation_send", "Discarding message hello from"),
+    ] {
+        let expression = format!("dist_channel_probe:{function}(), halt().");
+        let arguments = probe(&["-sname", &name], &expression);
+        let erts = stdout(&erts_erl(&epmd, &arguments));
+        assert!(erts.contains(expected), "{function}: {erts}");
+        assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), erts, "{function}");
+    }
+}
+
+#[test]
 fn runs_the_bifs_of_a_process_controller_as_pinned_erts() {
     // new_connection/1, abort_pending_connection/2, create_dist_channel/3,
     // the dist_ctrl_* BIFs, dist_get_stat/1, and nodes/1,2 of a connection
@@ -405,6 +441,30 @@ fn runs_the_bifs_of_a_process_controller_as_pinned_erts() {
     let erts = stdout(&erts_erl(&epmd, &exit_input));
     assert!(erts.contains("[ok,{down,killed}]"), "{erts}");
     assert_eq!(stdout(&pbeam_erl(&epmd, &exit_input)), erts);
+    // ALTACT_SIG_SEND gives a message to a pid, a name, and an alias, and
+    // an exit signal, and drops a target that is not alive without a
+    // decode (dist.c:2580-2686, erl_proc_sig_queue.c:2314-2331).
+    let altact = probe(
+        &["-sname", &name],
+        "dist_channel_probe:altact_input(), halt().",
+    );
+    let erts = stdout(&erts_erl(&epmd, &altact));
+    assert!(
+        erts.contains("exit_pid: [{'EXIT',{pid,zz@nohost},boom}]\n"),
+        "{erts}"
+    );
+    // A reference of another node has no local pid, so ERTS drops the
+    // packet and keeps the connection (erl_bif_unique.h:279-286,
+    // erl_proc_sig_queue.c:2311-2331).
+    assert!(
+        erts.contains("msg_external_ref: []\n") && erts.contains("after_external_ref: [up]\n"),
+        "{erts}"
+    );
+    // A bignum of flags with the alias bit in its least significant byte
+    // delivers the message on ERTS, so a higher-digit read fails the run
+    // instead of passing the probe (dist.c:2624-2630).
+    assert!(erts.contains("msg_big_flags: [big]\n"), "{erts}");
+    assert_eq!(stdout(&pbeam_erl(&epmd, &altact)), erts);
     // A DEMONITOR_P for a name finds no monitor of the connection and
     // removes nothing (dist.c:2441-2457).
     let demonitor = probe(
@@ -535,10 +595,7 @@ fn stops_at_a_part_of_a_channel_that_pbeam_does_not_have() {
         ("message()".to_owned(), rejected),
         ("port_message()".to_owned(), rejected),
         ("monitor_op()".to_owned(), rejected),
-        (
-            "altact_op()".to_owned(),
-            "unsupported distribution operation 37",
-        ),
+        ("altact_op()".to_owned(), rejected),
         ("demonitor_ref()".to_owned(), rejected),
         ("deliver_port()".to_owned(), deliver),
         ("deliver_udp()".to_owned(), deliver),
@@ -573,19 +630,30 @@ fn stops_at_a_part_of_a_channel_that_pbeam_does_not_have() {
         "spawn_scheduler()".to_owned(),
         "unsupported spawn option Tuple([Atom(\"scheduler\"), Integer(1)])",
     )]);
-    cases.extend([12, 13, 18, 25, 27].map(|op| {
+    cases.extend([12, 13, 16, 18, 23, 25, 27, 30, 32, 34].map(|op| {
         (
             format!("trace_token({op})"),
             "unsupported distribution message with a trace token",
         )
     }));
+    cases.push((
+        "altact_token()".to_owned(),
+        "unsupported distribution message with a trace token",
+    ));
     cases.extend(
         [
             1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
-            26, 27,
+            26, 27, 28, 29, 30, 31, 32, 33, 34, 35,
         ]
         .map(|n| (format!("reject({n})"), rejected)),
     );
+    // Operation 5 is the free slot of `dist.h:147`: ERTS rejects the packet
+    // at `default:` (dist.c:3131-3132), and PBeam stops with the error that
+    // the row records (#1408, #1409, #1410).
+    cases.push((
+        "reject(36)".to_owned(),
+        "unsupported distribution operation 5",
+    ));
     cases.push(("atom_cache()".to_owned(), rejected));
     cases.push((
         "reject(9)".to_owned(),

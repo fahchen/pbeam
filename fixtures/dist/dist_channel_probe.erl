@@ -8,7 +8,7 @@
          atom_cache/0, fragment_interleaving/0, fragment_reconnect/0,
          fragment_output/0, fragment_large_control/0, output/0, port_output/0,
          alias_ext/0, dead_alias/1, exit_input/0, link_input/0,
-         link_noconnection/0, altact_op/0, spawn_bad_ref/0, spawn_bad_from/0,
+         link_noconnection/0, altact_op/0, altact_input/0, altact_token/0, spawn_bad_ref/0, spawn_bad_from/0,
          spawn_bad_from_local/0,
          spawn_bad_leader/0, spawn_bad_mfa/0, spawn_bad_arity/0,
          spawn_bad_arguments/0, reply_bad_to/0, reply_bad_ref/0,
@@ -25,7 +25,8 @@
          spawn_bad_mfa_fields/0,
          spawn_bad_arguments_list/0,
          spawn_scheduler/0,
-         dflag_unicode_io/0]).
+         dflag_unicode_io/0, old_incarnation_monitor/0, old_incarnation_send/0,
+         binary_to_term_known/0]).
 
 main() ->
     %% net_kernel reports the dist_ctrlr message of a connection that it
@@ -443,7 +444,25 @@ reject(N) ->
                  24 -> packet_only({24, remote_pid(yy@nohost), self()});
                  25 -> packet_only({4, From, self()});
                  26 -> packet_only({3, From, self()});
-                 27 -> packet_only({1, remote_ref(zz@nohost), self()})
+                 27 -> packet_only({1, remote_ref(zz@nohost), self()});
+                 %% ALTACT_SIG_SEND rejects the arity 3 (altact_op/0), flags
+                 %% that are not a non-negative integer, a sender that is
+                 %% not a pid, a token flag without the token, an alias that
+                 %% is not a reference, an alias with the name flag, a name
+                 %% that is not an atom, and a target that is not a pid, a
+                 %% reference, or an atom (dist.c:2609-2674).
+                 28 -> packet_only({37, foo, From, self()});
+                 29 -> packet_only({37, -1, From, self()});
+                 30 -> packet_only({37, 0, foo, self()});
+                 31 -> packet_only({37, 2, From, self()});
+                 32 -> packet_only({37, 4, From, self()});
+                 33 -> packet_only({37, 12, From, remote_ref(zz@nohost)});
+                 34 -> packet_only({37, 8, From, self()});
+                 35 -> packet_only({37, 0, From, {a, b}});
+                 %% Operation 5 is the free slot of dist.h:147, so ERTS
+                 %% rejects it at `default:` (dist.c:3131-3132) and PBeam
+                 %% stops with the undefined-operation runtime error.
+                 36 -> packet_only({5, ''})
              end,
     erlang:dist_ctrl_put_data(DH, Packet).
 
@@ -628,16 +647,26 @@ fragment_output_controller(Node, Flags) ->
 %% A control message with a trace token. `EXIT2_TT` (18) reads the token at
 %% tuple[4], before the reason, and `PAYLOAD_EXIT2_TT` (27) at tuple[4]
 %% (dist.c:2822-2840).
+%% A control message of each trace-token form of dist.h:143-182, which
+%% carries a token that PBeam does not have: the node stops the run with a
+%% runtime error that names the trace token.
 trace_token(Op) ->
     erts_internal:new_connection(zz@nohost),
     {ok, DH} = erts_internal:create_dist_channel(zz@nohost, self(), {mandatory(), 1}),
     From = remote_pid(zz@nohost),
+    Token = {0, [], 0, From, 0},
     Packet = case Op of
                  12 -> packet({12, '', self(), []}, m);
                  13 -> packet_only({13, From, self(), [], x});
+                 16 -> packet({16, From, '', no_such_name, Token}, m);
                  18 -> packet_only({18, From, self(), [], boom});
+                 23 -> packet({23, From, self(), Token}, m);
                  25 -> packet({25, From, self(), []}, x);
-                 27 -> packet_only({27, From, self(), []})
+                 27 -> packet_only({27, From, self(), []});
+                 30 -> packet({30, remote_ref(zz@nohost), From, self(),
+                               {erlang, node, 0}, [], Token}, []);
+                 32 -> packet_only({32, remote_ref(zz@nohost), From, 0, Token});
+                 34 -> packet({34, From, remote_ref(zz@nohost), Token}, m)
              end,
     erlang:dist_ctrl_put_data(DH, Packet).
 
@@ -1279,18 +1308,173 @@ old_pid() ->
     binary_to_term(<<131, 88, 118, (byte_size(Name)):16, Name/binary,
                      0:32, 0:32, 0:32>>).
 
+%% A reference of this node with the creation 0, which is an old
+%% incarnation.
+old_ref() ->
+    Name = atom_to_binary(node()),
+    binary_to_term(<<131, 90, 3:16, 118, (byte_size(Name)):16, Name/binary,
+                     0:32, 1:32, 2:32, 3:32>>).
+
+%% A port of this node with the creation 0, which is an old incarnation.
+old_port() ->
+    Name = atom_to_binary(node()),
+    binary_to_term(<<131, 89, 118, (byte_size(Name)):16, Name/binary,
+                     3:32, 0:32>>).
+
+%% A monitor of a pid or a port of an old incarnation of the local node
+%% gives a DOWN message with noproc at once (bif.c:811-825, 925-935).
+old_incarnation_monitor() ->
+    logger:set_primary_config(level, none),
+    OldPid = monitor(process, old_pid()),
+    PidDown = [anon(M) || M <- drain(300)],
+    OldPort = monitor(port, old_port()),
+    PortDown = [anon(M) || M <- drain(300)],
+    show(monitor, [is_reference(OldPid), PidDown,
+                   is_reference(OldPort), PortDown]).
+
+%% A send to a pid or a port of an old incarnation of the local node
+%% drops the message, and `erts_send_error_to_logger` gives the text to the
+%% system logger (bif.c:2489-2503, 2537-2550, utils.c:846-878).
+old_incarnation_send() ->
+    logger:set_primary_config(level, none),
+    Parent = self(),
+    Collector = spawn(fun() -> report_collector(Parent) end),
+    Old = erlang:system_flag(system_logger, Collector),
+    OldPid = old_pid(),
+    OldPort = old_port(),
+    Returns = [OldPid ! hello,
+               erlang:send(OldPid, hello2),
+               erlang:send(OldPid, hello3, [noconnect]),
+               erlang:send(OldPid, hello3, [nosuspend]),
+               OldPort ! hello4,
+               old_ref() ! hello5],
+    Reports = [receive {report, Report} -> Report after 1000 -> missing end
+               || _ <- Returns],
+    show(send, [is_pid(Old), Returns, Reports]).
+
+report_collector(Parent) ->
+    receive
+        {log, Level, Format, Args, Metadata} ->
+            Parent ! {report, {Level, Format, report_text(Args, Parent),
+                               report_metadata(Metadata, Parent)}},
+            report_collector(Parent);
+        _ -> report_collector(Parent)
+    end.
+
+%% Replace the sender pid and the creation of the local node in the text
+%% of an error report, which each run and each node have their own.
+report_text([Text], Sender) ->
+    Flat = lists:flatten(string:replace(Text, pid_to_list(Sender), "<sender>", all)),
+    Creation = integer_to_list(erts_internal:get_creation()),
+    Suffix = "of this node (" ++ Creation ++ ")\n",
+    case lists:suffix(Suffix, Flat) of
+        true -> lists:sublist(Flat, length(Flat) - length(Suffix))
+                    ++ "of this node (creation)\n";
+        false -> Flat
+    end;
+report_text(Other, _Sender) -> Other.
+
+report_metadata(Metadata, Sender) ->
+    [{error_logger, maps:get(error_logger, Metadata)},
+     {gl, maps:get(gl, Metadata) =:= group_leader()},
+     {pid, maps:get(pid, Metadata) =:= Sender},
+     {time, is_integer(maps:get(time, Metadata))}].
+
+%% `binary_to_term/1` makes a not-connected dist entry of the node of each
+%% decoded identifier, which `erlang:nodes(known)` gives while a term
+%% refers to it, and no entry for the local node (external.c:3132-3138).
+binary_to_term_known() ->
+    logger:set_primary_config(level, none),
+    Before = lists:sort(nodes(known)),
+    Pid = binary_to_term(<<131, 88, 118, 9:16, "zz@nohost", 1:32, 0:32, 7:32>>),
+    WithPid = lists:sort(nodes(known)),
+    Port = binary_to_term(<<131, 89, 118, 9:16, "yy@nohost", 4:32, 5:32>>),
+    WithPort = lists:sort(nodes(known)),
+    Ref = binary_to_term(<<131, 90, 3:16, 118, 9:16, "xx@nohost", 2:32, 1:32, 2:32, 3:32>>),
+    WithRef = lists:sort(nodes(known)),
+    %% An identifier of another incarnation of the local node adds nothing.
+    Name = atom_to_binary(node()),
+    Old = binary_to_term(<<131, 88, 118, (byte_size(Name)):16, Name/binary,
+                           1:32, 0:32, 0:32>>),
+    show(binary_to_term, [Before, node(Pid), WithPid, node(Port), WithPort,
+                          node(Ref), WithRef, node(Old), lists:sort(nodes(known))]).
+
+%% The messages of the mailbox, after `Timeout` milliseconds of quiet.
+drain(Timeout) ->
+    receive M -> [M | drain(Timeout)] after Timeout -> [] end.
+
 %% A pid of the node Node.
 remote_pid(Node) ->
     Name = atom_to_binary(Node),
     binary_to_term(<<131, 88, 118, (byte_size(Name)):16, Name/binary, 1:32, 0:32, 1:32>>).
 
-%% A packet of an operation that ERTS defines and PBeam does not implement,
-%% `DOP_ALTACT_SIG_SEND` (dist.h:182): the node stops the run with a runtime
-%% error that names the operation.
+%% A packet of the operation `DOP_ALTACT_SIG_SEND` with the arity 3 that
+%% ERTS rejects (`dist.c:2615-2616`), `dist.h:182`.
 altact_op() ->
     erts_internal:new_connection(zz@nohost),
     {ok, DH} = erts_internal:create_dist_channel(zz@nohost, self(), {mandatory(), 1}),
     erlang:dist_ctrl_put_data(DH, packet_only({37, 0, self()})).
+
+%% `ALTACT_SIG_SEND` (37) gives a message to a local pid, to a registered
+%% name, and to an alias, and an exit signal, with the flags of
+%% dist.h:188-192 (dist.c:2580-2686). A name that no process has, a
+%% reference that is not an alias, and a pid that is not alive drop the
+%% packet without a decode.
+altact_input() ->
+    logger:set_primary_config(level, none),
+    process_flag(trap_exit, true),
+    M = mandatory(),
+    erts_internal:new_connection(zz@nohost),
+    {ok, DH} = erts_internal:create_dist_channel(zz@nohost, self(), {M, 1}),
+    register(altact_name, self()),
+    From = remote_pid(zz@nohost),
+    Self = self(),
+    Alias = alias(),
+    {Dead, DeadRef} = spawn_monitor(fun() -> ok end),
+    receive {'DOWN', DeadRef, _, _, _} -> ok end,
+    PutMsg = fun(Control, Msg) -> ok = erlang:dist_ctrl_put_data(DH, packet(Control, Msg)) end,
+    Drain = fun D() -> receive Msg -> [anon(Msg) | D()] after 0 -> [] end end,
+    Case = fun(Tag, Fun) -> Fun(), show(Tag, Drain()) end,
+    Case(msg_pid, fun() -> PutMsg({37, 0, From, Self}, plain) end),
+    %% ERTS reads a fifth element only with the token flag (dist.c:2641-2649).
+    Case(msg_extra, fun() -> PutMsg({37, 0, From, Self, ignored}, extra) end),
+    Case(msg_prio, fun() -> PutMsg({37, 1, From, Self}, prio) end),
+    %% ERTS reads the least significant byte of a bignum of flags
+    %% (dist.c:2624-2630), and its sender need not be a pid of the node of
+    %% the connection (dist.c:2636-2639). The low byte names an alias, so
+    %% a read of a higher digit gives `PRIO` and rejects the reference
+    %% target instead of delivering the message.
+    Case(msg_big_flags, fun() -> PutMsg({37, (1 bsl 64) bor 4, From, Alias}, big) end),
+    Case(msg_local_sender, fun() -> PutMsg({37, 0, Self, Self}, local) end),
+    %% A target that is a pid of another node is no local process.
+    Case(msg_external_pid, fun() -> PutMsg({37, 0, From, remote_pid(yy@nohost)}, external) end),
+    Case(msg_name, fun() -> PutMsg({37, 8, From, altact_name}, named) end),
+    Case(msg_no_name, fun() -> PutMsg({37, 8, From, no_such_name}, gone) end),
+    Case(msg_alias, fun() -> PutMsg({37, 4, From, Alias}, aliased) end),
+    Case(msg_no_alias, fun() -> PutMsg({37, 4, From, make_ref()}, no_alias) end),
+    %% A reference of another node is no local alias: ERTS finds no pid for
+    %% it (erl_bif_unique.h:279-286) and drops the packet
+    %% (erl_proc_sig_queue.c:2311-2331), so the connection stays up.
+    Case(msg_external_ref, fun() -> PutMsg({37, 4, From, remote_ref(zz@nohost)}, dropped) end),
+    Case(after_external_ref, fun() -> PutMsg({37, 0, From, Self}, up) end),
+    Case(msg_dead, fun() -> PutMsg({37, 0, From, Dead}, dead) end),
+    Case(exit_pid, fun() -> PutMsg({37, 16, From, Self}, boom) end),
+    Case(exit_name, fun() -> PutMsg({37, 16 bor 8, From, altact_name}, named_exit) end),
+    Case(exit_alias, fun() -> PutMsg({37, 16 bor 4, From, Alias}, alias_exit) end),
+    Case(exit_no_alias, fun() -> PutMsg({37, 16 bor 4, From, make_ref()}, no_alias) end),
+    Case(exit_dead, fun() -> PutMsg({37, 16, From, Dead}, dead) end),
+    %% The connection keeps the packets of a target that is not alive.
+    Case(after_dead, fun() -> PutMsg({37, 0, From, Self}, alive) end),
+    ok.
+
+%% `ALTACT_SIG_SEND` with the token flag carries the trace token of a
+%% sequence, which ERTS stores with the message (dist.c:2641-2649). PBeam
+%% has no sequential tracing, so the node stops the run.
+altact_token() ->
+    erts_internal:new_connection(zz@nohost),
+    {ok, DH} = erts_internal:create_dist_channel(zz@nohost, self(), {mandatory(), 1}),
+    From = remote_pid(zz@nohost),
+    erlang:dist_ctrl_put_data(DH, packet({37, 2, From, self(), {0, [], 0, From, 0}}, token)).
 
 %% The element sizes, the control message, and the message of a packet,
 %% with the pid of the caller as self, each local reference as ref, and

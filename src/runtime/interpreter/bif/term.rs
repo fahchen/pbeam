@@ -1226,8 +1226,17 @@ pub(super) fn binary_to_term(
         atoms: &context.scheduler.atoms,
         code: &context.scheduler.code,
         ets: &context.scheduler.ets,
+        nodes: Vec::new(),
     };
-    match decoder.decode_input(seed) {
+    let result = decoder.decode_input(seed);
+    // ERTS makes the entry of each node of a decoded identifier
+    // (`external.c:3132-3138`), which `erlang:nodes(known)` gives while a
+    // term refers to it. The bytes that ERTS rejects make no entry, because
+    // the decode freed each term of the failed input.
+    if result.is_ok() {
+        context.scheduler.decode_known_nodes(&decoder.nodes);
+    }
+    match result {
         Ok((term, used_bytes)) if used => Ok(Value(Term::tuple(vec![
             term,
             Term::Integer(to_i64(used_bytes)),
@@ -1271,6 +1280,7 @@ pub(in crate::runtime) fn decode_dist(
         atoms: &scheduler.atoms,
         code: &scheduler.code,
         ets: &scheduler.ets,
+        nodes: Vec::new(),
     };
     let result = if cache.is_some() {
         validate(input, seed, cache.map_or(0, <[crate::term::Atom]>::len)).and_then(|()| {
@@ -1368,6 +1378,10 @@ struct Decoder<'a> {
     /// The ETS tables of the node, which turn a magic reference back into
     /// the identifier of its live table.
     ets: &'a crate::runtime::ets::NodeTables,
+    /// The node of each identifier of another node that the decode made,
+    /// which `erlang:binary_to_term/1,2` gives to `erlang:nodes(known)` as
+    /// `dec_get_node` gives it (`external.c:3132-3138`).
+    nodes: Vec<crate::term::Atom>,
 }
 
 /// Return the record of `def` with `items`, the values in definition order.
@@ -1811,8 +1825,10 @@ impl Decoder<'_> {
             atoms: self.atoms,
             code: self.code,
             ets: self.ets,
+            nodes: Vec::new(),
         };
         let term = decoder.term()?;
+        self.nodes.append(&mut decoder.nodes);
         // The compressed header counts the bytes of the stream, and the
         // decompressed body adds no byte of the input (`binary2term_prepare`,
         // `external.c:1826-1839`); the plain body adds its cells to the
@@ -2453,15 +2469,23 @@ impl Decoder<'_> {
 
     /// Return the node name of `sysname` and `creation` when they do not
     /// name the local node, as `dec_get_node` (`external.c:3133-3139`)
-    /// gives another node entry.
+    /// gives another node entry, and record the node.
     fn remote(
-        &self,
+        &mut self,
         sysname: Option<crate::term::Atom>,
         creation: u32,
     ) -> Option<crate::term::Atom> {
         if self.is_local(sysname.clone(), creation) {
             None
         } else {
+            if let Some(sysname) = &sysname
+                && !self
+                    .nodes
+                    .iter()
+                    .any(|node| node.index() == sysname.index())
+            {
+                self.nodes.push(sysname.clone());
+            }
             sysname
         }
     }
@@ -2515,7 +2539,7 @@ impl Decoder<'_> {
     /// Return the local port of `number`, or a runtime error for a port of
     /// another node.
     fn local_port(
-        &self,
+        &mut self,
         sysname: Option<crate::term::Atom>,
         number: u64,
         creation: u32,

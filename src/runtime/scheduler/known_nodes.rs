@@ -165,7 +165,28 @@ impl Scheduler {
     /// `{Name, Node}` with another node (see [`KnownNodes::send`]).
     pub(in crate::runtime) fn send_to_remote_node(&mut self, name: &Atom) {
         let now = self.timers.now();
-        self.node().dist().send_known(name, now);
+        self.node().dist().insert_known(name, now);
+    }
+
+    /// Find or make the not-connected entry of each node of a decoded
+    /// identifier, as `dec_get_node` (`external.c:3132-3138`) does for a
+    /// term that `erlang:binary_to_term/1,2` gives. ERTS holds the entry
+    /// while a term refers to it (`erl_node_tables.c:429-537`); PBeam keeps
+    /// no reference count for a term, so the entry expires like the entry of
+    /// a send.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// scheduler.decode_known_nodes(&[node]);
+    /// assert_eq!(scheduler.node().dist().nodes()[0].kind, "known");
+    /// ```
+    pub(in crate::runtime) fn decode_known_nodes(&mut self, nodes: &[Atom]) {
+        let now = self.timers.now();
+        let mut dist = self.node().dist();
+        for node in nodes {
+            dist.insert_known(node, now);
+        }
     }
 }
 
