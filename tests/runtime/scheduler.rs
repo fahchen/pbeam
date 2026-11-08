@@ -3621,14 +3621,12 @@ fn sends_the_monitor_exit_packets_of_an_exiting_process_in_batches() {
 }
 
 #[test]
-fn stops_the_exit_of_a_process_at_a_reason_that_no_connection_can_carry() {
+fn carries_the_exit_of_a_process_with_a_dead_alias_reason() {
     use super::dist_table::Controller;
     use crate::runtime::process::{RemotePid, RemoteReference, RemoteWatcher};
-    // A monitor exit packet carries the exit reason, so a reason that holds
-    // a pid reference whose owner exited gives the runtime error of the
-    // encode (`erl_process.c:14662-14671`, `bif.rs`). ERTS writes the pid of
-    // the owner in the reference, which PBeam does not keep (row "External
-    // term format" of `docs/erts-differences.md`).
+    // A monitor exit packet carries a pid reference whose owner exited.
+    // PBeam keeps the owner pid word for the node lifetime, so the packet
+    // encodes as ERTS does (`external.c:3642-3668`, `erl_process.c:14662-14671`).
     let mut scheduler = test_scheduler();
     scheduler.start(frame(), vec![], allow_all());
     scheduler.schedule_next().unwrap();
@@ -3664,14 +3662,13 @@ fn stops_the_exit_of_a_process_at_a_reason_that_no_connection_can_carry() {
             connection: 1,
         },
     );
-    process.exiting = Some(Term::tuple(vec![Term::Reference(
-        Reference::ordinary(9).unwrap().pid_reference(),
-    )]));
-    assert!(
-        scheduler
-            .exit_links(process, ExitPhase::DistMonitors(None), 100)
-            .is_err()
-    );
+    let reference = Reference::ordinary(9).unwrap().pid_reference();
+    scheduler.node.register_alias(reference, ProcessId(2));
+    scheduler.node.remove_aliases(ProcessId(2));
+    process.exiting = Some(Term::tuple(vec![Term::Reference(reference)]));
+    scheduler
+        .exit_links(process, ExitPhase::DistMonitors(None), 100)
+        .unwrap();
 }
 
 #[test]

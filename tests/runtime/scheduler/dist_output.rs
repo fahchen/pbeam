@@ -456,7 +456,8 @@ fn nosuspend_send_rejects_busy_connection_started_after_idle_check() {
 #[test]
 fn queues_a_dead_alias_when_a_signal_joins_a_new_pending_connection() {
     // A fixture cannot force a new pending connection between the first
-    // connection check and the output lock. The dead alias is a legal term.
+    // connection check and the output lock. A dead alias keeps its pid word
+    // for the node lifetime, so the pending signals encode and flush.
     let mut scheduler = scheduler_with_kernel();
     let node = scheduler.atoms.put("error_race@nohost").unwrap();
     let node_ref = Arc::clone(&scheduler.node);
@@ -525,13 +526,7 @@ fn queues_a_dead_alias_when_a_signal_joins_a_new_pending_connection() {
         dist.connect(&node, Controller::Process(ProcessId(0)), 0)
             .is_some()
     );
-    let error = scheduler
-        .dist_flush_pending(&mut dist, &node, 0)
-        .unwrap_err();
-    assert!(
-        format!("{error:?}")
-            .contains("unsupported external term of a pid reference whose owner exited")
-    );
+    scheduler.dist_flush_pending(&mut dist, &node, 0).unwrap();
 }
 
 #[test]

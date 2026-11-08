@@ -34,7 +34,7 @@ use crate::runtime::{
 use crate::{
     error::{BeamError, error},
     runtime::{dirty::Pools, ets::NodeTables, timer::NodeClock},
-    term::{LiveBytes, PortId, ProcessId, Term},
+    term::{LiveBytes, PortId, ProcessId, Term, pid_word},
 };
 
 /// One delivery that crosses a scheduler thread boundary.
@@ -124,14 +124,17 @@ impl Roots {
     }
 }
 
-/// The alias table of the node: the owner of each alias, and the aliases
-/// of each owner, so the exit of a process removes only its own aliases, as
-/// the ERTS exit walks only the monitors of the process
-/// (`erl_process.c:14560-14569`).
+/// The alias table of the node: the owner of each active alias, the aliases
+/// of each owner, and the ERTS pid word of every pid reference. The exit of
+/// an owner removes only its active aliases, as the ERTS exit walks only the
+/// monitors of the process (`erl_process.c:14560-14569`); the pid word stays
+/// for the node lifetime, as ERTS keeps it in the reference
+/// (`erl_bif_unique.c:149-168`).
 #[derive(Debug, Default)]
 struct Aliases {
     owners: HashMap<crate::term::Reference, ProcessId>,
     by_owner: HashMap<ProcessId, Vec<crate::term::Reference>>,
+    reference_owners: HashMap<crate::term::Reference, u64>,
 }
 
 /// The node entry of one active BIF timer.
@@ -1194,6 +1197,7 @@ impl Node {
             .lock()
             .expect("the alias table is not poisoned");
         aliases.owners.insert(reference, owner);
+        aliases.reference_owners.insert(reference, pid_word(owner));
         aliases.by_owner.entry(owner).or_default().push(reference);
     }
 
@@ -1210,7 +1214,38 @@ impl Node {
             .copied()
     }
 
-    /// Remove each alias of the process `owner`, at its exit.
+    /// Return the ERTS pid word of the pid reference `reference`, also
+    /// after its owner exits. Return `None` for a reference that PBeam did
+    /// not make or decode as a pid reference.
+    pub(in crate::runtime) fn reference_owner(
+        &self,
+        reference: crate::term::Reference,
+    ) -> Option<u64> {
+        self.aliases
+            .lock()
+            .expect("the alias table is not poisoned")
+            .reference_owners
+            .get(&reference)
+            .copied()
+    }
+
+    /// Record the ERTS pid word of a pid reference that `binary_to_term/1,2`
+    /// decoded, so a later encode writes the same five numbers
+    /// (`external.c:3642-3668`, `4828-4839`).
+    pub(in crate::runtime) fn remember_reference_owner(
+        &self,
+        reference: crate::term::Reference,
+        owner_word: u64,
+    ) {
+        self.aliases
+            .lock()
+            .expect("the alias table is not poisoned")
+            .reference_owners
+            .insert(reference, owner_word);
+    }
+
+    /// Remove each active alias of the process `owner`, at its exit. Keep
+    /// each pid word for the external term format of a dead-owner reference.
     pub(in crate::runtime) fn remove_aliases(&self, owner: ProcessId) {
         let mut aliases = self
             .aliases

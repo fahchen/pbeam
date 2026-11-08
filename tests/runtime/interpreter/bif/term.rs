@@ -4,8 +4,10 @@
 //! `erlang:list_to_port/1`, and `Term::Reference` has no constructor outside
 //! the runtime. The expected bytes are measured on the pinned ERTS.
 
+use std::sync::Arc;
+
 use super::*;
-use crate::term::{Binary, MatchState, PortId};
+use crate::term::{Binary, MatchState, PortId, pid_word};
 
 /// Return the local node atom bytes of the pinned ERTS: `SMALL_ATOM_UTF8_EXT`
 /// and `nonode@nohost`.
@@ -21,13 +23,13 @@ fn encodes_a_local_pid_port_and_reference_as_pinned_erts() {
     // ERTS.
     let atoms = AtomTable::new();
     let options = Options::default();
-    let pid = encode(&Term::Pid(ProcessId(5)), &atoms, &options, &|_| None).unwrap();
-    let port = encode(&Term::Port(PortId(5)), &atoms, &options, &|_| None).unwrap();
+    let pid = encode(&Term::Pid(ProcessId(5)), &atoms, &options, &|_| 0).unwrap();
+    let port = encode(&Term::Port(PortId(5)), &atoms, &options, &|_| 0).unwrap();
     let reference = encode(
         &Term::Reference(Reference::ordinary(5).unwrap()),
         &atoms,
         &options,
-        &|_| None,
+        &|_| 0,
     )
     .unwrap();
     assert_eq!(
@@ -61,7 +63,7 @@ fn encodes_local_pid_port_and_reference_with_a_nil_sysname() {
         ..Options::default()
     };
     assert_eq!(
-        encode(&Term::Pid(ProcessId(5)), &atoms, &options, &|_| None).unwrap(),
+        encode(&Term::Pid(ProcessId(5)), &atoms, &options, &|_| 0).unwrap(),
         [88, 106, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0]
     );
 }
@@ -127,6 +129,11 @@ fn node() -> Vec<u8> {
 /// The seed of the local block hash that the tests use.
 const SEED: u32 = 7;
 
+/// Return a node for the owner pid words of decoded pid references.
+fn new_node() -> Arc<crate::runtime::scheduler::node::Node> {
+    crate::runtime::scheduler::node::Node::new(1).unwrap().0
+}
+
 /// Which atoms a decode accepts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AtomPolicy {
@@ -156,6 +163,7 @@ fn decode_full(atoms: &AtomTable, bytes: &[u8], policy: AtomPolicy) -> Result<Te
         atoms,
         code: &CodeTable::default(),
         ets: &crate::runtime::ets::NodeTables::default(),
+        node: &new_node(),
         nodes: Vec::new(),
     }
     .decode_input(SEED)
@@ -767,7 +775,7 @@ fn decodes_local_terms_with_their_block_hash() {
         local: true,
         ..Options::default()
     };
-    let pid_body = encode(&Term::Pid(ProcessId(5)), &atoms, &options, &|_| None).unwrap();
+    let pid_body = encode(&Term::Pid(ProcessId(5)), &atoms, &options, &|_| 0).unwrap();
     let pid_hash = external::block_hash(&pid_body, SEED);
     let pid_input = [
         &[VERSION_MAGIC, LOCAL_EXT][..],
@@ -786,7 +794,7 @@ fn decodes_local_terms_with_their_block_hash() {
         &Term::static_atom("ok"),
         &atoms,
         &Options::default(),
-        &|_| None,
+        &|_| 0,
     )
     .unwrap();
     let inner_hash = external::block_hash(&inner, SEED);
@@ -802,7 +810,7 @@ fn decodes_local_terms_with_their_block_hash() {
     ));
     // A local term with a different block hash raises badarg
     // (`external.c:5250-5255`).
-    let body = encode(&Term::Integer(1), &atoms, &options, &|_| None).unwrap();
+    let body = encode(&Term::Integer(1), &atoms, &options, &|_| 0).unwrap();
     let hash = external::block_hash(&body, SEED);
     let mut local = [&[VERSION_MAGIC, LOCAL_EXT][..], &hash.to_be_bytes(), &body].concat();
     assert_eq!(
@@ -816,6 +824,7 @@ fn decodes_local_terms_with_their_block_hash() {
             atoms: &atoms,
             code: &CodeTable::default(),
             ets: &crate::runtime::ets::NodeTables::default(),
+            node: &new_node(),
             nodes: Vec::new(),
         }
         .decode_input(SEED)
@@ -835,6 +844,7 @@ fn decodes_local_terms_with_their_block_hash() {
             atoms: &atoms,
             code: &CodeTable::default(),
             ets: &crate::runtime::ets::NodeTables::default(),
+            node: &new_node(),
             nodes: Vec::new(),
         }
         .decode_input(SEED),
@@ -921,22 +931,22 @@ fn encodes_the_large_and_unsupported_forms() {
     let options = Options::default();
     // A tuple of 256 elements takes `LARGE_TUPLE_EXT`.
     let elements = (0..256).map(Term::Integer).collect();
-    let bytes = encode(&Term::tuple(elements), &atoms, &options, &|_| None).unwrap();
+    let bytes = encode(&Term::tuple(elements), &atoms, &options, &|_| 0).unwrap();
     assert_eq!(&bytes[..5], [105, 0, 0, 1, 0]);
     // An atom of 256 bytes takes `ATOM_UTF8_EXT`.
     let long = "a".repeat(256);
     let atom = atoms.put(&long).unwrap();
-    let bytes = encode(&Term::Atom(atom.clone()), &atoms, &options, &|_| None).unwrap();
+    let bytes = encode(&Term::Atom(atom.clone()), &atoms, &options, &|_| 0).unwrap();
     assert_eq!(&bytes[..3], [118, 1, 0]);
     let latin1 = Options {
         minor: 1,
         ..Options::default()
     };
-    let bytes = encode(&Term::Atom(atom), &atoms, &latin1, &|_| None).unwrap();
+    let bytes = encode(&Term::Atom(atom), &atoms, &latin1, &|_| 0).unwrap();
     assert_eq!(&bytes[..3], [100, 1, 0]);
     // A bignum of more than 255 magnitude bytes takes `LARGE_BIG_EXT`.
     let large = Term::BigInt(Arc::new(BigInt::from(1) << (256 * 8)));
-    let bytes = encode(&large, &atoms, &options, &|_| None).unwrap();
+    let bytes = encode(&large, &atoms, &options, &|_| 0).unwrap();
     assert_eq!(&bytes[..5], [111, 0, 0, 1, 1]);
     // A match context has no bytes.
     let state = MatchState::new(Binary::from(vec![]));
@@ -945,7 +955,7 @@ fn encodes_the_large_and_unsupported_forms() {
             &Term::MatchContext(Arc::new(state)),
             &atoms,
             &options,
-            &|_| None
+            &|_| 0
         )
         .is_err()
     );
@@ -954,13 +964,13 @@ fn encodes_the_large_and_unsupported_forms() {
         .map(|value| (Term::Integer(value), Term::Integer(value)))
         .collect();
     let large = crate::term::Map::from_pairs(pairs, &atoms).unwrap();
-    let bytes = encode(&Term::Map(large), &atoms, &options, &|_| None).unwrap();
+    let bytes = encode(&Term::Map(large), &atoms, &options, &|_| 0).unwrap();
     assert_eq!(&bytes[..5], [116, 0, 0, 0, 40]);
     // A bitstring at a bit offset is written from its first bit
     // (`external.c:3916-3935`).
     let partial = Term::Binary(Binary::from(vec![0x5A, 0xFF]).bits(1, 12));
     assert_eq!(
-        encode(&partial, &atoms, &options, &|_| None).unwrap(),
+        encode(&partial, &atoms, &options, &|_| 0).unwrap(),
         [77, 0, 0, 0, 2, 3, 0xB5, 0xE0]
     );
     // `deterministic` sorts map keys in exact term order, where an integer
@@ -974,7 +984,7 @@ fn encodes_the_large_and_unsupported_forms() {
         deterministic: true,
         ..Options::default()
     };
-    let bytes = encode(&Term::Map(map), &atoms, &deterministic, &|_| None).unwrap();
+    let bytes = encode(&Term::Map(map), &atoms, &deterministic, &|_| 0).unwrap();
     assert_eq!(&bytes[..9], [116, 0, 0, 0, 2, 97, 2, 119, 1]);
     assert_eq!(bytes[9], b'x');
 }
@@ -999,7 +1009,7 @@ fn encodes_a_hashmap_in_the_erts_order() {
         29, 97, 29, 97, 19, 97, 19, 97, 12, 97, 12, 97, 4, 97, 4, 97, 18, 97, 18,
     ];
     assert_eq!(
-        encode(&Term::Map(map), &atoms, &Options::default(), &|_| None).unwrap(),
+        encode(&Term::Map(map), &atoms, &Options::default(), &|_| 0).unwrap(),
         expected
     );
 }
@@ -1008,12 +1018,12 @@ fn encodes_a_hashmap_in_the_erts_order() {
 fn encodes_a_pid_reference_with_the_pid_word_of_its_owner() {
     // ERTS writes five numbers for a pid reference: the marker in bit 16
     // of the second, and the pid word of the owner in the last two
-    // (`external.c:3642-3668`, `erl_bif_unique.h:259-277`). PBeam keeps no
-    // pid in the reference, so a pid reference without an owner gives a
-    // runtime error.
+    // (`external.c:3642-3668`, `erl_bif_unique.h:259-277`). PBeam keeps the
+    // pid word in the node for the node lifetime, so a dead owner and a
+    // decoded reference both re-encode the same five numbers.
     let reference = Reference::ordinary(5).unwrap().pid_reference();
     let atoms = AtomTable::new();
-    let owner = |_| Some(ProcessId(10));
+    let owner = |_| pid_word(ProcessId(10));
     let bytes = encode(
         &Term::Reference(reference),
         &atoms,
@@ -1030,15 +1040,6 @@ fn encodes_a_pid_reference_with_the_pid_word_of_its_owner() {
         decode_full(&atoms, &input, AtomPolicy::Create),
         Ok(Term::Reference(decoded)) if decoded == reference
     ));
-    assert!(
-        encode(
-            &Term::Reference(reference),
-            &atoms,
-            &Options::default(),
-            &|_| None
-        )
-        .is_err()
-    );
 }
 
 #[test]
@@ -1154,7 +1155,7 @@ fn decodes_and_encodes_a_deep_term_without_a_rust_stack() {
     let atoms = AtomTable::new();
     let term = decode_full(&atoms, &bytes, AtomPolicy::Create).unwrap();
     assert_eq!(
-        encode(&term, &atoms, &Options::default(), &|_| None).unwrap(),
+        encode(&term, &atoms, &Options::default(), &|_| 0).unwrap(),
         bytes[1..]
     );
 }
@@ -1176,6 +1177,7 @@ fn keeps_the_decoder_guards_behind_the_validation() {
             atoms: &atoms,
             code: &CodeTable::default(),
             ets: &crate::runtime::ets::NodeTables::default(),
+            node: &new_node(),
             nodes: Vec::new(),
         }
         .term()

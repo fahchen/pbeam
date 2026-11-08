@@ -13,11 +13,12 @@ use pbeam_runtime::{BeamProgram, Term};
 const PROBE: &[u8] = include_bytes!("../../fixtures/external_term/external_term_probe.beam");
 
 /// `term_to_binary/1` of an `alias([explicit_unalias])` whose owner exited,
-/// measured on OTP 29.1.1 with `mise run erts-eval`. The last eight bytes
+/// measured on OTP 29.1.1 with `ERL_FLAGS='+S 1' mise run erts-eval`, so
+/// `REF_THREAD` is 1 and the top bits of `N2` are 0. The last eight bytes
 /// hold the pid word of the dead owner (`external.c:3642-3668`).
 const DEAD_OWNER_REFERENCE: [u8; 43] = [
     131, 90, 0, 5, 119, 13, 110, 111, 110, 111, 100, 101, 64, 110, 111, 104, 111, 115, 116, 0, 0,
-    0, 0, 0, 3, 71, 26, 53, 141, 0, 2, 224, 150, 47, 5, 0, 0, 41, 131, 0, 0, 0, 0,
+    0, 0, 0, 1, 27, 160, 133, 221, 0, 1, 26, 215, 30, 45, 0, 0, 41, 131, 0, 0, 0, 0,
 ];
 
 /// Return the fixture program with the pinned `erlang` module.

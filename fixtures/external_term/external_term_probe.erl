@@ -93,8 +93,9 @@ decode_record() ->
 %% The pinned ERTS gives a pid of node 'a@b'.
 %% A pid reference of an owner that exited keeps the two pid words of its
 %% owner (`external.c:3642-3668`, `erl_bif_unique.c:149-168`). The fixed
-%% bytes come from `mise run erts-eval` on OTP 29.1.1 after an alias owner
-%% exited; a decode and an encode keep every byte.
+%% bytes come from `ERL_FLAGS='+S 1' mise run erts-eval` on OTP 29.1.1
+%% after an alias owner exited; `REF_THREAD` is 1 and the top bits of `N2`
+%% are 0, which PBeam can hold. A decode and an encode keep every byte.
 dead_owner_reference() ->
     Parent = self(),
     {Pid, Monitor} = spawn_monitor(fun() -> Parent ! {alias, self(), alias([explicit_unalias])} end),
@@ -103,7 +104,7 @@ dead_owner_reference() ->
     Bytes = term_to_binary(Alias),
     Decoded = binary_to_term(Bytes),
     Fixed = <<131, 90, 0, 5, 119, 13, 110, 111, 110, 111, 100, 101, 64, 110, 111, 104, 111, 115, 116,
-              0, 0, 0, 0, 0, 3, 71, 26, 53, 141, 0, 2, 224, 150, 47, 5, 0, 0, 41, 131, 0, 0, 0, 0>>,
+              0, 0, 0, 0, 0, 1, 27, 160, 133, 221, 0, 1, 26, 215, 30, 45, 0, 0, 41, 131, 0, 0, 0, 0>>,
     FixedRef = binary_to_term(Fixed),
     Checks = [not is_process_alive(Pid),
               is_reference(Alias),
