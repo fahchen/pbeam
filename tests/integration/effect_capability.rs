@@ -1045,6 +1045,18 @@ fn checks_the_process_arguments_before_the_capability() {
         erts_with_stand_in("process_badargs"),
         "[badarg,badarg,badarg,badarg,badarg,badarg,badarg,badarg,badarg]\n"
     );
+    assert_eq!(
+        run_text(&program, "group_leader_remote", &policy),
+        "[badarg,denied,denied]"
+    );
+    assert_eq!(
+        run_text(&program, "group_leader_remote", &AllowAll),
+        "[badarg,ok,ok]"
+    );
+    assert_eq!(
+        erts_with_stand_in("group_leader_remote"),
+        "[badarg,ok,ok]\n"
+    );
 }
 
 #[test]

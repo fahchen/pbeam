@@ -79,6 +79,14 @@ pub(super) fn group_leader(
             return Ok(BifResult::badarg());
         }
         Term::External(_) if pid_parts(target).is_some() => {
+            if let Some(denied) = denial(
+                context.scheduler,
+                CapabilityKind::Process,
+                Operation::GroupLeader,
+                None,
+            )? {
+                return Ok(denied);
+            }
             context.scheduler.dist_group_leader(leader, target)?;
             return Ok(Value(Term::static_atom("true")));
         }
