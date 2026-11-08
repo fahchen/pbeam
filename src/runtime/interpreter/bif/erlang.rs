@@ -51,21 +51,6 @@ use crate::term::{
     Reference, SMALL_INTEGER_MAX, SMALL_INTEGER_MIN, debug_term, external, print_term,
 };
 
-/// Return the runtime error of the BIF `operation` with a pid, a port, or a
-/// reference of another node, which needs a connection to that node
-/// (row "Distribution" of `docs/erts-differences.md`).
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// return Err(remote_unsupported("erlang:monitor/2,3"));
-/// ```
-pub(in crate::runtime::interpreter) fn remote_unsupported(operation: &str) -> BeamError {
-    error(format!(
-        "unsupported {operation} with a pid of another node: see \"Distribution\" in docs/erts-differences.md"
-    ))
-}
-
 /// Return whether `term` is a pid, a port, or a reference of an old
 /// incarnation of the local node: an external identifier whose node is the
 /// local node. ERTS gives it the dist entry of the local node

@@ -4,7 +4,7 @@
 %% erl_process.c:12440-12530, dist.c:5850-6260).
 -module(dist_spawn_probe).
 -export([server/0, client/1, leader/1, options/1, flags/1, demonitor/1,
-         report/1, report_flags/1, wait/1, alias_wait/1, boom/0]).
+         report/1, report_flags/1, wait/1, alias_wait/1, leader_target/1, boom/0]).
 
 server() ->
     io:format("~s~n", [node()]),
@@ -189,6 +189,18 @@ options(Server) ->
     receive after 200 -> ok end,
     LinkFirst = receive {'EXIT', LinkPid, normal} -> exit_signal; ordinary -> ordinary after 5000 -> timeout end,
     receive _ -> ok after 5000 -> timeout end,
+    LeaderPid = spawn(Server, ?MODULE, leader_target, [self()]),
+    receive {leader_ready, LeaderPid} -> ok after 5000 -> timeout end,
+    LeaderConnected = group_leader(self(), LeaderPid),
+    LeaderPid ! {check_leader, self()},
+    LeaderSeen = receive {leader_value, LeaderPid, L1} -> L1 =:= self() after 5000 -> timeout end,
+    Three = try erts_internal:group_leader(self(), LeaderPid, make_ref()) of
+                V -> V catch error:badarg -> badarg end,
+    true = erlang:disconnect_node(Server),
+    LeaderPending = group_leader(group_leader(), LeaderPid),
+    LeaderPid ! {check_leader, self()},
+    LeaderSeenPending = receive {leader_value, LeaderPid, L2} -> L2 =:= group_leader() after 5000 -> timeout end,
+    LeaderPid ! stop,
     io:format("options: ~0p~n",
               [[{bad_node, BadNode}, {local, Local},
                 {bad_options, BadOptions}, {bad_mfa, BadMfa},
@@ -204,7 +216,8 @@ options(Server) ->
                 {monitor_tag, MonitorTag}, {reply_yes, ReplyYes},
                 {no_connection, NoConnection}, {no_receiver, NoReceiver},
                 {monitor_priority, PriorityFirst}, {monitor_alias, Alias},
-                {link_priority, LinkFirst}]]),
+                {link_priority, LinkFirst},
+                {remote_leader, {LeaderConnected, LeaderSeen, Three, LeaderPending, LeaderSeenPending}}]]),
     ok.
 
 spawn_alias(Server, Mode) ->
@@ -218,6 +231,17 @@ spawn_alias(Server, Mode) ->
     erlang:demonitor(Ref, [flush]),
     Pid ! stop,
     {Mode, Message, Active}.
+
+leader_target(Parent) ->
+    Parent ! {leader_ready, self()},
+    leader_target_loop().
+
+leader_target_loop() ->
+    receive
+        {check_leader, Parent} -> Parent ! {leader_value, self(), group_leader()}, leader_target_loop();
+        stop -> ok
+    after 5000 -> ok
+    end.
 
 alias_wait(Parent) ->
     Parent ! {started, self()},
