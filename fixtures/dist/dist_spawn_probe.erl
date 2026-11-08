@@ -180,6 +180,9 @@ options(Server) ->
     receive _ -> ok after 5000 -> timeout end,
     Alias = [spawn_alias(Server, Mode) || Mode <-
              [explicit_unalias, demonitor, reply_demonitor]],
+    AliasLifetime = [spawn_alias_lifetime(Server, Mode, End) ||
+                     Mode <- [explicit_unalias, demonitor, reply_demonitor],
+                     End <- [down, demonitor]],
     process_flag(trap_exit, true),
     LinkRef = spawn_request(Server, dist_spawn_probe, wait, [self()], [{link, [priority]}]),
     LinkPid = receive {spawn_reply, LinkRef, ok, LP} -> LP after 5000 -> timeout end,
@@ -216,6 +219,7 @@ options(Server) ->
                 {monitor_tag, MonitorTag}, {reply_yes, ReplyYes},
                 {no_connection, NoConnection}, {no_receiver, NoReceiver},
                 {monitor_priority, PriorityFirst}, {monitor_alias, Alias},
+                {alias_lifetime, AliasLifetime},
                 {link_priority, LinkFirst},
                 {remote_leader, {LeaderConnected, LeaderSeen, Three, LeaderPending, LeaderSeenPending}}]]),
     ok.
@@ -231,6 +235,24 @@ spawn_alias(Server, Mode) ->
     erlang:demonitor(Ref, [flush]),
     Pid ! stop,
     {Mode, Message, Active}.
+
+spawn_alias_lifetime(Server, Mode, End) ->
+    Ref = spawn_request(Server, dist_spawn_probe, wait, [self()],
+                        [{monitor, [{alias, Mode}]}]),
+    Pid = receive {spawn_reply, Ref, ok, P} -> P after 5000 -> timeout end,
+    ok = receive {started, Pid} -> ok after 5000 -> timeout end,
+    case End of
+        down ->
+            Pid ! stop,
+            ok = receive {'DOWN', Ref, process, Pid, normal} -> ok after 5000 -> timeout end;
+        demonitor ->
+            true = erlang:demonitor(Ref),
+            Pid ! stop
+    end,
+    Ref ! after_monitor,
+    Message = receive after_monitor -> delivered after 200 -> dropped end,
+    Active = erlang:unalias(Ref),
+    {Mode, End, Message, Active}.
 
 leader_target(Parent) ->
     Parent ! {leader_ready, self()},
