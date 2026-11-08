@@ -25,7 +25,7 @@
          spawn_bad_mfa_fields/0,
          spawn_bad_arguments_list/0,
          spawn_scheduler/0,
-         dflag_unicode_io/0]).
+         dflag_unicode_io/0, old_incarnation_monitor/0, old_incarnation_send/0]).
 
 main() ->
     %% net_kernel reports the dist_ctrlr message of a connection that it
@@ -1292,6 +1292,82 @@ old_pid() ->
     Name = atom_to_binary(node()),
     binary_to_term(<<131, 88, 118, (byte_size(Name)):16, Name/binary,
                      0:32, 0:32, 0:32>>).
+
+%% A reference of this node with the creation 0, which is an old
+%% incarnation.
+old_ref() ->
+    Name = atom_to_binary(node()),
+    binary_to_term(<<131, 90, 3:16, 118, (byte_size(Name)):16, Name/binary,
+                     0:32, 1:32, 2:32, 3:32>>).
+
+%% A port of this node with the creation 0, which is an old incarnation.
+old_port() ->
+    Name = atom_to_binary(node()),
+    binary_to_term(<<131, 89, 118, (byte_size(Name)):16, Name/binary,
+                     3:32, 0:32>>).
+
+%% A monitor of a pid or a port of an old incarnation of the local node
+%% gives a DOWN message with noproc at once (bif.c:811-825, 925-935).
+old_incarnation_monitor() ->
+    logger:set_primary_config(level, none),
+    OldPid = monitor(process, old_pid()),
+    PidDown = [anon(M) || M <- drain(300)],
+    OldPort = monitor(port, old_port()),
+    PortDown = [anon(M) || M <- drain(300)],
+    show(monitor, [is_reference(OldPid), PidDown,
+                   is_reference(OldPort), PortDown]).
+
+%% A send to a pid or a port of an old incarnation of the local node
+%% drops the message, and `erts_send_error_to_logger` gives the text to the
+%% system logger (bif.c:2489-2503, 2537-2550, utils.c:846-878).
+old_incarnation_send() ->
+    logger:set_primary_config(level, none),
+    Parent = self(),
+    Collector = spawn(fun() -> report_collector(Parent) end),
+    Old = erlang:system_flag(system_logger, Collector),
+    OldPid = old_pid(),
+    OldPort = old_port(),
+    Returns = [OldPid ! hello,
+               erlang:send(OldPid, hello2),
+               erlang:send(OldPid, hello3, [noconnect]),
+               erlang:send(OldPid, hello3, [nosuspend]),
+               OldPort ! hello4,
+               old_ref() ! hello5],
+    Reports = [receive {report, Report} -> Report after 1000 -> missing end
+               || _ <- Returns],
+    show(send, [is_pid(Old), Returns, Reports]).
+
+report_collector(Parent) ->
+    receive
+        {log, Level, Format, Args, Metadata} ->
+            Parent ! {report, {Level, Format, report_text(Args, Parent),
+                               report_metadata(Metadata, Parent)}},
+            report_collector(Parent);
+        _ -> report_collector(Parent)
+    end.
+
+%% Replace the sender pid and the creation of the local node in the text
+%% of an error report, which each run and each node have their own.
+report_text([Text], Sender) ->
+    Flat = lists:flatten(string:replace(Text, pid_to_list(Sender), "<sender>", all)),
+    Creation = integer_to_list(erts_internal:get_creation()),
+    Suffix = "of this node (" ++ Creation ++ ")\n",
+    case lists:suffix(Suffix, Flat) of
+        true -> lists:sublist(Flat, length(Flat) - length(Suffix))
+                    ++ "of this node (creation)\n";
+        false -> Flat
+    end;
+report_text(Other, _Sender) -> Other.
+
+report_metadata(Metadata, Sender) ->
+    [{error_logger, maps:get(error_logger, Metadata)},
+     {gl, maps:get(gl, Metadata) =:= group_leader()},
+     {pid, maps:get(pid, Metadata) =:= Sender},
+     {time, is_integer(maps:get(time, Metadata))}].
+
+%% The messages of the mailbox, after `Timeout` milliseconds of quiet.
+drain(Timeout) ->
+    receive M -> [M | drain(Timeout)] after Timeout -> [] end.
 
 %% A pid of the node Node.
 remote_pid(Node) ->

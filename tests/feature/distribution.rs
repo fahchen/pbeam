@@ -365,6 +365,26 @@ fn applies_auto_connect_policy_to_name_sends_as_pinned_erts() {
 }
 
 #[test]
+fn answers_an_identifier_of_an_old_incarnation_as_pinned_erts() {
+    // A monitor of a pid or a port of an old incarnation of the local node
+    // gives a DOWN message with noproc at once (bif.c:811-825, 925-935),
+    // and a send to one drops the message with the error report of
+    // erts_send_error_to_logger (bif.c:2489-2503, 2537-2550, utils.c:846-878).
+    let epmd = Epmd::start();
+    let name = format!("dold{}", std::process::id());
+    for (function, expected) in [
+        ("old_incarnation_monitor", "noproc"),
+        ("old_incarnation_send", "Discarding message hello from"),
+    ] {
+        let expression = format!("dist_channel_probe:{function}(), halt().");
+        let arguments = probe(&["-sname", &name], &expression);
+        let erts = stdout(&erts_erl(&epmd, &arguments));
+        assert!(erts.contains(expected), "{function}: {erts}");
+        assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), erts, "{function}");
+    }
+}
+
+#[test]
 fn runs_the_bifs_of_a_process_controller_as_pinned_erts() {
     // new_connection/1, abort_pending_connection/2, create_dist_channel/3,
     // the dist_ctrl_* BIFs, dist_get_stat/1, and nodes/1,2 of a connection
@@ -413,7 +433,10 @@ fn runs_the_bifs_of_a_process_controller_as_pinned_erts() {
         "dist_channel_probe:altact_input(), halt().",
     );
     let erts = stdout(&erts_erl(&epmd, &altact));
-    assert!(erts.contains("exit_pid: [{'EXIT',{pid,zz@nohost},boom}]\n"), "{erts}");
+    assert!(
+        erts.contains("exit_pid: [{'EXIT',{pid,zz@nohost},boom}]\n"),
+        "{erts}"
+    );
     assert_eq!(stdout(&pbeam_erl(&epmd, &altact)), erts);
     // A DEMONITOR_P for a name finds no monitor of the connection and
     // removes nothing (dist.c:2441-2457).
