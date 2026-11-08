@@ -14,7 +14,7 @@
          spawn_bad_arguments/0, reply_bad_to/0, reply_bad_ref/0,
          reply_bad_flags/0, reply_bad_result/0, group_leader_bad/0,
          group_leader_bad_to/0, group_leader_external_to/0,
-         spawn_notsup/0, spawn_lost/0, spawn_options/0,
+         spawn_notsup/0, spawn_lost/0, spawn_options/0, received_spawn_state/1,
          spawn_reply_unknown/0, spawn_reply_ordinary_monitor/0,
          spawn_lost_suppressed/0, spawn_local_leader/0,
          group_leader_packet/0,
@@ -852,7 +852,40 @@ spawn_options() ->
     [show(Tag, [request(list_to_atom("so" ++ integer_to_list(N) ++ "@nohost"),
                         Options)])
      || {N, {Tag, Options}} <- lists:zip(lists:seq(1, length(Cases)), Cases)],
+    States = [request_state(list_to_atom("state" ++ integer_to_list(N) ++ "@nohost"), Options)
+              || {N, Options} <- lists:zip(lists:seq(1, 4),
+                  [[link, monitor], [{link, [priority]}, monitor],
+                   [link, {monitor, [priority]}],
+                   [link, {monitor, [{alias, demonitor}]}]])],
+    show(received_states, States),
     ok.
+
+request_state(Node, Options) ->
+    Parent = self(),
+    Ctrl = spawn(fun() ->
+        erts_internal:new_connection(Node),
+        {ok, DH} = erts_internal:create_dist_channel(Node, self(), {mandatory(), 1}),
+        Control = {29, remote_ref(Node), remote_pid(Node), remote_pid(Node),
+                   {?MODULE, received_spawn_state, 1}, Options},
+        erlang:dist_ctrl_put_data(DH, packet(Control, [Parent])),
+        receive {exit_child, Pid} ->
+            erlang:dist_ctrl_put_data(DH, packet_only({3, remote_pid(Node), Pid, boom}))
+        after 5000 -> timeout end,
+        receive stop -> ok after 5000 -> timeout end
+    end),
+    receive {spawn_ready, Pid} -> Ctrl ! {exit_child, Pid} after 5000 -> timeout end,
+    Result = receive {spawn_state, State} -> State after 5000 -> timeout end,
+    Ctrl ! stop,
+    Result.
+
+received_spawn_state(Parent) ->
+    process_flag(trap_exit, true),
+    {links, Links} = process_info(self(), links),
+    self() ! ordinary,
+    Parent ! {spawn_ready, self()},
+    receive after 200 -> ok end,
+    First = receive {'EXIT', _, boom} -> exit_signal; ordinary -> ordinary after 5000 -> timeout end,
+    Parent ! {spawn_state, {length(Links), First}}.
 
 %% Put a spawn request of the local node on a connection of `Node` and
 %% return its first packet, with whether the connection is still open. One

@@ -2576,6 +2576,13 @@ fn reads_the_options_of_a_spawn_request_as_pinned_erts() {
             "{tag}\n{erts}"
         );
     }
+    assert!(
+        erts.chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+            .contains("received_states:[{1,ordinary},{1,ordinary},{1,ordinary},{1,ordinary}]"),
+        "{erts}"
+    );
     let pbeam = stdout(&pbeam_erl(&epmd, &arguments));
     assert_eq!(pbeam, erts);
 }
