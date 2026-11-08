@@ -5388,8 +5388,9 @@ pub(in crate::runtime::interpreter) fn send(
             SuspendMode::Allow,
         )? {
             Ok(Sent::Local) => local_send_result(scheduler, message),
-            Ok(Sent::NoConnect) => Value(message),
-            Ok(Sent::NoSuspend) => unreachable!("send/2 can suspend"),
+            // `send/2` passes SuspendMode::Allow, so NoSuspend cannot arise.
+            // ERTS gives the message back for a send/2 that cannot connect.
+            Ok(Sent::NoConnect | Sent::NoSuspend) => Value(message),
             Err(raise) => raise,
         },
     )
