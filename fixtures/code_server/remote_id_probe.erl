@@ -193,8 +193,20 @@ text(I) -> ref_to_list(I).
 
 remote() -> hd(ids()).
 
-old_monitor() -> erlang:monitor(port, binary_to_term(<<131, 89, 100, 13:16, "nonode@nohost", 8:32, 7:32>>)).
-old_process_monitor() -> erlang:monitor(process, lists:last(ids())).
+%% A monitor of a port or of a pid of an old incarnation of the local node
+%% gives a DOWN message with noproc at once (bif.c:811-825, 925-935).
+old_monitor() ->
+    down(old_monitor, erlang:monitor(port, binary_to_term(<<131, 89, 100, 13:16, "nonode@nohost", 8:32, 7:32>>))).
+
+old_process_monitor() ->
+    down(old_process_monitor, erlang:monitor(process, lists:last(ids()))).
+
+down(Label, Ref) ->
+    receive
+        {'DOWN', Ref, Type, Item, Reason} ->
+            io:format("~s: ~p~n", [Label, [Type, Item, Reason]])
+    after 1000 -> io:format("~s: timeout~n", [Label])
+    end.
 group_leader() ->
     Result = erlang:group_leader(self(), remote()),
     io:format("group_leader: ~p~n", [Result]),
@@ -207,7 +219,27 @@ group_leader_leader() ->
     true = erlang:group_leader(Leader, self()),
     io:format("group_leader_leader: ~p~n", [[Result, IsRemote]]),
     ok.
-old_send() -> lists:last(ids()) ! x.
+%% A send to a pid of an old incarnation of the local node drops the
+%% message and gives its text to the system logger (bif.c:2489-2503).
+old_send() ->
+    Parent = self(),
+    Collector = spawn(fun() -> logger_text(Parent) end),
+    true = is_pid(erlang:system_flag(system_logger, Collector)),
+    Result = lists:last(ids()) ! x,
+    receive
+        {report, Text} -> io:format("old_send: ~p~n", [[Result, Text]])
+    after 1000 -> io:format("old_send: timeout~n")
+    end.
+
+%% Give the text of each error report to `Parent`, with its first pid
+%% replaced, which each run has its own.
+logger_text(Parent) ->
+    receive
+        {log, _, "~s~n", [Text], _} ->
+            [Before, After] = string:split(Text, pid_to_list(Parent), leading),
+            Parent ! {report, Before ++ "<sender>" ++ After};
+        _ -> logger_text(Parent)
+    end.
 %% A local reference of the second scheduler, which PBeam does not hold.
 other_scheduler() ->
     binary_to_term(<<131, 90, 3:16, 100, 13:16, "nonode@nohost", 0:32, 1:32, 2:32, 3:32>>).

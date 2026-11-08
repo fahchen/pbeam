@@ -1435,6 +1435,12 @@ altact_input() ->
     %% ERTS reads a fifth element only with the token flag (dist.c:2641-2649).
     Case(msg_extra, fun() -> PutMsg({37, 0, From, Self, ignored}, extra) end),
     Case(msg_prio, fun() -> PutMsg({37, 1, From, Self}, prio) end),
+    %% ERTS reads a bignum of flags (dist.c:2624-2630), and its sender need
+    %% not be a pid of the node of the connection (dist.c:2636-2639).
+    Case(msg_big_flags, fun() -> PutMsg({37, 1 bsl 64, From, Self}, big) end),
+    Case(msg_local_sender, fun() -> PutMsg({37, 0, Self, Self}, local) end),
+    %% A target that is a pid of another node is no local process.
+    Case(msg_external_pid, fun() -> PutMsg({37, 0, From, remote_pid(yy@nohost)}, external) end),
     Case(msg_name, fun() -> PutMsg({37, 8, From, altact_name}, named) end),
     Case(msg_no_name, fun() -> PutMsg({37, 8, From, no_such_name}, gone) end),
     Case(msg_alias, fun() -> PutMsg({37, 4, From, Alias}, aliased) end),

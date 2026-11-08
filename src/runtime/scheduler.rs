@@ -3987,13 +3987,10 @@ impl Scheduler {
     pub(super) fn send_old_incarnation_report(
         &mut self,
         to: &Term,
+        creation: u32,
         message: &Term,
     ) -> Result<(), BeamError> {
         let id = self.current_process().id;
-        let creation = match to {
-            Term::External(remote) => remote.creation,
-            _ => self.atoms.this_node().1,
-        };
         let mut text = b"Discarding message ".to_vec();
         text.extend(print_term(message, &self.atoms));
         text.extend_from_slice(b" from ");

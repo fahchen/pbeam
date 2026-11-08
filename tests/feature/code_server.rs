@@ -1444,14 +1444,13 @@ fn keeps_a_group_leader_of_another_node_as_pinned_erts() {
 #[test]
 fn stops_with_a_runtime_error_for_each_signal_to_another_node() {
     // A group leader change to a pid of another node returns true on a node
-    // without a connection (bif.c:4942-4957). A monitor of an old incarnation
-    // of the local node
-    // needs state that PBeam does not keep (bif.c:811-825, 925-935); a send
-    // to an old incarnation of the local node logs an error report
-    // (bif.c:2489-2503). A monitor of a pid
-    // of another node no longer stops the run: it ends at once with the
-    // `DOWN` message `noconnection` on a node without a connection, as ERTS
-    // does (bif.c:842-849, #1493).
+    // without a connection (bif.c:4942-4957). A monitor of a pid or a port
+    // of an old incarnation of the local node gives a `DOWN` message with
+    // `noproc` (bif.c:811-825, 925-935), and a send to one drops the message
+    // with an error report for the system logger (bif.c:2489-2503). A
+    // monitor of a pid of another node no longer stops the run: it ends at
+    // once with the `DOWN` message `noconnection` on a node without a
+    // connection, as ERTS does (bif.c:842-849, #1493).
     let erts = run(&mut erts_probe(
         REMOTE_ID_PROBE,
         "remote_id_probe",
@@ -1469,34 +1468,47 @@ fn stops_with_a_runtime_error_for_each_signal_to_another_node() {
         erts
     );
     for (function, expected) in [
-        (
-            "old_monitor",
-            "unsupported erlang:monitor/2,3 of a pid or a port of an old incarnation",
-        ),
+        ("old_monitor", "old_monitor: [port,#Port<0.8>,noproc]"),
         (
             "old_process_monitor",
-            "unsupported erlang:monitor/2,3 of a pid or a port of an old incarnation",
-        ),
-        (
-            "other_scheduler",
-            "unsupported erlang:binary_to_term/1,2 of a reference of another scheduler",
+            "old_process_monitor: [process,<0.0.0>,noproc]",
         ),
         (
             "old_send",
-            "unsupported send to a pid, a port, or a reference of an old incarnation",
+            "old_send: [x,\n           \"Discarding message x from <sender> to <0.0.0> in an old incarnation (7) of this node (0)\\n\"]",
         ),
     ] {
-        let output = pbeam_probe(REMOTE_ID_PROBE, "remote_id_probe", function, &[])
-            .env("TERM", "dumb")
-            .stdin(Stdio::null())
-            .output()
-            .unwrap();
-        let stderr = String::from_utf8(output.stderr).unwrap();
-        assert!(
-            !output.status.success() && stderr.contains(expected),
-            "{function}: {stderr}"
+        let erts = run(&mut erts_probe(
+            REMOTE_ID_PROBE,
+            "remote_id_probe",
+            function,
+            &[],
+        ));
+        assert!(erts.contains(expected), "{function}: {erts}");
+        assert_eq!(
+            run(&mut pbeam_probe(
+                REMOTE_ID_PROBE,
+                "remote_id_probe",
+                function,
+                &[]
+            )),
+            erts,
+            "{function}"
         );
     }
+    let output = pbeam_probe(REMOTE_ID_PROBE, "remote_id_probe", "other_scheduler", &[])
+        .env("TERM", "dumb")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        !output.status.success()
+            && stderr.contains(
+                "unsupported erlang:binary_to_term/1,2 of a reference of another scheduler"
+            ),
+        "{stderr}"
+    );
 }
 
 #[test]
