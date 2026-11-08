@@ -3798,7 +3798,7 @@ fn lists_node_types_and_mixed_known_order_as_pinned_erts() {
         &["+S", "2", "-sname", &client, "-setcookie", "ck"],
         "dist_lost_probe:nodes_order(), halt().",
     );
-    let expected = "[[nmea@host,nmeb@host,nmec@host],[nmeb@host,nmec@host,nmea@host]]\n";
+    let expected = "[[nmea@host,nmeb@host,nmec@host],[nmea@host,nmeb@host,nmec@host],[nmeb@host,nmec@host,nmea@host]]\n";
     assert_eq!(stdout(&erts_erl(&epmd, &arguments)), expected);
     assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), expected);
 }

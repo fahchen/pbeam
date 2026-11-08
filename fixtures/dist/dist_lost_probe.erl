@@ -60,9 +60,11 @@ nodes_order() ->
     noconnect = erlang:send({reg, C}, msg, [noconnect]),
     Filter = fun() -> [N || N <- erlang:nodes(known), N =:= A orelse N =:= B orelse N =:= C] end,
     Before = Filter(),
+    noconnect = erlang:send({reg, A}, msg, [noconnect]),
+    AfterSend = Filter(),
     HA = erts_internal:new_connection(A),
     true = erts_internal:abort_pending_connection(A, HA),
-    io:format("~w~n", [[Before, Filter()]]).
+    io:format("~w~n", [[Before, AfterSend, Filter()]]).
 
 nodes_expiry() ->
     A = 'nmeexpire@host', B = 'nmekeep@host',

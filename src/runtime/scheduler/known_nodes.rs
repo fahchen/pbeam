@@ -19,7 +19,7 @@
 use super::Scheduler;
 use crate::term::Atom;
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap};
 
 /// The default `node_tab_delete_delay` of ERTS, 60 s
 /// (`ERTS_NODE_TAB_DELAY_GC_DEFAULT`, `erl_node_tables.h:67`), in
@@ -32,13 +32,13 @@ const DELETE_DELAY: i64 = 60_000_000_000;
 #[derive(Debug, Default)]
 pub(super) struct KnownNodes {
     /// For the entry of each node, by the atom index of the node name:
-    /// whether a send used the entry after its delete timer started.
+    /// whether a send used the entry after its delete timer started, and its
+    /// position in the shared not-connected list.
     used: HashMap<u32, (bool, u64)>,
-    /// The node name of each entry, from the oldest to the newest.
-    order: BTreeMap<u64, Atom>,
     /// The delete timer of each entry: the run clock time at which it ends,
-    /// and the order number of the entry. The first timer to end is first.
-    timers: BinaryHeap<Reverse<(i64, u64)>>,
+    /// the order number of the entry, and the atom index of the entry. The
+    /// first timer to end is first.
+    timers: BinaryHeap<Reverse<(i64, u64, u32)>>,
     /// The order number of the next new entry.
     #[cfg(test)]
     next: u64,
@@ -79,13 +79,14 @@ impl KnownNodes {
     /// assert!(known.send_ordered(&name, 1, now));
     /// ```
     pub(super) fn send_ordered(&mut self, name: &Atom, order: u64, now: i64) -> bool {
-        if let Some((used, _)) = self.used.get_mut(&name.index()) {
+        let index = name.index();
+        if let Some((used, _)) = self.used.get_mut(&index) {
             *used = true;
             false
         } else {
-            self.used.insert(name.index(), (false, order));
-            self.order.insert(order, name.clone());
-            self.timers.push(Reverse((now + DELETE_DELAY, order)));
+            self.used.insert(index, (false, order));
+            self.timers
+                .push(Reverse((now + DELETE_DELAY, order, index)));
             true
         }
     }
@@ -98,13 +99,12 @@ impl KnownNodes {
     /// assert_eq!(known.take(&name), Some(1));
     /// ```
     pub(super) fn take(&mut self, name: &Atom) -> Option<u64> {
-        let (_, order) = self.used.remove(&name.index())?;
-        self.order.remove(&order);
-        Some(order)
+        self.used.remove(&name.index()).map(|(_, order)| order)
     }
 
     /// Return the names of the entries at the run clock time `now`, from the
-    /// oldest to the newest.
+    /// oldest to the newest. The entries hold the atom indices alone, so
+    /// [`Atom::from_index`] gives each name.
     ///
     /// # Examples
     ///
@@ -117,7 +117,16 @@ impl KnownNodes {
     #[cfg(test)]
     pub(super) fn names(&mut self, now: i64) -> Vec<Atom> {
         self.expire(now);
-        self.order.values().cloned().collect()
+        let mut entries: Vec<(u64, u32)> = self
+            .used
+            .iter()
+            .map(|(&index, &(_, order))| (order, index))
+            .collect();
+        entries.sort_unstable();
+        entries
+            .into_iter()
+            .map(|(_, index)| Atom::from_index(index))
+            .collect()
     }
 
     /// Run each delete timer that ends at `now` or before, the first to end
@@ -125,28 +134,25 @@ impl KnownNodes {
     /// and start the timer of each other entry again.
     pub(super) fn expire(&mut self, now: i64) -> Vec<u64> {
         let mut removed = Vec::new();
-        while let Some(&Reverse((deadline, order))) = self.timers.peek() {
+        while let Some(&Reverse((deadline, order, index))) = self.timers.peek() {
             if deadline > now {
                 break;
             }
             self.timers.pop();
-            let Some(name) = self.order.get(&order) else {
+            // A send that gave the entry to a dist handle left its timer here.
+            let Some((used, _)) = self.used.get_mut(&index) else {
                 continue;
             };
             #[cfg(test)]
             {
                 self.steps += 1;
             }
-            let (used, _) = self
-                .used
-                .get_mut(&name.index())
-                .expect("each timer has an entry");
             if *used {
                 *used = false;
-                self.timers.push(Reverse((deadline + DELETE_DELAY, order)));
+                self.timers
+                    .push(Reverse((deadline + DELETE_DELAY, order, index)));
             } else {
-                self.used.remove(&name.index());
-                self.order.remove(&order);
+                self.used.remove(&index);
                 removed.push(order);
             }
         }
