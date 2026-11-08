@@ -3498,7 +3498,8 @@ impl Scheduler {
                 _ => None,
             },
             _ => None,
-        }; // The pid or the name of another node that the monitor watches
+        };
+        // The pid or the name of another node that the monitor watches
         // (`ERTS_MON_TYPE_DIST_PROC`, `bif.c:811-894`).
         let remote = match target {
             MonitorTarget::RemoteProcess(remote) => Some(RemoteTarget::Pid(*remote)),
