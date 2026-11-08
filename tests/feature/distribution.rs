@@ -2423,6 +2423,10 @@ fn spawns_a_request_over_a_channel_as_pinned_erts() {
             "spawn_pending_alias",
             "spawn_pending_alias: {dropped,ok,delivered,false}\n",
         ),
+        (
+            "spawn_abandon_alias",
+            "spawn_abandon_alias: {true,dropped,false,dropped}\n",
+        ),
         ("spawn_lost_suppressed", "spawn_lost_suppressed: none\n"),
         ("spawn_reply_unknown", "spawn_reply_unknown: true\n"),
         (

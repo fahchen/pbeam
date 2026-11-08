@@ -16,6 +16,7 @@
          group_leader_bad_to/0, group_leader_external_to/0,
          spawn_notsup/0, spawn_lost/0, spawn_options/0, received_spawn_state/1,
          spawn_reply_unknown/0, spawn_reply_ordinary_monitor/0, spawn_pending_alias/0,
+         spawn_abandon_alias/0,
          spawn_priority_packets/0,
          spawn_lost_suppressed/0, spawn_local_leader/0,
          group_leader_packet/0,
@@ -1053,6 +1054,36 @@ spawn_pending_alias() ->
     Active = erlang:unalias(Ref),
     Ctrl ! stop,
     io:format("spawn_pending_alias: ~p~n", [{Early, Reply, Late, Active}]).
+
+%% Abandoning a pending unlinked request removes its alias as well as its
+%% monitor (`bif.c:1197-1206`). A later spawn reply cannot reactivate it.
+spawn_abandon_alias() ->
+    logger:set_primary_config(level, none),
+    Node = abandon_alias@nohost,
+    Parent = self(),
+    erts_internal:new_connection(Node),
+    Ctrl = spawn(fun() ->
+        receive {reply, DH, Ref} ->
+            erlang:dist_ctrl_put_data(DH, packet_only({31, Ref, Parent, 2, remote_pid(Node)})),
+            Parent ! {self(), injected},
+            receive stop -> ok after 5000 -> timeout end
+        end
+    end),
+    {message, Setup} = erts_internal:create_dist_channel(Node, Ctrl,
+                                    {mandatory() bor (1 bsl 32), 1}),
+    DH = receive {Setup, Handle} -> Handle after 5000 -> timeout end,
+    Ref = erts_internal:dist_spawn_request(Node, {erlang, node, []},
+                    [{monitor, [{alias, explicit_unalias}]}], spawn_request),
+    Abandoned = erlang:spawn_request_abandon(Ref),
+    Ctrl ! {reply, DH, Ref},
+    ok = receive {Ctrl, injected} -> ok after 5000 -> timeout end,
+    receive after 100 -> ok end,
+    Ref ! after_abandon,
+    Delivery = receive after_abandon -> delivered after 200 -> dropped end,
+    Active = erlang:unalias(Ref),
+    Reply = receive {spawn_reply, Ref, _, _} -> delivered after 200 -> dropped end,
+    Ctrl ! stop,
+    io:format("spawn_abandon_alias: ~p~n", [{Abandoned, Delivery, Active, Reply}]).
 
 %% A spawn request whose error message is suppressed gives no message when
 %% its connection ends (`erl_proc_sig_queue.c:4877-4900`).

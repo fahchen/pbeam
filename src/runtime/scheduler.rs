@@ -3687,8 +3687,13 @@ impl Scheduler {
         // The pending monitor leaves the monitor tree and the monitor list
         // of its connection, and sends no `DEMONITOR_P` packet: the request
         // names no remote pid yet (`dist.c:305-320`).
+        // Abandonment removes the full origin, including an explicit alias
+        // (`bif.c:1197-1206`).
         let monitor = self
-            .remove_origin_monitor(watcher, key)
+            .processes
+            .get_mut(watcher)
+            .and_then(|process| process.monitors.remove(&key))
+            .and_then(|origin| origin.monitor)
             .expect("the monitor is in the tree");
         if let Some(target) = &monitor.remote {
             let node = target.node();
