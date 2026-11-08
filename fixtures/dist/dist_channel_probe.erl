@@ -16,6 +16,7 @@
          group_leader_bad_to/0, group_leader_external_to/0,
          spawn_notsup/0, spawn_lost/0, spawn_options/0, received_spawn_state/1,
          spawn_reply_unknown/0, spawn_reply_ordinary_monitor/0, spawn_pending_alias/0,
+         spawn_priority_packets/0,
          spawn_lost_suppressed/0, spawn_local_leader/0,
          group_leader_packet/0,
          monitor_down_unknown/0, spawn_local_ref/0, spawn_bad_local_leader/0,
@@ -749,6 +750,40 @@ group_leader_external_to() ->
     Connected = receive {Ctrl, C} -> C after 5000 -> timeout end,
     io:format("group_leader_external_to: ~p~n", [Connected]),
     Ctrl ! stop.
+
+%% The sender removes the option tuples and sends bare link and monitor
+%% (`dist.c:5930-5963`, `6011-6058`). Keep the actual packet fields in the
+%% result, and compare its reference, sender, and leader to their inputs.
+spawn_priority_packets() ->
+    logger:set_primary_config(level, none),
+    Node = packets@nohost,
+    erts_internal:new_connection(Node),
+    {ok, DH} = erts_internal:create_dist_channel(Node, self(),
+                                                  {mandatory() bor (1 bsl 32), 1}),
+    Monitor = spawn_priority_packet(DH, Node, [{monitor, [priority]}]),
+    Link = spawn_priority_packet(DH, Node, [{link, [priority]}]),
+    io:format("spawn_priority_packets: ~0p~n", [[Monitor, Link]]).
+
+spawn_priority_packet(DH, Node, Options) ->
+    Ref = erts_internal:dist_spawn_request(Node, {erlang, node, []}, Options, spawn_request),
+    spawn_priority_poll(DH, Ref, 100).
+
+spawn_priority_poll(_DH, _Ref, 0) -> timeout;
+spawn_priority_poll(DH, Ref, N) ->
+    case erlang:dist_ctrl_get_data(DH) of
+        none -> receive after 20 -> ok end, spawn_priority_poll(DH, Ref, N - 1);
+        Data -> spawn_priority_decode(Data, Ref)
+    end.
+
+spawn_priority_decode({ok, Data}, Ref) -> spawn_priority_decode(Data, Ref);
+spawn_priority_decode({_Size, Data}, Ref) -> spawn_priority_decode(Data, Ref);
+spawn_priority_decode(Data, Ref) when is_list(Data) ->
+    spawn_priority_decode(iolist_to_binary(Data), Ref);
+spawn_priority_decode(<<112, Rest/binary>>, Ref) ->
+    {{Op, PacketRef, From, Leader, MFA, Options}, Used} = binary_to_term(Rest, [used]),
+    <<_:Used/binary, Message/binary>> = Rest,
+    {Op, PacketRef =:= Ref, From =:= self(), Leader =:= group_leader(),
+     MFA, Options, binary_to_term(Message)}.
 
 %% A connection whose flags have no `DFLAG_SPAWN` answers a spawn request
 %% with `notsup` (`dist.c:6089-6093`, `6197-6202`).
