@@ -1435,9 +1435,12 @@ altact_input() ->
     %% ERTS reads a fifth element only with the token flag (dist.c:2641-2649).
     Case(msg_extra, fun() -> PutMsg({37, 0, From, Self, ignored}, extra) end),
     Case(msg_prio, fun() -> PutMsg({37, 1, From, Self}, prio) end),
-    %% ERTS reads a bignum of flags (dist.c:2624-2630), and its sender need
-    %% not be a pid of the node of the connection (dist.c:2636-2639).
-    Case(msg_big_flags, fun() -> PutMsg({37, 1 bsl 64, From, Self}, big) end),
+    %% ERTS reads the least significant byte of a bignum of flags
+    %% (dist.c:2624-2630), and its sender need not be a pid of the node of
+    %% the connection (dist.c:2636-2639). The low byte names an alias, so
+    %% a read of a higher digit gives `PRIO` and rejects the reference
+    %% target instead of delivering the message.
+    Case(msg_big_flags, fun() -> PutMsg({37, (1 bsl 64) bor 4, From, Alias}, big) end),
     Case(msg_local_sender, fun() -> PutMsg({37, 0, Self, Self}, local) end),
     %% A target that is a pid of another node is no local process.
     Case(msg_external_pid, fun() -> PutMsg({37, 0, From, remote_pid(yy@nohost)}, external) end),

@@ -460,6 +460,10 @@ fn runs_the_bifs_of_a_process_controller_as_pinned_erts() {
         erts.contains("msg_external_ref: []\n") && erts.contains("after_external_ref: [up]\n"),
         "{erts}"
     );
+    // A bignum of flags with the alias bit in its least significant byte
+    // delivers the message on ERTS, so a higher-digit read fails the run
+    // instead of passing the probe (dist.c:2624-2630).
+    assert!(erts.contains("msg_big_flags: [big]\n"), "{erts}");
     assert_eq!(stdout(&pbeam_erl(&epmd, &altact)), erts);
     // A DEMONITOR_P for a name finds no monitor of the connection and
     // removes nothing (dist.c:2441-2457).
