@@ -216,7 +216,7 @@ impl Scheduler {
             let idle = dist.connected(node).is_none();
             drop(dist);
             #[cfg(test)]
-            if idle && connect == ConnectMode::NoConnect {
+            if idle {
                 tests::after_idle_send_check();
             }
             let mut refused = false;

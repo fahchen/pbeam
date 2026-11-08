@@ -807,6 +807,7 @@ pbeam-runtime|runtime::scheduler::dist_output::tests::closes_a_distribution_port
 pbeam-runtime|runtime::scheduler::dist_output::tests::drops_a_queued_drain_after_the_controller_is_detached|runtime_integration|network,local_socket
 pbeam-runtime|runtime::scheduler::dist_output::tests::exit_link_and_monitor_join_a_new_pending_connection|runtime_integration|network,local_socket
 pbeam-runtime|runtime::scheduler::dist_output::tests::noconnect_send_joins_a_connection_started_after_the_idle_check|runtime_integration|network,local_socket
+pbeam-runtime|runtime::scheduler::dist_output::tests::nosuspend_send_rejects_busy_connection_started_after_idle_check|runtime_integration|network,local_socket
 pbeam-runtime|runtime::scheduler::dist_output::tests::queues_a_dead_alias_when_a_signal_joins_a_new_pending_connection|runtime_integration|none
 pbeam-runtime|runtime::scheduler::dist_output::tests::rejects_auto_connect_when_the_connection_changes_before_its_lock|runtime_integration|network,local_socket
 pbeam-runtime|runtime::scheduler::dist_output::tests::spawn_joins_a_new_pending_connection_after_the_connected_check|runtime_integration|network,local_socket

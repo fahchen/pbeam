@@ -403,6 +403,57 @@ fn noconnect_send_joins_a_connection_started_after_the_idle_check() {
 }
 
 #[test]
+fn nosuspend_send_rejects_busy_connection_started_after_idle_check() {
+    // A fixture cannot force the transition between the idle check and the
+    // auto-connect or fallback lock. Both paths must leave the queue intact.
+    for connect in [super::ConnectMode::Allow, super::ConnectMode::NoConnect] {
+        let mut scheduler = scheduler_with_kernel();
+        let node = scheduler.atoms.put("busy_race@nohost").unwrap();
+        let destination = Term::tuple(vec![
+            Term::Atom(scheduler.atoms.put("sink").unwrap()),
+            Term::Atom(node.clone()),
+        ]);
+        let message = Term::Atom(scheduler.atoms.put("hello").unwrap());
+        let shared = Arc::clone(&scheduler.node);
+        shared.dist().insert(&node, Reference(8), 0);
+        let other = Arc::clone(&shared);
+        let name = node.clone();
+        let target = destination.clone();
+        let queued = message.clone();
+        AFTER_IDLE_SEND_CHECK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let mut dist = other.dist();
+                dist.new_connection(&name);
+                dist.enqueue_pending(
+                    &name,
+                    super::PendingSignal::Send(
+                        ProcessId(0),
+                        target,
+                        queued,
+                        super::SendPriority::Normal,
+                    ),
+                    1_048_576,
+                );
+            }));
+        });
+        let result = scheduler
+            .dist_send(
+                &node,
+                &destination,
+                &message,
+                super::SendPriority::Normal,
+                connect,
+                super::SuspendMode::NoSuspend,
+            )
+            .unwrap();
+        assert_eq!(result, (true, true));
+        let mut dist = shared.dist();
+        assert_eq!(dist.output(&node).1, 1_048_576);
+        assert_eq!(dist.take_pending_signals(&node).len(), 1);
+    }
+}
+
+#[test]
 fn queues_a_dead_alias_when_a_signal_joins_a_new_pending_connection() {
     // A fixture cannot force a new pending connection between the first
     // connection check and the output lock. The dead alias is a legal term.
