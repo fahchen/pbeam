@@ -354,9 +354,11 @@ fn noconnect_send_joins_a_connection_started_after_the_idle_check() {
                 &destination,
                 &message,
                 super::SendPriority::Normal,
-                super::ConnectMode::NoConnect
+                super::ConnectMode::NoConnect,
+                super::SuspendMode::Allow,
             )
             .unwrap()
+            .0
     );
     // Force the other scheduler's transition before this send takes its
     // fallback lock; a compiled BEAM fixture cannot pause at this boundary.
@@ -374,9 +376,11 @@ fn noconnect_send_joins_a_connection_started_after_the_idle_check() {
                 &destination,
                 &message,
                 super::SendPriority::Normal,
-                super::ConnectMode::NoConnect
+                super::ConnectMode::NoConnect,
+                super::SuspendMode::Allow,
             )
             .unwrap()
+            .0
     );
     let mut dist = node_ref.dist();
     assert!(
@@ -396,6 +400,57 @@ fn noconnect_send_joins_a_connection_started_after_the_idle_check() {
             .unwrap()
             .unwrap();
     assert_eq!(delivered, message);
+}
+
+#[test]
+fn nosuspend_send_rejects_busy_connection_started_after_idle_check() {
+    // A fixture cannot force the transition between the idle check and the
+    // auto-connect or fallback lock. Both paths must leave the queue intact.
+    for connect in [super::ConnectMode::Allow, super::ConnectMode::NoConnect] {
+        let mut scheduler = scheduler_with_kernel();
+        let node = scheduler.atoms.put("busy_race@nohost").unwrap();
+        let destination = Term::tuple(vec![
+            Term::Atom(scheduler.atoms.put("sink").unwrap()),
+            Term::Atom(node.clone()),
+        ]);
+        let message = Term::Atom(scheduler.atoms.put("hello").unwrap());
+        let shared = Arc::clone(&scheduler.node);
+        shared.dist().insert(&node, Reference(8), 0);
+        let other = Arc::clone(&shared);
+        let name = node.clone();
+        let target = destination.clone();
+        let queued = message.clone();
+        AFTER_IDLE_SEND_CHECK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let mut dist = other.dist();
+                dist.new_connection(&name);
+                dist.enqueue_pending(
+                    &name,
+                    super::PendingSignal::Send(
+                        ProcessId(0),
+                        target,
+                        queued,
+                        super::SendPriority::Normal,
+                    ),
+                    1_048_576,
+                );
+            }));
+        });
+        let result = scheduler
+            .dist_send(
+                &node,
+                &destination,
+                &message,
+                super::SendPriority::Normal,
+                connect,
+                super::SuspendMode::NoSuspend,
+            )
+            .unwrap();
+        assert_eq!(result, (true, true));
+        let mut dist = shared.dist();
+        assert_eq!(dist.output(&node).1, 1_048_576);
+        assert_eq!(dist.take_pending_signals(&node).len(), 1);
+    }
 }
 
 #[test]
@@ -441,9 +496,16 @@ fn queues_a_dead_alias_when_a_signal_joins_a_new_pending_connection() {
         side: super::super::dist_table::MonitorSide::Watcher,
     };
     let mut queued = false;
+    let mut refused = false;
     for operation in 0..3 {
         let pending = match operation {
-            0 => super::PendingOutput::Send(&target, &alias, super::SendPriority::Normal),
+            0 => super::PendingOutput::Send(
+                &target,
+                &alias,
+                super::SendPriority::Normal,
+                super::SuspendMode::Allow,
+                &mut refused,
+            ),
             1 => super::PendingOutput::Exit(&target, &alias, super::SendPriority::Normal),
             _ => super::PendingOutput::Spawn(monitor, &control, &arguments, &mut queued),
         };

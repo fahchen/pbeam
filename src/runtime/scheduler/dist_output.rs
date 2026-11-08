@@ -70,9 +70,18 @@ pub(in crate::runtime) enum ConnectMode {
     NoConnect,
 }
 
+/// Whether a send may suspend for a busy connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::runtime) enum SuspendMode {
+    /// The caller may suspend.
+    Allow,
+    /// Reject a send to a busy connection.
+    NoSuspend,
+}
+
 /// A signal that may join a pending connection during the final state check.
 pub(super) enum PendingOutput<'a> {
-    Send(&'a Term, &'a Term, SendPriority),
+    Send(&'a Term, &'a Term, SendPriority, SuspendMode, &'a mut bool),
     Exit(&'a Term, &'a Term, SendPriority),
     Link(RemotePid, &'a Term),
     GroupLeader(&'a Term),
@@ -182,7 +191,8 @@ impl Scheduler {
         message: &Term,
         priority: SendPriority,
         connect: ConnectMode,
-    ) -> Result<bool, BeamError> {
+        nosuspend: SuspendMode,
+    ) -> Result<(bool, bool), BeamError> {
         let caller = self.current_process().id;
         let from = Term::Pid(caller);
         // A pending connection accepts sends even with noconnect
@@ -192,24 +202,32 @@ impl Scheduler {
             let node_ref = Arc::clone(&self.node);
             let mut dist = node_ref.dist();
             if dist.pending(node) {
+                if nosuspend == SuspendMode::NoSuspend && dist.output_busy(node) {
+                    return Ok((true, true));
+                }
                 self.enqueue_pending(
                     &mut dist,
                     node,
                     PendingSignal::Send(caller, to.clone(), message.clone(), priority),
                 )
                 .expect("a pending send contains no match context");
-                return Ok(true);
+                return Ok((true, false));
             }
             let idle = dist.connected(node).is_none();
             drop(dist);
             #[cfg(test)]
-            if idle && connect == ConnectMode::NoConnect {
+            if idle {
                 tests::after_idle_send_check();
             }
+            let mut refused = false;
             if idle
                 && connect == ConnectMode::Allow
                 && self
                     .dist_auto_connect(node, |scheduler, dist, _| {
+                        if nosuspend == SuspendMode::NoSuspend && dist.output_busy(node) {
+                            refused = true;
+                            return Ok(());
+                        }
                         scheduler.enqueue_pending(
                             dist,
                             node,
@@ -218,24 +236,32 @@ impl Scheduler {
                     })?
                     .is_some()
             {
-                return Ok(true);
+                return Ok((true, refused));
             }
         }
+        let mut refused = false;
         let pending = self
             .node
             .net_kernel()
             .is_some()
-            .then_some(PendingOutput::Send(to, message, priority));
-        self.dist_output_with_pending(caller, node, None, pending, |flags, _| {
-            if is_remote_reference(to) && flags & ALIAS == 0 {
-                return None;
-            }
-            Some((
-                send_control(flags, from, to, priority),
-                Some(message.clone()),
-            ))
-        })
-        .map(|connection| connection.is_some())
+            .then_some(PendingOutput::Send(
+                to,
+                message,
+                priority,
+                nosuspend,
+                &mut refused,
+            ));
+        let connection =
+            self.dist_output_with_pending(caller, node, None, pending, |flags, _| {
+                if is_remote_reference(to) && flags & ALIAS == 0 {
+                    return None;
+                }
+                Some((
+                    send_control(flags, from, to, priority),
+                    Some(message.clone()),
+                ))
+            })?;
+        Ok((connection.is_some(), refused))
     }
 
     /// Start an idle connection and queue a signal (`dist.c:5713-5759`).
@@ -443,74 +469,24 @@ impl Scheduler {
         sender: ProcessId,
         node: &Atom,
         monitor: Option<super::dist_table::DistMonitor>,
-        pending: Option<PendingOutput<'_>>,
+        mut pending: Option<PendingOutput<'_>>,
         build: impl FnOnce(u64, u32) -> Option<(Term, Option<Term>)>,
     ) -> Result<Option<u32>, BeamError> {
         let node_ref = Arc::clone(&self.node);
         let mut dist = node_ref.dist();
+        if let Some(PendingOutput::Send(_, _, _, SuspendMode::NoSuspend, refused)) =
+            pending.as_mut()
+            && (dist.pending(node) || dist.connected(node).is_some())
+            && dist.output_busy(node)
+        {
+            **refused = true;
+            return Ok(Some(dist.connection_id(node)));
+        }
         if dist.pending(node)
             && let Some(pending) = pending
         {
             let connection = dist.connection_id(node);
-            match pending {
-                PendingOutput::Send(to, message, priority) => {
-                    self.enqueue_pending(
-                        &mut dist,
-                        node,
-                        PendingSignal::Send(sender, to.clone(), message.clone(), priority),
-                    )
-                    .expect("a pending send contains no match context");
-                }
-                PendingOutput::Exit(to, reason, priority) => {
-                    self.enqueue_pending(
-                        &mut dist,
-                        node,
-                        PendingSignal::Exit(sender, to.clone(), reason.clone(), priority),
-                    )
-                    .expect("a pending exit contains no match context");
-                }
-                PendingOutput::Link(remote, control) => {
-                    dist.insert_link_now(sender, remote);
-                    self.enqueue_pending(
-                        &mut dist,
-                        node,
-                        PendingSignal::Link(sender, control.clone()),
-                    )
-                    .expect("a link control holds only an integer and pids");
-                }
-                PendingOutput::GroupLeader(control) => {
-                    self.enqueue_pending(
-                        &mut dist,
-                        node,
-                        PendingSignal::GroupLeader(sender, control.clone()),
-                    )
-                    .expect("a group leader control holds only an integer and pids");
-                }
-                PendingOutput::Monitor(monitor, control) => {
-                    dist.insert_monitor_now(node, monitor);
-                    self.enqueue_pending(
-                        &mut dist,
-                        node,
-                        PendingSignal::Monitor(sender, control.clone()),
-                    )
-                    .expect("a monitor control holds a target and the watcher's live reference");
-                }
-                PendingOutput::Spawn(monitor, control, arguments, queued) => {
-                    dist.insert_monitor_now(node, monitor);
-                    self.enqueue_pending(
-                        &mut dist,
-                        node,
-                        PendingSignal::Spawn(
-                            sender,
-                            monitor.key,
-                            control.clone(),
-                            arguments.clone(),
-                        ),
-                    )
-                    .expect("a pending spawn request contains no match context");
-                    *queued = true;
-                }
-            }
+            self.queue_pending_output(&mut dist, node, sender, pending);
             return Ok(Some(connection));
         }
         let Some((flags, controller, connection)) = dist.connected(node) else {
@@ -543,6 +519,62 @@ impl Scheduler {
             }
         }
         Ok(Some(connection))
+    }
+
+    /// Queue a signal when the connection is still pending.
+    fn queue_pending_output(
+        &self,
+        dist: &mut DistTable,
+        node: &Atom,
+        sender: ProcessId,
+        pending: PendingOutput<'_>,
+    ) {
+        match pending {
+            PendingOutput::Send(to, message, priority, _, _) => {
+                self.enqueue_pending(
+                    dist,
+                    node,
+                    PendingSignal::Send(sender, to.clone(), message.clone(), priority),
+                )
+                .expect("a pending send contains no match context");
+            }
+            PendingOutput::Exit(to, reason, priority) => {
+                self.enqueue_pending(
+                    dist,
+                    node,
+                    PendingSignal::Exit(sender, to.clone(), reason.clone(), priority),
+                )
+                .expect("a pending exit contains no match context");
+            }
+            PendingOutput::Link(remote, control) => {
+                dist.insert_link_now(sender, remote);
+                self.enqueue_pending(dist, node, PendingSignal::Link(sender, control.clone()))
+                    .expect("a link control holds only an integer and pids");
+            }
+            PendingOutput::GroupLeader(control) => {
+                self.enqueue_pending(
+                    dist,
+                    node,
+                    PendingSignal::GroupLeader(sender, control.clone()),
+                )
+                .expect("a group leader control holds only an integer and pids");
+            }
+            PendingOutput::Monitor(monitor, control) => {
+                dist.insert_monitor_now(node, monitor);
+                self.enqueue_pending(dist, node, PendingSignal::Monitor(sender, control.clone()))
+                    .expect("a monitor control holds a target and the watcher's live reference");
+            }
+            PendingOutput::Spawn(monitor, control, arguments, queued) => {
+                dist.insert_monitor_now(node, monitor);
+                self.enqueue_pending(
+                    dist,
+                    node,
+                    PendingSignal::Spawn(sender, monitor.key, control.clone(), arguments.clone()),
+                )
+                .expect("a pending spawn request contains no match context");
+                *queued = true;
+            }
+        }
     }
 
     /// Encode pending signals before releasing the lock that publishes a connection.

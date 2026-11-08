@@ -3342,6 +3342,33 @@ fn measures_pending_queue_size_on_pinned_erts() {
 }
 
 #[test]
+fn rejects_nosuspend_at_the_distribution_watermark_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let name = format!("dnosuspend{}", std::process::id());
+    let arguments = probe(
+        &["-sname", &name, "-kernel", "logger_level", "none"],
+        "dist_busy_probe:nosuspend(), halt().",
+    );
+    let expected = "{ok,true,nosuspend,true,ok,{true,nosuspend},{nosuspend,true},[{524287,ok},{524288,nosuspend},{524289,nosuspend}]}\n";
+    assert_eq!(stdout(&erts_erl(&epmd, &arguments)), expected);
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), expected);
+}
+
+#[test]
+fn measures_distribution_busy_state_on_pinned_erts() {
+    let epmd = Epmd::start();
+    let name = format!("dbusy{}", std::process::id());
+    let arguments = probe(
+        &["-sname", &name, "-kernel", "logger_level", "none"],
+        "dist_busy_probe:main(), halt().",
+    );
+    assert_eq!(
+        stdout(&erts_erl(&epmd, &arguments)),
+        "{1048576,true,nosuspend,true,1100000,1100000}\n"
+    );
+}
+
+#[test]
 fn orders_all_five_pending_signal_packets_as_pinned_erts() {
     let epmd = Epmd::start();
     let name = format!("dorder{}", std::process::id());
