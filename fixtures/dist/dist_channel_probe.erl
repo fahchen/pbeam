@@ -458,7 +458,11 @@ reject(N) ->
                  32 -> packet_only({37, 4, From, self()});
                  33 -> packet_only({37, 12, From, remote_ref(zz@nohost)});
                  34 -> packet_only({37, 8, From, self()});
-                 35 -> packet_only({37, 0, From, {a, b}})
+                 35 -> packet_only({37, 0, From, {a, b}});
+                 %% Operation 5 is the free slot of dist.h:147, so ERTS
+                 %% rejects it at `default:` (dist.c:3131-3132) and PBeam
+                 %% stops with the undefined-operation runtime error.
+                 36 -> packet_only({5, ''})
              end,
     erlang:dist_ctrl_put_data(DH, Packet).
 

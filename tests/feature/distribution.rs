@@ -647,6 +647,13 @@ fn stops_at_a_part_of_a_channel_that_pbeam_does_not_have() {
         ]
         .map(|n| (format!("reject({n})"), rejected)),
     );
+    // Operation 5 is the free slot of `dist.h:147`: ERTS rejects the packet
+    // at `default:` (dist.c:3131-3132), and PBeam stops with the error that
+    // the row records (#1408, #1409, #1410).
+    cases.push((
+        "reject(36)".to_owned(),
+        "unsupported distribution operation 5",
+    ));
     cases.push(("atom_cache()".to_owned(), rejected));
     cases.push((
         "reject(9)".to_owned(),
