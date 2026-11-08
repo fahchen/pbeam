@@ -5401,9 +5401,6 @@ pub(in crate::runtime::interpreter) fn send(
             SendPriority::Normal,
             ConnectMode::Allow,
         )? {
-            Ok(Sent::Local) if scheduler.current_process().suspended => {
-                BifResult::SuspendReturn(message)
-            }
             Ok(Sent::Local) => local_send_result(scheduler, message),
             Ok(Sent::NoConnect) => Value(message),
             Err(raise) => raise,
@@ -5469,9 +5466,6 @@ pub(super) fn send3(
     }
     Ok(
         match deliver_to(scheduler, to, message.clone(), priority, connect)? {
-            Ok(Sent::Local) if scheduler.current_process().suspended => {
-                BifResult::SuspendReturn(Term::static_atom("ok"))
-            }
             Ok(Sent::Local) => local_send_result(scheduler, Term::static_atom("ok")),
             Ok(Sent::NoConnect) if connect == ConnectMode::NoConnect => {
                 Value(Term::static_atom("noconnect"))

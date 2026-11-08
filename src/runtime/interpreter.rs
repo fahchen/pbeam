@@ -3959,7 +3959,6 @@ impl BeamProgram {
                 }
                 Ok(Some(Outcome::Yield))
             }
-            BifResult::SuspendReturn(value) => Self::finish_suspend_return(process, value, entry),
             BifResult::Raise { class, reason } => Ok(raise(process, class, reason)),
             BifResult::ErrorWithCause { reason, .. } => {
                 Ok(raise(process, ExceptionClass::Error, reason))
@@ -4044,24 +4043,6 @@ impl BeamProgram {
                 process.registers = vec![Some(module), Some(function), Some(arguments)];
                 Ok(Some(Outcome::Hibernate))
             }
-        }
-    }
-
-    /// Finish a completed send, preserving its value when it must wait.
-    fn finish_suspend_return(
-        process: &mut ProcessState,
-        value: Term,
-        entry: CallKind,
-    ) -> Result<Option<Outcome>, BeamError> {
-        write(process, &Operand::X(0), value.clone())?;
-        if entry.is_tail() {
-            return_from_frame(process)?;
-        }
-        if process.suspended {
-            process.pending_dist_reply = Some(value);
-            Ok(Some(Outcome::Wait))
-        } else {
-            Ok(None)
         }
     }
 

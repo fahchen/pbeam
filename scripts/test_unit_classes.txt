@@ -632,7 +632,6 @@ pbeam-runtime|runtime::interpreter::tests::reads_tuple_elements_as_pinned_erts|r
 pbeam-runtime|runtime::interpreter::tests::recognizes_runtime_process_identifiers_as_pids|runtime_integration|network,local_socket
 pbeam-runtime|runtime::interpreter::tests::records_the_decoded_loop_body|measurement|native_library
 pbeam-runtime|runtime::interpreter::tests::registers_a_name_or_raises_badarg_as_pinned_erts|runtime_integration|network,local_socket
-pbeam-runtime|runtime::interpreter::tests::returns_a_suspended_send_result_after_an_early_wakeup|runtime_integration|network,local_socket
 pbeam-runtime|runtime::interpreter::tests::rejects_a_bif_name_that_no_table_entry_holds|runtime_integration|network,local_socket
 pbeam-runtime|runtime::interpreter::tests::rejects_a_bitstring_in_the_byte_bifs|runtime_integration|network,local_socket
 pbeam-runtime|runtime::interpreter::tests::rejects_a_catch_tag_operand_and_an_unallocated_catch_register|runtime_integration|network,local_socket
