@@ -14,15 +14,17 @@
          spawn_bad_arguments/0, reply_bad_to/0, reply_bad_ref/0,
          reply_bad_flags/0, reply_bad_result/0, group_leader_bad/0,
          group_leader_bad_to/0, group_leader_external_to/0,
-         spawn_notsup/0, spawn_lost/0, spawn_options/0,
-         spawn_reply_unknown/0, spawn_reply_ordinary_monitor/0,
+         spawn_notsup/0, spawn_lost/0, spawn_options/0, received_spawn_state/1,
+         spawn_reply_unknown/0, spawn_reply_ordinary_monitor/0, spawn_pending_alias/0,
+         spawn_abandon_alias/0,
+         spawn_priority_packets/0,
          spawn_lost_suppressed/0, spawn_local_leader/0,
          group_leader_packet/0,
          monitor_down_unknown/0, spawn_local_ref/0, spawn_bad_local_leader/0,
          spawn_bad_mfa_not_tuple/0, spawn_bad_mfa_tuple/0,
          spawn_bad_mfa_fields/0,
-         spawn_bad_arguments_list/0, spawn_monitor_priority/0,
-         spawn_monitor_alias/0, spawn_link_priority/0, spawn_scheduler/0,
+         spawn_bad_arguments_list/0,
+         spawn_scheduler/0,
          dflag_unicode_io/0]).
 
 main() ->
@@ -755,6 +757,40 @@ group_leader_external_to() ->
     io:format("group_leader_external_to: ~p~n", [Connected]),
     Ctrl ! stop.
 
+%% The sender removes the option tuples and sends bare link and monitor
+%% (`dist.c:5930-5963`, `6011-6058`). Keep the actual packet fields in the
+%% result, and compare its reference, sender, and leader to their inputs.
+spawn_priority_packets() ->
+    logger:set_primary_config(level, none),
+    Node = packets@nohost,
+    erts_internal:new_connection(Node),
+    {ok, DH} = erts_internal:create_dist_channel(Node, self(),
+                                                  {mandatory() bor (1 bsl 32), 1}),
+    Monitor = spawn_priority_packet(DH, Node, [{monitor, [priority]}]),
+    Link = spawn_priority_packet(DH, Node, [{link, [priority]}]),
+    io:format("spawn_priority_packets: ~0p~n", [[Monitor, Link]]).
+
+spawn_priority_packet(DH, Node, Options) ->
+    Ref = erts_internal:dist_spawn_request(Node, {erlang, node, []}, Options, spawn_request),
+    spawn_priority_poll(DH, Ref, 100).
+
+spawn_priority_poll(_DH, _Ref, 0) -> timeout;
+spawn_priority_poll(DH, Ref, N) ->
+    case erlang:dist_ctrl_get_data(DH) of
+        none -> receive after 20 -> ok end, spawn_priority_poll(DH, Ref, N - 1);
+        Data -> spawn_priority_decode(Data, Ref)
+    end.
+
+spawn_priority_decode({ok, Data}, Ref) -> spawn_priority_decode(Data, Ref);
+spawn_priority_decode({_Size, Data}, Ref) -> spawn_priority_decode(Data, Ref);
+spawn_priority_decode(Data, Ref) when is_list(Data) ->
+    spawn_priority_decode(iolist_to_binary(Data), Ref);
+spawn_priority_decode(<<112, Rest/binary>>, Ref) ->
+    {{Op, PacketRef, From, Leader, MFA, Options}, Used} = binary_to_term(Rest, [used]),
+    <<_:Used/binary, Message/binary>> = Rest,
+    {Op, PacketRef =:= Ref, From =:= self(), Leader =:= group_leader(),
+     MFA, Options, binary_to_term(Message)}.
+
 %% A connection whose flags have no `DFLAG_SPAWN` answers a spawn request
 %% with `notsup` (`dist.c:6089-6093`, `6197-6202`).
 spawn_notsup() ->
@@ -857,7 +893,71 @@ spawn_options() ->
     [show(Tag, [request(list_to_atom("so" ++ integer_to_list(N) ++ "@nohost"),
                         Options)])
      || {N, {Tag, Options}} <- lists:zip(lists:seq(1, length(Cases)), Cases)],
+    StateResults = [request_state(list_to_atom("state" ++ integer_to_list(N) ++ "@nohost"), Options)
+                    || {N, Options} <- lists:zip(lists:seq(1, 7),
+                        [[link, monitor], [{link, [priority]}, monitor],
+                         [link, {monitor, [priority]}],
+                         [link, {monitor, [{alias, demonitor}]}],
+                         [link, {monitor, [{alias, explicit_unalias}]}],
+                         [link, {monitor, [{alias, reply_demonitor}]}],
+                         [link, {monitor, [priority, {alias, demonitor}]}]])],
+    show(received_states, [State || {State, _, _} <- StateResults]),
+    show(received_packets, [{Reply, Down} || {_, Reply, Down} <- StateResults]),
     ok.
+
+request_state(Node, Options) ->
+    Parent = self(),
+    Ctrl = spawn(fun() ->
+        erts_internal:new_connection(Node),
+        {ok, DH} = erts_internal:create_dist_channel(Node, self(), {mandatory() bor 16#28, 1}),
+        Control = {29, remote_ref(Node), remote_pid(Node), remote_pid(Node),
+                   {?MODULE, received_spawn_state, 1}, Options},
+        erlang:dist_ctrl_put_data(DH, packet(Control, [Parent])),
+        receive {exit_child, Pid} ->
+            Reply = await_control(DH, 100),
+            erlang:dist_ctrl_put_data(DH, packet_only({3, remote_pid(Node), Pid, boom})),
+            Down = await_control(DH, 100),
+            Parent ! {packets, self(), received_reply(Reply, Node, Pid),
+                      received_down(Down, Node, Pid)}
+        after 5000 -> timeout end,
+        receive stop -> ok after 5000 -> timeout end
+    end),
+    receive {spawn_ready, Pid} -> Ctrl ! {exit_child, Pid} after 5000 -> timeout end,
+    Result = receive {spawn_state, State} -> State after 5000 -> timeout end,
+    {Reply, Down} = receive {packets, Ctrl, R, D} -> {R, D} after 5000 -> {timeout, timeout} end,
+    Ctrl ! stop,
+    {Result, Reply, Down}.
+
+await_control(_DH, 0) -> timeout;
+await_control(DH, N) ->
+    case erlang:dist_ctrl_get_data(DH) of
+        none -> receive after 20 -> ok end, await_control(DH, N - 1);
+        Data -> decode_control(Data)
+    end.
+
+decode_control({ok, Data}) -> decode_control(Data);
+decode_control({_Size, Data}) -> decode_control(Data);
+decode_control(Data) when is_list(Data) -> decode_control(iolist_to_binary(Data));
+decode_control(<<112, Rest/binary>>) ->
+    {Control, _Used} = binary_to_term(Rest, [used]),
+    Control.
+
+received_reply({31, Ref, From, Flags, Pid}, Node, Pid) ->
+    {31, Ref =:= remote_ref(Node), From =:= remote_pid(Node), Flags, true};
+received_reply(Other, _Node, _Pid) -> Other.
+
+received_down({21, Pid, To, Ref, Reason}, Node, Pid) ->
+    {21, true, To =:= remote_pid(Node), Ref =:= remote_ref(Node), Reason};
+received_down(Other, _Node, _Pid) -> Other.
+
+received_spawn_state(Parent) ->
+    process_flag(trap_exit, true),
+    {links, Links} = process_info(self(), links),
+    self() ! ordinary,
+    Parent ! {spawn_ready, self()},
+    receive after 200 -> ok end,
+    First = receive {'EXIT', _, boom} -> exit_signal; ordinary -> ordinary after 5000 -> timeout end,
+    Parent ! {spawn_state, {length(Links), First}}.
 
 %% Put a spawn request of the local node on a connection of `Node` and
 %% return its first packet, with whether the connection is still open. One
@@ -933,6 +1033,63 @@ spawn_reply_ordinary_monitor() ->
     io:format("spawn_reply_ordinary_monitor: ~p~n", [[{Down, Connected}]]),
     Ctrl ! stop.
 
+%% A spawn alias is inactive until the spawn reply (`erl_proc_sig_queue.c:6030-6041`).
+spawn_pending_alias() ->
+    logger:set_primary_config(level, none),
+    Node = pa@nohost,
+    Parent = self(),
+    erts_internal:new_connection(Node),
+    Ctrl = spawn(fun() ->
+        receive {reply, DH, Ref} ->
+            erlang:dist_ctrl_put_data(DH, packet_only({31, Ref, Parent, 2, remote_pid(Node)})),
+            receive stop -> ok after 5000 -> timeout end
+        end
+    end),
+    {message, Setup} = erts_internal:create_dist_channel(Node, Ctrl,
+                                    {mandatory() bor (1 bsl 32), 1}),
+    DH = receive {Setup, Handle} -> Handle after 5000 -> timeout end,
+    Ref = erts_internal:dist_spawn_request(Node, {erlang, node, []},
+                    [{monitor, [{alias, reply_demonitor}]}], spawn_request),
+    Ref ! early,
+    Early = receive early -> delivered after 200 -> dropped end,
+    Ctrl ! {reply, DH, Ref},
+    Reply = receive {spawn_reply, Ref, ok, _} -> ok after 5000 -> timeout end,
+    Ref ! late,
+    Late = receive late -> delivered after 5000 -> timeout end,
+    Active = erlang:unalias(Ref),
+    Ctrl ! stop,
+    io:format("spawn_pending_alias: ~p~n", [{Early, Reply, Late, Active}]).
+
+%% Abandoning a pending unlinked request removes its alias as well as its
+%% monitor (`bif.c:1197-1206`). A later spawn reply cannot reactivate it.
+spawn_abandon_alias() ->
+    logger:set_primary_config(level, none),
+    Node = abandon_alias@nohost,
+    Parent = self(),
+    erts_internal:new_connection(Node),
+    Ctrl = spawn(fun() ->
+        receive {reply, DH, Ref} ->
+            erlang:dist_ctrl_put_data(DH, packet_only({31, Ref, Parent, 2, remote_pid(Node)})),
+            Parent ! {self(), injected},
+            receive stop -> ok after 5000 -> timeout end
+        end
+    end),
+    {message, Setup} = erts_internal:create_dist_channel(Node, Ctrl,
+                                    {mandatory() bor (1 bsl 32), 1}),
+    DH = receive {Setup, Handle} -> Handle after 5000 -> timeout end,
+    Ref = erts_internal:dist_spawn_request(Node, {erlang, node, []},
+                    [{monitor, [{alias, explicit_unalias}]}], spawn_request),
+    Abandoned = erlang:spawn_request_abandon(Ref),
+    Ctrl ! {reply, DH, Ref},
+    ok = receive {Ctrl, injected} -> ok after 5000 -> timeout end,
+    receive after 100 -> ok end,
+    Ref ! after_abandon,
+    Delivery = receive after_abandon -> delivered after 200 -> dropped end,
+    Active = erlang:unalias(Ref),
+    Reply = receive {spawn_reply, Ref, _, _} -> delivered after 200 -> dropped end,
+    Ctrl ! stop,
+    io:format("spawn_abandon_alias: ~p~n", [{Abandoned, Delivery, Active, Reply}]).
+
 %% A spawn request whose error message is suppressed gives no message when
 %% its connection ends (`erl_proc_sig_queue.c:4877-4900`).
 spawn_lost_suppressed() ->
@@ -1001,22 +1158,6 @@ spawn_bad_mfa_fields() ->
 spawn_bad_arguments_list() ->
     channel({29, remote_ref(zz@nohost), remote_pid(zz@nohost),
              remote_pid(zz@nohost), {erlang, node, 0}, []}, not_a_list).
-
-%% PBeam does not implement the priority option of a monitor or a link and
-%% the alias option of a monitor (`bif.c:675-780`), so the request stops the
-%% run with a runtime error (row "Distribution").
-spawn_monitor_priority() ->
-    erts_internal:dist_spawn_request(zz@nohost, {erlang, node, []},
-                                     [{monitor, [priority]}], spawn_request).
-
-spawn_monitor_alias() ->
-    erts_internal:dist_spawn_request(zz@nohost, {erlang, node, []},
-                                     [{monitor, [{alias, demonitor}]}],
-                                     spawn_request).
-
-spawn_link_priority() ->
-    erts_internal:dist_spawn_request(zz@nohost, {erlang, node, []},
-                                     [{link, [priority]}], spawn_request).
 
 %% PBeam does not bind a process to a scheduler, as its local spawn does
 %% (`erl_process.c:12500-12507`), so the request stops the run.

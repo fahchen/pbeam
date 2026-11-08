@@ -1212,6 +1212,7 @@ fn moves_the_containers_of_an_exiting_process_to_the_release_work_list() {
                     spawn: None,
                     abandoned: false,
                     spawn_link: false,
+                    spawn_link_priority: false,
                 }),
                 alias: None,
                 watched_by: None,
@@ -1285,6 +1286,7 @@ fn releases_the_terms_of_every_container_of_an_exiting_process() {
                     spawn: None,
                     abandoned: false,
                     spawn_link: false,
+                    spawn_link_priority: false,
                 }),
                 alias: None,
                 watched_by: None,
@@ -1566,6 +1568,7 @@ fn moves_the_monitors_of_an_exiting_process_in_batches() {
                         spawn: None,
                         abandoned: false,
                         spawn_link: false,
+                        spawn_link_priority: false,
                     }),
                     alias: None,
                     watched_by: None,
@@ -1758,6 +1761,7 @@ fn counts_the_bytes_of_the_release_work_list() {
                     spawn: None,
                     abandoned: false,
                     spawn_link: false,
+                    spawn_link_priority: false,
                 }),
                 alias: None,
                 watched_by: None,
@@ -2202,6 +2206,7 @@ fn keeps_a_link_of_a_newer_connection_at_the_exit_signal_of_the_lost_one() {
         Some(&LinkState {
             unlinking: 0,
             connection: 2,
+            priority: false,
         })
     );
     assert_eq!(messages(&scheduler, id.0), []);
@@ -3704,6 +3709,7 @@ fn a_signal_to_a_dead_process_answers_an_unlink() {
         LinkState {
             unlinking: 7,
             connection: 0,
+            priority: false,
         },
     );
     scheduler.dead_target_signal(target, &Signal::Unlink { from: root, id: 7 });
@@ -4364,6 +4370,7 @@ fn second_abandon_of_a_linked_spawn_request_keeps_its_monitor() {
                     }),
                     abandoned: false,
                     spawn_link: true,
+                    spawn_link_priority: false,
                 }),
                 alias: None,
                 watched_by: None,
@@ -4400,6 +4407,7 @@ fn second_abandon_of_a_linked_spawn_request_keeps_its_monitor() {
                     }),
                     abandoned: false,
                     spawn_link: false,
+                    spawn_link_priority: false,
                 }),
                 alias: None,
                 watched_by: None,
@@ -4453,6 +4461,7 @@ fn an_abandoned_spawn_request_error_sends_no_reply() {
                     }),
                     abandoned: true,
                     spawn_link: true,
+                    spawn_link_priority: false,
                 }),
                 alias: None,
                 watched_by: None,
@@ -4532,6 +4541,7 @@ fn an_abandoned_spawn_request_success_installs_no_link_and_sends_abandoned() {
                     }),
                     abandoned: true,
                     spawn_link: true,
+                    spawn_link_priority: false,
                 }),
                 alias: None,
                 watched_by: None,
@@ -4619,6 +4629,7 @@ fn abandon_of_a_remote_request_removes_the_connection_monitor() {
                     }),
                     abandoned: false,
                     spawn_link: false,
+                    spawn_link_priority: false,
                 }),
                 alias: None,
                 watched_by: None,

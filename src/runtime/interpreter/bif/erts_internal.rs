@@ -3,8 +3,8 @@
 use std::cmp::Ordering;
 
 use super::BifResult::Value;
+use super::erlang::old_incarnation;
 use super::erlang::{c_int, signals_return};
-use super::erlang::{old_incarnation, remote_unsupported};
 use super::{
     Atom, AtomTable, BeamError, BifContext, BifResult, ExceptionClass, ProcessId, Scheduler,
     SpawnOptions, Target, Term, boot_denial, code, create_process, denial, error, iolist, maps,
@@ -79,7 +79,16 @@ pub(super) fn group_leader(
             return Ok(BifResult::badarg());
         }
         Term::External(_) if pid_parts(target).is_some() => {
-            return Err(remote_unsupported("erlang:group_leader/2"));
+            if let Some(denied) = denial(
+                context.scheduler,
+                CapabilityKind::Process,
+                Operation::GroupLeader,
+                None,
+            )? {
+                return Ok(denied);
+            }
+            context.scheduler.dist_group_leader(leader, target)?;
+            return Ok(Value(Term::static_atom("true")));
         }
         _ => return Ok(Value(Term::static_atom("badarg"))),
     };

@@ -75,6 +75,7 @@
     is_process_alive/0,
     is_alive_request/0,
     group_leader2/0,
+    group_leader_remote/0,
     group_leader3/0,
     pt_get0/0,
     pt_get1/0,
@@ -335,6 +336,12 @@ is_process_alive() -> other(fun(Pid) -> erlang:is_process_alive(Pid) end).
 is_alive_request() -> other(fun(Pid) -> erts_internal:is_process_alive(Pid, make_ref()) end).
 
 group_leader2() -> other(fun(Pid) -> erts_internal:group_leader(group_leader(), Pid) end).
+
+group_leader_remote() ->
+    Remote = binary_to_term(<<131, 88, 100, 6:16, "b@host", 7:32, 0:32, 5:32>>),
+    [erts_internal:group_leader(id(1), Remote),
+     attempt(fun() -> erts_internal:group_leader(self(), Remote) end),
+     attempt(fun() -> erlang:group_leader(self(), Remote) end)].
 
 group_leader3() ->
     other(fun(Pid) -> erts_internal:group_leader(group_leader(), Pid, make_ref()) end).

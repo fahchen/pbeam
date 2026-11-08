@@ -4,7 +4,8 @@
 %% erl_process.c:12440-12530, dist.c:5850-6260).
 -module(dist_spawn_probe).
 -export([server/0, client/1, leader/1, options/1, flags/1, demonitor/1,
-         report/1, report_flags/1, wait/1, boom/0]).
+         report/1, report_flags/1, wait/1, alias_wait/1, alias_order_sender/1,
+         leader_target/1, boom/0]).
 
 server() ->
     io:format("~s~n", [node()]),
@@ -155,6 +156,15 @@ options(Server) ->
                                           [{monitor, []}])),
     MonitorTag = received(spawn_request(Server, erlang, node, [],
                                         [{monitor, [{tag, mine}]}])),
+    CombinedRef = spawn_request(Server, dist_spawn_probe, wait, [self()],
+                                [{monitor, [{tag, mine}]}, monitor]),
+    CombinedPid = receive {spawn_reply, CombinedRef, ok, CP} -> CP after 5000 -> timeout end,
+    ok = receive {started, CombinedPid} -> ok after 5000 -> timeout end,
+    CombinedPid ! stop,
+    CombinedTag = receive {Tag, CombinedRef, process, CombinedPid, normal} ->
+                              {Tag, process, normal}
+                  after 5000 -> timeout
+                  end,
     ReplyYes = received(spawn_request(Server, erlang, node, [], [{reply, yes}])),
     Host = lists:nth(2, string:split(atom_to_list(Server), "@")),
     Missing = list_to_atom("none@" ++ Host),
@@ -165,6 +175,47 @@ options(Server) ->
                                           [{reply, no}, monitor])),
     NoReceiver = received(spawn_request(Server, erlang, node, [],
                                         [{reply, no}, foo])),
+    PriorityRef = spawn_request(Server, dist_spawn_probe, wait, [self()],
+                                [{monitor, [priority]}]),
+    PriorityPid = receive {spawn_reply, PriorityRef, ok, PP} -> PP after 5000 -> timeout end,
+    receive {started, PriorityPid} -> ok after 5000 -> timeout end,
+    self() ! ordinary,
+    PriorityPid ! stop,
+    receive after 200 -> ok end,
+    PriorityFirst = receive
+                        {'DOWN', PriorityRef, process, PriorityPid, normal} -> down;
+                        ordinary -> ordinary
+                    after 5000 -> timeout
+                    end,
+    receive _ -> ok after 5000 -> timeout end,
+    Alias = [spawn_alias(Server, Mode) || Mode <-
+             [explicit_unalias, demonitor, reply_demonitor]],
+    AliasLifetime = [spawn_alias_lifetime(Server, Mode, End) ||
+                     Mode <- [explicit_unalias, demonitor, reply_demonitor],
+                     End <- [down, demonitor]],
+    AliasOrder = [spawn_alias_order(Server, Mode) || Mode <-
+                  [explicit_unalias, demonitor, reply_demonitor]],
+    process_flag(trap_exit, true),
+    LinkRef = spawn_request(Server, dist_spawn_probe, wait, [self()], [{link, [priority]}]),
+    LinkPid = receive {spawn_reply, LinkRef, ok, LP} -> LP after 5000 -> timeout end,
+    receive {started, LinkPid} -> ok after 5000 -> timeout end,
+    self() ! ordinary,
+    LinkPid ! stop,
+    receive after 200 -> ok end,
+    LinkFirst = receive {'EXIT', LinkPid, normal} -> exit_signal; ordinary -> ordinary after 5000 -> timeout end,
+    receive _ -> ok after 5000 -> timeout end,
+    LeaderPid = spawn(Server, ?MODULE, leader_target, [self()]),
+    receive {leader_ready, LeaderPid} -> ok after 5000 -> timeout end,
+    LeaderConnected = group_leader(self(), LeaderPid),
+    LeaderPid ! {check_leader, self()},
+    LeaderSeen = receive {leader_value, LeaderPid, L1} -> L1 =:= self() after 5000 -> timeout end,
+    Three = try erts_internal:group_leader(self(), LeaderPid, make_ref()) of
+                V -> V catch error:badarg -> badarg end,
+    true = erlang:disconnect_node(Server),
+    LeaderPending = group_leader(group_leader(), LeaderPid),
+    LeaderPid ! {check_leader, self()},
+    LeaderSeenPending = receive {leader_value, LeaderPid, L2} -> L2 =:= group_leader() after 5000 -> timeout end,
+    LeaderPid ! stop,
     io:format("options: ~0p~n",
               [[{bad_node, BadNode}, {local, Local},
                 {bad_options, BadOptions}, {bad_mfa, BadMfa},
@@ -177,9 +228,90 @@ options(Server) ->
                 {bad_monitor_alias, BadMonitorAlias},
                 {bad_monitor_tag, BadMonitorTag}, {bad_tuple, BadTuple},
                 {link_empty, LinkEmpty}, {monitor_empty, MonitorEmpty},
-                {monitor_tag, MonitorTag}, {reply_yes, ReplyYes},
-                {no_connection, NoConnection}, {no_receiver, NoReceiver}]]),
+                {monitor_tag, MonitorTag}, {combined_monitor_tag, CombinedTag}, {reply_yes, ReplyYes},
+                {no_connection, NoConnection}, {no_receiver, NoReceiver},
+                {monitor_priority, PriorityFirst}, {monitor_alias, Alias},
+                {alias_lifetime, AliasLifetime}, {alias_order, AliasOrder},
+                {link_priority, LinkFirst},
+                {remote_leader, {LeaderConnected, LeaderSeen, Three, LeaderPending, LeaderSeenPending}}]]),
     ok.
+
+spawn_alias(Server, Mode) ->
+    Ref = spawn_request(Server, dist_spawn_probe, alias_wait, [self()],
+                        [{monitor, [{alias, Mode}]}]),
+    Pid = receive {spawn_reply, Ref, ok, P} -> P after 5000 -> timeout end,
+    receive {started, Pid} -> ok after 5000 -> timeout end,
+    Pid ! {alias, Ref},
+    Message = receive alias_message -> received after 5000 -> timeout end,
+    Active = erlang:unalias(Ref),
+    erlang:demonitor(Ref, [flush]),
+    Pid ! stop,
+    {Mode, Message, Active}.
+
+spawn_alias_order(Server, Mode) ->
+    Ref = spawn_request(Server, ?MODULE, alias_order_sender, [self()],
+                        [{monitor, [{alias, Mode}]}]),
+    Pid = receive {spawn_reply, Ref, ok, P} -> P after 5000 -> timeout end,
+    ok = receive {started, Pid} -> ok after 5000 -> timeout end,
+    Pid ! {send_order, Ref},
+    Messages = alias_order_messages([]),
+    erlang:demonitor(Ref, [flush]),
+    erlang:unalias(Ref),
+    Pid ! stop,
+    {Mode, Messages}.
+
+alias_order_messages(Acc) ->
+    receive
+        {ordered, done} -> lists:reverse(Acc);
+        {ordered, Message} -> alias_order_messages([Message | Acc])
+    after 5000 -> timeout
+    end.
+
+alias_order_sender(Parent) ->
+    Parent ! {started, self()},
+    receive {send_order, Ref} ->
+        Parent ! {ordered, ordinary1},
+        Ref ! {ordered, alias1},
+        Parent ! {ordered, ordinary2},
+        Ref ! {ordered, alias2},
+        Parent ! {ordered, done}
+    after 5000 -> timeout
+    end,
+    receive stop -> ok after 5000 -> timeout end.
+
+spawn_alias_lifetime(Server, Mode, End) ->
+    Ref = spawn_request(Server, dist_spawn_probe, wait, [self()],
+                        [{monitor, [{alias, Mode}]}]),
+    Pid = receive {spawn_reply, Ref, ok, P} -> P after 5000 -> timeout end,
+    ok = receive {started, Pid} -> ok after 5000 -> timeout end,
+    case End of
+        down ->
+            Pid ! stop,
+            ok = receive {'DOWN', Ref, process, Pid, normal} -> ok after 5000 -> timeout end;
+        demonitor ->
+            true = erlang:demonitor(Ref),
+            Pid ! stop
+    end,
+    Ref ! after_monitor,
+    Message = receive after_monitor -> delivered after 200 -> dropped end,
+    Active = erlang:unalias(Ref),
+    {Mode, End, Message, Active}.
+
+leader_target(Parent) ->
+    Parent ! {leader_ready, self()},
+    leader_target_loop().
+
+leader_target_loop() ->
+    receive
+        {check_leader, Parent} -> Parent ! {leader_value, self(), group_leader()}, leader_target_loop();
+        stop -> ok
+    after 5000 -> ok
+    end.
+
+alias_wait(Parent) ->
+    Parent ! {started, self()},
+    receive {alias, Ref} -> Ref ! alias_message end,
+    receive stop -> ok end.
 
 %% The options of a spawn request set the start values of the priority, the
 %% message queue data, and the async_dist flag of the new process
