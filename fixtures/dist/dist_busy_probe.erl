@@ -1,6 +1,6 @@
 %% Measure the distribution output busy state of the pinned ERTS.
 -module(dist_busy_probe).
--export([main/0]).
+-export([main/0, nosuspend/0]).
 
 main() ->
     Node = busy_probe@nohost,
@@ -32,6 +32,56 @@ teardown(Message) ->
     suspended(Sender, 1000),
     Controller ! stop,
     receive {teardown_sent, Value} -> Value after 2000 -> timeout end.
+
+nosuspend() ->
+    Node = nosuspend_probe@nohost,
+    Handle = erts_internal:new_connection(Node),
+    Flags = element(3, erts_internal:get_dflags()),
+    {ok, Handle} = erts_internal:create_dist_channel(Node, self(), {Flags, 1}),
+    Message = binary:copy(<<1>>, 1100000),
+    First = erlang:send({sink, Node}, Message, [nosuspend]),
+    {ok, 0, 0, Before} = erlang:dist_get_stat(Handle),
+    Second = erlang:send({sink, Node}, extra, [nosuspend]),
+    {ok, 0, 0, After} = erlang:dist_get_stat(Handle),
+    drain(Handle),
+    Third = erlang:send({sink, Node}, after_drain, [nosuspend]),
+    Mid = hysteresis(),
+    Pending = pending(),
+    io:format("~w~n", [{First, Before >= 1048576, Second, Before =:= After, Third, Mid, Pending}]).
+
+pending() ->
+    Node = pending_busy_probe@nohost,
+    Handle = erts_internal:new_connection(Node),
+    ok = erlang:send({sink, Node}, binary:copy(<<3>>, 1100000), [nosuspend]),
+    {ok, _, _, Before} = erlang:dist_get_stat(Handle),
+    Result = erlang:send({sink, Node}, extra, [nosuspend]),
+    {ok, _, _, After} = erlang:dist_get_stat(Handle),
+    true = erts_internal:abort_pending_connection(Node, Handle),
+    {Result, Before =:= After}.
+
+hysteresis() ->
+    Parent = self(),
+    spawn(fun() -> Parent ! {hysteresis_result, hysteresis_controller()} end),
+    receive {hysteresis_result, Result} -> Result after 2000 -> timeout end.
+
+hysteresis_controller() ->
+    Node = hysteresis_probe@nohost,
+    Handle = erts_internal:new_connection(Node),
+    Flags = element(3, erts_internal:get_dflags()),
+    {ok, Handle} = erts_internal:create_dist_channel(Node, self(), {Flags, 1}),
+    Message = binary:copy(<<2>>, 600000),
+    ok = erlang:send({sink, Node}, Message, [nosuspend]),
+    ok = erlang:send({sink, Node}, Message, [nosuspend]),
+    _ = erlang:dist_ctrl_get_data(Handle),
+    {ok, _, _, Size} = erlang:dist_get_stat(Handle),
+    Result = erlang:send({sink, Node}, extra, [nosuspend]),
+    {Size >= 524288 andalso Size < 1048576, Result}.
+
+drain(Handle) ->
+    case erlang:dist_ctrl_get_data(Handle) of
+        none -> ok;
+        _ -> drain(Handle)
+    end.
 
 suspended(_, 0) -> error(suspend_timeout);
 suspended(Sender, Attempts) ->

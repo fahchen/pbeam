@@ -3326,6 +3326,19 @@ fn measures_pending_queue_size_on_pinned_erts() {
 }
 
 #[test]
+fn rejects_nosuspend_at_the_distribution_watermark_as_pinned_erts() {
+    let epmd = Epmd::start();
+    let name = format!("dnosuspend{}", std::process::id());
+    let arguments = probe(
+        &["-sname", &name, "-kernel", "logger_level", "none"],
+        "dist_busy_probe:nosuspend(), halt().",
+    );
+    let expected = "{ok,true,nosuspend,true,ok,{true,nosuspend},{nosuspend,true}}\n";
+    assert_eq!(stdout(&erts_erl(&epmd, &arguments)), expected);
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), expected);
+}
+
+#[test]
 fn measures_distribution_busy_state_on_pinned_erts() {
     let epmd = Epmd::start();
     let name = format!("dbusy{}", std::process::id());

@@ -328,9 +328,11 @@ fn noconnect_send_joins_a_connection_started_after_the_idle_check() {
                 &destination,
                 &message,
                 super::SendPriority::Normal,
-                super::ConnectMode::NoConnect
+                super::ConnectMode::NoConnect,
+                super::SuspendMode::Allow,
             )
             .unwrap()
+            .0
     );
     // Force the other scheduler's transition before this send takes its
     // fallback lock; a compiled BEAM fixture cannot pause at this boundary.
@@ -348,9 +350,11 @@ fn noconnect_send_joins_a_connection_started_after_the_idle_check() {
                 &destination,
                 &message,
                 super::SendPriority::Normal,
-                super::ConnectMode::NoConnect
+                super::ConnectMode::NoConnect,
+                super::SuspendMode::Allow,
             )
             .unwrap()
+            .0
     );
     let mut dist = node_ref.dist();
     assert!(
@@ -415,9 +419,16 @@ fn queues_a_dead_alias_when_a_signal_joins_a_new_pending_connection() {
         side: super::super::dist_table::MonitorSide::Watcher,
     };
     let mut queued = false;
+    let mut refused = false;
     for operation in 0..3 {
         let pending = match operation {
-            0 => super::PendingOutput::Send(&target, &alias, super::SendPriority::Normal),
+            0 => super::PendingOutput::Send(
+                &target,
+                &alias,
+                super::SendPriority::Normal,
+                super::SuspendMode::Allow,
+                &mut refused,
+            ),
             1 => super::PendingOutput::Exit(&target, &alias, super::SendPriority::Normal),
             _ => super::PendingOutput::Spawn(monitor, &control, &arguments, &mut queued),
         };

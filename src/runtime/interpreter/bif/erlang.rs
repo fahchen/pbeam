@@ -29,7 +29,7 @@ use crate::runtime::process::{Flush, MonitorKey, Origin, Priority, SpawnReply};
 use crate::runtime::process::{InitialCall, OTHER_PROCESS_INFO_ITEMS};
 use crate::runtime::process::{LinkId, ProcessState, RemotePid};
 use crate::runtime::scheduler::PTAB_SIZE;
-use crate::runtime::scheduler::dist_output::{ConnectMode, SendPriority};
+use crate::runtime::scheduler::dist_output::{ConnectMode, SendPriority, SuspendMode};
 use crate::runtime::scheduler::dist_table::NodeInfo;
 use crate::runtime::scheduler::node::Named;
 use crate::runtime::scheduler::{
@@ -5400,9 +5400,11 @@ pub(in crate::runtime::interpreter) fn send(
             message.clone(),
             SendPriority::Normal,
             ConnectMode::Allow,
+            SuspendMode::Allow,
         )? {
             Ok(Sent::Local) => local_send_result(scheduler, message),
             Ok(Sent::NoConnect) => Value(message),
+            Ok(Sent::NoSuspend) => unreachable!("send/2 can suspend"),
             Err(raise) => raise,
         },
     )
@@ -5419,8 +5421,8 @@ pub(in crate::runtime::interpreter) fn send(
 /// reductions, and can return `ok` after a switch (see
 /// [`local_send_result`]).
 ///
-/// PBeam has no busy port and no busy connection, so `nosuspend` changes
-/// nothing.
+/// A connection at its high watermark returns `nosuspend` without queuing
+/// a send with that option (`dist.c:3247-3255`).
 /// A `priority` message is an ordinary message unless its receiver gets it
 /// through a priority alias (`erl_proc_sig_queue.c:6021-6045`). Only
 /// `erlang:alias/1` makes a priority alias, so `priority` changes nothing
@@ -5455,18 +5457,22 @@ pub(super) fn send3(
     let Some(options) = options.proper_list() else {
         return Ok(BifResult::badopt());
     };
-    let (mut connect, mut priority) = (ConnectMode::Allow, SendPriority::Normal);
+    let (mut connect, mut priority, mut nosuspend) =
+        (ConnectMode::Allow, SendPriority::Normal, SuspendMode::Allow);
     for option in options {
         match option {
             Term::Atom(option) if option.is_static("noconnect") => connect = ConnectMode::NoConnect,
             Term::Atom(option) if option.is_static("priority") => priority = SendPriority::Priority,
-            Term::Atom(option) if option.is_static("nosuspend") => {}
+            Term::Atom(option) if option.is_static("nosuspend") => {
+                nosuspend = SuspendMode::NoSuspend
+            }
             _ => return Ok(BifResult::badopt()),
         }
     }
     Ok(
-        match deliver_to(scheduler, to, message.clone(), priority, connect)? {
+        match deliver_to(scheduler, to, message.clone(), priority, connect, nosuspend)? {
             Ok(Sent::Local) => local_send_result(scheduler, Term::static_atom("ok")),
+            Ok(Sent::NoSuspend) => Value(Term::static_atom("nosuspend")),
             Ok(Sent::NoConnect) if connect == ConnectMode::NoConnect => {
                 Value(Term::static_atom("noconnect"))
             }
@@ -5538,6 +5544,8 @@ enum Sent {
     /// The message was to `{Name, Node}` on another node, and was dropped
     /// (`SEND_NOCONNECT`).
     NoConnect,
+    /// A busy distribution connection rejected a send with `nosuspend`.
+    NoSuspend,
 }
 
 /// The destination of a send, as ERTS `do_send` (`bif.c:2458-2695`) reads
@@ -5660,6 +5668,7 @@ fn deliver_to(
     message: Term,
     priority: SendPriority,
     connect: ConnectMode,
+    nosuspend: SuspendMode,
 ) -> Result<Result<Sent, BifResult>, BeamError> {
     let Some(destination) = destination(to, &scheduler.atoms) else {
         return Ok(Err(BifResult::badarg()));
@@ -5686,7 +5695,12 @@ fn deliver_to(
             None => None,
         },
         Destination::Remote(node) => {
-            if scheduler.dist_send(node, to, &message, priority, connect)? {
+            let (connected, refused) =
+                scheduler.dist_send(node, to, &message, priority, connect, nosuspend)?;
+            if refused {
+                return Ok(Ok(Sent::NoSuspend));
+            }
+            if connected {
                 return Ok(Ok(Sent::Local));
             }
             scheduler.send_to_remote_node(node);
