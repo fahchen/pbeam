@@ -619,7 +619,7 @@ fn stops_at_a_part_of_a_channel_that_pbeam_does_not_have() {
         "spawn_scheduler()".to_owned(),
         "unsupported spawn option Tuple([Atom(\"scheduler\"), Integer(1)])",
     )]);
-    cases.extend([12, 13, 18, 25, 27].map(|op| {
+    cases.extend([12, 13, 16, 18, 23, 25, 27, 30, 32, 34].map(|op| {
         (
             format!("trace_token({op})"),
             "unsupported distribution message with a trace token",

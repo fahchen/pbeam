@@ -643,16 +643,26 @@ fragment_output_controller(Node, Flags) ->
 %% A control message with a trace token. `EXIT2_TT` (18) reads the token at
 %% tuple[4], before the reason, and `PAYLOAD_EXIT2_TT` (27) at tuple[4]
 %% (dist.c:2822-2840).
+%% A control message of each trace-token form of dist.h:143-182, which
+%% carries a token that PBeam does not have: the node stops the run with a
+%% runtime error that names the trace token.
 trace_token(Op) ->
     erts_internal:new_connection(zz@nohost),
     {ok, DH} = erts_internal:create_dist_channel(zz@nohost, self(), {mandatory(), 1}),
     From = remote_pid(zz@nohost),
+    Token = {0, [], 0, From, 0},
     Packet = case Op of
                  12 -> packet({12, '', self(), []}, m);
                  13 -> packet_only({13, From, self(), [], x});
+                 16 -> packet({16, From, '', no_such_name, Token}, m);
                  18 -> packet_only({18, From, self(), [], boom});
+                 23 -> packet({23, From, self(), Token}, m);
                  25 -> packet({25, From, self(), []}, x);
-                 27 -> packet_only({27, From, self(), []})
+                 27 -> packet_only({27, From, self(), []});
+                 30 -> packet({30, remote_ref(zz@nohost), From, self(),
+                               {erlang, node, 0}, [], Token}, []);
+                 32 -> packet_only({32, remote_ref(zz@nohost), From, 0, Token});
+                 34 -> packet({34, From, remote_ref(zz@nohost), Token}, m)
              end,
     erlang:dist_ctrl_put_data(DH, Packet).
 

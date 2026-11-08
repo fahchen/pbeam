@@ -264,7 +264,7 @@ impl Scheduler {
                 self.net_altact_signal(from, flags, to, items.len(), message, cache.as_deref())
             }
             (Some(37), _) => Err(error(REJECTED)),
-            (Some(12 | 13 | 16 | 18 | 23 | 25 | 27 | 34), _) => Err(error(TRACE_TOKEN)),
+            (Some(12 | 13 | 16 | 18 | 23 | 25 | 27 | 30 | 32 | 34), _) => Err(error(TRACE_TOKEN)),
             // ERTS reads the operation as unsigned (`unsigned_val`,
             // dist.c:2223), so a negative one is not valid (dist.c:3131-3132).
             // `UNLINK` (4) is not valid since OTP 26 (dist.c:2277-2282).
