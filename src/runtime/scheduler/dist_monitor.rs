@@ -297,6 +297,7 @@ impl Scheduler {
         ended: &super::dist_table::EndedConnection,
         reason: &Term,
     ) {
+        self.resume_dist_senders(ended.send_waiters.iter().copied());
         let (name, watchers) = &ended.node_monitors;
         self.nodes_event(
             name,

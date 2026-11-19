@@ -1,4 +1,4 @@
-%% Measure the distribution output busy state of the pinned ERTS.
+%% Compare distribution sender suspension and resumption with pinned ERTS.
 -module(dist_busy_probe).
 -export([main/0, nosuspend/0]).
 
@@ -8,17 +8,24 @@ main() ->
     Flags = element(3, erts_internal:get_dflags()),
     {ok, Handle} = erts_internal:create_dist_channel(Node, self(), {Flags, 1}),
     Parent = self(),
-    Message = binary:copy(<<1>>, 1100000),
-    Sender = spawn(fun() -> Parent ! {sent, byte_size(erlang:send({sink, Node}, Message))} end),
+    Chunk = binary:copy(<<1>>, 600000),
+    ok = erlang:send({sink, Node}, Chunk, [nosuspend]),
+    Sender = spawn(fun() -> Parent ! {sent, erlang:send({sink, Node}, Chunk, [])} end),
     suspended(Sender, 1000),
     {ok, 0, 0, Size} = erlang:dist_get_stat(Handle),
     NoSuspend = erlang:send({sink, Node}, extra, [nosuspend]),
     {ok, 0, 0, After} = erlang:dist_get_stat(Handle),
-    _ = erlang:dist_ctrl_get_data(Handle),
+    First = erlang:dist_ctrl_get_data(Handle),
+    {status, HalfStatus} = process_info(Sender, status),
+    Second = erlang:dist_ctrl_get_data(Handle),
     Result = receive {sent, Value} -> Value after 2000 -> timeout end,
+    Empty = erlang:dist_ctrl_get_data(Handle),
+    Message = binary:copy(<<1>>, 1100000),
     Teardown = teardown(Message),
-    io:format("~w~n", [{erlang:system_info(dist_buf_busy_limit), Size >= 1048576,
-                         NoSuspend, After =:= Size, Result, Teardown}]).
+    Pending = pending_abort(Message),
+    Async = async_dist(Message),
+    io:format("~w~n", [{Size >= 1048576, NoSuspend, After =:= Size,
+                         is_list(First), HalfStatus, is_list(Second), Empty, Result, Teardown, Pending, Async}]).
 
 teardown(Message) ->
     Node = teardown_probe@nohost,
@@ -28,10 +35,46 @@ teardown(Message) ->
     {message, Ref} = erts_internal:create_dist_channel(Node, Controller, {Flags, 1}),
     receive {Ref, Handle} -> ok after 2000 -> error(controller_timeout) end,
     Parent = self(),
-    Sender = spawn(fun() -> Parent ! {teardown_sent, byte_size(erlang:send({sink, Node}, Message))} end),
+    Sender = spawn(fun() -> Parent ! {teardown_sent, ({sink, Node} ! Message) =:= Message} end),
     suspended(Sender, 1000),
     Controller ! stop,
     receive {teardown_sent, Value} -> Value after 2000 -> timeout end.
+
+pending_abort(Message) ->
+    Node = pending_suspend_probe@nohost,
+    Handle = erts_internal:new_connection(Node),
+    Parent = self(),
+    Sender = spawn(fun() -> Parent ! {pending_sent, erlang:send({sink, Node}, Message, [])} end),
+    suspended(Sender, 1000),
+    true = erts_internal:abort_pending_connection(Node, Handle),
+    receive {pending_sent, Value} -> Value after 2000 -> timeout end.
+
+async_dist(Message) ->
+    Parent = self(),
+    spawn(fun() -> Parent ! {async_result, async_controller(Message)} end),
+    receive {async_result, Value} -> Value after 2000 -> timeout end.
+
+async_controller(Message) ->
+    Node = async_busy_probe@nohost,
+    Handle = erts_internal:new_connection(Node),
+    Pending = async_send(Node, Message),
+    PendingNext = erlang:send({sink, Node}, extra, [nosuspend]),
+    Flags = element(3, erts_internal:get_dflags()),
+    {ok, Handle} = erts_internal:create_dist_channel(Node, self(), {Flags, 1}),
+    PromotedNext = erlang:send({sink, Node}, extra, [nosuspend]),
+    drain(Handle),
+    Connected = async_send(Node, Message),
+    ConnectedNext = erlang:send({sink, Node}, extra, [nosuspend]),
+    Packet = erlang:dist_ctrl_get_data(Handle),
+    {Pending, PendingNext, PromotedNext, Connected, ConnectedNext, is_list(Packet)}.
+
+async_send(Node, Message) ->
+    Parent = self(),
+    spawn(fun() ->
+        process_flag(async_dist, true),
+        Parent ! {async_sent, erlang:send({sink, Node}, Message, [])}
+    end),
+    receive {async_sent, Value} -> Value after 2000 -> timeout end.
 
 nosuspend() ->
     Node = nosuspend_probe@nohost,

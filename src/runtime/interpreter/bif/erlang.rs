@@ -29,7 +29,7 @@ use crate::runtime::process::{Flush, MonitorKey, Origin, Priority, SpawnReply};
 use crate::runtime::process::{InitialCall, OTHER_PROCESS_INFO_ITEMS};
 use crate::runtime::process::{LinkId, ProcessState, RemotePid};
 use crate::runtime::scheduler::PTAB_SIZE;
-use crate::runtime::scheduler::dist_output::{ConnectMode, SendPriority, SuspendMode};
+use crate::runtime::scheduler::dist_output::{ConnectMode, DistSend, SendPriority, SuspendMode};
 use crate::runtime::scheduler::dist_table::NodeInfo;
 use crate::runtime::scheduler::node::Named;
 use crate::runtime::scheduler::{
@@ -462,8 +462,8 @@ fn boolean_flag(flag: &mut bool, value: Option<&str>) -> BifResult {
 /// scheduler reads the new priority when the process next goes into the
 /// run queue. Each other value raises `badarg`. A
 /// flag that ERTS does not know raises `badarg`, also a tuple that is not
-/// `{monitor_nodes, Options}`. PBeam has no asynchronous distribution sender,
-/// so `async_dist` has no other effect.
+/// `{monitor_nodes, Options}`. A sender with `async_dist` ignores the
+/// distribution output busy state.
 ///
 /// The heap flags `fullsweep_after`, `min_heap_size`,
 /// `min_bin_vheap_size`, and `max_heap_size` go to [`process_heap_flag`].
@@ -5379,6 +5379,7 @@ pub(in crate::runtime::interpreter) fn send(
             SuspendMode::Allow,
         )? {
             Ok(Sent::Local) => local_send_result(scheduler, message),
+            Ok(Sent::Wait) => BifResult::SuspendReturn(message),
             // `send/2` passes SuspendMode::Allow, so NoSuspend cannot arise.
             // ERTS gives the message back for a send/2 that cannot connect.
             Ok(Sent::NoConnect | Sent::NoSuspend) => Value(message),
@@ -5449,6 +5450,7 @@ pub(super) fn send3(
     Ok(
         match deliver_to(scheduler, to, message.clone(), priority, connect, nosuspend)? {
             Ok(Sent::Local) => local_send_result(scheduler, Term::static_atom("ok")),
+            Ok(Sent::Wait) => BifResult::SuspendReturn(Term::static_atom("ok")),
             Ok(Sent::NoSuspend) => Value(Term::static_atom("nosuspend")),
             Ok(Sent::NoConnect) if connect == ConnectMode::NoConnect => {
                 Value(Term::static_atom("noconnect"))
@@ -5523,6 +5525,8 @@ enum Sent {
     NoConnect,
     /// A busy distribution connection rejected a send with `nosuspend`.
     NoSuspend,
+    /// The distribution send is complete, but the connection is busy.
+    Wait,
 }
 
 /// The destination of a send, as ERTS `do_send` (`bif.c:2458-2695`) reads
@@ -5672,16 +5676,17 @@ fn deliver_to(
             None => None,
         },
         Destination::Remote(node) => {
-            let (connected, refused) =
-                scheduler.dist_send(node, to, &message, priority, connect, nosuspend)?;
-            if refused {
-                return Ok(Ok(Sent::NoSuspend));
-            }
-            if connected {
-                return Ok(Ok(Sent::Local));
-            }
-            scheduler.send_to_remote_node(node);
-            return Ok(Ok(Sent::NoConnect));
+            let sent =
+                match scheduler.dist_send(node, to, &message, priority, connect, nosuspend)? {
+                    DistSend::Complete => Sent::Local,
+                    DistSend::Wait => Sent::Wait,
+                    DistSend::NoSuspend => Sent::NoSuspend,
+                    DistSend::NoConnect => {
+                        scheduler.send_to_remote_node(node);
+                        Sent::NoConnect
+                    }
+                };
+            return Ok(Ok(sent));
         }
         Destination::Port(id) => return port_send(scheduler, id, &message),
         // ERTS logs an error report and drops the message

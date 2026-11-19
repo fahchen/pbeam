@@ -726,7 +726,7 @@ impl Scheduler {
             }
             Signal::Resume => {
                 self.handled(id, node);
-                // A `persistent_term` call waits for this signal.
+                // A persistent-term call or a busy distribution sender waits for this signal.
                 self.resume(id);
                 0
             }
