@@ -120,6 +120,8 @@ pub(in crate::runtime) enum BifResult {
     /// traps to `bif_return_trap`, which returns the value when the process
     /// runs again.
     YieldReturn(Term),
+    /// Return the completed result when a busy distribution connection resumes the caller.
+    SuspendReturn(Term),
     /// The NIF continues on a thread of the dirty pool of its job with this
     /// work, as a NIF with the `ERL_NIF_DIRTY_JOB_CPU_BOUND` or
     /// `ERL_NIF_DIRTY_JOB_IO_BOUND` flag does (`static_schedule_dirty_nif`,

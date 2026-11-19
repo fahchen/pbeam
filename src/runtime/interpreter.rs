@@ -3941,6 +3941,7 @@ impl BeamProgram {
         entry: CallKind,
     ) -> Result<Option<Outcome>, BeamError> {
         let process = scheduler.current_process_mut();
+        let suspend_return = matches!(result, BifResult::SuspendReturn(_));
         match result {
             BifResult::Value(value) => {
                 write(process, &Operand::X(0), value)?;
@@ -3950,14 +3951,19 @@ impl BeamProgram {
                     Ok(None)
                 }
             }
-            BifResult::YieldReturn(value) => {
+            BifResult::YieldReturn(value) | BifResult::SuspendReturn(value) => {
+                process.suspended = suspend_return;
                 write(process, &Operand::X(0), value)?;
                 if entry.is_tail() {
                     // The process exits at its next run when it returned
                     // from its last frame.
                     return_from_frame(process)?;
                 }
-                Ok(Some(Outcome::Yield))
+                Ok(Some(if suspend_return {
+                    Outcome::Wait
+                } else {
+                    Outcome::Yield
+                }))
             }
             BifResult::Raise { class, reason } => Ok(raise(process, class, reason)),
             BifResult::ErrorWithCause { reason, .. } => {

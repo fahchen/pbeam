@@ -652,7 +652,9 @@ pub(super) fn dist_ctrl_get_data(context: &mut BifContext<'_>, handle: &Term) ->
     };
     let get_size = dist.get_size(&name);
     let connection = dist.connection_id(&name);
+    let ready = dist.take_ready_senders(&name);
     drop(dist);
+    context.scheduler.resume_dist_senders(ready);
     if let Some((process, key)) = output.spawn_notsup {
         context
             .scheduler

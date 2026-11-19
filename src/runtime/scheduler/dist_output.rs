@@ -7,9 +7,9 @@ use std::sync::Arc;
 
 use super::{
     Scheduler,
-    dist_table::{Controller, DistTable, PendingSignal, queue_size},
+    dist_table::{BusyCharge, Controller, DistTable, PendingSignal, queue_size},
 };
-use crate::runtime::process::RemotePid;
+use crate::runtime::{process::RemotePid, signal::Signal};
 use crate::{
     error::BeamError,
     runtime::interpreter::bif::{encode_dist, encode_dist_cached, encode_dist_pending},
@@ -77,11 +77,42 @@ pub(in crate::runtime) enum SuspendMode {
     Allow,
     /// Reject a send to a busy connection.
     NoSuspend,
+    /// Ignore the busy state for a sender with `async_dist`.
+    IgnoreBusy,
+}
+
+impl SuspendMode {
+    /// Asynchronous sends contribute only to the total queue size.
+    fn busy_charge(self) -> BusyCharge {
+        match self {
+            Self::Allow | Self::NoSuspend => BusyCharge::Charged,
+            Self::IgnoreBusy => BusyCharge::Exempt,
+        }
+    }
+}
+
+/// The result of sending a message to a distribution entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::runtime) enum DistSend {
+    /// The signal was queued or discarded by the connection.
+    Complete,
+    /// The node had no usable connection.
+    NoConnect,
+    /// A busy connection rejected a send with `nosuspend`.
+    NoSuspend,
+    /// The send is complete, and the caller waits for the queue to drain.
+    Wait,
 }
 
 /// A signal that may join a pending connection during the final state check.
 pub(super) enum PendingOutput<'a> {
-    Send(&'a Term, &'a Term, SendPriority, SuspendMode, &'a mut bool),
+    Send(
+        &'a Term,
+        &'a Term,
+        SendPriority,
+        SuspendMode,
+        &'a mut DistSend,
+    ),
     Exit(&'a Term, &'a Term, SendPriority),
     Link(RemotePid, &'a Term),
     GroupLeader(&'a Term),
@@ -109,7 +140,7 @@ impl Scheduler {
         signal: PendingSignal,
     ) -> Result<(), BeamError> {
         let (control, message) = match &signal {
-            PendingSignal::Send(sender, to, message, priority) => (
+            PendingSignal::Send(sender, to, message, priority, _) => (
                 send_control(
                     if is_remote_reference(to) || *priority == SendPriority::Priority {
                         ALTACT_SIG
@@ -192,26 +223,29 @@ impl Scheduler {
         priority: SendPriority,
         connect: ConnectMode,
         nosuspend: SuspendMode,
-    ) -> Result<(bool, bool), BeamError> {
-        let caller = self.current_process().id;
+    ) -> Result<DistSend, BeamError> {
+        let process = self.current_process();
+        let caller = process.id;
+        let mode = if process.async_dist {
+            SuspendMode::IgnoreBusy
+        } else {
+            nosuspend
+        };
         let from = Term::Pid(caller);
+        let mut outcome = DistSend::Complete;
         // A pending connection accepts sends even with noconnect
-        // (bif.c:2391-2417). Keep them until the negotiated flags are known,
-        // then encode them before publishing the connection.
+        // (bif.c:2391-2417).
         if self.node.net_kernel().is_some() {
             let node_ref = Arc::clone(&self.node);
             let mut dist = node_ref.dist();
             if dist.pending(node) {
-                if nosuspend == SuspendMode::NoSuspend && dist.output_busy(node) {
-                    return Ok((true, true));
-                }
-                self.enqueue_pending(
+                self.queue_pending_output(
                     &mut dist,
                     node,
-                    PendingSignal::Send(caller, to.clone(), message.clone(), priority),
-                )
-                .expect("a pending send contains no match context");
-                return Ok((true, false));
+                    caller,
+                    PendingOutput::Send(to, message, priority, mode, &mut outcome),
+                );
+                return Ok(outcome);
             }
             let idle = dist.connected(node).is_none();
             drop(dist);
@@ -219,40 +253,26 @@ impl Scheduler {
             if idle {
                 tests::after_idle_send_check();
             }
-            let mut refused = false;
             if idle
                 && connect == ConnectMode::Allow
                 && self
                     .dist_auto_connect(node, |scheduler, dist, _| {
-                        if nosuspend == SuspendMode::NoSuspend && dist.output_busy(node) {
-                            refused = true;
-                            return Ok(());
-                        }
-                        scheduler.enqueue_pending(
+                        scheduler.queue_pending_output(
                             dist,
                             node,
-                            PendingSignal::Send(caller, to.clone(), message.clone(), priority),
-                        )
+                            caller,
+                            PendingOutput::Send(to, message, priority, mode, &mut outcome),
+                        );
+                        Ok(())
                     })?
                     .is_some()
             {
-                return Ok((true, refused));
+                return Ok(outcome);
             }
         }
-        let mut refused = false;
-        let pending = self
-            .node
-            .net_kernel()
-            .is_some()
-            .then_some(PendingOutput::Send(
-                to,
-                message,
-                priority,
-                nosuspend,
-                &mut refused,
-            ));
+        let pending = PendingOutput::Send(to, message, priority, mode, &mut outcome);
         let connection =
-            self.dist_output_with_pending(caller, node, None, pending, |flags, _| {
+            self.dist_output_with_pending(caller, node, None, Some(pending), |flags, _| {
                 if is_remote_reference(to) && flags & ALIAS == 0 {
                     return None;
                 }
@@ -261,7 +281,11 @@ impl Scheduler {
                     Some(message.clone()),
                 ))
             })?;
-        Ok((connection.is_some(), refused))
+        Ok(if connection.is_some() {
+            outcome
+        } else {
+            DistSend::NoConnect
+        })
     }
 
     /// Start an idle connection and queue a signal (`dist.c:5713-5759`).
@@ -473,16 +497,11 @@ impl Scheduler {
         build: impl FnOnce(u64, u32) -> Option<(Term, Option<Term>)>,
     ) -> Result<Option<u32>, BeamError> {
         let node_ref = Arc::clone(&self.node);
+        let can_queue_pending =
+            !matches!(pending, Some(PendingOutput::Send(..))) || node_ref.net_kernel().is_some();
         let mut dist = node_ref.dist();
-        if let Some(PendingOutput::Send(_, _, _, SuspendMode::NoSuspend, refused)) =
-            pending.as_mut()
-            && (dist.pending(node) || dist.connected(node).is_some())
-            && dist.output_busy(node)
-        {
-            **refused = true;
-            return Ok(Some(dist.connection_id(node)));
-        }
-        if dist.pending(node)
+        if can_queue_pending
+            && dist.pending(node)
             && let Some(pending) = pending
         {
             let connection = dist.connection_id(node);
@@ -492,6 +511,13 @@ impl Scheduler {
         let Some((flags, controller, connection)) = dist.connected(node) else {
             return Ok(None);
         };
+        if let Some(PendingOutput::Send(_, _, _, SuspendMode::NoSuspend, outcome)) =
+            pending.as_mut()
+            && dist.output_busy(node)
+        {
+            **outcome = DistSend::NoSuspend;
+            return Ok(Some(connection));
+        }
         let Some((control, message)) = build(flags, connection) else {
             return Ok(Some(connection));
         };
@@ -502,9 +528,18 @@ impl Scheduler {
         }
         let packets =
             self.dist_encode_packets(&mut dist, sender, node, flags, &control, message)?;
+        let charge = match pending {
+            Some(PendingOutput::Send(_, _, _, mode, _)) => mode.busy_charge(),
+            _ => BusyCharge::Charged,
+        };
         let mut notify = false;
         for packet in packets {
-            notify |= dist.enqueue(node, packet);
+            notify |= dist.enqueue(node, packet, charge);
+        }
+        if let Some(PendingOutput::Send(_, _, _, SuspendMode::Allow, outcome)) = pending
+            && dist.wait_for_output(node, sender)
+        {
+            *outcome = DistSend::Wait;
         }
         match controller {
             Controller::Process(process) => {
@@ -530,13 +565,26 @@ impl Scheduler {
         pending: PendingOutput<'_>,
     ) {
         match pending {
-            PendingOutput::Send(to, message, priority, _, _) => {
+            PendingOutput::Send(to, message, priority, mode, outcome) => {
+                if mode == SuspendMode::NoSuspend && dist.output_busy(node) {
+                    *outcome = DistSend::NoSuspend;
+                    return;
+                }
                 self.enqueue_pending(
                     dist,
                     node,
-                    PendingSignal::Send(sender, to.clone(), message.clone(), priority),
+                    PendingSignal::Send(
+                        sender,
+                        to.clone(),
+                        message.clone(),
+                        priority,
+                        mode.busy_charge(),
+                    ),
                 )
                 .expect("a pending send contains no match context");
+                if mode == SuspendMode::Allow && dist.wait_for_output(node, sender) {
+                    *outcome = DistSend::Wait;
+                }
             }
             PendingOutput::Exit(to, reason, priority) => {
                 self.enqueue_pending(
@@ -585,10 +633,14 @@ impl Scheduler {
         flags: u64,
     ) -> Result<(), BeamError> {
         for signal in dist.take_pending_signals(node) {
+            let charge = match &signal {
+                PendingSignal::Send(_, _, _, _, charge) => *charge,
+                _ => BusyCharge::Charged,
+            };
             let (sender, control, message) = match signal {
-                super::dist_table::PendingSignal::Send(sender, to, message, priority) => {
+                super::dist_table::PendingSignal::Send(sender, to, message, priority, _) => {
                     if is_remote_reference(&to) && flags & (ALIAS | ALTACT_SIG) == 0 {
-                        dist.enqueue(node, Vec::new());
+                        dist.enqueue(node, Vec::new(), charge);
                         continue;
                     }
                     (
@@ -608,14 +660,14 @@ impl Scheduler {
                     let Some((control, message)) =
                         exit_control(flags, sender, &to, &reason, priority)
                     else {
-                        dist.enqueue(node, Vec::new());
+                        dist.enqueue(node, Vec::new(), charge);
                         continue;
                     };
                     (sender, control, message)
                 }
                 super::dist_table::PendingSignal::Monitor(sender, control) => {
                     if flags & MONITOR_FLAGS != MONITOR_FLAGS {
-                        dist.enqueue(node, Vec::new());
+                        dist.enqueue(node, Vec::new(), charge);
                         continue;
                     }
                     (sender, control, None)
@@ -626,10 +678,20 @@ impl Scheduler {
                 }
             };
             for packet in self.dist_encode_packets(dist, sender, node, flags, &control, message)? {
-                dist.enqueue(node, packet);
+                dist.enqueue(node, packet, charge);
             }
         }
         Ok(())
+    }
+
+    /// Queue a resume even for a local sender, which can still be in its send BIF.
+    pub(in crate::runtime) fn resume_dist_senders(
+        &mut self,
+        senders: impl IntoIterator<Item = ProcessId>,
+    ) {
+        for sender in senders {
+            let _ = self.send_signal(None, sender, Signal::Resume);
+        }
     }
 
     /// Encode one distribution signal with the flags of its connection.
@@ -699,13 +761,16 @@ impl Scheduler {
                     return Ok(None);
                 };
                 let connection = dist.connection_id(&name);
+                let ready = dist.take_ready_senders(&name);
                 drop(dist);
                 if let Some((sender, key)) = output.spawn_notsup {
                     self.dist_spawn_notsup(&name, connection, sender, key);
                 }
                 let bytes: Vec<u8> = output.elements.iter().flat_map(Binary::to_bytes).collect();
                 let events = item.inet_mut().map(|tcp| tcp.send_dist(&bytes));
-                if let Some(exit) = self.send_events(port, item, events.unwrap_or_default())? {
+                let result = self.send_events(port, item, events.unwrap_or_default());
+                self.resume_dist_senders(ready);
+                if let Some(exit) = result? {
                     return Ok(Some(exit));
                 }
             }

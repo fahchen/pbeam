@@ -112,6 +112,12 @@ struct Entry {
     queue_size: u64,
     /// The connection remains busy until its queue falls below half the limit.
     output_busy: bool,
+    /// Portion of the total queue size charged by asynchronous senders.
+    async_queue_size: u64,
+    /// Portion of the pending queue size charged by asynchronous senders.
+    pending_async_size: u64,
+    /// Processes waiting for the current connection to drain or end.
+    send_waiters: Vec<ProcessId>,
     /// The count of the packets that the controller took (`dep->out`).
     out: u64,
     /// Whether `erlang:dist_ctrl_get_data_notification/1` asked for the
@@ -141,13 +147,27 @@ struct Entry {
 #[derive(Debug)]
 pub(in crate::runtime) struct DistOutput {
     pub(in crate::runtime) elements: Vec<Binary>,
+    charge: BusyCharge,
     pub(in crate::runtime) spawn_notsup: Option<(ProcessId, MonitorKey)>,
+}
+
+/// Whether a packet counts toward the connection busy limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BusyCharge {
+    Charged,
+    Exempt,
 }
 
 /// A signal queued while the connection flags are not yet known.
 #[derive(Debug)]
 pub(super) enum PendingSignal {
-    Send(ProcessId, Term, Term, super::dist_output::SendPriority),
+    Send(
+        ProcessId,
+        Term,
+        Term,
+        super::dist_output::SendPriority,
+        BusyCharge,
+    ),
     Monitor(ProcessId, Term),
     Link(ProcessId, Term),
     GroupLeader(ProcessId, Term),
@@ -213,6 +233,8 @@ pub(in crate::runtime) enum MonitorSide {
 pub(in crate::runtime) struct EndedConnection {
     /// The id of the connection that ended.
     pub(in crate::runtime) connection: u32,
+    /// Senders that resume after the connection ends.
+    pub(in crate::runtime) send_waiters: Vec<ProcessId>,
     /// The links of the connection.
     pub(in crate::runtime) links: Vec<(ProcessId, RemotePid)>,
     /// The monitors of the connection.
@@ -346,6 +368,9 @@ impl DistTable {
                 pending_queue_size: 0,
                 queue_size: 0,
                 output_busy: false,
+                async_queue_size: 0,
+                pending_async_size: 0,
+                send_waiters: Vec::new(),
                 out: 0,
                 notify: false,
                 order,
@@ -482,6 +507,7 @@ impl DistTable {
             State::Pending => {
                 let ended = EndedConnection {
                     connection: connection_id,
+                    send_waiters: std::mem::take(&mut entry.send_waiters),
                     links: std::mem::take(&mut entry.links),
                     monitors: std::mem::take(&mut entry.monitors),
                     node_monitors: (name.clone(), std::mem::take(&mut entry.node_monitors)),
@@ -782,15 +808,19 @@ impl DistTable {
     /// Queue a signal and its ERTS allocation size while the entry is pending.
     pub(super) fn enqueue_pending(&mut self, name: &Atom, signal: PendingSignal, size: u64) {
         let entry = self.entry_mut(name);
+        if matches!(&signal, PendingSignal::Send(_, _, _, _, BusyCharge::Exempt)) {
+            entry.pending_async_size += size;
+        }
         entry.pending_signals.push_back(signal);
         entry.pending_queue_size += size;
-        entry.output_busy |= entry.queue_size + entry.pending_queue_size >= 1_048_576;
+        entry.output_busy |= entry.busy_queue_size() >= 1_048_576;
     }
 
     /// Take pending signals while the entry lock is held.
     pub(super) fn take_pending_signals(&mut self, name: &Atom) -> VecDeque<PendingSignal> {
         let entry = self.entry_mut(name);
         entry.pending_queue_size = 0;
+        entry.pending_async_size = 0;
         std::mem::take(&mut entry.pending_signals)
     }
 
@@ -800,12 +830,22 @@ impl DistTable {
     /// `dist_data` message: once after
     /// `erlang:dist_ctrl_get_data_notification/1` asked for it
     /// (`dist.c:3655-3667`).
-    pub(in crate::runtime) fn enqueue(&mut self, name: &Atom, elements: Vec<Binary>) -> bool {
+    pub(super) fn enqueue(
+        &mut self,
+        name: &Atom,
+        elements: Vec<Binary>,
+        charge: BusyCharge,
+    ) -> bool {
         let entry = self.entry_mut(name);
-        entry.queue_size += queue_size(&elements);
-        entry.output_busy |= entry.queue_size + entry.pending_queue_size >= 1_048_576;
+        let size = queue_size(&elements);
+        entry.queue_size += size;
+        if charge == BusyCharge::Exempt {
+            entry.async_queue_size += size;
+        }
+        entry.output_busy |= entry.busy_queue_size() >= 1_048_576;
         entry.output.push_back(DistOutput {
             elements,
+            charge,
             spawn_notsup: None,
         });
         std::mem::take(&mut entry.notify)
@@ -815,9 +855,10 @@ impl DistTable {
     pub(super) fn enqueue_spawn_notsup(&mut self, name: &Atom, sender: ProcessId, key: MonitorKey) {
         let entry = self.entry_mut(name);
         entry.queue_size += queue_size(&[]);
-        entry.output_busy |= entry.queue_size + entry.pending_queue_size >= 1_048_576;
+        entry.output_busy |= entry.busy_queue_size() >= 1_048_576;
         entry.output.push_back(DistOutput {
             elements: Vec::new(),
+            charge: BusyCharge::Charged,
             spawn_notsup: Some((sender, key)),
         });
     }
@@ -828,12 +869,35 @@ impl DistTable {
     pub(in crate::runtime) fn dequeue(&mut self, name: &Atom) -> Option<DistOutput> {
         let entry = self.entry_mut(name);
         let output = entry.output.pop_front()?;
-        entry.queue_size -= queue_size(&output.elements);
-        if entry.queue_size + entry.pending_queue_size < 1_048_576 / 2 {
+        let size = queue_size(&output.elements);
+        entry.queue_size -= size;
+        if output.charge == BusyCharge::Exempt {
+            entry.async_queue_size -= size;
+        }
+        if entry.busy_queue_size() < 1_048_576 / 2 {
             entry.output_busy = false;
         }
         entry.out += 1;
         Some(output)
+    }
+
+    /// Register a sender under the same lock as the output queue update.
+    pub(super) fn wait_for_output(&mut self, name: &Atom, sender: ProcessId) -> bool {
+        let entry = self.entry_mut(name);
+        if entry.output_busy {
+            entry.send_waiters.push(sender);
+        }
+        entry.output_busy
+    }
+
+    /// Take the senders that can resume after the queue drains.
+    pub(in crate::runtime) fn take_ready_senders(&mut self, name: &Atom) -> Vec<ProcessId> {
+        let entry = self.entry_mut(name);
+        if entry.output_busy {
+            Vec::new()
+        } else {
+            std::mem::take(&mut entry.send_waiters)
+        }
     }
 
     /// Ask for the `dist_data` message of the next packet of the entry of
@@ -886,6 +950,7 @@ impl DistTable {
         let monitors = std::mem::take(&mut entry.monitors);
         let visible = entry.flags & PUBLISHED != 0;
         let node_monitors = (entry.name.clone(), std::mem::take(&mut entry.node_monitors));
+        let send_waiters = std::mem::take(&mut entry.send_waiters);
         entry.set_idle(self.next_order);
         entry.input = 0;
         // dist.c:1081.
@@ -895,6 +960,7 @@ impl DistTable {
         self.next_order += 1;
         Some(EndedConnection {
             connection,
+            send_waiters,
             links,
             monitors,
             node_monitors,
@@ -1217,6 +1283,11 @@ impl DistTable {
 }
 
 impl Entry {
+    /// Return the portion of the queue subject to the busy limits (`dist.c:3646-3653`).
+    fn busy_queue_size(&self) -> u64 {
+        self.queue_size - self.async_queue_size + self.pending_queue_size - self.pending_async_size
+    }
+
     /// Make the entry idle at the list position `order`, as
     /// `erts_set_dist_entry_not_connected` does
     /// (`erl_node_tables.c:630-686`): no flags, no options, and no
@@ -1232,6 +1303,8 @@ impl Entry {
         self.pending_signals.clear();
         self.pending_queue_size = 0;
         self.queue_size = 0;
+        self.async_queue_size = 0;
+        self.pending_async_size = 0;
         self.output_busy = false;
         self.notify = false;
         self.controller = None;

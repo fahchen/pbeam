@@ -4,7 +4,7 @@ use std::{cell::RefCell, sync::Arc};
 
 use socket2::{Domain, Socket, Type};
 
-use super::{Controller, Scheduler};
+use super::{BusyCharge, Controller, Scheduler};
 use crate::runtime::scheduler::{MonitorOptions, MonitorTarget};
 use crate::{
     runtime::{
@@ -347,8 +347,8 @@ fn noconnect_send_joins_a_connection_started_after_the_idle_check() {
     let local = scheduler.atoms.put("ncrace_local@nohost").unwrap();
     assert!(node_ref.set_this_node(&scheduler.atoms, ProcessId(0), &local, 4));
     node_ref.dist().insert(&node, Reference(8), 0);
-    assert!(
-        !scheduler
+    assert_eq!(
+        scheduler
             .dist_send(
                 &node,
                 &destination,
@@ -357,8 +357,8 @@ fn noconnect_send_joins_a_connection_started_after_the_idle_check() {
                 super::ConnectMode::NoConnect,
                 super::SuspendMode::Allow,
             )
-            .unwrap()
-            .0
+            .unwrap(),
+        super::DistSend::NoConnect
     );
     // Force the other scheduler's transition before this send takes its
     // fallback lock; a compiled BEAM fixture cannot pause at this boundary.
@@ -369,7 +369,7 @@ fn noconnect_send_joins_a_connection_started_after_the_idle_check() {
             other_node.dist().new_connection(&other_name);
         }));
     });
-    assert!(
+    assert_eq!(
         scheduler
             .dist_send(
                 &node,
@@ -379,8 +379,8 @@ fn noconnect_send_joins_a_connection_started_after_the_idle_check() {
                 super::ConnectMode::NoConnect,
                 super::SuspendMode::Allow,
             )
-            .unwrap()
-            .0
+            .unwrap(),
+        super::DistSend::Complete
     );
     let mut dist = node_ref.dist();
     assert!(
@@ -431,6 +431,7 @@ fn nosuspend_send_rejects_busy_connection_started_after_idle_check() {
                         target,
                         queued,
                         super::SendPriority::Normal,
+                        BusyCharge::Charged,
                     ),
                     1_048_576,
                 );
@@ -446,7 +447,7 @@ fn nosuspend_send_rejects_busy_connection_started_after_idle_check() {
                 super::SuspendMode::NoSuspend,
             )
             .unwrap();
-        assert_eq!(result, (true, true));
+        assert_eq!(result, super::DistSend::NoSuspend);
         let mut dist = shared.dist();
         assert_eq!(dist.output(&node).1, 1_048_576);
         assert_eq!(dist.take_pending_signals(&node).len(), 1);
@@ -496,7 +497,7 @@ fn queues_a_dead_alias_when_a_signal_joins_a_new_pending_connection() {
         side: super::super::dist_table::MonitorSide::Watcher,
     };
     let mut queued = false;
-    let mut refused = false;
+    let mut outcome = super::DistSend::Complete;
     for operation in 0..3 {
         let pending = match operation {
             0 => super::PendingOutput::Send(
@@ -504,7 +505,7 @@ fn queues_a_dead_alias_when_a_signal_joins_a_new_pending_connection() {
                 &alias,
                 super::SendPriority::Normal,
                 super::SuspendMode::Allow,
-                &mut refused,
+                &mut outcome,
             ),
             1 => super::PendingOutput::Exit(&target, &alias, super::SendPriority::Normal),
             _ => super::PendingOutput::Spawn(monitor, &control, &arguments, &mut queued),
@@ -579,7 +580,7 @@ fn closes_a_distribution_port_when_the_write_fails() {
         dist.new_connection(&node);
         scheduler.node.add_connection();
         assert!(dist.connect(&node, Controller::Port(port), 0).is_some());
-        dist.enqueue(&node, vec![Binary::from(vec![1])]);
+        dist.enqueue(&node, vec![Binary::from(vec![1])], BusyCharge::Charged);
     }
     drop(peer);
     scheduler.dist_port_send(port).unwrap();
