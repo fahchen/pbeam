@@ -931,7 +931,23 @@ fn encodes_the_large_and_unsupported_forms() {
     assert_eq!(&bytes[..5], [111, 0, 0, 1, 1]);
     // A match context has no bytes.
     let state = MatchState::new(Binary::from(vec![]));
-    assert!(encode(&Term::MatchContext(Arc::new(state)), &atoms, &options,).is_err());
+    let context = Term::MatchContext(Arc::new(state));
+    assert!(encode(&context, &atoms, &options).is_err());
+    // A match context cannot escape a compiled BEAM function. Neither
+    // half of a failed cached packet may change the connection's slots.
+    let scheduler = crate::runtime::scheduler::Scheduler::new(AtomTable::new());
+    let name = Term::static_atom("ok");
+    let invalid_control = Term::tuple(vec![name.clone(), context.clone()]);
+    let mut slots = HashMap::new();
+    for (control, message) in [(&invalid_control, None), (&name, Some(&context))] {
+        let error = encode_dist_cached(&scheduler, control, message, &mut slots).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .starts_with("unsupported erlang:term_to_binary/1,2 of a match context:")
+        );
+        assert!(slots.is_empty());
+    }
     // A map above 32 pairs keeps the HAMT order of `Map::iter`.
     let pairs: Vec<(Term, Term)> = (0..40)
         .map(|value| (Term::Integer(value), Term::Integer(value)))
