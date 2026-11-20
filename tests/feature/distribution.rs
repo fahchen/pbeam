@@ -572,6 +572,16 @@ fn encodes_an_alias_as_a_pid_reference_as_pinned_erts() {
         "{erts}"
     );
     assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), erts);
+    for use_ in ["binary", "size", "send"] {
+        let expression =
+            format!("io:format(\"~w~n\", [dist_channel_probe:dead_alias({use_})]), halt().");
+        let arguments = probe(
+            &["-sname", &name, "-kernel", "logger_level", "none"],
+            &expression,
+        );
+        assert_eq!(stdout(&erts_erl(&epmd, &arguments)), "true\n", "{use_}");
+        assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), "true\n", "{use_}");
+    }
 }
 
 #[test]
@@ -659,12 +669,6 @@ fn stops_at_a_part_of_a_channel_that_pbeam_does_not_have() {
         "reject(9)".to_owned(),
         "unsupported distribution message of a pid reference that is not of five numbers",
     ));
-    for use_ in ["binary", "size", "send"] {
-        cases.push((
-            format!("dead_alias({use_})"),
-            "unsupported external term of a pid reference whose owner exited",
-        ));
-    }
     for (call, error) in cases {
         let expression = format!("dist_channel_probe:{call}, halt().");
         let output = pbeam_erl(&epmd, &probe(&["-sname", &name], &expression));
@@ -1651,9 +1655,8 @@ fn preserves_cache_order_for_concurrent_port_senders() {
 }
 
 /// Run a cached distribution encode whose control or payload contains an
-/// alias whose owner has exited. ERTS keeps the owner in the alias, while
-/// PBeam reports the documented external-term difference.
-fn cache_encoder_rejects_dead_alias(operation: &str) {
+/// alias whose owner has exited.
+fn cache_encoder_keeps_dead_alias(operation: &str) {
     let epmd = Epmd::start();
     let id = std::process::id();
     let expression = format!(
@@ -1662,10 +1665,12 @@ fn cache_encoder_rejects_dead_alias(operation: &str) {
          Alias = receive {{Owner,A}} -> A end, \
          Node = cache_encode_peer@nohost, erts_internal:new_connection(Node), \
          Flags = element(3,erts_internal:get_dflags()) bor 16#2000, \
-         {{ok,_}} = erts_internal:create_dist_channel(Node,self(),{{Flags,1}}), \
+         {{ok,Handle}} = erts_internal:create_dist_channel(Node,self(),{{Flags,1}}), \
          Name = atom_to_binary(Node), \
          Pid = binary_to_term(<<131,88,118,(byte_size(Name)):16,Name/binary,1:32,0:32,1:32>>), \
-         {operation}, io:format(\"ok~n\"), halt()."
+         {operation}, Out = iolist_to_binary(erlang:dist_ctrl_get_data(Handle)), \
+         Bytes = term_to_binary(Alias), RefWords = binary:part(Bytes, byte_size(Bytes)-20, 20), \
+         RefWords = binary:part(Out, byte_size(Out)-20, 20), io:format(\"ok~n\"), halt()."
     );
     let run = |name: &str| {
         vec![
@@ -1683,23 +1688,20 @@ fn cache_encoder_rejects_dead_alias(operation: &str) {
         stdout(&erts_erl(&epmd, &run(&format!("dcaerts{id}")))),
         "ok\n"
     );
-    let output = pbeam_erl(&epmd, &run(&format!("dcapbeam{id}")));
-    assert_eq!(output.status.code(), Some(1), "{output:?}");
     assert_eq!(
-        String::from_utf8_lossy(&output.stderr),
-        "pbeam: unsupported external term of a pid reference whose owner exited: ERTS writes the pid of the owner in the reference, and PBeam does not keep it: see \"External term format\" in docs/erts-differences.md\n",
-        "{output:?}"
+        stdout(&pbeam_erl(&epmd, &run(&format!("dcapbeam{id}")))),
+        "ok\n"
     );
 }
 
 #[test]
-fn reports_a_dead_alias_in_a_cached_control_term() {
-    cache_encoder_rejects_dead_alias("erlang:exit(Pid, Alias)");
+fn encodes_a_dead_alias_in_a_cached_control_term() {
+    cache_encoder_keeps_dead_alias("erlang:exit(Pid, Alias)");
 }
 
 #[test]
-fn reports_a_dead_alias_in_a_cached_message() {
-    cache_encoder_rejects_dead_alias("Pid ! Alias");
+fn encodes_a_dead_alias_in_a_cached_message() {
+    cache_encoder_keeps_dead_alias("Pid ! Alias");
 }
 
 #[test]
@@ -3360,8 +3362,7 @@ fn counts_dead_aliases_in_pending_signals_as_pinned_erts() {
 }
 
 #[test]
-fn records_dead_alias_pending_delivery_difference() {
-    // The External term format row and #1619 record the missing owner pid.
+fn delivers_a_pending_dead_alias_as_pinned_erts() {
     let epmd = Epmd::start();
     let name = format!("dpenderr{}", std::process::id());
     let arguments = probe(
@@ -3369,13 +3370,7 @@ fn records_dead_alias_pending_delivery_difference() {
         "dist_pending_error_probe:deliver(), halt().",
     );
     assert_eq!(stdout(&erts_erl(&epmd, &arguments)), "ok\n");
-    let output = pbeam_erl(&epmd, &arguments);
-    assert_eq!(output.status.code(), Some(1), "{output:?}");
-    assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("unsupported external term of a pid reference whose owner exited"),
-        "{output:?}"
-    );
+    assert_eq!(stdout(&pbeam_erl(&epmd, &arguments)), "ok\n");
 }
 
 #[test]

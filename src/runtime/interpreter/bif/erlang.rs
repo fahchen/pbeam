@@ -47,8 +47,9 @@ use std::io::Write;
 
 use crate::term::external_id::{is_reference, pid_parts, port_number};
 use crate::term::{
-    Atom, AtomTable, Fun, MAX_ATOM_CHARACTERS, MAX_ATOM_SZ_LIMIT, MAX_TUPLE_SIZE, Map, ProcessId,
-    Reference, SMALL_INTEGER_MAX, SMALL_INTEGER_MIN, debug_term, external, print_term,
+    Atom, AtomTable, Fun, LocalReference, MAX_ATOM_CHARACTERS, MAX_ATOM_SZ_LIMIT, MAX_TUPLE_SIZE,
+    Map, ProcessId, Reference, SMALL_INTEGER_MAX, SMALL_INTEGER_MIN, debug_term, external,
+    print_term,
 };
 
 /// Return whether `term` is a pid, a port, or a reference of an old
@@ -79,9 +80,11 @@ pub(in crate::runtime::interpreter) fn old_incarnation(term: &Term, atoms: &Atom
 /// ```
 pub(super) fn node(term: &Term, atoms: &AtomTable) -> BifResult {
     match term {
-        Term::Pid(_) | Term::Port(_) | Term::Reference(_) | Term::Resource(_) => {
-            Value(local_node(atoms))
-        }
+        Term::Pid(_)
+        | Term::Port(_)
+        | Term::Reference(_)
+        | Term::PidReference(_)
+        | Term::Resource(_) => Value(local_node(atoms)),
         Term::External(id) => Value(Term::Atom(id.node.clone())),
         _ => BifResult::badarg(),
     }
@@ -1635,7 +1638,10 @@ fn send_exit(
     let (target, alias, remote) = match (id, id.reference()) {
         (Term::Pid(target), _) => (Some(*target), None, None),
         (_, Some(reference)) => {
-            let Some(owner) = scheduler.alias_owner(reference) else {
+            let Some(owner) = reference
+                .owner()
+                .filter(|id| scheduler.node().live_owner(*id).is_some())
+            else {
                 return Ok(Value(Term::static_atom("true")));
             };
             (Some(owner), Some(reference), None)
@@ -1880,7 +1886,7 @@ pub(super) fn monitor(
     }
     let target = target?;
     let reference = scheduler.monitor(&target, options)?;
-    Ok(Value(Term::Reference(reference)))
+    Ok(Value(reference.term()))
 }
 
 /// Read the options of `erlang:monitor/3` as ERTS `erts_monitor_opts`
@@ -2355,14 +2361,14 @@ pub(super) fn read_spawn_options(
 /// assert_eq!(spawn_reply_pair(&BifResult::Value(Term::Pid(ProcessId(1)))), Some((ProcessId(1), None)));
 /// assert_eq!(spawn_reply_pair(&BifResult::Value(Term::static_atom("x"))), None);
 /// ```
-fn spawn_reply_pair(result: &BifResult) -> Option<(ProcessId, Option<Reference>)> {
+fn spawn_reply_pair(result: &BifResult) -> Option<(ProcessId, Option<LocalReference>)> {
     match result {
         BifResult::Value(Term::Pid(pid)) => Some((*pid, None)),
         BifResult::Value(Term::Tuple(pair)) => {
-            let [Term::Pid(pid), Term::Reference(reference)] = pair.as_ref() else {
+            let [Term::Pid(pid), reference] = pair.as_ref() else {
                 return None;
             };
-            Some((*pid, Some(*reference)))
+            Some((*pid, Some(reference.reference()?)))
         }
         _ => None,
     }
@@ -2418,18 +2424,18 @@ pub(super) fn spawn_request(
         return Ok(result);
     };
     let scheduler = &mut *context.scheduler;
-    let reference = monitor_reference.unwrap_or(scheduler.make_ref()?);
+    let reference = monitor_reference.unwrap_or(LocalReference::Compact(scheduler.make_ref()?));
     if !message.reply.no_smsg {
         let message = Term::tuple(vec![
             message.tag,
-            Term::Reference(reference),
+            reference.term(),
             Term::static_atom("ok"),
             Term::Pid(pid),
         ]);
         let caller = context.scheduler.current_process().id;
         context.scheduler.send_message(caller, caller, message);
     }
-    Ok(BifResult::Value(Term::Reference(reference)))
+    Ok(BifResult::Value(reference.term()))
 }
 
 /// Run `erlang:spawn_request_abandon/1` as ERTS `spawn_request_abandon_1`
@@ -2482,7 +2488,7 @@ fn abandon_reference(reference: &Term) -> AbandonReference {
 /// The classes of [`abandon_reference`].
 enum AbandonReference {
     /// An internal reference, which may end an outstanding request.
-    Pending(Reference),
+    Pending(LocalReference),
     /// An external reference of another node.
     False,
     /// A term that is not a reference.
@@ -5535,7 +5541,7 @@ enum Destination<'a> {
     /// A local pid.
     Pid(ProcessId),
     /// A reference, which can be an alias.
-    Alias(Reference),
+    Alias(LocalReference),
     /// A registered name atom. A name that no process has raises `badarg`.
     /// The caller reads the name through the owning atom table.
     Name(&'a Atom),
@@ -5573,9 +5579,9 @@ fn destination<'a>(to: &'a Term, atoms: &AtomTable) -> Option<Destination<'a>> {
     let (this, _) = atoms.this_node();
     Some(match to {
         Term::Pid(pid) => Destination::Pid(*pid),
-        Term::Reference(reference) => Destination::Alias(*reference),
-        // A resource term is a magic reference (`erl_nif.c:3197-3204`).
-        Term::Resource(resource) => Destination::Alias(resource.reference()),
+        Term::Reference(_) | Term::PidReference(_) | Term::Resource(_) => {
+            Destination::Alias(to.reference()?)
+        }
         Term::Atom(name) => Destination::Name(name),
         Term::Port(id) => Destination::Port(*id),
         Term::External(id) if id.node == this => Destination::OldIncarnation(id),
@@ -7307,14 +7313,14 @@ pub(super) fn alias(context: &mut BifContext<'_>, options: &Term) -> Result<BifR
     };
     let reference = scheduler.monitor(&MonitorTarget::Process(caller), options)?;
     scheduler.current_process_mut().monitors.insert(
-        MonitorKey::Local(reference),
+        MonitorKey::local(reference),
         Origin {
             monitor: None,
             alias: Some(mode),
             watched_by: None,
         },
     );
-    Ok(Value(Term::Reference(reference)))
+    Ok(Value(reference.term()))
 }
 
 /// Run `erlang:unalias/1` as `unalias_1` (`bif.c:5896-5927`) does. A term
@@ -7350,11 +7356,11 @@ pub(super) fn unalias(
     };
     let scheduler = &mut *context.scheduler;
     let caller = scheduler.current_process().id;
-    if !reference.is_pid_reference() || scheduler.alias_owner(reference) != Some(caller) {
+    if reference.owner() != Some(caller) {
         return Ok(Value(Term::static_atom("false")));
     }
     let process = scheduler.current_process_mut();
-    let key = MonitorKey::Local(reference);
+    let key = MonitorKey::local(reference);
     let Some(origin) = process.monitors.get_mut(&key) else {
         return Ok(Value(Term::static_atom("false")));
     };
@@ -8079,9 +8085,9 @@ pub(super) fn cancel_timer(
     // returns `false` for it (`erl_hl_timer.c:2209-2220`,
     // `erl_hl_timer.c:2245-2250`).
     let end = match reference.reference() {
-        Some(id) => scheduler.cancel_bif_timer(id),
+        Some(LocalReference::Compact(id)) => scheduler.cancel_bif_timer(id),
         None if !asynchronous => return Ok(Value(Term::static_atom("false"))),
-        None => None,
+        Some(LocalReference::Pid(_)) | None => None,
     };
     let result = match end {
         Some(end) => Term::Integer(Timers::time_left(scheduler.timers.now(), end)),
@@ -8670,7 +8676,7 @@ pub(super) fn term_to_binary_2(
 ) -> Result<BifResult, BeamError> {
     let local = Term::list_from(vec![Term::static_atom("local")]);
     match term {
-        Term::Reference(reference) if *options == local && !reference.is_pid_reference() => {
+        Term::Reference(reference) if *options == local => {
             let seed = context.scheduler.local_node_hash();
             Ok(Value(Term::binary(external::local_reference(
                 *reference, seed,

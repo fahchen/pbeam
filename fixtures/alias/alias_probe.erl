@@ -1,6 +1,6 @@
 -module(alias_probe).
 -export([targets/0, options/0, tags/0, modes/0, downs/0, exits/0, sends/0, call/0, unsupported/1,
-         priority_down_order/0, priority_down_selective/0, priority_marker_hit/0, priority_watcher/1,
+         pid_reference_identity/0, show_pid_reference_identity/0, priority_down_order/0, priority_down_selective/0, priority_marker_hit/0, priority_watcher/1,
          priority_immediate/0, priority_immediate_remote/0, priority_large_tag/0, priority_tag_reference/0,
          priority_unrelated_marker/0, priority_unrelated_watcher/1, priority_info_wait/0,
          priority_tag_shapes/0, priority_tag_shapes_watcher/1,
@@ -406,3 +406,55 @@ call() ->
 %% Calls that PBeam does not support (see docs/erts-differences.md).
 unsupported(priority) -> erlang:monitor(process, spawn(?MODULE, idle, []), [priority]);
 unsupported(time_offset) -> erlang:monitor(time_offset, clock_service).
+
+%% Keep both PID words through decode, comparison, hash, and alias routing.
+pid_reference_identity() ->
+    Ref = alias(),
+    Bytes = term_to_binary(Ref),
+    Size = byte_size(Bytes) - 8,
+    <<Prefix:Size/binary, Low:32, High:32>> = Bytes,
+    Lower = <<Prefix/binary, (Low + 128):32, High:32>>,
+    Higher = <<Prefix/binary, Low:32, (High + 1):32>>,
+    LowRef = binary_to_term(Lower),
+    HighRef = binary_to_term(Higher),
+    Copy = binary_to_term(Bytes),
+    Flat = #{Ref => original, LowRef => low, HighRef => high},
+    Trie = add_integer_keys(33, Flat),
+    LowRef ! low,
+    HighRef ! high,
+    Copy ! original,
+    Messages = flush(),
+    Bad = <<Prefix/binary, (Low bxor 1):32, High:32>>,
+    PrefixSize = byte_size(Prefix) - 8,
+    <<BeforeN1:PrefixSize/binary, N1:32, N2:32>> = Prefix,
+    Magic = <<BeforeN1/binary, (N1 bor 16#20000):32, N2:32, Low:32, High:32>>,
+    MagicRef = binary_to_term(Magic),
+    Pid = spawn(?MODULE, idle, []),
+    Monitor = monitor(process, Pid, [{alias, demonitor}]),
+    MonitorBytes = term_to_binary(Monitor),
+    <<MonitorPrefix:Size/binary, MonitorLow:32, MonitorHigh:32>> = MonitorBytes,
+    Changed = binary_to_term(<<MonitorPrefix/binary, (MonitorLow bxor 128):32, MonitorHigh:32>>),
+    Demonitor = {Monitor =:= Changed, demonitor(Changed, [info]), demonitor(Monitor, [info])},
+    Pid ! stop,
+    ok = erts_internal:group_leader(group_leader(), self(), Ref),
+    LeaderReply = receive {Ref, true} -> true end,
+    NoTimer = {erlang:read_timer(Ref), erlang:cancel_timer(Ref), erlang:cancel_timer(Ref, [{info, false}])},
+    DeadOwnerExit = exit(HighRef, unused),
+    {Ref =:= Copy, Ref =:= LowRef, Ref =:= HighRef, Ref < LowRef, LowRef < HighRef, Ref < HighRef,
+     erlang:phash2(Ref) =:= erlang:phash2(LowRef), erlang:phash2(Ref) =:= erlang:phash2(HighRef),
+     map_size(Flat), map_size(Trie),
+     {erlang:map_get(Ref, Flat), erlang:map_get(LowRef, Flat), erlang:map_get(HighRef, Flat)},
+     {erlang:map_get(Ref, Trie), erlang:map_get(LowRef, Trie), erlang:map_get(HighRef, Trie)},
+     is_reference(LowRef), node(HighRef) =:= node(), erts_debug:flat_size(Ref),
+     erts_debug:same(Ref, Ref), erts_debug:same(Ref, Copy),
+     term_to_binary(LowRef) =:= Lower, term_to_binary(HighRef) =:= Higher,
+     erlang:ref_to_list(Ref) =/= erlang:ref_to_list(LowRef), erlang:ref_to_list(Ref) =/= erlang:ref_to_list(HighRef),
+     {is_reference(MagicRef), Ref =:= MagicRef, term_to_binary(MagicRef) =:= Magic, unalias(MagicRef)},
+     Demonitor, LeaderReply, NoTimer, DeadOwnerExit, erts_internal:term_type(Ref),
+     Messages, unalias(LowRef), unalias(HighRef), unalias(Ref),
+     try binary_to_term(Bad) of _ -> accepted catch error:badarg -> badarg end}.
+
+show_pid_reference_identity() -> exit(pid_reference_identity()).
+
+add_integer_keys(0, Map) -> Map;
+add_integer_keys(N, Map) -> add_integer_keys(N - 1, Map#{N => N}).

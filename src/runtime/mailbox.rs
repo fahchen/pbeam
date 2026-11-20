@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
 use super::signal::Signal;
-use crate::term::{LiveBytes, Reference, Term};
+use crate::term::{LiveBytes, LocalReference, Term};
 
 /// Number of receive marker slots in a process, as
 /// `ERTS_RECV_MARKER_BLOCK_SIZE` in ERTS.
@@ -116,7 +116,7 @@ enum SaveMode {
     /// An emulator request that waits after the message queue.
     Last,
     /// An optimized receive that uses this marker reference.
-    Marker(Reference),
+    Marker(LocalReference),
 }
 
 /// The signal queue of a process, as the private and public signal queues
@@ -246,7 +246,8 @@ impl Mailbox {
                 SaveMode::First => true,
                 SaveMode::Last => false,
                 SaveMode::Marker(reference) => self.markers.iter().any(|marker| {
-                    marker.id == Some(Term::Reference(reference)) && marker.in_priority
+                    marker.id.as_ref().and_then(Term::reference) == Some(reference)
+                        && marker.in_priority
                 }),
             };
             if !inspect {
@@ -632,7 +633,7 @@ impl Mailbox {
         }
         if let Some(index) = self.marker(marker) {
             let slot = &mut self.markers[index];
-            if matches!(reference, Term::Reference(_)) {
+            if matches!(reference, Term::Reference(_) | Term::PidReference(_)) {
                 slot.id = Some(reference.clone());
             } else {
                 slot.id = None;
@@ -654,13 +655,13 @@ impl Mailbox {
     /// mailbox.use_marker(&Term::Reference(reference));
     /// ```
     pub(super) fn use_marker(&mut self, reference: &Term) {
-        let Term::Reference(reference_id) = reference else {
+        let Some(reference_id) = reference.reference() else {
             return;
         };
         let Some(index) = self.marker(reference) else {
             return;
         };
-        self.save_mode = SaveMode::Marker(*reference_id);
+        self.save_mode = SaveMode::Marker(reference_id);
         self.clear_pending_set_save();
         self.priority_save =
             if self.markers[index].in_priority && !self.priority_messages.is_empty() {
@@ -703,7 +704,10 @@ impl Mailbox {
     /// mailbox.clear_marker(&Term::Reference(reference));
     /// ```
     pub(super) fn clear_marker(&mut self, id: &Term) {
-        if !matches!(id, Term::Integer(_) | Term::Reference(_)) {
+        if !matches!(
+            id,
+            Term::Integer(_) | Term::Reference(_) | Term::PidReference(_)
+        ) {
             return;
         }
         if let Some(index) = self.marker(id) {
@@ -1230,7 +1234,10 @@ impl Mailbox {
 fn mark_priority_references(term: &Term, markers: &mut VecDeque<Marker>) -> i32 {
     let mut remaining = markers
         .iter()
-        .filter(|marker| !marker.in_priority && matches!(marker.id, Some(Term::Reference(_))))
+        .filter(|marker| {
+            !marker.in_priority
+                && matches!(marker.id, Some(Term::Reference(_) | Term::PidReference(_)))
+        })
         .count();
     let mut extra = 0;
     let mut pending = vec![term];
@@ -1238,7 +1245,7 @@ fn mark_priority_references(term: &Term, markers: &mut VecDeque<Marker>) -> i32 
         && let Some(term) = pending.pop()
     {
         match term {
-            Term::Reference(_) => {
+            Term::Reference(_) | Term::PidReference(_) => {
                 for marker in markers.iter_mut() {
                     if !marker.in_priority && marker.id.as_ref() == Some(term) {
                         marker.in_priority = true;

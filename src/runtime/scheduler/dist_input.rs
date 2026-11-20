@@ -198,15 +198,13 @@ impl Scheduler {
                 Ok(())
             }
             (Some(33), [_, _, to]) => match to {
-                Term::Reference(alias) => {
-                    if let Some(owner) = self.node.alias_owner(*alias)
+                Term::PidReference(_) => {
+                    let alias = to.reference().expect("a local pid reference");
+                    if let Some(owner) = alias.owner()
                         && self.node.live_owner(owner).is_some()
                     {
                         let message = self.dist_message(message, cache.as_deref())?;
-                        let signal = Signal::AliasMessage {
-                            alias: *alias,
-                            message,
-                        };
+                        let signal = Signal::AliasMessage { alias, message };
                         let _ = self.send_signal(None, owner, signal);
                     }
                     Ok(())
@@ -567,9 +565,8 @@ impl Scheduler {
             let Some(reference) = to.reference() else {
                 return Ok(());
             };
-            let owner = self
-                .node
-                .alias_owner(reference)
+            let owner = reference
+                .owner()
                 .filter(|owner| self.node.live_owner(*owner).is_some());
             (owner, Some(reference))
         } else if flags & ALTACT_NAME != 0 {

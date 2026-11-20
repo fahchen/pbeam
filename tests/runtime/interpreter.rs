@@ -1487,7 +1487,10 @@ fn raises_badkey_when_put_map_exact_gets_a_missing_reference_key() {
 fn changes_a_map_with_alias_reference_keys_by_put_map_exact() {
     // An alias reference has a PBeam order, so the exact change finds two
     // alias keys as it finds two references (`src/term/order.rs`).
-    let alias = |number| Term::Reference(crate::Reference(number).pid_reference());
+    let alias = |number| {
+        crate::term::LocalReference::new_pid(crate::Reference(number), crate::term::ProcessId(1))
+            .term()
+    };
     let map = Term::Map(
         Map::from_pairs(
             vec![(alias(2), test_atom("b")), (alias(1), test_atom("a"))],

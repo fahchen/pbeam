@@ -181,7 +181,7 @@ fn spawn_joins_a_new_pending_connection_after_the_connected_check() {
         )
         .unwrap();
     assert!(!monitored);
-    let key = MonitorKey::Local(reference);
+    let key = MonitorKey::local(reference);
     assert!(scheduler.current_process().monitors.get(&key).is_some());
     assert_eq!(
         scheduler.current_process().mailbox.messages(),
@@ -466,10 +466,7 @@ fn queues_a_dead_alias_when_a_signal_joins_a_new_pending_connection() {
         dist.insert(&node, Reference(8), 0);
         dist.new_connection(&node);
     }
-    let reference = Reference::ordinary(9).unwrap().pid_reference();
-    node_ref.register_alias(reference, ProcessId(2));
-    node_ref.remove_aliases(ProcessId(2));
-    let alias = Term::Reference(reference);
+    let alias = crate::term::LocalReference::new_pid(Reference(9), ProcessId(2)).term();
     let remote = RemotePid {
         node: node.index(),
         creation: 1,
@@ -526,13 +523,7 @@ fn queues_a_dead_alias_when_a_signal_joins_a_new_pending_connection() {
         dist.connect(&node, Controller::Process(ProcessId(0)), 0)
             .is_some()
     );
-    let error = scheduler
-        .dist_flush_pending(&mut dist, &node, 0)
-        .unwrap_err();
-    assert!(
-        format!("{error:?}")
-            .contains("unsupported external term of a pid reference whose owner exited")
-    );
+    scheduler.dist_flush_pending(&mut dist, &node, 0).unwrap();
 }
 
 #[test]

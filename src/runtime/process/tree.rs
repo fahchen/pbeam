@@ -148,10 +148,10 @@ fn key_bytes(key: MonitorKey) -> [u8; 25] {
     let mut bytes = [0; 25];
     match key {
         MonitorKey::Local(reference) => {
-            for (index, number) in memory_bytes(reference).iter().enumerate() {
-                let start = 5 + index * 4;
-                bytes[start..start + 4].copy_from_slice(number);
-            }
+            bytes[5..].copy_from_slice(&number_bytes(&reference.numbers()));
+        }
+        MonitorKey::Pid(reference) => {
+            bytes[5..].copy_from_slice(&number_bytes(&reference.0[..3]));
         }
         MonitorKey::Remote(reference) => {
             bytes[0] = 1;
@@ -186,24 +186,15 @@ impl TreeKey for TimerReference {
 
 /// Return the bytes of the ERTS reference numbers `[N0, N1, N2]` of
 /// `reference` in little-endian memory order. Arrays compare element by
-/// element, so these bytes compare as `sys_memcmp` does. ERTS marks a pid
-/// reference with bit 16 of `N1` (`ERTS_REF1_PID_MARKER_BIT__`,
-/// `erl_bif_unique.h:106-109`). [`Reference::numbers`] gives the mark in
-/// the high bit of `N2`, so this function moves it.
+/// element, so these bytes compare as `sys_memcmp` does.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// assert_eq!(memory_bytes(Reference(0x1_0203)), [[3, 2, 1, 0], [1, 0, 0, 0], [0, 0, 0, 0]]);
-/// assert_eq!(memory_bytes(Reference(0).pid_reference())[1], [1, 0, 1, 0]);
 /// ```
 fn memory_bytes(reference: Reference) -> [[u8; 4]; 3] {
-    let [n0, mut n1, mut n2] = reference.numbers();
-    if reference.is_pid_reference() {
-        n1 |= 1 << 16;
-        n2 &= !(1 << 31);
-    }
-    [n0, n1, n2].map(u32::to_le_bytes)
+    reference.numbers().map(u32::to_le_bytes)
 }
 
 /// Return the bytes of the reference numbers `numbers` in the order that
@@ -375,6 +366,20 @@ impl<K: TreeKey, V> MonitorLinkTree<K, V> {
     /// ```
     pub(in crate::runtime) fn get_mut(&mut self, key: &K) -> Option<&mut V> {
         self.find(*key).map(|index| &mut self.nodes[index].value)
+    }
+
+    /// Return the stored key and mutable value that match `key`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// tree.insert(ProcessId(1), 7);
+    /// assert_eq!(tree.get_entry_mut(&ProcessId(1)), Some((ProcessId(1), &mut 7)));
+    /// ```
+    pub(in crate::runtime) fn get_entry_mut(&mut self, key: &K) -> Option<(K, &mut V)> {
+        let index = self.find(*key)?;
+        let node = &mut self.nodes[index];
+        Some((node.key, &mut node.value))
     }
 
     /// Insert `value` at `key`, as the ERTS `insert_aux__`

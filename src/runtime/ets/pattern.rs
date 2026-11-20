@@ -940,9 +940,11 @@ fn call(atoms: &AtomTable, function: Guard, arguments: &[Term]) -> Option<Term> 
         },
         Guard::Node0 => Some(Term::Atom(atoms.this_node().0)),
         Guard::Node1 => match &arguments[0] {
-            Term::Pid(_) | Term::Port(_) | Term::Reference(_) | Term::Resource(_) => {
-                Some(Term::Atom(atoms.this_node().0))
-            }
+            Term::Pid(_)
+            | Term::Port(_)
+            | Term::Reference(_)
+            | Term::PidReference(_)
+            | Term::Resource(_) => Some(Term::Atom(atoms.this_node().0)),
             Term::External(id) => Some(Term::Atom(id.node.clone())),
             _ => None,
         },

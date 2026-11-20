@@ -124,16 +124,6 @@ impl Roots {
     }
 }
 
-/// The alias table of the node: the owner of each alias, and the aliases
-/// of each owner, so the exit of a process removes only its own aliases, as
-/// the ERTS exit walks only the monitors of the process
-/// (`erl_process.c:14560-14569`).
-#[derive(Debug, Default)]
-struct Aliases {
-    owners: HashMap<crate::term::Reference, ProcessId>,
-    by_owner: HashMap<ProcessId, Vec<crate::term::Reference>>,
-}
-
 /// The node entry of one active BIF timer.
 #[derive(Debug, Clone, Copy)]
 struct TimerEntry {
@@ -208,10 +198,6 @@ pub(in crate::runtime) struct Node {
     persistent_terms: Mutex<PersistentTermStore>,
     /// True when a persistent term table waits for thread progress.
     persistent_progress: AtomicBool,
-    /// The owner of each alias, by its reference. ERTS aliases belong to
-    /// the node, and any scheduler sends to them
-    /// (`erl_proc_sig_queue.c:2814-2895`).
-    aliases: Mutex<Aliases>,
     /// The active BIF timers of the node.
     timers: Mutex<BifTimers>,
     /// The inbox of each scheduler. A node of one scheduler has one inbox
@@ -372,7 +358,6 @@ impl Node {
                 ttys: Mutex::default(),
                 persistent_terms: Mutex::default(),
                 persistent_progress: AtomicBool::new(false),
-                aliases: Mutex::new(Aliases::default()),
                 timers: Mutex::new(BifTimers::default()),
                 inboxes,
                 nif_library: AtomicBool::new(false),
@@ -673,7 +658,6 @@ impl Node {
             ttys: Mutex::default(),
             persistent_terms: Mutex::default(),
             persistent_progress: AtomicBool::new(false),
-            aliases: Mutex::new(Aliases::default()),
             timers: Mutex::new(BifTimers::default()),
             inboxes: vec![Inbox {
                 queue: Mutex::new(VecDeque::new()),
@@ -1181,44 +1165,6 @@ impl Node {
     /// library can send a message at any time.
     pub(in crate::runtime) fn has_nif_library(&self) -> bool {
         self.nif_library.load(Ordering::Acquire)
-    }
-
-    /// Record the process `owner` as the owner of the alias `reference`.
-    pub(in crate::runtime) fn register_alias(
-        &self,
-        reference: crate::term::Reference,
-        owner: ProcessId,
-    ) {
-        let mut aliases = self
-            .aliases
-            .lock()
-            .expect("the alias table is not poisoned");
-        aliases.owners.insert(reference, owner);
-        aliases.by_owner.entry(owner).or_default().push(reference);
-    }
-
-    /// Return the owner of the alias `reference`.
-    pub(in crate::runtime) fn alias_owner(
-        &self,
-        reference: crate::term::Reference,
-    ) -> Option<ProcessId> {
-        self.aliases
-            .lock()
-            .expect("the alias table is not poisoned")
-            .owners
-            .get(&reference)
-            .copied()
-    }
-
-    /// Remove each alias of the process `owner`, at its exit.
-    pub(in crate::runtime) fn remove_aliases(&self, owner: ProcessId) {
-        let mut aliases = self
-            .aliases
-            .lock()
-            .expect("the alias table is not poisoned");
-        for reference in aliases.by_owner.remove(&owner).unwrap_or_default() {
-            aliases.owners.remove(&reference);
-        }
     }
 
     /// Record the BIF timer `reference` of the scheduler `index` with the

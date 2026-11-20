@@ -141,8 +141,8 @@ fn compares_a_partially_bound_key_as_cmp_partly_bound() {
     assert_eq!(
         cmp_partly_bound(
             &atoms,
-            &Term::Reference(Reference(1).pid_reference()),
-            &Term::Reference(Reference(2).pid_reference())
+            &crate::term::LocalReference::new_pid(Reference(1), crate::term::ProcessId(1)).term(),
+            &crate::term::LocalReference::new_pid(Reference(2), crate::term::ProcessId(1)).term()
         )
         .unwrap(),
         Ordering::Less
@@ -180,8 +180,8 @@ fn orders_the_partially_bound_keys_as_partly_bound_can_match() {
     // An alias reference compares by its three reference numbers
     // (`src/term/order.rs`), so the alias 1 is less than the alias 2.
     assert!(lesser(
-        &Term::Reference(Reference(1).pid_reference()),
-        &Term::Reference(Reference(2).pid_reference())
+        &crate::term::LocalReference::new_pid(Reference(1), crate::term::ProcessId(1)).term(),
+        &crate::term::LocalReference::new_pid(Reference(2), crate::term::ProcessId(1)).term()
     ));
 }
 

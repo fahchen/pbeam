@@ -167,7 +167,9 @@ fn write(
     let Some((key, socket)) = socket_argument(scheduler, socket) else {
         return Ok(BifResult::badarg());
     };
-    let (Term::Reference(_), Some(bytes)) = (reference, data.binary_bytes()) else {
+    let (Term::Reference(_) | Term::PidReference(_), Some(bytes)) =
+        (reference, data.binary_bytes())
+    else {
         return Ok(BifResult::badarg());
     };
     let flags = match int(flags) {
@@ -277,7 +279,7 @@ pub(super) fn sendv(
     let Some((key, socket)) = socket_argument(scheduler, socket) else {
         return Ok(BifResult::badarg());
     };
-    let Term::Reference(_) = reference else {
+    let (Term::Reference(_) | Term::PidReference(_)) = reference else {
         return Ok(BifResult::badarg());
     };
     let caller = scheduler.current_process().id;
@@ -492,7 +494,7 @@ pub(super) fn sendmsg(
     let Some((key, socket)) = socket_argument(scheduler, socket) else {
         return Ok(BifResult::badarg());
     };
-    let (Term::Reference(_), Term::Map(_)) = (reference, message) else {
+    let (Term::Reference(_) | Term::PidReference(_), Term::Map(_)) = (reference, message) else {
         return Ok(BifResult::badarg());
     };
     let flags = match int(flags) {
@@ -636,7 +638,7 @@ pub(super) fn sendmmsg(
     let Some((key, socket)) = socket_argument(scheduler, socket) else {
         return Ok(BifResult::badarg());
     };
-    if !matches!(reference, Term::Reference(_)) || !messages.is_list() {
+    if !matches!(reference, Term::Reference(_) | Term::PidReference(_)) || !messages.is_list() {
         return Ok(BifResult::badarg());
     }
     let flags = match int(flags) {
@@ -817,7 +819,7 @@ pub(super) fn recvmmsg(
         return Ok(BifResult::badarg());
     };
     let zero = match reference {
-        Term::Reference(_) => false,
+        Term::Reference(_) | Term::PidReference(_) => false,
         Term::Atom(name) if scheduler.atoms.name_of(name) == "zero" => true,
         _ => return Ok(BifResult::badarg()),
     };
@@ -1022,7 +1024,7 @@ fn read_request(
         return Ok(Err(BifResult::badarg()));
     };
     let zero = match reference {
-        Term::Reference(_) => false,
+        Term::Reference(_) | Term::PidReference(_) => false,
         Term::Atom(name) if scheduler.atoms.name_of(name) == "zero" => true,
         _ => return Ok(Err(BifResult::badarg())),
     };
@@ -1382,7 +1384,7 @@ pub(super) fn recvmsg(
         return Ok(BifResult::badarg());
     };
     let zero = match reference {
-        Term::Reference(_) => false,
+        Term::Reference(_) | Term::PidReference(_) => false,
         Term::Atom(name) if scheduler.atoms.name_of(name) == "zero" => true,
         _ => return Ok(BifResult::badarg()),
     };

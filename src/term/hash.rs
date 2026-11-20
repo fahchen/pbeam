@@ -29,7 +29,7 @@
 use num_bigint::Sign;
 
 use super::{
-    Atom, AtomTable, Binary, Fun, Map, PortId, ProcessId, Record, Reference, Target, Term,
+    Atom, AtomTable, Binary, Fun, LocalReference, Map, PortId, ProcessId, Record, Target, Term,
     external_id::{ExternalData, ExternalId, pid_parts, port_number, reference_numbers},
     map::{Child, Form, Node},
     match_context::MATCH_CONTEXT_ESCAPE,
@@ -133,7 +133,7 @@ enum Shape<'a> {
     Bignum(bool, Vec<u64>),
     /// The bits of a float.
     Float(u64),
-    Reference(Reference),
+    Reference(LocalReference),
     /// A pid, a port, or a reference of another node.
     External(&'a ExternalId),
     Fun(&'a Fun),
@@ -175,8 +175,9 @@ fn shape(term: &Term) -> Shape<'_> {
         Term::Record(record) => Shape::Record(record),
         Term::Map(map) => Shape::Map(map),
         Term::Binary(bytes) => Shape::Binary(bytes),
-        Term::Reference(reference) => Shape::Reference(*reference),
-        Term::Resource(resource) => Shape::Reference(resource.reference()),
+        Term::Reference(_) | Term::PidReference(_) | Term::Resource(_) => {
+            Shape::Reference(term.reference().expect("a local reference"))
+        }
         Term::External(id) => Shape::External(id),
         Term::Fun(fun) => Shape::Fun(fun),
         Term::MatchContext(_) => unreachable!("{MATCH_CONTEXT_ESCAPE}"),
@@ -224,6 +225,21 @@ fn pixdata(number: u64, bits: u32) -> u64 {
 /// ```
 pub(crate) fn pid_word(ProcessId(number): ProcessId) -> u64 {
     (pixdata(number, PROCESS_TABLE_BITS) << IMMED1_TAG_BITS) | PID_TAG
+}
+
+/// Reverse the pid table index layout of [`pid_word`].
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// assert_eq!(word_pid(1283), Some(ProcessId(10)));
+/// ```
+pub(super) fn word_pid(word: u64) -> Option<ProcessId> {
+    let data = word >> IMMED1_TAG_BITS;
+    let shift = PROCESS_TABLE_BITS - 3;
+    let mask = (1 << PROCESS_TABLE_BITS) - 1;
+    let pid = ProcessId((data & !mask) | ((data & mask) >> 3) | ((data & 7) << shift));
+    (pid_word(pid) == word).then_some(pid)
 }
 
 /// Return the ERTS word of the atom with an atom-table index.
@@ -651,9 +667,12 @@ impl State {
                 self.mix_beta(bits);
             }
             Shape::Reference(reference) => {
-                let [number_0, number_1, number_2] = reference.numbers().map(u64::from);
+                let [number_0, number_1, number_2, low, high] = reference.numbers().map(u64::from);
                 self.mix_alpha(pair(TYPE_LOCAL_REF, number_0));
                 self.mix_beta(pair(number_1, number_2));
+                if matches!(reference, LocalReference::Pid(_)) {
+                    self.mix_alpha(pair(low, high));
+                }
             }
             // ERTS mixes the address of the node entry, which PBeam does not
             // have; PBeam mixes the atom index of the node name and the
@@ -1016,6 +1035,7 @@ pub(crate) fn make_hash(atoms: &AtomTable, term: &Term) -> u32 {
                 Term::Pid(_)
                 | Term::Port(_)
                 | Term::Reference(_)
+                | Term::PidReference(_)
                 | Term::Resource(_)
                 | Term::External(_) => {
                     if let Some((number, _)) = pid_parts(term) {
@@ -1732,6 +1752,7 @@ pub(crate) fn make_hash2(atoms: &AtomTable, term: &Term) -> (u32, u64) {
             Term::Pid(_)
             | Term::Port(_)
             | Term::Reference(_)
+            | Term::PidReference(_)
             | Term::Resource(_)
             | Term::External(_) => {
                 hash = if let Some((number, _)) = pid_parts(term) {

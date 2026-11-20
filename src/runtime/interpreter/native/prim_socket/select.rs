@@ -106,7 +106,7 @@ pub(super) fn connect(
     let address = match reference {
         None => None,
         Some((reference, address)) => {
-            if !matches!(reference, Term::Reference(_)) {
+            if !matches!(reference, Term::Reference(_) | Term::PidReference(_)) {
                 return Ok(BifResult::badarg());
             }
             if matches!(address, Term::Cons(_) | Term::Nil) {
@@ -444,7 +444,9 @@ pub(super) fn cancel(
     let Some((key, socket)) = socket_argument(scheduler, socket) else {
         return Ok(BifResult::badarg());
     };
-    let (Term::Atom(operation), Term::Reference(_)) = (operation, reference) else {
+    let (Term::Atom(operation), Term::Reference(_) | Term::PidReference(_)) =
+        (operation, reference)
+    else {
         return Ok(BifResult::badarg());
     };
     let caller = scheduler.current_process().id;

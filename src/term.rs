@@ -124,6 +124,8 @@ pub enum Term {
     Port(PortId),
     /// A reference owned by this runtime.
     Reference(Reference),
+    /// A local reference with the exact ERTS pid word of its owner.
+    PidReference(Arc<PidReference>),
     /// A pid, a port, or a reference of another node, which
     /// `binary_to_term/1` makes (`ExternalThing`, `erl_node_tables.h`).
     External(Arc<ExternalId>),
@@ -461,6 +463,7 @@ impl Term {
         Some(match (self, other) {
             (Term::Binary(left), Term::Binary(right)) => left.same_view(right),
             (Term::BigInt(left), Term::BigInt(right)) => Arc::ptr_eq(left, right),
+            (Term::PidReference(left), Term::PidReference(right)) => Arc::ptr_eq(left, right),
             (Term::Cons(left), Term::Cons(right)) => left.same_cell(right),
             // The empty tuple is one global literal (`copy.c:130-140`).
             (Term::Tuple(left), Term::Tuple(right)) => {
@@ -493,13 +496,14 @@ impl Term {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// assert_eq!(Term::Reference(Reference(0)).reference(), Some(Reference(0)));
+    /// assert_eq!(Term::Reference(Reference(0)).reference(), Some(LocalReference::Compact(Reference(0))));
     /// assert_eq!(Term::Nil.reference(), None);
     /// ```
-    pub(crate) fn reference(&self) -> Option<Reference> {
+    pub(crate) fn reference(&self) -> Option<LocalReference> {
         match self {
-            Term::Reference(reference) => Some(*reference),
-            Term::Resource(resource) => Some(resource.reference()),
+            Term::Reference(reference) => Some(LocalReference::Compact(*reference)),
+            Term::PidReference(reference) => Some(LocalReference::Pid(**reference)),
+            Term::Resource(resource) => Some(LocalReference::Compact(resource.reference())),
             _ => None,
         }
     }
@@ -772,6 +776,7 @@ impl Clone for Term {
             Term::Pid(pid) => Term::Pid(*pid),
             Term::Port(port) => Term::Port(*port),
             Term::Reference(reference) => Term::Reference(*reference),
+            Term::PidReference(reference) => Term::PidReference(Arc::clone(reference)),
             Term::Resource(resource) => Term::Resource(Arc::clone(resource)),
             Term::Fun(fun) => Term::Fun(fun.clone()),
             Term::Record(record) => Term::Record(record.clone()),
@@ -980,8 +985,8 @@ impl Term {
                 (Term::External(left), Term::External(right)) => left == right,
                 // A resource term is its magic reference.
                 (
-                    Term::Reference(_) | Term::Resource(_),
-                    Term::Reference(_) | Term::Resource(_),
+                    Term::Reference(_) | Term::PidReference(_) | Term::Resource(_),
+                    Term::Reference(_) | Term::PidReference(_) | Term::Resource(_),
                 ) => left.reference() == right.reference(),
                 // A match context is a heap object, so its identity is its
                 // address. ERTS never compares a match context
@@ -1157,6 +1162,7 @@ fn write_debug(term: &Term, atoms: Option<&AtomTable>, out: &mut impl fmt::Write
             Term::Pid(pid) => write!(out, "Pid({pid:?})")?,
             Term::Port(port) => write!(out, "Port({port:?})")?,
             Term::Reference(reference) => write!(out, "Reference({reference:?})")?,
+            Term::PidReference(reference) => write!(out, "{reference:?}")?,
             Term::Resource(resource) => write!(out, "Resource({:?})", resource.reference())?,
             Term::MatchContext(context) => write!(out, "MatchContext({context:?})")?,
             Term::External(id) => write!(out, "External({id:?})")?,
@@ -1263,20 +1269,93 @@ pub struct ProcessId(pub(crate) u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PortId(pub(crate) u64);
 
-/// An identifier for a reference in this runtime: a counter value, and the
-/// pid reference marker in its high bit. The order of identifiers is their
-/// creation order; the runtime uses it to visit the monitors of a process in
-/// one fixed order.
+/// The compact local reference counter and its magic and table markers.
 #[derive(Debug, Clone, Copy)]
 pub struct Reference(pub(crate) u64);
 
-/// The bit of a reference value that marks a pid reference: the reference
-/// that `erlang:monitor/3` makes for an alias option. ERTS marks the
-/// reference numbers of a pid reference with `ERTS_REF1_PID_MARKER_BIT__`
-/// (`erl_bif_unique.h:106-109`, `146-149`), and the mark stays when the
-/// owner exits. The reference counter stays below this bit. The bit shows
-/// in the number `N2` of [`Reference::numbers`].
-const PID_REFERENCE_MARKER: u64 = 1 << 63;
+/// The five words of a local pid reference. A term owns these immutable
+/// words through an Arc. The last two words retain the tagged owner pid
+/// even when its process exits or its alias ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PidReference(pub(crate) [u32; 5]);
+
+/// The identity of a local reference, including a resource's magic reference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LocalReference {
+    Compact(Reference),
+    Pid(PidReference),
+}
+
+/// ERTS sets bit 16 of the second number of a pid reference
+/// (`erl_bif_unique.h:106-109`).
+pub(crate) const PID_REFERENCE_BIT: u32 = 1 << 16;
+
+impl LocalReference {
+    /// Make a pid reference from a new ordinary reference and its owner.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(LocalReference::new_pid(Reference(1), ProcessId(10)).numbers(), [1, 65537, 0, 1283, 0]);
+    /// ```
+    pub(crate) fn new_pid(reference: Reference, owner: ProcessId) -> Self {
+        let [n0, n1, n2] = reference.numbers();
+        let word = hash::pid_word(owner).to_le_bytes();
+        let [b0, b1, b2, b3, b4, b5, b6, b7] = word;
+        Self::Pid(PidReference([
+            n0,
+            n1 | PID_REFERENCE_BIT,
+            n2,
+            u32::from_le_bytes([b0, b1, b2, b3]),
+            u32::from_le_bytes([b4, b5, b6, b7]),
+        ]))
+    }
+
+    /// Return the ERTS numbers, padded with zeros for a compact reference.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(LocalReference::Compact(Reference(1)).numbers(), [1, 1, 0, 0, 0]);
+    /// ```
+    pub(crate) fn numbers(self) -> [u32; 5] {
+        match self {
+            Self::Compact(reference) => {
+                let [n0, n1, n2] = reference.numbers();
+                [n0, n1, n2, 0, 0]
+            }
+            Self::Pid(PidReference(numbers)) => numbers,
+        }
+    }
+
+    /// Return the owner encoded by a pid reference.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(LocalReference::new_pid(Reference(1), ProcessId(10)).owner(), Some(ProcessId(10)));
+    /// ```
+    pub(crate) fn owner(self) -> Option<ProcessId> {
+        let Self::Pid(PidReference([_, _, _, low, high])) = self else {
+            return None;
+        };
+        hash::word_pid(u64::from(low) | (u64::from(high) << 32))
+    }
+
+    /// Return the local reference term for this identity.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(LocalReference::Compact(Reference(1)).term(), Term::Reference(Reference(1)));
+    /// ```
+    pub(crate) fn term(self) -> Term {
+        match self {
+            Self::Compact(reference) => Term::Reference(reference),
+            Self::Pid(reference) => Term::PidReference(Arc::new(reference)),
+        }
+    }
+}
 
 /// The bit of a reference value that marks a magic reference: a reference
 /// that ERTS makes for a magic binary (`erts_mk_magic_ref`,
@@ -1297,9 +1376,8 @@ const MAGIC_REFERENCE_MARKER: u64 = 1 << 62;
 /// [`Reference::numbers`].
 const TABLE_REFERENCE_MARKER: u64 = 1 << 61;
 
-/// The marker bits of a reference value.
-const REFERENCE_MARKERS: u64 =
-    PID_REFERENCE_MARKER | MAGIC_REFERENCE_MARKER | TABLE_REFERENCE_MARKER;
+/// The high bits that the compact reference counter reserves.
+const REFERENCE_MARKERS: u64 = (1 << 63) | MAGIC_REFERENCE_MARKER | TABLE_REFERENCE_MARKER;
 
 /// The mask of the first reference number (`REF_MASK`, 18 bits).
 const REF_NUMBER_0_MASK: u64 = 0x3_FFFF;
@@ -1323,30 +1401,6 @@ impl Reference {
     /// ```
     pub(crate) fn ordinary(value: u64) -> Option<Self> {
         (value & REFERENCE_MARKERS == 0).then_some(Reference(value))
-    }
-
-    /// Return the pid reference with the counter value of the ordinary
-    /// reference `self`.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert!(Reference(0).pid_reference().is_pid_reference());
-    /// ```
-    pub(crate) fn pid_reference(self) -> Self {
-        Reference(self.0 | PID_REFERENCE_MARKER)
-    }
-
-    /// Return true for a pid reference, as `erts_is_pid_ref_numbers`
-    /// (`erl_bif_unique.h:145-149`) does.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert!(!Reference(0).is_pid_reference());
-    /// ```
-    pub(crate) fn is_pid_reference(self) -> bool {
-        self.0 & PID_REFERENCE_MARKER != 0
     }
 
     /// Return the magic reference with the counter value of the ordinary
@@ -1390,7 +1444,7 @@ impl Reference {
     /// low 18 bits, `N1` is the next 14 counter bits with the scheduler
     /// number in its low bits, and `N2` is the high 32 bits. PBeam takes
     /// its reference value as the counter value of scheduler 1, with the
-    /// pid reference marker in `N2` and the magic marker in bit 17 of `N1`.
+    /// magic marker in bit 17 of `N1`.
     /// ERTS prints the reference as `#Ref<0.N2.N1.N0>`, encodes these
     /// numbers in `term_to_binary/1`, and compares them in the term order.
     ///
@@ -1425,7 +1479,7 @@ impl Reference {
 
 impl Ord for Reference {
     /// Compare the counter values, so that the order is the creation order
-    /// also for a pid reference and a magic reference.
+    /// also for a magic reference.
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         (self.0 & !REFERENCE_MARKERS).cmp(&(other.0 & !REFERENCE_MARKERS))
     }

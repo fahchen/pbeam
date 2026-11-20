@@ -28,7 +28,7 @@ use std::{
 use num_bigint::BigInt;
 
 use super::{
-    Binary, Fun, Map, Record, Term,
+    Binary, Fun, Map, PidReference, Record, Term,
     fun::FunThing,
     list::{Cons, ConsRef},
     map::{Child, Node, Repr},
@@ -80,6 +80,7 @@ enum Shared {
     RecordDef(Arc<RecordDef>),
     Match(Arc<MatchState>),
     BigInt(Arc<BigInt>),
+    PidReference(Arc<PidReference>),
 }
 
 /// Return true when one owner only holds the container of `term`, so the
@@ -101,6 +102,7 @@ fn owned_once(term: &Term) -> bool {
         Term::Record(record) => Arc::strong_count(record.arc()) == 1,
         Term::MatchContext(state) => Arc::strong_count(state) == 1,
         Term::BigInt(value) => Arc::strong_count(value) == 1,
+        Term::PidReference(value) => Arc::strong_count(value) == 1,
         Term::Atom(_)
         | Term::Binary(_)
         | Term::Integer(_)
@@ -129,6 +131,7 @@ impl Shared {
             (Shared::RecordDef(left), Shared::RecordDef(right)) => Arc::ptr_eq(left, right),
             (Shared::Match(left), Shared::Match(right)) => Arc::ptr_eq(left, right),
             (Shared::BigInt(left), Shared::BigInt(right)) => Arc::ptr_eq(left, right),
+            (Shared::PidReference(left), Shared::PidReference(right)) => Arc::ptr_eq(left, right),
             _ => false,
         }
     }
@@ -243,6 +246,12 @@ impl LiveBytes {
                 Term::Record(record) => self.record(record, owners),
                 Term::MatchContext(state) => self.match_context(state, owners),
                 Term::BigInt(value) => self.bigint(value, owners),
+                Term::PidReference(value) => {
+                    if owners == Owners::One || self.fresh(Shared::PidReference(Arc::clone(value)))
+                    {
+                        self.bytes += size_of::<PidReference>();
+                    }
+                }
                 Term::Atom(_)
                 | Term::Integer(_)
                 | Term::Float(_)

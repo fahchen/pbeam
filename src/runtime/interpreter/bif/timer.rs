@@ -279,9 +279,10 @@ fn read(context: &mut BifContext<'_>, reference: &Term, reply: ReadReply) -> Bif
         return BifResult::badarg();
     }
     let scheduler = &mut *context.scheduler;
-    let end = reference
-        .reference()
-        .and_then(|id| scheduler.node().timer_end(id));
+    let end = reference.reference().and_then(|id| match id {
+        crate::term::LocalReference::Compact(id) => scheduler.node().timer_end(id),
+        crate::term::LocalReference::Pid(_) => None,
+    });
     let result = match end {
         Some(end) => Term::Integer(Timers::time_left(scheduler.timers.now(), end)),
         None => Term::static_atom("false"),

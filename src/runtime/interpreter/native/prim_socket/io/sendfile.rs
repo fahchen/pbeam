@@ -163,7 +163,7 @@ pub(in crate::runtime::interpreter::native::prim_socket) fn sendfile(
     let Some((key, socket)) = socket_argument(scheduler, socket) else {
         return Ok(BifResult::badarg());
     };
-    if !matches!(reference, Term::Reference(_)) {
+    if !matches!(reference, Term::Reference(_) | Term::PidReference(_)) {
         return Ok(BifResult::badarg());
     }
     let (start_offset, size) = match (int64(offset), uint64(count)) {

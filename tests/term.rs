@@ -363,11 +363,15 @@ fn gives_a_reference_its_erts_reference_numbers() {
 
 #[test]
 fn keeps_the_creation_order_and_the_pid_reference_marker() {
-    let alias = Reference(1).pid_reference();
-    assert!(alias.is_pid_reference() && !Reference(1).is_pid_reference());
-    assert!(Reference(0) < alias && alias < Reference(2));
+    let alias = super::LocalReference::new_pid(Reference(1), ProcessId(1));
+    assert_eq!(alias.numbers(), [1, 65537, 0, 131, 0]);
+    assert_eq!(
+        format!("{:?}", alias.term()),
+        "PidReference([1, 65537, 0, 131, 0])"
+    );
+    assert!(Reference(0) < Reference(1) && Reference(1) < Reference(2));
     assert_eq!(Reference::ordinary(1), Some(Reference(1)));
-    assert_eq!(Reference::ordinary(alias.0), None);
+    assert_eq!(Reference::ordinary(1 << 63), None);
 }
 
 #[test]

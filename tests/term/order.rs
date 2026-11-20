@@ -368,11 +368,11 @@ fn orders_references_by_their_number_words() {
 }
 
 #[test]
-fn orders_an_alias_reference_by_its_three_numbers() {
-    // ERTS keeps the pid of the owner in the two higher number words of an
-    // alias, and a PBeam reference does not keep it, so an alias compares
-    // by the three PBeam number words (`src/term/order.rs`).
-    let alias = |number| Term::Reference(Reference(number).pid_reference());
+fn orders_an_alias_reference_by_its_reference_and_pid_words() {
+    // For references of the same owner the first three number words compare.
+    let alias = |number| {
+        crate::term::LocalReference::new_pid(Reference(number), crate::term::ProcessId(1)).term()
+    };
     assert_eq!(
         alias(1).compare(&alias(2), &test_atom_table()).unwrap(),
         Less
@@ -381,8 +381,7 @@ fn orders_an_alias_reference_by_its_three_numbers() {
         alias(1).compare(&alias(1), &test_atom_table()).unwrap(),
         Equal
     );
-    // The pid mark in `N1` makes an alias greater than an ordinary reference
-    // of the same counter (`Reference::numbers`).
+    // The owner words make a pid reference greater than a compact reference.
     assert_eq!(
         alias(1)
             .compare(&Term::Reference(Reference(1)), &test_atom_table())

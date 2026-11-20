@@ -179,13 +179,25 @@ fn hashes_tuple_keys_with_the_internal_hash() {
 }
 
 #[test]
-fn hashes_an_alias_reference_with_its_three_numbers() {
+fn hashes_an_alias_reference_with_its_pid_words() {
     assert_eq!(map_hash(&Term::nil()), Some(internal_hash(&Term::nil())));
-    // A PBeam alias reference hashes its three number words, so it is a
-    // supported map key alone and inside a list, tuple, or map
-    // (docs/erts-differences.md, "Map keys").
-    let alias = || Term::Reference(Reference(0).pid_reference());
+    // A pid reference is a supported map key alone or inside a compound term.
+    let alias =
+        || crate::term::LocalReference::new_pid(Reference(0), crate::term::ProcessId(1)).term();
     assert_eq!(map_hash(&alias()), Some(internal_hash(&alias())));
+    let reference = alias().reference().unwrap();
+    let mut numbers = reference.numbers();
+    numbers[3] ^= 128;
+    assert_ne!(
+        map_hash(&alias()),
+        map_hash(&crate::term::LocalReference::Pid(crate::term::PidReference(numbers)).term())
+    );
+    let mut numbers = reference.numbers();
+    numbers[4] += 1;
+    assert_ne!(
+        map_hash(&alias()),
+        map_hash(&crate::term::LocalReference::Pid(crate::term::PidReference(numbers)).term())
+    );
     let alias_map = || {
         Term::Map(Map::from_pairs(vec![(Term::Integer(1), alias())], &test_atom_table()).unwrap())
     };
@@ -664,15 +676,15 @@ fn sorts_pairs_by_the_flatmap_key_order() {
     Map::sort_pairs(&mut references, &test_atom_table());
     let values: Vec<_> = references.iter().map(|(_, value)| value.clone()).collect();
     assert_eq!(values, [1, 2].map(Term::Integer));
-    // An alias reference compares by its three number words (`src/term/order.rs`),
+    // An alias reference with the same owner compares by its first three words (`src/term/order.rs`),
     // so the alias 2 comes after the alias 1.
     let mut aliases = vec![
         (
-            Term::Reference(Reference(2).pid_reference()),
+            crate::term::LocalReference::new_pid(Reference(2), crate::term::ProcessId(1)).term(),
             Term::Integer(2),
         ),
         (
-            Term::Reference(Reference(1).pid_reference()),
+            crate::term::LocalReference::new_pid(Reference(1), crate::term::ProcessId(1)).term(),
             Term::Integer(1),
         ),
     ];
