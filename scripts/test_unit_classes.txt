@@ -1119,6 +1119,7 @@ pbeam-runtime|term::live_bytes::tests::counts_a_transient_record_definition_once
 pbeam-runtime|term::live_bytes::tests::counts_each_cell_of_a_list_and_shares_a_tail|pure_logic|none
 pbeam-runtime|term::live_bytes::tests::counts_no_bytes_for_an_immediate|pure_logic|none
 pbeam-runtime|term::live_bytes::tests::counts_the_element_array_of_a_tuple_once_for_its_copies|pure_logic|none
+pbeam-runtime|term::live_bytes::tests::counts_the_pid_reference_payload_once_for_its_copies|pure_logic|none
 pbeam-runtime|term::live_bytes::tests::counts_the_thing_of_a_record_once_for_its_copies|pure_logic|none
 pbeam-runtime|term::live_bytes::tests::counts_two_funs_that_share_one_thing_once|pure_logic|none
 pbeam-runtime|term::live_bytes::tests::walks_a_long_list_without_recursion|pure_logic|none
@@ -1138,7 +1139,7 @@ pbeam-runtime|term::map::tests::drains_the_pairs_of_a_collision_child_in_batches
 pbeam-runtime|term::map::tests::drains_the_pairs_of_a_map_in_batches|pure_logic|none
 pbeam-runtime|term::map::tests::drains_the_pairs_of_a_map_only_from_the_last_copy|pure_logic|none
 pbeam-runtime|term::map::tests::fails_for_a_path_that_erts_returns_as_a_bignum_not_in_normal_form|pure_logic|none
-pbeam-runtime|term::map::tests::hashes_an_alias_reference_with_its_three_numbers|pure_logic|none
+pbeam-runtime|term::map::tests::hashes_an_alias_reference_with_its_pid_words|pure_logic|none
 pbeam-runtime|term::map::tests::hashes_atoms_by_their_index_as_erts|pure_logic|none
 pbeam-runtime|term::map::tests::hashes_improper_list_keys_with_their_tail_as_erts|pure_logic|none
 pbeam-runtime|term::map::tests::hashes_small_integers_as_erts|pure_logic|none
@@ -1168,7 +1169,7 @@ pbeam-runtime|term::match_context::tests::reads_utf8_at_a_position_that_is_not_b
 pbeam-runtime|term::match_context::tests::reports_the_binary_of_the_state|pure_logic|none
 pbeam-runtime|term::match_context::tests::shares_the_bytes_of_the_binary_that_it_matches|pure_logic|none
 pbeam-runtime|term::match_context::tests::takes_bits_at_aligned_and_unaligned_offsets|pure_logic|none
-pbeam-runtime|term::order::tests::orders_an_alias_reference_by_its_three_numbers|pure_logic|none
+pbeam-runtime|term::order::tests::orders_an_alias_reference_by_its_reference_and_pid_words|pure_logic|none
 pbeam-runtime|term::order::tests::orders_an_integer_before_a_float_in_exact_comparison|pure_logic|none
 pbeam-runtime|term::order::tests::orders_atoms_by_name_and_not_by_index|pure_logic|none
 pbeam-runtime|term::order::tests::orders_each_nested_atom_by_the_owning_table_name|pure_logic|none

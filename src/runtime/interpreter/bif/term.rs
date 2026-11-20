@@ -28,8 +28,8 @@ use super::{
 use crate::runtime::interpreter::code_table::CodeTable;
 use crate::runtime::unicode::CharEncoding;
 use crate::term::{
-    AtomTable, ExternalId, Fun, Lambda, MAX_ATOM_CHARACTERS, MAX_TUPLE_SIZE, ProcessId, Record,
-    RecordDef, Reference, Target,
+    AtomTable, ExternalId, Fun, Lambda, LocalReference, MAX_ATOM_CHARACTERS, MAX_TUPLE_SIZE,
+    PID_REFERENCE_BIT, PidReference, ProcessId, Record, RecordDef, Reference, Target,
     external::{self},
     external_id::ExternalData,
     float_text,
@@ -67,7 +67,6 @@ const MAGIC_REFERENCE_BIT: u32 = 1 << 17;
 /// The bit of the second reference number that marks a pid reference: bit
 /// `_REF_NUM_SIZE - 2` (`ERTS_REF1_PID_MARKER_BIT__`,
 /// `erl_bif_unique.h:106-109`, `_REF_NUM_SIZE` 18 in `erl_term.h:180`).
-const PID_REFERENCE_BIT: u32 = 1 << 16;
 /// The count of the reference numbers of a pid reference on a 64-bit host:
 /// the three reference numbers and the two words of the pid
 /// (`ERTS_PID_REF_NUMBERS`, `erl_term.h:775`).
@@ -364,48 +363,8 @@ pub(in crate::runtime) fn encode_dist(
     scheduler: &crate::runtime::scheduler::Scheduler,
     term: &Term,
 ) -> Result<Vec<Binary>, BeamError> {
-    encode_dist_with_owner(scheduler, term, &alias_owner(scheduler))
-}
-
-/// Count pending distribution output when an alias owner has exited.
-///
-/// The two owner pid words have a fixed encoded width (`external.c:3642-3666`).
-/// A placeholder is sufficient for accounting; these bytes are not sent.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// let elements = encode_dist_pending(scheduler, &term)?;
-/// ```
-///
-/// # Errors
-///
-/// The errors of [`encode_dist`] other than an alias with a missing owner.
-pub(in crate::runtime) fn encode_dist_pending(
-    scheduler: &crate::runtime::scheduler::Scheduler,
-    term: &Term,
-) -> Result<Vec<Binary>, BeamError> {
-    let owner = alias_owner(scheduler);
-    encode_dist_with_owner(scheduler, term, &|reference| {
-        Some(owner(reference).unwrap_or(ProcessId(0)))
-    })
-}
-
-/// Encode a distribution term with the owner lookup `owner`.
-fn encode_dist_with_owner(
-    scheduler: &crate::runtime::scheduler::Scheduler,
-    term: &Term,
-    owner: &dyn Fn(Reference) -> Option<ProcessId>,
-) -> Result<Vec<Binary>, BeamError> {
     let mut refs = Vec::new();
-    let body = encode_parts(
-        term,
-        &scheduler.atoms,
-        &Options::default(),
-        &mut refs,
-        owner,
-        None,
-    )?;
+    let body = encode_parts(term, &scheduler.atoms, &Options::default(), &mut refs, None)?;
     let bytes = compress_term(&body, 0);
     let refs = refs
         .into_iter()
@@ -437,22 +396,13 @@ fn external_term(
     // The existing `[local]` reference path of `erlang.rs` gives the bytes
     // that `prim_inet:send/3` needs; keep it for that one case.
     let local = Term::list_from(vec![Term::static_atom("local")]);
-    if matches!(term, Term::Reference(reference) if !reference.is_pid_reference())
-        && *options == local
-    {
+    if matches!(term, Term::Reference(_)) && *options == local {
         return super::erlang::term_to_binary_2(context, term, options);
     }
     let options = parsed;
     let scheduler = &mut *context.scheduler;
     let seed = scheduler.local_node_hash();
-    let mut body = encode_parts(
-        term,
-        &scheduler.atoms,
-        &options,
-        refs,
-        &alias_owner(scheduler),
-        None,
-    )?;
+    let mut body = encode_parts(term, &scheduler.atoms, &options, refs, None)?;
     let unprefixed = body.len();
     if options.local {
         let hash = external::block_hash(&body, seed);
@@ -523,12 +473,7 @@ pub(super) fn external_size(
     scheduler: &crate::runtime::scheduler::Scheduler,
     term: &Term,
 ) -> Result<BifResult, BeamError> {
-    let body = encode(
-        term,
-        &scheduler.atoms,
-        &Options::default(),
-        &alias_owner(scheduler),
-    )?;
+    let body = encode(term, &scheduler.atoms, &Options::default())?;
     Ok(Value(Term::Integer(1 + to_i64(body.len()))))
 }
 
@@ -556,7 +501,7 @@ pub(super) fn external_size_2(
     let Some(options) = parse_options(options) else {
         return Ok(BifResult::badarg());
     };
-    let body = encode(term, &scheduler.atoms, &options, &alias_owner(scheduler))?;
+    let body = encode(term, &scheduler.atoms, &options)?;
     let local = if options.local { 5 } else { 0 };
     Ok(Value(Term::Integer(1 + local + to_i64(body.len()))))
 }
@@ -569,30 +514,15 @@ pub(super) fn external_size_2(
 ///
 /// ```rust,ignore
 /// let atoms = AtomTable::new();
-/// assert_eq!(encode(&Term::Integer(1), &atoms, &Options::default(), &|_| None)?, [97, 1]);
+/// assert_eq!(encode(&Term::Integer(1), &atoms, &Options::default())?, [97, 1]);
 /// ```
 ///
 /// # Errors
 ///
 /// A match context and a pid reference without an owner in `owner` give a
 /// runtime error, and a full atom table gives its error.
-fn encode(
-    term: &Term,
-    atoms: &AtomTable,
-    options: &Options,
-    owner: &dyn Fn(Reference) -> Option<ProcessId>,
-) -> Result<Vec<u8>, BeamError> {
-    encode_parts(term, atoms, options, &mut Vec::new(), owner, None)
-}
-
-/// Return the owner lookup of the pid references of [`encode_parts`]: the
-/// alias table of the node, which holds the owner of each pid reference
-/// until the owner exits. An ERTS pid reference holds the pid of its owner
-/// (`erts_get_pid_of_ref`, `erl_bif_unique.h:279-286`).
-fn alias_owner(
-    scheduler: &crate::runtime::scheduler::Scheduler,
-) -> impl Fn(Reference) -> Option<ProcessId> + '_ {
-    |reference| scheduler.node().alias_owner(reference)
+fn encode(term: &Term, atoms: &AtomTable, options: &Options) -> Result<Vec<u8>, BeamError> {
+    encode_parts(term, atoms, options, &mut Vec::new(), None)
 }
 
 /// Return the bytes of [`encode`], and put in `refs` the byte range and the
@@ -613,7 +543,6 @@ fn encode_parts(
     atoms: &AtomTable,
     options: &Options,
     refs: &mut Vec<(Range<usize>, Binary)>,
-    owner: &dyn Fn(Reference) -> Option<ProcessId>,
     mut cache: Option<&mut DistAtomEncoder>,
 ) -> Result<Vec<u8>, BeamError> {
     let mut out = Vec::new();
@@ -778,31 +707,18 @@ fn encode_parts(
                 }
             }
             // A resource term is its magic reference.
-            Term::Reference(_) | Term::Resource(_) => {
-                let reference = term.reference().unwrap_or(Reference(0));
-                let mut numbers = reference.numbers().to_vec();
-                // A pid reference has five numbers: the three reference
-                // numbers with `ERTS_REF1_PID_MARKER_BIT__` in the second,
-                // and the low and the high 32 bits of the pid word of its
-                // owner (`external.c:3642-3668`, `erl_bif_unique.h:259-277`).
-                // PBeam keeps its pid marker in the high bit of the third
-                // number, and the ERTS counter does not reach it.
-                if reference.is_pid_reference() {
-                    let Some(pid) = owner(reference) else {
-                        return Err(error(
-                            "unsupported external term of a pid reference whose owner exited: ERTS writes the pid of the owner in the reference, and PBeam does not keep it: see \"External term format\" in docs/erts-differences.md",
-                        ));
-                    };
-                    let word = crate::term::pid_word(pid);
-                    numbers[1] |= PID_REFERENCE_BIT;
-                    numbers[2] &= !(1 << 31);
-                    numbers.extend([low_u32(word), low_u32(word >> 32)]);
-                }
+            Term::Reference(_) | Term::PidReference(_) | Term::Resource(_) => {
+                let reference = term.reference().expect("a local reference");
+                let numbers = reference.numbers();
+                let count = match reference {
+                    LocalReference::Compact(_) => 3,
+                    LocalReference::Pid(_) => PID_REFERENCE_NUMBERS,
+                };
                 out.push(90);
-                out.extend_from_slice(&be16(numbers.len()));
+                out.extend_from_slice(&be16(count));
                 let creation = encode_sysname(atoms, options, &mut out, cache.as_deref_mut());
                 out.extend_from_slice(&creation.to_be_bytes());
-                for number in numbers {
+                for number in &numbers[..count] {
                     out.extend_from_slice(&number.to_be_bytes());
                 }
             }
@@ -992,13 +908,11 @@ pub(in crate::runtime) fn encode_dist_cached(
         entries: Vec::new(),
     };
     let options = Options::default();
-    let owner = alias_owner(scheduler);
     let mut body = encode_parts(
         control,
         &scheduler.atoms,
         &options,
         &mut Vec::new(),
-        &owner,
         Some(&mut cache),
     )?;
     let control_len = body.len();
@@ -1008,7 +922,6 @@ pub(in crate::runtime) fn encode_dist_cached(
             &scheduler.atoms,
             &options,
             &mut Vec::new(),
-            &owner,
             Some(&mut cache),
         )?);
     }
@@ -2610,20 +2523,23 @@ impl Decoder<'_> {
         // `140-156`). A pid reference of five numbers gives the pid
         // reference of the pid word in its last two numbers, and a pid word
         // without the pid tag is not valid (`external.c:4833-4843`,
-        // `erl_bif_unique.h:259-277`). PBeam keeps no pid in a pid
-        // reference, so it rebuilds the reference from its three numbers.
+        // `erl_bif_unique.h:259-277`). Retain all five words for a pid reference.
         // Another count gives an ordinary reference with the pid marker
         // (`external.c:4844-4848`), which PBeam cannot hold.
         let pid = numbers[1] & PID_REFERENCE_BIT != 0;
         if pid {
-            if count != PID_REFERENCE_NUMBERS || numbers[1] & MAGIC_REFERENCE_BIT != 0 {
+            if count != PID_REFERENCE_NUMBERS {
                 return Err(DecodeError::Unsupported(
-                    "a pid reference that is not of five numbers or that is magic",
+                    "a pid reference that is not of five numbers",
                 ));
             }
             if read[3] & PID_WORD_TAG.0 != PID_WORD_TAG.1 {
                 return Err(DecodeError::Badarg);
             }
+            return Ok(LocalReference::Pid(PidReference([
+                numbers[0], numbers[1], numbers[2], read[3], read[4],
+            ]))
+            .term());
         }
         // A PBeam reference belongs to the first scheduler, whose number is
         // in the low bits of the second reference number (`REF_THREAD`,
@@ -2643,14 +2559,9 @@ impl Decoder<'_> {
         let value = (u64::from(numbers[2]) << 32)
             | (u64::from(numbers[1]) & 0xFFFC_0000)
             | u64::from(numbers[0]);
-        // The high bit of the third reference number is not a marker in
-        // ERTS, and PBeam keeps its pid marker in bit 63 of the value, so
-        // PBeam cannot hold such an ordinary reference.
+        // A compact reference reserves the high three bits of its counter.
         Reference::ordinary(value)
             .map(|reference| {
-                if pid {
-                    return Term::Reference(reference.pid_reference());
-                }
                 if !magic {
                     return Term::Reference(reference);
                 }

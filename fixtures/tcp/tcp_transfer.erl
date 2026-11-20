@@ -114,6 +114,7 @@ unsupported(Path, Case) ->
     case Case of
         length -> erlang:port_control(S, 42 + ?MAGIC, [0, 0, 0, 0, 255, 255, 255, 255]);
         header -> erlang:port_command(S, <<0, 1, 0>>);
+        send_header -> erlang:send(S, {self(), {command, <<0, 1, 0>>}});
         delay_send -> ok = prim_inet:setopts(S, [{delay_send, true}]), prim_inet:send(S, "x");
         term -> term_to_binary(S, [local])
     end.

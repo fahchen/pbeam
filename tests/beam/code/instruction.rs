@@ -317,7 +317,8 @@ fn prepares_the_select_value_choices_by_shape() {
     let aliases: Vec<(Term, u32)> = (0..=limit_unsigned)
         .map(|index| {
             (
-                Term::Reference(Reference(index).pid_reference()),
+                crate::term::LocalReference::new_pid(Reference(index), crate::term::ProcessId(1))
+                    .term(),
                 u32::try_from(index).unwrap(),
             )
         })

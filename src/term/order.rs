@@ -39,11 +39,8 @@
 //! - binary: by the bytes, then by the size.
 //!
 //! Two references compare by their number words, from the highest word
-//! down, as in ERTS (`erts_cmp_compound`, `utils.c:2283-2286`). ERTS holds
-//! the pid of the owner in the two higher words of an alias reference, and
-//! a PBeam reference keeps no pid, so two alias references compare by their
-//! three PBeam number words. A PBeam alias reference is still a term of its
-//! own, so the comparison stays consistent with equality.
+//! down, as in ERTS (`erts_cmp_compound`, `utils.c:2283-2286`).
+//! The two highest words of a pid reference hold its owner pid word.
 
 use std::cmp::Ordering;
 
@@ -51,7 +48,7 @@ use num_bigint::{BigInt, Sign};
 use num_traits::FromPrimitive;
 
 use super::external_id::{self, ExternalData};
-use super::{AtomTable, Reference, Term, match_context::MATCH_CONTEXT_ESCAPE};
+use super::{AtomTable, Term, match_context::MATCH_CONTEXT_ESCAPE};
 use crate::error::BeamError;
 
 /// The rank of `[]` in the ERTS term order (`NIL_DEF`).
@@ -182,25 +179,6 @@ impl Term {
     }
 }
 
-/// Return the order of two references. ERTS compares two references on
-/// one node by their number words, from the highest word down
-/// (`erts_cmp_compound`, utils.c:2283-2286), and [`Reference::numbers`]
-/// matches that layout (row "Term order" of docs/erts-differences.md). An
-/// alias reference has two more ERTS number words that hold the pid of its
-/// owner, and a PBeam reference keeps no pid, so two alias references
-/// compare by the three PBeam number words.
-fn reference_order(left: Reference, right: Reference) -> Ordering {
-    if left == right {
-        return Ordering::Equal;
-    }
-    // ERTS compares `N2`, `N1`, `N0`, with the magic marker of a magic
-    // reference in `N1` (`utils.c:2283-2286`, `erl_bif_unique.h:102-113`).
-    left.numbers()
-        .iter()
-        .rev()
-        .cmp(right.numbers().iter().rev())
-}
-
 /// Compare two terms without their nested terms. For two lists, tuples,
 /// maps, or funs that the sizes and fun entries do not order, push the
 /// nested pairs onto `steps` and return `Equal`. Two cons cells push the
@@ -227,7 +205,13 @@ fn compare_pair<'a>(
 ) -> Ordering {
     // A resource term is its magic reference.
     if let Some((left, right)) = left.reference().zip(right.reference()) {
-        return reference_order(left, right);
+        // ERTS compares from the highest word down, with missing words
+        // treated as zeros (`utils.c:2265-2286`).
+        return left
+            .numbers()
+            .iter()
+            .rev()
+            .cmp(right.numbers().iter().rev());
     }
     if matches!(left, Term::External(_)) || matches!(right, Term::External(_)) {
         let rank = type_rank(left);
@@ -504,7 +488,7 @@ fn type_rank(term: &Term) -> u8 {
     match term {
         Term::Integer(_) | Term::BigInt(_) | Term::Float(_) => 0,
         Term::Atom(_) => 1,
-        Term::Reference(_) | Term::Resource(_) => REFERENCE_RANK,
+        Term::Reference(_) | Term::PidReference(_) | Term::Resource(_) => REFERENCE_RANK,
         Term::Fun(_) => 3,
         Term::Port(_) => PORT_RANK,
         Term::Pid(_) => 5,

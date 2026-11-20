@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 
 use super::{MonitorLinkTree, TreeKey};
-use crate::runtime::process::{LinkId, RemotePid};
+use crate::runtime::process::{LinkId, MonitorKey, RemotePid};
 use crate::term::{PortId, ProcessId, Reference};
 
 /// Link sequences of a process on pinned ERTS 29.1.1 with one scheduler,
@@ -161,13 +161,22 @@ fn compares_references_as_erts_memory_bytes() {
     assert_eq!(Reference(256).compare(Reference(256)), Ordering::Equal);
     // N0 holds the low 18 bits; the next bits are in N1 after the scheduler
     // number 1, so the pid marker of N1 compares before them.
-    let pid = Reference(0).pid_reference();
+    let pid = MonitorKey::local(crate::term::LocalReference::new_pid(
+        Reference(0),
+        ProcessId(0),
+    ));
     assert_eq!(
-        super::memory_bytes(pid),
-        [[0, 0, 0, 0], [1, 0, 1, 0], [0, 0, 0, 0]]
+        &super::key_bytes(pid)[5..17],
+        [0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0]
     );
-    assert_eq!(pid.compare(Reference(1 << 32)), Ordering::Greater);
-    assert_eq!(pid.compare(Reference(1 << 18)), Ordering::Less);
+    assert_eq!(
+        pid.compare(MonitorKey::Local(Reference(1 << 32))),
+        Ordering::Greater
+    );
+    assert_eq!(
+        pid.compare(MonitorKey::Local(Reference(1 << 18))),
+        Ordering::Less
+    );
 }
 
 #[test]

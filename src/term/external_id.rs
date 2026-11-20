@@ -8,7 +8,7 @@
 //! `4685-4740`, `4786-4890`). The local node is `nonode@nohost` with the
 //! creation 0 until `erlang:setnode/2` gives it a name and a creation.
 
-use super::{Atom, PortId, ProcessId, Reference, Term};
+use super::{Atom, LocalReference, PortId, ProcessId, Term};
 
 /// The number of the bits of the process number in the data of a local
 /// pid (`_PID_NUM_SIZE`, `erl_term.h:609-627`).
@@ -141,7 +141,7 @@ pub(crate) fn port_number(term: &Term) -> Option<u64> {
 /// ```
 pub(crate) fn is_reference(term: &Term) -> bool {
     match term {
-        Term::Reference(_) | Term::Resource(_) => true,
+        Term::Reference(_) | Term::PidReference(_) | Term::Resource(_) => true,
         Term::External(id) => matches!(id.data, ExternalData::Reference(_)),
         _ => false,
     }
@@ -155,6 +155,8 @@ pub(crate) fn reference_numbers(term: &Term) -> Option<Vec<u32>> {
     {
         return Some(numbers.to_vec());
     }
-    term.reference()
-        .map(|reference: Reference| reference.numbers().to_vec())
+    term.reference().map(|reference| match reference {
+        LocalReference::Compact(reference) => reference.numbers().to_vec(),
+        LocalReference::Pid(reference) => reference.0.to_vec(),
+    })
 }

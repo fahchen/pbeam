@@ -40,7 +40,7 @@ use crate::{
     beam::ModuleId,
     error::{BeamError, error},
     term::{
-        Atom, AtomTable, Group, LiveBytes, MapDrain, PortId, ProcessId, Reference,
+        Atom, AtomTable, Group, LiveBytes, LocalReference, MapDrain, PortId, ProcessId, Reference,
         SMALL_INTEGER_MIN, Term, external::block_hash, print_term,
     },
 };
@@ -3481,14 +3481,15 @@ impl Scheduler {
         &mut self,
         target: &MonitorTarget,
         options: MonitorOptions,
-    ) -> Result<Reference, BeamError> {
-        let mut reference = self.make_ref()?;
+    ) -> Result<LocalReference, BeamError> {
+        let reference = self.make_ref()?;
         let watcher = self.current_process_mut().id;
-        if options.alias.is_some() {
+        let reference = if options.alias.is_some() {
             // ERTS makes a pid reference for an alias option (`bif.c:765-767`).
-            reference = reference.pid_reference();
-            self.node.register_alias(reference, watcher);
-        }
+            LocalReference::new_pid(reference, watcher)
+        } else {
+            LocalReference::Compact(reference)
+        };
         // A name of a port monitors the port (`erts_whereis_name_to_id`,
         // bif.c:898-922).
         let target_port = match target {
@@ -3547,7 +3548,7 @@ impl Scheduler {
             alias: options.alias,
             watched_by: None,
         };
-        let key = MonitorKey::Local(reference);
+        let key = MonitorKey::local(reference);
         self.current_process_mut().monitors.insert(key, origin);
         match (id, target_port, target) {
             (Some(id), _, _) if kind == "process" => {
@@ -3559,7 +3560,7 @@ impl Scheduler {
                     },
                 );
             }
-            (_, Some(port), _) if self.monitor_port(port, watcher, reference) => {}
+            (_, Some(port), _) if self.monitor_port(port, watcher, key) => {}
             _ => match &remote {
                 // A pid or a name of another node: `MONITOR_P` on the
                 // connection of its node (`bif.c:857`, `dist.c:1543-1547`).
@@ -3620,9 +3621,9 @@ impl Scheduler {
     /// assert!(scheduler.demonitor(reference));
     /// assert!(!scheduler.demonitor(reference));
     /// ```
-    pub(super) fn demonitor(&mut self, reference: Reference) -> bool {
+    pub(super) fn demonitor(&mut self, reference: LocalReference) -> bool {
         let watcher = self.current_process_mut().id;
-        self.demonitor_key(watcher, MonitorKey::Local(reference))
+        self.demonitor_key(watcher, MonitorKey::local(reference))
     }
 
     /// Remove the monitor `reference` of `watcher`, as
@@ -3636,7 +3637,7 @@ impl Scheduler {
     /// assert!(scheduler.demonitor_key(watcher, MonitorKey::Local(reference)));
     /// ```
     pub(super) fn demonitor_key(&mut self, watcher: ProcessId, reference: MonitorKey) -> bool {
-        let Some(monitor) = self.remove_origin_monitor(watcher, reference) else {
+        let Some((reference, monitor)) = self.remove_origin_monitor(watcher, reference) else {
             return false;
         };
         self.end_monitor(watcher, reference, &monitor)
@@ -3661,9 +3662,9 @@ impl Scheduler {
     /// assert!(scheduler.abandon_spawn_request(reference));
     /// assert!(!scheduler.abandon_spawn_request(reference));
     /// ```
-    pub(super) fn abandon_spawn_request(&mut self, reference: Reference) -> bool {
+    pub(super) fn abandon_spawn_request(&mut self, reference: LocalReference) -> bool {
         let watcher = self.current_process_mut().id;
-        let key = MonitorKey::Local(reference);
+        let key = MonitorKey::local(reference);
         let Some(monitor) = self
             .processes
             .get(watcher)
@@ -3725,7 +3726,7 @@ impl Scheduler {
     /// # Examples
     ///
     /// ```rust,ignore
-    /// let monitor = scheduler.remove_origin_monitor(watcher, reference).unwrap();
+    /// let (reference, monitor) = scheduler.remove_origin_monitor(watcher, reference).unwrap();
     /// scheduler.end_monitor(watcher, reference, &monitor);
     /// ```
     pub(super) fn end_monitor(
@@ -3764,31 +3765,31 @@ impl Scheduler {
         &mut self,
         id: ProcessId,
         reference: MonitorKey,
-    ) -> Option<OriginMonitor> {
+    ) -> Option<(MonitorKey, OriginMonitor)> {
         let monitors = &mut self.processes.get_mut(id)?.monitors;
-        let origin = monitors.get_mut(&reference)?;
+        let (reference, origin) = monitors.get_entry_mut(&reference)?;
         let monitor = origin.monitor.take()?;
         if origin.alias != Some(AliasMode::ExplicitUnalias) {
             monitors.remove(&reference);
         }
-        Some(monitor)
+        Some((reference, monitor))
     }
 
     /// Send the message `message` from the current process through the
     /// alias `alias`, as `erts_proc_sig_send_altact_msg`
     /// (`erl_proc_sig_queue.c:2077-2290`) does: the message goes as a signal
     /// to the owner of the alias, which checks the alias when it handles
-    /// the signal. A reference that no `erlang:monitor/3` made with an alias
-    /// option, and an owner that does not exist or exits, drop the message.
+    /// the signal. An inactive alias or an owner that does not exist or exits drops the
+    /// message.
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// scheduler.send_alias_message(alias, Term::static_atom("ok"));
     /// ```
-    pub(super) fn send_alias_message(&mut self, alias: Reference, message: Term) {
+    pub(super) fn send_alias_message(&mut self, alias: LocalReference, message: Term) {
         let sender = self.current_process_mut().id;
-        let Some(owner) = self.node.alias_owner(alias) else {
+        let Some(owner) = alias.owner() else {
             return;
         };
         // An owner of another scheduler gets the signal through the inbox
@@ -3797,21 +3798,6 @@ impl Scheduler {
             let signal = Signal::AliasMessage { alias, message };
             let _ = self.send_signal(Some(sender), owner, signal);
         }
-    }
-
-    /// Return the owner of the alias reference `reference`: the pid in an
-    /// ERTS pid reference (`erts_get_pid_of_ref`, `erl_bif_unique.h:279`).
-    /// Return `None` for a reference that no `erlang:monitor/3` made with an
-    /// alias option.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// assert_eq!(scheduler.alias_owner(alias), Some(owner));
-    /// assert_eq!(scheduler.alias_owner(plain_reference), None);
-    /// ```
-    pub(super) fn alias_owner(&self, reference: Reference) -> Option<ProcessId> {
-        self.node.alias_owner(reference)
     }
 
     /// Give the name `name` to the live process or the open port `id`, as
@@ -4691,7 +4677,6 @@ impl Scheduler {
             // A walk that ends gives 1 when no reductions are left.
             reds = reds.max(1);
         }
-        self.node.remove_aliases(id);
         self.send_pending_monitor();
         if let Some(slot) = process.root {
             self.node.root_exit(slot);

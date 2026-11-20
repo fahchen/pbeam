@@ -23,7 +23,7 @@ use crate::{
         signal::Signal,
         sockets::Sockets,
     },
-    term::{Atom, ProcessId, Reference, Term},
+    term::{Atom, LocalReference, ProcessId, Reference, Term},
 };
 
 /// A delivery of the current process to a process of another scheduler.
@@ -367,7 +367,7 @@ impl Scheduler {
             } => self.send_message(
                 target,
                 requester,
-                reply(reference, Term::static_atom("badarg")),
+                Term::tuple(vec![reference.term(), Term::static_atom("badarg")]),
             ),
             Signal::IsAlive {
                 requester,
@@ -960,7 +960,11 @@ impl Scheduler {
                 reference,
             } => {
                 self.handled(id, node).group_leader = leader;
-                self.send_message(id, requester, reply(reference, Term::static_atom("true")));
+                self.send_message(
+                    id,
+                    requester,
+                    Term::tuple(vec![reference.term(), Term::static_atom("true")]),
+                );
                 0
             }
             Signal::SpawnReply {
@@ -1123,7 +1127,7 @@ impl Scheduler {
         let active = match alias {
             Some(alias) => process
                 .monitors
-                .get(&MonitorKey::Local(alias))
+                .get(&MonitorKey::local(alias))
                 .is_some_and(|origin| origin.alias.is_some()),
             None => link.is_none_or(|link| {
                 process
@@ -1182,7 +1186,7 @@ impl Scheduler {
         reference: MonitorKey,
         reason: Term,
     ) -> i32 {
-        let Some(monitor) = self.remove_origin_monitor(id, reference) else {
+        let Some((reference, monitor)) = self.remove_origin_monitor(id, reference) else {
             let process = self.processes.get_mut(id).expect("the process is alive");
             process.mailbox.remove(node);
             return 0;
@@ -1412,11 +1416,11 @@ impl Scheduler {
         id: ProcessId,
         walk: &mut Walk,
         node: NodeId,
-        alias: Reference,
+        alias: LocalReference,
         message: Term,
     ) -> i32 {
         let process = self.processes.get_mut(id).expect("the process is alive");
-        let key = MonitorKey::Local(alias);
+        let key = MonitorKey::local(alias);
         let Some(mode) = process.monitors.get(&key).and_then(|origin| origin.alias) else {
             process.mailbox.remove(node);
             return 2;
@@ -1557,7 +1561,11 @@ impl Scheduler {
                     reference,
                     ..
                 } => {
-                    self.send_message(id, requester, reply(reference, Term::static_atom("badarg")));
+                    self.send_message(
+                        id,
+                        requester,
+                        Term::tuple(vec![reference.term(), Term::static_atom("badarg")]),
+                    );
                 }
                 Signal::IsAlive {
                     requester,
@@ -1729,7 +1737,7 @@ struct ExitSignal {
     /// True when `normal` also ends the receiver.
     normal_kills: bool,
     /// The alias that the signal went through.
-    alias: Option<Reference>,
+    alias: Option<LocalReference>,
 }
 
 /// Return the monitor signal of `monitor`.

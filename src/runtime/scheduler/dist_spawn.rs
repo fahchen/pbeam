@@ -7,7 +7,7 @@ use crate::{
         process::{MonitorKey, Origin, OriginMonitor, Priority, SpawnLink, SpawnReply, StartFlags},
         signal::Signal,
     },
-    term::{Atom, ProcessId, Reference, Term},
+    term::{Atom, LocalReference, ProcessId, Reference, Term},
 };
 
 /// `DOP_SPAWN_REQUEST` (`dist.h:171`).
@@ -64,14 +64,15 @@ impl Scheduler {
         reply_tag: &Term,
         reply: SpawnReply,
         link: SpawnLink,
-    ) -> Result<(Reference, bool), BeamError> {
+    ) -> Result<(LocalReference, bool), BeamError> {
         let watcher = self.current_process_mut().id;
-        let mut reference = self.make_ref()?;
-        if monitor.is_some_and(|options| options.alias.is_some()) {
-            reference = reference.pid_reference();
-            self.node.register_alias(reference, watcher);
-        }
-        let key = MonitorKey::Local(reference);
+        let reference = self.make_ref()?;
+        let reference = if monitor.is_some_and(|options| options.alias.is_some()) {
+            LocalReference::new_pid(reference, watcher)
+        } else {
+            LocalReference::Compact(reference)
+        };
+        let key = MonitorKey::local(reference);
         let pending = Origin {
             monitor: Some(OriginMonitor {
                 priority: monitor.is_some_and(|options| options.priority),
@@ -98,7 +99,7 @@ impl Scheduler {
             Term::Atom(function.clone()),
             Term::Integer(arity),
         ]);
-        let key_term = Term::Reference(reference);
+        let key_term = reference.term();
         let control = Term::tuple(vec![
             Term::Integer(SPAWN_REQUEST),
             key_term,

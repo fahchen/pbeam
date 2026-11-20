@@ -454,3 +454,28 @@ fn replies_to_a_gen_server_call_through_an_alias_as_pinned_erts() {
     );
     assert_eq!(erl_reference("call()"), "[{echo,1},{echo,2},timeout,[]]\n");
 }
+
+#[test]
+fn preserves_pid_reference_identity_as_pinned_erts() {
+    let program = BeamProgram::load(&[
+        ALIAS_PROBE,
+        &pinned_beam("erlang"),
+        &pinned_beam("erts_debug"),
+        &pinned_beam("erts_internal"),
+    ])
+    .unwrap();
+    let error = program
+        .execute("alias_probe", "show_pid_reference_identity", &[])
+        .unwrap_err()
+        .to_string();
+    let expected = erl_reference("pid_reference_identity()");
+    assert_eq!(
+        expected,
+        "{true,false,false,true,true,true,true,true,3,36,{original,low,high},{original,low,high},true,true,4,true,false,true,true,true,true,{true,false,true,false},{false,true,false},true,{false,false,ok},true,reference,[original],false,false,true,badarg}\n"
+    );
+    assert_eq!(
+        error.strip_prefix("root process exited with "),
+        Some(expected.trim_end()),
+        "{error}"
+    );
+}

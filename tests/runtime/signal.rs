@@ -81,7 +81,7 @@ fn visits_the_terms_of_a_signal() {
     };
     assert_eq!(terms(&info), vec![Term::Integer(3)]);
     let message = Signal::AliasMessage {
-        alias: Reference(1),
+        alias: crate::term::LocalReference::Compact(Reference(1)),
         message: Term::Integer(4),
     };
     assert_eq!(terms(&message), vec![Term::Integer(4)]);
@@ -149,7 +149,7 @@ fn takes_the_term_of_each_signal_that_holds_one() {
         ),
         (
             Signal::AliasMessage {
-                alias: Reference(1),
+                alias: crate::term::LocalReference::Compact(Reference(1)),
                 message: marker(4),
             },
             vec![marker(4)],
@@ -231,7 +231,7 @@ fn takes_no_term_of_a_signal_that_holds_none() {
         Signal::GroupLeader {
             leader: Term::Pid(ProcessId(1)),
             requester: ProcessId(2),
-            reference: Reference(1),
+            reference: crate::term::LocalReference::Compact(Reference(1)),
         },
         Signal::IsAlive {
             requester: ProcessId(1),

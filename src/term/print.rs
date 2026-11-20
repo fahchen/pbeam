@@ -23,7 +23,7 @@
 //! | reference | `#Ref<0.N2.N1.N0>` |
 
 use super::external_id::{ExternalData, PID_NUMBER_BITS, PID_NUMBER_MASK};
-use super::{AtomTable, Reference, Target, Term, match_context::MATCH_CONTEXT_ESCAPE};
+use super::{AtomTable, LocalReference, Target, Term, match_context::MATCH_CONTEXT_ESCAPE};
 
 /// An item of the work stack of `print_term`: a term to print, or a fixed
 /// text, as the `PRT_*` markers of `print_term` are.
@@ -36,7 +36,7 @@ enum Item<'a> {
 /// (`erl_printf_term.c:352-811`) prints it with no length limit. A deep term
 /// does not recurse on the Rust stack: the function keeps a work stack, as
 /// `print_term` does. A pid prints its PBeam process number as the ERTS pid
-/// data, and a reference prints its `Reference::numbers`. `atoms` is the
+/// data, and a reference prints its numbers. `atoms` is the
 /// table of the run that owns `term`, so each atom name comes from the table.
 ///
 /// # Examples
@@ -262,9 +262,14 @@ fn print_term_counted(term: &Term, atoms: &AtomTable, dcount: &mut i64) -> Vec<u
                 };
                 text.extend_from_slice(printed.as_bytes());
             }
-            Term::Reference(_) | Term::Resource(_) => {
-                let [n0, n1, n2] = term.reference().map_or([0; 3], Reference::numbers);
-                text.extend_from_slice(format!("#Ref<0.{n2}.{n1}.{n0}>").as_bytes());
+            Term::Reference(_) | Term::PidReference(_) | Term::Resource(_) => {
+                let reference = term.reference().expect("a local reference");
+                let [n0, n1, n2, low, high] = reference.numbers();
+                let printed = match reference {
+                    LocalReference::Compact(_) => format!("#Ref<0.{n2}.{n1}.{n0}>"),
+                    LocalReference::Pid(_) => format!("#Ref<0.{high}.{low}.{n2}.{n1}.{n0}>"),
+                };
+                text.extend_from_slice(printed.as_bytes());
             }
             // `#Module:Name{Key=Value,...}` in the sorted key order
             // (`erl_printf_term.c:558-585`).

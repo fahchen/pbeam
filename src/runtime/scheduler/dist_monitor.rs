@@ -690,8 +690,8 @@ pub(super) fn remote_of(node: &Atom, from: &Term) -> Result<RemotePid, BeamError
 pub(super) fn monitor_key(reference: &Term) -> Option<MonitorKey> {
     match reference {
         Term::Reference(reference) => Some(MonitorKey::Local(*reference)),
-        external @ Term::External(_) => Some(MonitorKey::Remote(RemoteReference::of(external)?)),
-        _ => None,
+        Term::PidReference(reference) => Some(MonitorKey::Pid(**reference)),
+        _ => RemoteReference::of(reference).map(MonitorKey::Remote),
     }
 }
 

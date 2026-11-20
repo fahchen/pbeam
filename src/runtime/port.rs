@@ -14,10 +14,10 @@ use std::{
 
 use super::{
     host::spawn::{Child, Fds},
-    process::MonitorLinkTree,
+    process::{MonitorKey, MonitorLinkTree},
     scheduler::poll::{Direction, NodePoll},
 };
-use crate::term::{PortId, ProcessId, Reference, Term};
+use crate::term::{PortId, ProcessId, Term};
 use inet::Inet;
 
 /// The open ports of the node, by port number. A port leaves the table when
@@ -71,7 +71,7 @@ pub(super) struct Port {
     /// Port)`, as the watcher and the monitor reference, in creation
     /// order. The close of the port sends the `DOWN` message of each
     /// (`erts_port_task_handle_exit`, io.c).
-    pub(super) monitors: Vec<(ProcessId, Reference)>,
+    pub(super) monitors: Vec<(ProcessId, MonitorKey)>,
     /// True in the `CLOSING` state (`ERTS_PORT_SFLG_CLOSING`): the port
     /// closed with queued output, sent its exit signals, and writes its
     /// queue until it terminates (io.c:3939-3948). `erlang:port_info/1,2`

@@ -18,7 +18,7 @@ main(Operation) ->
     {ok, _, _, After} = erlang:dist_get_stat(Handle),
     io:format("~w~n", [{ok, After - Before}]).
 
-%% The External term format row and #1619 record the missing owner at delivery.
+%% A pending send keeps the exact reference words after the owner exits.
 deliver() ->
     Alias = dead_alias(),
     Node = pending_delivery@nohost,
@@ -26,6 +26,10 @@ deliver() ->
     remote_pid(Node) ! Alias,
     Flags = element(3, erts_internal:get_dflags()),
     {ok, Handle} = erts_internal:create_dist_channel(Node, self(), {Flags, 1}),
+    Out = iolist_to_binary(erlang:dist_ctrl_get_data(Handle)),
+    Bytes = term_to_binary(Alias),
+    RefWords = binary:part(Bytes, byte_size(Bytes)-20, 20),
+    RefWords = binary:part(Out, byte_size(Out)-20, 20),
     io:format("ok~n").
 
 dead_alias() ->

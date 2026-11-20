@@ -72,7 +72,7 @@ pub(crate) fn flat_size(term: &Term) -> usize {
                 usize::try_from(value.bits().div_ceil(64)).expect("a digit count fits in usize") + 1
             }
             Term::Float(_) => FLOAT_WORDS,
-            Term::Reference(reference) if reference.is_pid_reference() => PID_REFERENCE_WORDS,
+            Term::PidReference(_) => PID_REFERENCE_WORDS,
             Term::Reference(_) | Term::Resource(_) => REFERENCE_WORDS,
             // The header, the next pointer, the node, and the data words:
             // one for a pid or a port, and the 32-bit count and the numbers

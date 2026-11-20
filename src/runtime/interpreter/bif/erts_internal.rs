@@ -140,7 +140,9 @@ pub(super) fn group_leader_request(
     target: &Term,
     reference: &Term,
 ) -> Result<BifResult, BeamError> {
-    let (Term::Pid(target), Term::Reference(reference)) = (target, reference) else {
+    let (Term::Pid(target), reference @ (Term::Reference(_) | Term::PidReference(_))) =
+        (target, reference)
+    else {
         return Ok(BifResult::badarg());
     };
     if crate::term::external_id::pid_parts(leader).is_none() {
@@ -151,19 +153,17 @@ pub(super) fn group_leader_request(
         return Ok(denied);
     }
     let caller = scheduler.current_process_mut().id;
+    let reference = reference.reference().expect("a local reference");
     let request = Signal::GroupLeader {
         leader: leader.clone(),
         requester: caller,
-        reference: *reference,
+        reference,
     };
     if scheduler
         .send_signal(Some(caller), *target, request)
         .is_err()
     {
-        let reply = Term::tuple(vec![
-            Term::Reference(*reference),
-            Term::static_atom("badarg"),
-        ]);
+        let reply = Term::tuple(vec![reference.term(), Term::static_atom("badarg")]);
         scheduler.deliver(caller, reply);
     }
     Ok(Value(Term::static_atom("ok")))
@@ -202,9 +202,6 @@ pub(super) fn is_process_alive(
     let (Term::Pid(target), Term::Reference(reference)) = (pid, reference) else {
         return Ok(BifResult::badarg());
     };
-    if reference.is_pid_reference() {
-        return Ok(BifResult::badarg());
-    }
     let scheduler = &mut *context.scheduler;
     if let Some(denied) = other_process_denial(scheduler, *target, Operation::Inspect)? {
         return Ok(denied);
@@ -2628,7 +2625,7 @@ pub(super) fn term_type(atoms: &AtomTable, term: &Term) -> Result<BifResult, Bea
         Term::Map(_) => "flatmap",
         Term::Integer(_) if term.small_integer().is_some() => "fixnum",
         Term::Integer(_) | Term::BigInt(_) => "bignum",
-        Term::Reference(_) | Term::Resource(_) => "reference",
+        Term::Reference(_) | Term::PidReference(_) | Term::Resource(_) => "reference",
         Term::Float(_) => "hfloat",
         Term::Pid(_) => "pid",
         Term::Port(_) => "port",

@@ -1022,13 +1022,14 @@ pub(super) fn dist_spawn_request(
         },
     );
     let (reference, monitored) = request?;
+    let reference = reference.term();
     let value = if spawn_opt {
         Term::tuple(vec![
-            Term::Reference(reference),
+            reference,
             Term::static_atom(if monitored { "true" } else { "false" }),
         ])
     } else {
-        Term::Reference(reference)
+        reference
     };
     Ok(BifResult::Value(value))
 }

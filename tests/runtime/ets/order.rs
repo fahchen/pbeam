@@ -53,7 +53,9 @@ fn keeps_a_key_for_each_alias_reference() {
     // A PBeam alias reference compares by its three reference numbers
     // (`src/term/order.rs`), so an ordered_set table holds two different
     // aliases as two keys.
-    let alias = |number| Term::Reference(Reference(number).pid_reference());
+    let alias = |number| {
+        crate::term::LocalReference::new_pid(Reference(number), crate::term::ProcessId(1)).term()
+    };
     let (atoms, mut order) = order(&[alias(1)]);
     assert_eq!(order.find(&atoms, &alias(2)), Ok(None));
     order.put(alias(2));

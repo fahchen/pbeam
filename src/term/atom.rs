@@ -690,6 +690,7 @@ impl AtomTable {
             | Term::Pid(_)
             | Term::Port(_)
             | Term::Reference(_)
+            | Term::PidReference(_)
             | Term::Resource(_)
             | Term::MatchContext(_) => ready.push(term.clone()),
         }

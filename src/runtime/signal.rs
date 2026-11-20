@@ -19,7 +19,7 @@ use super::{
     capability::{Capability, CapabilityId},
     process::{LinkId, MonitorKey, RemotePid},
 };
-use crate::term::{Atom, PortId, ProcessId, Reference, Term};
+use crate::term::{Atom, LocalReference, PortId, ProcessId, Reference, Term};
 
 /// A non-message signal in the signal queue of a process.
 #[derive(Debug, PartialEq)]
@@ -45,7 +45,7 @@ pub(super) enum Signal {
         /// The alias that the signal went through, for `exit(Alias, Reason)`.
         /// The receiver ignores the signal when the alias is not active
         /// (`erl_proc_sig_queue.c:4659-4672`).
-        alias: Option<Reference>,
+        alias: Option<LocalReference>,
     },
     /// `ERTS_SIG_Q_OP_EXIT` from a process of another node: the exit signal
     /// of an `EXIT2` or a `PAYLOAD_EXIT2` packet (`dist.c:2806-2870`,
@@ -324,7 +324,7 @@ pub(super) enum Signal {
         /// The process that gets the reply.
         requester: ProcessId,
         /// The reference of the reply.
-        reference: Reference,
+        reference: LocalReference,
     },
     /// `ERTS_SIG_Q_OP_IS_ALIVE` from `erts_internal:is_process_alive/2`: the
     /// receiver replies `{Ref, true}`; the cost is 0 (`is_alive_response`,
@@ -369,7 +369,7 @@ pub(super) enum Signal {
     /// `erl_proc_sig_queue.c:6009-6221`). At exit it is dropped.
     AliasMessage {
         /// The alias that the message went through.
-        alias: Reference,
+        alias: LocalReference,
         /// The message.
         message: Term,
     },

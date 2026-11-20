@@ -504,20 +504,20 @@ alias_ext() ->
                  binary_to_term(term_to_binary({A, Monitor}, [local])) =:= {A, Monitor}]).
 
 %% The external term of an alias of a process that exited, which holds
-%% the pid of the owner in ERTS and which PBeam does not keep: in
-%% term_to_binary/1, external_size/1, and a message to another node.
+%% the pid of the owner in term_to_binary/1, external_size/1, and a message
+%% to another node.
 dead_alias(Use) ->
     Parent = self(),
     {Pid, Ref} = spawn_monitor(fun() -> Parent ! {self(), alias()} end),
     receive {'DOWN', Ref, _, _, _} -> ok end,
     A = receive {Pid, Alias} -> Alias end,
     case Use of
-        binary -> term_to_binary(A);
-        size -> erlang:external_size(A);
+        binary -> binary_to_term(term_to_binary(A)) =:= A;
+        size -> erlang:external_size(A) =:= byte_size(term_to_binary(A));
         send ->
             erts_internal:new_connection(zz@nohost),
             {ok, _} = erts_internal:create_dist_channel(zz@nohost, self(), {mandatory(), 1}),
-            remote_pid(zz@nohost) ! A
+            (remote_pid(zz@nohost) ! A) =:= A
     end.
 
 %% A packet on a connection with DFLAG_DIST_HDR_ATOM_CACHE.

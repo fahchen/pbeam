@@ -899,6 +899,10 @@ fn stops_the_run_for_each_receive_and_send_part_that_is_not_implemented() {
             "header",
             "unsupported tcp_inet output header other than term_to_binary(Ref, [local])",
         ),
+        (
+            "send_header",
+            "unsupported tcp_inet output header other than term_to_binary(Ref, [local])",
+        ),
         ("delay_send", "unsupported tcp_inet output with delay_send"),
     ] {
         let path = std::env::temp_dir().join(format!(

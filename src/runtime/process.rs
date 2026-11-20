@@ -18,7 +18,7 @@ use crate::{
     beam::{ModuleId, NameId},
     error::{BeamError, error},
     term::{
-        Atom, LiveBytes, PortId, ProcessId, Reference, Term,
+        Atom, LiveBytes, LocalReference, PidReference, PortId, ProcessId, Reference, Term,
         external_id::{ExternalData, ExternalId},
     },
 };
@@ -179,15 +179,46 @@ impl RemoteReference {
 /// reference of this node, and a monitor that a process of another node
 /// holds on this process has a reference of that node
 /// (`dist.c:2387-2400`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub(super) enum MonitorKey {
     /// A reference of this node.
     Local(Reference),
+    /// A pid reference of this node.
+    Pid(PidReference),
     /// A reference of another node.
     Remote(RemoteReference),
 }
 
+impl PartialEq for MonitorKey {
+    /// Compare the monitor keys, using the first three words of local
+    /// pid references (`erl_monitor_link.c:167-181`).
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Local(left), Self::Local(right)) => left == right,
+            (Self::Pid(left), Self::Pid(right)) => left.0[..3] == right.0[..3],
+            (Self::Remote(left), Self::Remote(right)) => left == right,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for MonitorKey {}
+
 impl MonitorKey {
+    /// Return the monitor key of a local reference.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// assert_eq!(MonitorKey::local(LocalReference::Compact(Reference(1))), MonitorKey::Local(Reference(1)));
+    /// ```
+    pub(super) fn local(reference: LocalReference) -> Self {
+        match reference {
+            LocalReference::Compact(reference) => Self::Local(reference),
+            LocalReference::Pid(reference) => Self::Pid(reference),
+        }
+    }
+
     /// Return the reference term of the key.
     ///
     /// # Examples
@@ -198,6 +229,7 @@ impl MonitorKey {
     pub(super) fn term(self) -> Term {
         match self {
             MonitorKey::Local(reference) => Term::Reference(reference),
+            MonitorKey::Pid(reference) => LocalReference::Pid(reference).term(),
             MonitorKey::Remote(reference) => reference.term(),
         }
     }

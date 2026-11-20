@@ -22,7 +22,7 @@ use crate::{
     },
     runtime::signal::Signal,
     runtime::timer::{Receiver, Timer},
-    term::{Atom, Fun, Lambda, Map, ProcessId, Reference, Term},
+    term::{Atom, Fun, Lambda, LocalReference, Map, ProcessId, Reference, Term},
 };
 use std::{
     io::{PipeReader, PipeWriter, Read, Write},
@@ -501,14 +501,14 @@ fn creates_no_monitor_of_the_caller_and_sends_noproc_for_a_missing_target() {
         [
             Term::tuple(vec![
                 atom("DOWN"),
-                Term::Reference(port),
+                port.term(),
                 atom("port"),
                 named,
                 atom("noproc"),
             ]),
             Term::tuple(vec![
                 atom("DOWN"),
-                Term::Reference(gone),
+                gone.term(),
                 atom("process"),
                 Term::Pid(ProcessId(9)),
                 atom("noproc"),
@@ -2016,7 +2016,7 @@ fn removes_a_reply_demonitor_port_monitor_from_the_port_at_the_alias_message() {
     assert!(
         scheduler.processes[&id]
             .monitors
-            .get(&MonitorKey::Local(alias))
+            .get(&MonitorKey::local(alias))
             .is_none()
     );
     let monitors = scheduler.node.with_port(port, |port| port.monitors.len());
@@ -2664,7 +2664,7 @@ fn gives_noconnection_to_a_monitor_without_a_connection() {
         messages(&scheduler, id.0),
         [Term::tuple(vec![
             atom("DOWN"),
-            Term::Reference(reference),
+            reference.term(),
             atom("process"),
             remote.term(),
             atom("noconnection"),
@@ -2701,7 +2701,7 @@ fn gives_noconnection_to_a_monitor_of_a_name_of_another_node() {
         messages(&scheduler, id.0),
         [Term::tuple(vec![
             atom("DOWN"),
-            Term::Reference(reference),
+            reference.term(),
             atom("process"),
             Term::tuple(vec![Term::Atom(registered), Term::Atom(node)]),
             atom("noconnection"),
@@ -2739,9 +2739,9 @@ fn removes_a_name_monitor_of_another_node_at_its_exit_packet() {
         node: node.clone(),
     };
     let reference = scheduler.monitor(&target, no_options()).unwrap();
-    let key = MonitorKey::Local(reference);
+    let key = MonitorKey::local(reference);
     assert_eq!(scheduler.node.dist().monitors(&node).len(), 1);
-    let monitor = scheduler
+    let (key, monitor) = scheduler
         .remove_origin_monitor(id, key)
         .expect("the watcher holds the monitor");
     scheduler.end_monitor(id, key, &monitor).unwrap();
@@ -2756,7 +2756,7 @@ fn removes_a_name_monitor_of_another_node_at_its_exit_packet() {
             &node,
             &Term::Atom(registered.clone()),
             &Term::Pid(id),
-            &Term::Reference(reference),
+            &reference.term(),
             |_| Ok(atom("boom")),
         )
         .unwrap();
@@ -2771,7 +2771,7 @@ fn removes_a_name_monitor_of_another_node_at_its_exit_packet() {
         messages(&scheduler, id.0),
         [Term::tuple(vec![
             atom("DOWN"),
-            Term::Reference(reference),
+            reference.term(),
             atom("process"),
             Term::tuple(vec![Term::Atom(registered), Term::Atom(node)]),
             atom("boom"),
@@ -2893,7 +2893,7 @@ fn gives_noconnection_to_a_monitor_of_a_connection_that_ended_before_the_insert(
     scheduler.monitor_on(
         id,
         &RemoteTarget::Pid(remote),
-        MonitorKey::Local(reference),
+        MonitorKey::local(reference),
         1,
     );
     scheduler
@@ -2904,7 +2904,7 @@ fn gives_noconnection_to_a_monitor_of_a_connection_that_ended_before_the_insert(
         messages(&scheduler, id.0),
         [Term::tuple(vec![
             atom("DOWN"),
-            Term::Reference(reference),
+            reference.term(),
             atom("process"),
             remote.term(),
             atom("noconnection"),
@@ -3260,7 +3260,7 @@ fn removes_a_monitor_of_another_node_at_the_exit_packet_of_its_target() {
             &name,
             &remote.term(),
             &Term::Pid(id),
-            &Term::Reference(reference),
+            &reference.term(),
             |_| Ok(atom("normal")),
         )
         .unwrap();
@@ -3279,7 +3279,7 @@ fn removes_a_monitor_of_another_node_at_the_exit_packet_of_its_target() {
         messages(&scheduler, id.0),
         [Term::tuple(vec![
             atom("DOWN"),
-            Term::Reference(reference),
+            reference.term(),
             atom("process"),
             remote.term(),
             atom("normal"),
@@ -3664,9 +3664,9 @@ fn stops_the_exit_of_a_process_at_a_reason_that_no_connection_can_carry() {
             connection: 1,
         },
     );
-    process.exiting = Some(Term::tuple(vec![Term::Reference(
-        Reference::ordinary(9).unwrap().pid_reference(),
-    )]));
+    process.exiting = Some(Term::MatchContext(Arc::new(crate::term::MatchState::new(
+        crate::term::Binary::from(vec![]),
+    ))));
     assert!(
         scheduler
             .exit_links(process, ExitPhase::DistMonitors(None), 100)
@@ -4025,7 +4025,7 @@ fn a_signal_to_a_dead_process_answers_a_group_leader_and_an_is_alive() {
         &Signal::GroupLeader {
             leader: Term::Pid(ProcessId(98)),
             requester: root,
-            reference: leader_reference,
+            reference: LocalReference::Compact(leader_reference),
         },
     );
     scheduler.dead_target_signal(
@@ -4377,8 +4377,8 @@ fn second_abandon_of_a_linked_spawn_request_keeps_its_monitor() {
             },
         );
     }
-    assert!(scheduler.abandon_spawn_request(Reference(1)));
-    assert!(!scheduler.abandon_spawn_request(Reference(1)));
+    assert!(scheduler.abandon_spawn_request(LocalReference::Compact(Reference(1))));
+    assert!(!scheduler.abandon_spawn_request(LocalReference::Compact(Reference(1))));
     assert!(
         scheduler.processes[&id].monitors.get(&key).is_some(),
         "the second abandon keeps the pending monitor of a linked request"
@@ -4414,8 +4414,8 @@ fn second_abandon_of_a_linked_spawn_request_keeps_its_monitor() {
             },
         );
     }
-    assert!(scheduler.abandon_spawn_request(Reference(2)));
-    assert!(!scheduler.abandon_spawn_request(Reference(2)));
+    assert!(scheduler.abandon_spawn_request(LocalReference::Compact(Reference(2))));
+    assert!(!scheduler.abandon_spawn_request(LocalReference::Compact(Reference(2))));
     assert!(
         scheduler.processes[&id].monitors.get(&plain).is_none(),
         "the first abandon of a plain request removes its pending monitor"
@@ -4636,7 +4636,7 @@ fn abandon_of_a_remote_request_removes_the_connection_monitor() {
             },
         );
     }
-    assert!(scheduler.abandon_spawn_request(Reference(3)));
+    assert!(scheduler.abandon_spawn_request(LocalReference::Compact(Reference(3))));
     assert!(scheduler.processes[&id].monitors.get(&key).is_none());
 }
 

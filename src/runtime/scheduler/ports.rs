@@ -17,7 +17,7 @@ use crate::{
         process::{MonitorKey, MonitorLinkTree},
         signal::Signal,
     },
-    term::{PortId, ProcessId, Reference, Term},
+    term::{PortId, ProcessId, Term},
 };
 
 #[cfg(test)]
@@ -671,9 +671,8 @@ impl Scheduler {
     /// `erts_deliver_port_exit` does with `monitor_port_exit`
     /// (io.c:3922-3936). The watcher gets `{'DOWN', Ref, port, Port,
     /// Reason}`.
-    fn port_monitors_down(&mut self, monitors: &[(ProcessId, Reference)], reason: &Term) {
+    fn port_monitors_down(&mut self, monitors: &[(ProcessId, MonitorKey)], reason: &Term) {
         for &(watcher, reference) in monitors {
-            let reference = MonitorKey::Local(reference);
             self.send_monitor_down(None, watcher, reference, reason.clone());
         }
     }
@@ -690,7 +689,7 @@ impl Scheduler {
         &mut self,
         id: PortId,
         watcher: ProcessId,
-        reference: Reference,
+        reference: MonitorKey,
     ) -> bool {
         self.node
             .with_port(id, |port| {
@@ -712,8 +711,7 @@ impl Scheduler {
     pub(super) fn demonitor_port(&mut self, id: PortId, reference: MonitorKey) {
         // A port that closed has no monitor to remove.
         self.node.with_port(id, |port| {
-            port.monitors
-                .retain(|&(_, item)| MonitorKey::Local(item) != reference);
+            port.monitors.retain(|&(_, item)| item != reference);
         });
     }
 

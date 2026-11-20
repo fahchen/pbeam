@@ -258,3 +258,15 @@ fn counts_a_transient_record_definition_once() {
     let both = Term::tuple(vec![first, second]);
     assert_eq!(bytes(&both), 2 * thing + definition + 2 * size_of::<Term>());
 }
+
+#[test]
+fn counts_the_pid_reference_payload_once_for_its_copies() {
+    use crate::term::{LocalReference, PidReference, ProcessId, Reference};
+    let reference = LocalReference::new_pid(Reference(0), ProcessId(0)).term();
+    assert_eq!(bytes(&reference), size_of::<PidReference>());
+    let tuple = Term::tuple(vec![reference.clone(), reference]);
+    assert_eq!(
+        bytes(&tuple),
+        2 * size_of::<Term>() + size_of::<PidReference>()
+    );
+}
