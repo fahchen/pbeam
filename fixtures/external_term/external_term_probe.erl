@@ -1,5 +1,5 @@
 -module(external_term_probe).
--export([literals/0, options/0, decode/0, used/0, sizes/0, errors/0, decode_record/0, decode_remote_pid/0, bits/0, iovec/0]).
+-export([literals/0, options/0, decode/0, used/0, sizes/0, errors/0, decode_record/0, decode_remote_pid/0, bits/0, iovec/0, dead_owner_reference/0]).
 
 -define(VALUES,
         [0, 255, 256, -1, 1 bsl 40, -(1 bsl 40), 1 bsl 70, -(1 bsl 70),
@@ -89,6 +89,37 @@ check(F) ->
 %% atom uses `ATOM_UTF8_EXT` (118), with a 2-byte length.
 decode_record() ->
     binary_to_term(<<131, 67, 0, 0, 0, 0, 1, 119, 1, "m", 118, 0, 1, "r">>).
+
+%% A pid reference of an owner that exited keeps the two pid words of its
+%% owner (`external.c:3642-3668`, `erl_bif_unique.c:149-168`). The fixed
+%% bytes come from `ERL_FLAGS='+S 1' mise run erts-eval` on OTP 29.1.1
+%% after an alias owner exited. The last two words retain its tagged pid.
+%% A decode and an encode keep every byte.
+dead_owner_reference() ->
+    Parent = self(),
+    {Pid, Monitor} = spawn_monitor(fun() ->
+        Alias = alias([explicit_unalias]),
+        Parent ! {alias, self(), Alias, term_to_binary(Alias)}
+    end),
+    receive {'DOWN', Monitor, process, Pid, _} -> ok end,
+    {Alias, LiveBytes} = receive {alias, Pid, A, B} -> {A, B} end,
+    Bytes = term_to_binary(Alias),
+    Decoded = binary_to_term(Bytes),
+    Fixed = <<131, 90, 0, 5, 119, 13, 110, 111, 110, 111, 100, 101, 64, 110, 111, 104, 111, 115, 116,
+              0, 0, 0, 0, 0, 1, 27, 160, 133, 221, 0, 1, 26, 215, 30, 45, 0, 0, 41, 131, 0, 0, 0, 0>>,
+    FixedRef = binary_to_term(Fixed),
+    Checks = [not is_process_alive(Pid),
+              is_reference(Alias),
+              Bytes =:= LiveBytes,
+              byte_size(Bytes) =:= 43,
+              binary:part(Bytes, 0, 4) =:= <<131, 90, 0, 5>>,
+              binary:part(Bytes, byte_size(Bytes) - 8, 8) =/= <<0:64>>,
+              Decoded =:= Alias,
+              term_to_binary(Decoded) =:= Bytes,
+              is_reference(FixedRef),
+              term_to_binary(FixedRef) =:= Fixed,
+              binary_to_term(term_to_binary(FixedRef)) =:= FixedRef],
+    {Checks, Fixed}.
 
 %% The pinned ERTS gives a pid of node 'a@b'.
 decode_remote_pid() ->
