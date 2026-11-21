@@ -37,14 +37,12 @@ only_known_flake() {
     END { exit !(named && failures == 1 && flaky) }'
 }
 
-# Run the flaky test once more, alone, with the arguments of scripts/test.sh, and check the coverage again.
-# --no-clean keeps the profile files of the full run, so the report merges the full run and this run.
+# Run the known flaky test once more with the same nextest options.
 retry_flake() {
   echo "check: retried $flake after \`$flake_message\`" | tee -a "$log"
-  CARGO_LLVM_COV_TARGET_DIR=target/llvm-cov-target cargo llvm-cov nextest --locked --workspace --all-features --no-clean \
+  cargo nextest run --locked --workspace --all-features \
     --status-level slow --final-status-level slow --no-fail-fast \
-    --cobertura --output-path target/coverage.xml -E "test(=$flake)" 2>&1 | sed 's/^/[retry] /' >>"$log" &&
-    mise exec -- elixir scripts/check_coverage.exs target/coverage.xml 2>&1 | sed 's/^/[retry] /' >>"$log"
+    -E "test(=$flake)" 2>&1 | sed 's/^/[retry] /' >>"$log"
 }
 
 if ((status != 0)) && only_known_flake; then
@@ -56,7 +54,6 @@ fi
 
 if ((status == 0)); then
   echo 'check: pass'
-  clean <"$log" | grep -o 'Application line coverage: .*'
   exit 0
 fi
 
@@ -75,8 +72,4 @@ for task in $(clean <"$log" | sed -n 's/^\[\([^]]*\)\] ERROR task failed$/\1/p')
     head -n 60
 done
 
-if grep -q 'application line coverage must be 100%' "$log"; then
-  echo 'Uncovered lines:'
-  cargo llvm-cov report --show-missing-lines 2>&1 | clean | sed '1,/^Uncovered Lines:$/d'
-fi
 exit "$status"

@@ -40,12 +40,11 @@ formatting that `cargo fmt` or `rumdl` controls.
 - Keep concepts with different owners in separate modules.
 - Clippy warnings and formatting are merge blockers. Do not accept `allow`
   attributes that hide warnings.
-- Application line coverage must stay at 100%. Flag excluded production code
-  and tests that do not assert behavior.
+- Flag changes that remove selected OTP cases, add known failures, or leave new behavior without a test.
 
 ## Tests
 
-- Runtime behavior needs a compiled fixture whose result matches ERTS.
+- Verify runtime behavior with an upstream OTP case or a compiled fixture whose result matches ERTS.
 - Tests must not change runtime configuration that other tests read.
 
 ## Pull requests

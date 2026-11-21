@@ -36,7 +36,7 @@ Most second review rounds came from these classes. Check each one before you ask
 1. Each OTP citation: open the cited lines with `mise run otp-src` and confirm they say what the text says.
 2. Each claim in the PR body (a case count, "covers X", "the same as ERTS", "no regression") matches a test or a measured number. Do not write a gain or a "faster" without a `docs/performance/` record; write "no regression against main at <sha>" instead.
 3. No field, function, or table without a reader in this PR.
-4. Each new line is covered on the Linux CI host. A branch that Erlang code cannot reach gets a `--lib` unit test. A path that only a race reaches gets a deterministic unit test. Remove a branch that cannot run. Do not join lines or move code to satisfy the coverage counter.
+4. Test new behavior on the Linux CI host. Use an upstream OTP case or a compiled fixture for guest behavior. Use a deterministic unit test for internal invariants and paths that only a race can reach. Remove unreachable code.
 5. Revert check: revert the change locally once and see each new test fail.
 6. A probe whose ERTS output depends on the host libcrypto or kernel asserts the exact PBeam output on every host, and compares with ERTS only on macOS. Linux is the only CI host.
 7. A new BIF or NIF also adds its row and its unsupported-list entry to `docs/effect-inventory.md`, and adds an entry with an `effect_probe` call to the `AMBIENT` list in `tests/integration/effect_capability.rs`.

@@ -6,19 +6,18 @@ rumdl = "0.2.78"
 taplo = "0.10.0"
 actionlint = "1.7.12"
 shellcheck = "0.11.0"
-"github:taiki-e/cargo-llvm-cov" = "0.9.1"
 "github:nextest-rs/nextest" = { version = "0.9.148", version_prefix = "cargo-nextest-" }
 mr-boxington = "1.29.1"
 
 [tasks.setup]
 description = "Install check components for the mise-pinned Rust toolchain"
-run = 'rustup component add rustfmt clippy llvm-tools-preview --toolchain "$(mise config get --file mise.toml tools.rust.version)"'
+run = 'rustup component add rustfmt clippy --toolchain "$(mise config get --file mise.toml tools.rust.version)"'
 
 [tasks.lint]
 description = "Check documentation, configuration, workflows, and Rust"
 run = [
-  "rumdl check .",
-  "taplo fmt --check",
+  "rumdl check --exclude 'vendor/otp/**' .",
+  "git ls-files -z '*.toml' | xargs -0 taplo fmt --check",
   "actionlint",
   "shellcheck scripts/*.sh",
   "cd fixtures/hello && mix format --check-formatted && mix compile --warnings-as-errors",
@@ -31,13 +30,34 @@ run = [
   "mix format --check-formatted scripts/test_classes.exs tests/test_classes_test.exs",
   "elixir tests/test_classes_test.exs",
   "python3 tests/test_ci_frequency.py",
+  "python3 -B -m unittest discover -s tests -p test_otp_compat.py",
   "cargo fmt --all -- --check",
   "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings",
 ]
 
 [tasks.test]
-description = "Run reference and Rust tests with 100% application line coverage"
+description = "Run OTP compatibility, reference, and Rust tests"
 run = "bash scripts/test.sh"
+
+[tasks.otp-check]
+description = "Run the pinned OTP cases outside the known-failure list"
+usage = 'flag "--base <revision>" help="Check the PR against this target-branch revision"'
+run = [
+  "cargo build --locked --all-features --profile test --bin pbeam",
+  'python3 scripts/otp_compat.py check ${usage_base:+--base "$usage_base"}',
+]
+
+[tasks.otp-update-failures]
+description = "Run all selected OTP cases and remove fixed cases from the failure list"
+run = [
+  "cargo build --locked --all-features --profile test --bin pbeam",
+  "python3 scripts/otp_compat.py update",
+]
+
+[tasks.otp-test-beams]
+description = "Compare the committed OTP test BEAM files with the pinned source"
+usage = 'flag "--write" help="Regenerate the BEAM files from upstream source"'
+run = 'bash scripts/otp_suite_beam.sh ${usage_write:+--write}'
 
 [tasks.check]
 description = "Run all required checks"

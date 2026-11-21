@@ -64,7 +64,7 @@ mise run check
 ```
 
 The shared local/CI command checks Markdown, TOML formatting, GitHub Actions, shell scripts,
-Rust formatting, Clippy with warnings denied, tests, and 100% line coverage.
+Rust formatting, Clippy with warnings denied, Rust tests, and selected upstream OTP compatibility tests.
 Elixir fixtures use formatting, warnings-as-errors, and Mix tests with 100% application
 line coverage. The constant-return BEAM fixture is checked in at
 `fixtures/beam/constant.beam`. Run `mise run beam-inventory` to inspect its disassembly,
@@ -74,7 +74,15 @@ See the [evidence table](docs/hello-world-target.md).
 
 Run `mise run bench-compare` to compare the runtime with the pinned ERTS on the five scenarios of [benchmark](benchmark/README.md). That directory records the method, the scenarios, and the measured results.
 
-In CI, the `lint` job runs `mise run lint`. In parallel, four `test` jobs run `mise run test`, and each job runs one slice of the Rust tests and keeps its coverage report. The required `checks` job passes when these jobs pass and when the four reports together give 100% application line coverage (`scripts/check_coverage.exs`). A pull request that changes only Markdown files runs the lint job only. A Markdown file that a test or build step reads counts as code: `scripts/ci_task.sh` lists these files. A push to `main` always runs all jobs.
+In CI, the `lint` job runs `mise run lint`. The fixture job checks the Mix projects. Four test jobs run one slice of the Rust tests each. The first slice also runs the upstream OTP compatibility tests. The required `checks` job passes when all these jobs pass. A pull request that changes only Markdown files runs the lint job only. A Markdown file that a test or build step reads counts as code: `scripts/ci_task.sh` lists these files. A push to `main` always runs all jobs.
+
+### OTP compatibility tests
+
+`mise run otp-check` runs the selected OTP cases in `tests/otp/cases.txt` with PBeam. It uses the BEAM files in `tests/otp/beam/` and skips the cases in `tests/otp/known_failures.txt`. A PR cannot remove a selected case or add a known failure. Remove a known failure only when the case passes.
+
+`mise run otp-update-failures` runs all selected cases and removes the known failures that now pass. A new failure or an incomplete run leaves the file as it was. The initial cases run directly from the upstream modules. They do not need the Common Test suite lifecycle.
+
+To check the committed BEAM files, run `git submodule update --init --depth 1 -- vendor/otp`, then `mise run otp-test-beams`. Use `mise run otp-test-beams -- --write` to regenerate them from the pinned sources. The regular compatibility run uses the committed files and requires no submodule checkout.
 
 ## Delivery
 

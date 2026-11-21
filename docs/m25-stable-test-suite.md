@@ -4,11 +4,11 @@
 
 The full unit, integration, and feature test suite must pass under parallel load on macOS arm64 and Ubuntu. No test binary may crash. This is the follow-on milestone for the test failures found during the completed BeautifulRust work. GitHub already tracks it as [m25](https://github.com/fahchen/pbeam/milestone/25), with [tracker #1440](https://github.com/fahchen/pbeam/issues/1440) and [epic #1441](https://github.com/fahchen/pbeam/issues/1441). This repository document gives another agent the goal, accepted constraints, verified progress, and next steps.
 
-All m25 tasks are done: [#1442](https://github.com/fahchen/pbeam/issues/1442), [#1443](https://github.com/fahchen/pbeam/issues/1443), [#1444](https://github.com/fahchen/pbeam/issues/1444), [#1473](https://github.com/fahchen/pbeam/issues/1473), [#1476](https://github.com/fahchen/pbeam/issues/1476), and [#1478](https://github.com/fahchen/pbeam/issues/1478). Each cause is recorded, each 20-run record passes, and each fix merged with green CI. The only open item is the project board `Status`, which needs a token with `read:project`. Reproduce each failure and establish its cause before changing code. Split a task if its failures have independent causes. Keep one focused task per PR.
+The original stability tasks are done: [#1442](https://github.com/fahchen/pbeam/issues/1442), [#1443](https://github.com/fahchen/pbeam/issues/1443), [#1444](https://github.com/fahchen/pbeam/issues/1444), [#1473](https://github.com/fahchen/pbeam/issues/1473), [#1476](https://github.com/fahchen/pbeam/issues/1476), and [#1478](https://github.com/fahchen/pbeam/issues/1478). Each cause is recorded, each 20-run record passes, and each fix merged with green CI. The only open item is the project board `Status`, which needs a token with `read:project`. Reproduce each failure and establish its cause before changing code. Split a task if its failures have independent causes. Keep one focused task per PR.
 
 This milestone does not reopen the completed lint rollout, restore blaze, or take ownership of the m24 distribution and Redbug plan. The completed work below supplies evidence and context.
 
-## Completion gate
+## Original stability checkpoint
 
 - #1442 passes on macOS arm64 and Ubuntu without a test binary crash. Done in `49a97595`.
 - #1443 identifies both causes and passes 20 full parallel unit test runs with no `SIGSEGV` stop of the test binary. Done: 20 of 20 pass at `485cad79`.
@@ -18,6 +18,10 @@ This milestone does not reopen the completed lint rollout, restore blaze, or tak
 - Each runtime fix matches pinned ERTS behavior and cites the relevant OTP source. No new unsafe operation or shared test configuration mutation is introduced.
 - Each task has accepted verification and a merged PR. Formatting, Clippy, focused tests, and CI's full gate pass, with 100% application line coverage.
 - The task issues, epic, tracker, and milestone state agree after acceptance. The project Status still needs a session with `read:project`; see the paragraph below the progress summary.
+
+## OTP compatibility gate
+
+[Epic #1664](https://github.com/fahchen/pbeam/issues/1664) adds upstream OTP compatibility tests. [Task #1665](https://github.com/fahchen/pbeam/issues/1665) replaces the Rust line coverage requirement with the selected cases and the known-failure list. The Rust tests and the Mix fixture checks continue to run. The coverage criteria above record the original stability checkpoint. See the [OTP compatibility test commands](../README.md#otp-compatibility-tests).
 
 ## Progress summary
 
