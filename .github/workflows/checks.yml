@@ -136,6 +136,9 @@ jobs:
 
       - name: Build the Rust test archive
         if: steps.select.outputs.task == 'check'
+        env:
+          # Keep source locations for failures and limit the size of the shared archive.
+          CARGO_PROFILE_TEST_DEBUG: line-tables-only
         run: mise exec -- cargo nextest archive --locked --workspace --all-features --archive-file "$RUNNER_TEMP/pbeam-rust.tar.zst"
 
       - name: Publish the Rust test archive
@@ -174,7 +177,7 @@ jobs:
           path: ${{ runner.temp }}
 
       - name: Restore the Rust test archive
-        run: mise exec -- cargo nextest list --archive-file "$RUNNER_TEMP/pbeam-rust.tar.zst" --extract-to "$GITHUB_WORKSPACE" --workspace-remap "$GITHUB_WORKSPACE" --list-type binaries-only
+        run: mise exec -- cargo nextest list --archive-file "$RUNNER_TEMP/pbeam-rust.tar.zst" --extract-to "$GITHUB_WORKSPACE" --extract-overwrite --workspace-remap "$GITHUB_WORKSPACE" --list-type binaries-only
 
       - name: Get the test fixtures
         uses: actions/download-artifact@v8.0.2
