@@ -23,34 +23,6 @@ env:
 
 # The lint, fixture, and test jobs run in parallel. The `checks` job is the status that the ruleset of main requires. It passes only when each job passes.
 jobs:
-  select:
-    name: select checks
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    outputs:
-      task: ${{ steps.select.outputs.task }}
-      otp_beams: ${{ steps.select.outputs.otp_beams }}
-    steps:
-      - uses: actions/checkout@v7.0.1
-        with:
-          fetch-depth: 0
-
-      - uses: jdx/mise-action@v5.1.1
-        with:
-          version: 2026.10.7
-          install: false
-
-      - name: Install Erlang and Elixir
-        run: mise install erlang elixir
-
-      - name: Select the checks
-        id: select
-        env:
-          EVENT: ${{ github.event_name }}
-          BASE: ${{ github.event.pull_request.base.sha }}
-          HEAD: ${{ github.event.pull_request.head.sha }}
-        run: mise exec -- elixir scripts/ci_task.exs --github
-
   lint:
     name: lint
     runs-on: ubuntu-latest
@@ -80,13 +52,13 @@ jobs:
 
   fixtures:
     name: fixture checks
-    needs: select
-    if: needs.select.outputs.task == 'check'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
       - name: Check out source
         uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Set up mise
         uses: jdx/mise-action@v5.1.1
@@ -94,20 +66,28 @@ jobs:
           version: 2026.10.7
           install: true
 
+      - name: Select the checks
+        id: select
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: mise exec -- elixir scripts/ci_task.exs --github
+
       - name: Cache cargo
+        if: steps.select.outputs.task == 'check'
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: checks
           save-if: false
 
       - name: Run fixture checks
+        if: steps.select.outputs.task == 'check'
         run: mise exec -- elixir scripts/fixture_checks.exs
 
   # Each test job runs one Rust test slice. The first slice also runs the OTP cases.
   test:
     name: test (${{ matrix.partition }})
-    needs: select
-    if: needs.select.outputs.task == 'check'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     strategy:
@@ -127,16 +107,25 @@ jobs:
           version: 2026.10.7
           install: true
 
+      - name: Select the checks
+        id: select
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: mise exec -- elixir scripts/ci_task.exs --github
+
       - name: Get upstream OTP test source
-        if: matrix.partition == 1 && needs.select.outputs.otp_beams == 'true'
+        if: matrix.partition == 1 && steps.select.outputs.task == 'check' && steps.select.outputs.otp_beams == 'true'
         run: git submodule update --init --depth 1 -- vendor/otp
 
       - name: Verify upstream OTP test BEAM files
-        if: matrix.partition == 1 && needs.select.outputs.otp_beams == 'true'
+        if: matrix.partition == 1 && steps.select.outputs.task == 'check' && steps.select.outputs.otp_beams == 'true'
         run: mise run otp-test-beams
 
       # The test jobs build the same files, so they share one cache, and only the first job saves it.
       - name: Cache cargo
+        if: steps.select.outputs.task == 'check'
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: checks
@@ -144,12 +133,13 @@ jobs:
           cache-on-failure: true
 
       - name: Run the upstream OTP compatibility cases
-        if: matrix.partition == 1
+        if: matrix.partition == 1 && steps.select.outputs.task == 'check'
         env:
           PBEAM_CI_BASE: ${{ github.event.pull_request.base.sha }}
         run: mise run otp-check
 
       - name: Run the tests
+        if: steps.select.outputs.task == 'check'
         env:
           NEXTEST_PROFILE: ci
           PBEAM_TEST_PARTITION: slice:${{ matrix.partition }}/${{ strategy.job-total }}
@@ -160,11 +150,11 @@ jobs:
         run: mise exec -- elixir scripts/test.exs
 
       - name: Extract test durations
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.select.outputs.task == 'check' }}
         run: mise exec -- elixir scripts/ci_test_durations.exs target/nextest/ci/junit.xml target/test-durations.json
 
       - name: Keep test durations
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.select.outputs.task == 'check' }}
         uses: actions/upload-artifact@v7.0.2
         with:
           name: test-durations-${{ matrix.partition }}
@@ -175,19 +165,12 @@ jobs:
 
   checks:
     name: checks
-    needs: [select, lint, fixtures, test]
+    needs: [lint, fixtures, test]
     # The job runs also when a needed job fails or is cancelled, so that the required status is always reported.
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Fail if a required job did not pass
-        if: >-
-          needs.select.result != 'success' ||
-          needs.lint.result != 'success' ||
-          (needs.select.outputs.task == 'check' &&
-          (needs.fixtures.result != 'success' || needs.test.result != 'success')) ||
-          (needs.select.outputs.task == 'lint' &&
-          (needs.fixtures.result != 'skipped' || needs.test.result != 'skipped')) ||
-          (needs.select.outputs.task != 'check' && needs.select.outputs.task != 'lint')
+        if: needs.lint.result != 'success' || needs.fixtures.result != 'success' || needs.test.result != 'success'
         run: "false"
