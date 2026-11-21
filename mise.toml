@@ -27,8 +27,8 @@ run = [
   "cd fixtures/exqlite && mix format --check-formatted",
   "cd fixtures/fs_notify && mix format --check-formatted",
   "mix format --check-formatted 'examples/*/*.ex' 'fixtures/*/*.ex'",
-  "mix format --check-formatted scripts/check_brief.exs scripts/ci_fixture_artifact.exs scripts/test_selection.exs scripts/ci_task.exs scripts/ci_test_durations.exs scripts/fixture_checks.exs scripts/otp_compat.exs scripts/otp_suite_beam.exs scripts/setup.exs scripts/test.exs scripts/test_classes.exs scripts/test_focus.exs",
-  "mix format --check-formatted tests/test_selection_test.exs tests/otp_compat_test.exs tests/test_classes_test.exs",
+  "mix format --check-formatted scripts/check_brief.exs scripts/ci_test_artifacts.exs scripts/test_selection.exs scripts/ci_task.exs scripts/ci_test_durations.exs scripts/fixture_checks.exs scripts/otp_compat.exs scripts/otp_suite_beam.exs scripts/setup.exs scripts/test.exs scripts/test_classes.exs scripts/test_focus.exs",
+  "mix format --check-formatted tests/ci_test_artifacts_test.exs tests/test_selection_test.exs tests/otp_compat_test.exs tests/test_classes_test.exs",
   "cargo fmt --all -- --check",
   "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings",
 ]

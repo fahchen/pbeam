@@ -1,15 +1,16 @@
-Code.require_file("ci_fixture_artifact.exs", __DIR__)
+Code.require_file("ci_test_artifacts.exs", __DIR__)
 Code.require_file("test_selection.exs", __DIR__)
 
 defmodule PBeamTest do
   def run do
     prebuilt? = System.get_env("PBEAM_PREBUILT_TESTS") == "1"
     build_args = build_args(prebuilt?)
+    command = if prebuilt?, do: "cargo-nextest", else: "cargo"
     excluded = TestSelection.identities()
     selection_args = ["-E", TestSelection.filter(excluded)]
 
     if System.get_env("PBEAM_VERIFY_TEST_INVENTORIES") == "1" do
-      verify_inventories(build_args, prebuilt?, selection_args, excluded)
+      verify_inventories(command, build_args, prebuilt?, selection_args, excluded)
     end
 
     nextest = [
@@ -22,7 +23,7 @@ defmodule PBeamTest do
       "--no-fail-fast"
     ]
 
-    run!("cargo", nextest ++ build_args ++ selection_args)
+    run!(command, nextest ++ build_args ++ selection_args)
   end
 
   defp build_args(false) do
@@ -31,7 +32,7 @@ defmodule PBeamTest do
   end
 
   defp build_args(true) do
-    CIFixtureArtifact.verify!()
+    CITestArtifacts.verify_fixtures!()
 
     for path <- ~w(target/nextest/cargo-metadata.json target/nextest/binaries-metadata.json) do
       unless File.regular?(path), do: raise("missing prebuilt test metadata: #{path}")
@@ -49,7 +50,7 @@ defmodule PBeamTest do
     ]
   end
 
-  defp verify_inventories(build_args, prebuilt?, selection_args, excluded) do
+  defp verify_inventories(command, build_args, prebuilt?, selection_args, excluded) do
     suffix = 12 |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)
     dir = Path.join(System.tmp_dir!(), "pbeam-test-classes.#{suffix}")
     File.mkdir!(dir)
@@ -68,8 +69,8 @@ defmodule PBeamTest do
           "json"
         ] ++ build_args
 
-      full = run!("cargo", list, into: "")
-      selected = run!("cargo", list ++ selection_args, into: "")
+      full = run!(command, list, into: "")
+      selected = run!(command, list ++ selection_args, into: "")
       TestSelection.verify_lists(full, selected, excluded)
 
       File.write!(tests, full)

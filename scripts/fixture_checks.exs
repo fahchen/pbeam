@@ -4,7 +4,7 @@ defmodule FixtureChecks do
 
     case mode do
       mode when mode in [nil, "", "full"] ->
-        for suite <- ~w(test_selection otp_compat test_classes) do
+        for suite <- ~w(ci_test_artifacts test_selection otp_compat test_classes) do
           run_command("elixir", ["tests/#{suite}_test.exs"], [])
         end
 
