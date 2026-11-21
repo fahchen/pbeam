@@ -11,7 +11,7 @@ mr-boxington = "1.29.1"
 
 [tasks.setup]
 description = "Install check components for the mise-pinned Rust toolchain"
-run = 'rustup component add rustfmt clippy --toolchain "$(mise config get --file mise.toml tools.rust.version)"'
+run = "elixir scripts/setup.exs"
 
 [tasks.lint]
 description = "Check documentation, configuration, workflows, and Rust"
@@ -27,37 +27,39 @@ run = [
   "cd fixtures/exqlite && mix format --check-formatted",
   "cd fixtures/fs_notify && mix format --check-formatted",
   "mix format --check-formatted 'examples/*/*.ex' 'fixtures/*/*.ex'",
-  "mix format --check-formatted scripts/test_classes.exs tests/test_classes_test.exs",
+  "mix format --check-formatted scripts/check_brief.exs scripts/ci_frequency.exs scripts/ci_task.exs scripts/ci_test_durations.exs scripts/fixture_checks.exs scripts/otp_compat.exs scripts/otp_suite_beam.exs scripts/setup.exs scripts/test.exs scripts/test_classes.exs scripts/test_focus.exs",
+  "mix format --check-formatted tests/ci_frequency_test.exs tests/otp_compat_test.exs tests/test_classes_test.exs",
   "elixir tests/test_classes_test.exs",
-  "python3 tests/test_ci_frequency.py",
-  "python3 -B -m unittest discover -s tests -p test_otp_compat.py",
+  "elixir tests/ci_frequency_test.exs",
+  "elixir tests/otp_compat_test.exs",
   "cargo fmt --all -- --check",
   "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings",
 ]
 
 [tasks.test]
 description = "Run OTP compatibility, reference, and Rust tests"
-run = "bash scripts/test.sh"
+depends = ["otp-check"]
+run = "elixir scripts/test.exs"
 
 [tasks.otp-check]
 description = "Run the pinned OTP cases outside the known-failure list"
 usage = 'flag "--base <revision>" help="Check the PR against this target-branch revision"'
 run = [
   "cargo build --locked --all-features --profile test --bin pbeam",
-  'python3 scripts/otp_compat.py check ${usage_base:+--base "$usage_base"}',
+  "elixir scripts/otp_compat.exs check",
 ]
 
 [tasks.otp-update-failures]
 description = "Run all selected OTP cases and remove fixed cases from the failure list"
 run = [
   "cargo build --locked --all-features --profile test --bin pbeam",
-  "python3 scripts/otp_compat.py update",
+  "elixir scripts/otp_compat.exs update",
 ]
 
 [tasks.otp-test-beams]
 description = "Compare the committed OTP test BEAM files with the pinned source"
 usage = 'flag "--write" help="Regenerate the BEAM files from upstream source"'
-run = 'bash scripts/otp_suite_beam.sh ${usage_write:+--write}'
+run = "elixir scripts/otp_suite_beam.exs"
 
 [tasks.check]
 description = "Run all required checks"
@@ -80,13 +82,12 @@ run = '''erl -noshell -eval 'io:format("~p~n", [beam_disasm:file("fixtures/beam/
 [tasks.check-brief]
 description = "Run all required checks and print only the result; the full log goes to target/check.log"
 quiet = true
-run = "bash scripts/check_brief.sh"
+run = "elixir scripts/check_brief.exs"
 
 [tasks.test-focus]
 description = "Run selected Rust tests and print only the results and failures"
 quiet = true
-usage = 'arg "[args]..." help="Arguments for cargo test, such as --test group for one target of tests/feature/ or tests/integration/, --lib for the unit tests, a test name filter, or -- --exact" var=#true double_dash="preserve"'
-run = 'eval "set -- ${usage_args:-}"; bash scripts/test_focus.sh "$@"'
+run = "elixir scripts/test_focus.exs"
 
 [tasks.erts-eval]
 description = "Evaluate Erlang expressions on the pinned OTP and print the value or the exception"

@@ -74,7 +74,7 @@ See the [evidence table](docs/hello-world-target.md).
 
 Run `mise run bench-compare` to compare the runtime with the pinned ERTS on the five scenarios of [benchmark](benchmark/README.md). That directory records the method, the scenarios, and the measured results.
 
-In CI, the `lint` job runs `mise run lint`. The fixture job checks the Mix projects. Four test jobs run one slice of the Rust tests each. The first slice also runs the upstream OTP compatibility tests. The required `checks` job passes when all these jobs pass. A pull request that changes only Markdown files runs the lint job only. A Markdown file that a test or build step reads counts as code: `scripts/ci_task.sh` lists these files. A push to `main` always runs all jobs.
+In CI, the `lint` job runs `mise run lint`. The fixture job checks the Mix projects. Four test jobs run one slice of the Rust tests each. The first slice also runs the upstream OTP compatibility tests. The required `checks` job passes when all these jobs pass. A pull request that changes only Markdown files runs the lint job only. A Markdown file that a test or build step reads counts as code: `scripts/ci_task.exs` lists these files. A push to `main` always runs all jobs.
 
 ### OTP compatibility tests
 
