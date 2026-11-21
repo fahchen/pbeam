@@ -378,5 +378,19 @@ defmodule OTPCompat do
 end
 
 if Path.expand(List.to_string(List.first(:init.get_plain_arguments(), ~c""))) == __ENV__.file do
-  System.halt(OTPCompat.main(System.argv()))
+  args =
+    case {System.argv(), System.get_env("usage_update_failures")} do
+      {["check"], "true"} ->
+        bases = [System.get_env("usage_base"), System.get_env("PBEAM_CI_BASE")]
+
+        case Enum.find(bases, &(&1 not in [nil, ""])) do
+          nil -> ["update"]
+          base -> ["update", "--base", base]
+        end
+
+      {args, _} ->
+        args
+    end
+
+  System.halt(OTPCompat.main(args))
 end

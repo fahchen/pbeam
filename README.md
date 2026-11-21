@@ -66,10 +66,7 @@ mise run check
 The shared local/CI command checks Markdown, TOML formatting, GitHub Actions, shell scripts,
 Rust formatting, Clippy with warnings denied, Rust tests, and selected upstream OTP compatibility tests.
 Elixir fixtures use formatting, warnings-as-errors, and Mix tests with 100% application
-line coverage. The constant-return BEAM fixture is checked in at
-`fixtures/beam/constant.beam`. Run `mise run beam-inventory` to inspect its disassembly,
-`mise run reference` for the ERTS checks, and `mise run inventory` for the compiled Hello
-World entry instructions and imports.
+line coverage. Run `mise run disasm fixtures/beam/constant.beam` to inspect the constant-return fixture. Run `mise run inventory` for the compiled Hello World entry instructions and imports.
 See the [evidence table](docs/hello-world-target.md).
 
 Run `mise run bench-compare` to compare the runtime with the pinned ERTS on the five scenarios of [benchmark](benchmark/README.md). That directory records the method, the scenarios, and the measured results.
@@ -80,7 +77,7 @@ In CI, the `lint` job runs `mise run lint`. The fixture job checks the Mix proje
 
 `mise run otp-check` runs the selected OTP cases in `tests/otp/cases.txt` with PBeam. It uses the BEAM files in `tests/otp/beam/` and skips the cases in `tests/otp/known_failures.txt`. A PR cannot remove a selected case or add a known failure. Remove a known failure only when the case passes.
 
-`mise run otp-update-failures` runs all selected cases and removes the known failures that now pass. A new failure or an incomplete run leaves the file as it was. The initial cases run directly from the upstream modules. They do not need the Common Test suite lifecycle.
+`mise run otp-check -- --update-failures` runs all selected cases and removes the known failures that now pass. A new failure or an incomplete run leaves the file as it was. The initial cases run directly from the upstream modules. They do not need the Common Test suite lifecycle.
 
 To check the committed BEAM files, run `git submodule update --init --depth 1 -- vendor/otp`, then `mise run otp-test-beams`. Use `mise run otp-test-beams -- --write` to regenerate them from the pinned sources. The regular compatibility run uses the committed files and requires no submodule checkout.
 

@@ -42,18 +42,14 @@ depends = ["otp-check"]
 run = "elixir scripts/test.exs"
 
 [tasks.otp-check]
-description = "Run the pinned OTP cases outside the known-failure list"
-usage = 'flag "--base <revision>" help="Check the PR against this target-branch revision"'
+description = "Run the pinned OTP cases or refresh the known-failure list"
+usage = '''
+flag "--base <revision>" help="Check the PR against this target-branch revision"
+flag "--update-failures" help="Run every selected case and remove fixed cases from the known-failure list"
+'''
 run = [
   "cargo build --locked --all-features --profile test --bin pbeam",
   "elixir scripts/otp_compat.exs check",
-]
-
-[tasks.otp-update-failures]
-description = "Run all selected OTP cases and remove fixed cases from the failure list"
-run = [
-  "cargo build --locked --all-features --profile test --bin pbeam",
-  "elixir scripts/otp_compat.exs update",
 ]
 
 [tasks.otp-test-beams]
@@ -65,19 +61,10 @@ run = "elixir scripts/otp_suite_beam.exs"
 description = "Run all required checks"
 depends = ["lint", "test"]
 
-[tasks.reference]
-description = "Verify compiled Hello World fixtures under ERTS"
-dir = "fixtures/hello"
-run = "mix test --cover --warnings-as-errors"
-
 [tasks.inventory]
 description = "Inspect compiled Hello World entry instructions and imports"
 dir = "fixtures/hello"
 run = '''mix run --no-start -e 'for module <- [Hello, HelloVariant] do path = :code.which(module); {:beam_file, _, exports, _, _, functions} = :beam_disasm.file(path); IO.inspect({module, path, exports}, limit: :infinity); IO.inspect(Enum.filter(functions, fn {:function, name, _, _, _} -> name == :main end), limit: :infinity); IO.inspect(:beam_lib.chunks(path, [:imports, :exports]), limit: :infinity) end' '''
-
-[tasks.beam-inventory]
-description = "Disassemble the constant-return BEAM fixture"
-run = '''erl -noshell -eval 'io:format("~p~n", [beam_disasm:file("fixtures/beam/constant.beam")]), halt().' '''
 
 [tasks.check-brief]
 description = "Run all required checks and print only the result; the full log goes to target/check.log"
@@ -189,14 +176,6 @@ echo "Wrote $output"
 [tasks.bench-dispatch]
 description = "Measure the interpreter dispatch baseline on a release build and write target/dispatch-baseline.txt"
 run = "bash scripts/dispatch_baseline.sh"
-
-[tasks.bench-attribution]
-description = "Measure the instruction attribution reference points and micro-costs on a release build and write target/dispatch-attribution.txt"
-usage = '''
-arg "[label]" help="The label of the build, such as the name of the scratch ablation variant"
-arg "[output]" help="The output file; the default is target/dispatch-attribution.txt"
-'''
-run = 'bash scripts/dispatch_attribution.sh "${usage_label:-base}" "${usage_output:-target/dispatch-attribution.txt}"'
 
 [tasks.bench-drop]
 description = "Measure the term drop cost on a release build and write target/drop-costs.txt"
