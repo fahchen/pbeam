@@ -44,7 +44,7 @@ formatting that `cargo fmt` or `rumdl` controls.
 
 ## Tests
 
-- Verify runtime behavior with an upstream OTP case or a compiled fixture whose result matches ERTS.
+- Verify OTP compatibility with an upstream case from the pinned OTP source. Test PBeam-specific behavior through its normal entry points.
 - Tests must not change runtime configuration that other tests read.
 
 ## Pull requests

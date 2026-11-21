@@ -21,7 +21,7 @@ This milestone does not reopen the completed lint rollout, restore blaze, or tak
 
 ## OTP compatibility gate
 
-[Epic #1664](https://github.com/fahchen/pbeam/issues/1664) adds upstream OTP compatibility tests. [Task #1665](https://github.com/fahchen/pbeam/issues/1665) replaces the Rust line coverage requirement with the selected cases and the known-failure list. The Rust tests and the Mix fixture checks continue to run. The coverage criteria above record the original stability checkpoint. See the [OTP compatibility test commands](../README.md#otp-compatibility-tests).
+[Epic #1664](https://github.com/fahchen/pbeam/issues/1664) adds upstream OTP compatibility tests. [Task #1665](https://github.com/fahchen/pbeam/issues/1665) replaces the Rust line coverage requirement and the regular legacy compatibility probe runs with the selected upstream cases and the known-failure list. PBeam-specific tests and the Mix fixture checks continue to run. The coverage criteria above record the original stability checkpoint. See the [OTP compatibility test commands](../README.md#otp-compatibility-tests).
 
 ## Progress summary
 

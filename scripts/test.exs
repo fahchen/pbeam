@@ -1,26 +1,20 @@
-Code.require_file("ci_task.exs", __DIR__)
-Code.require_file("ci_frequency.exs", __DIR__)
+Code.require_file("ci_fixture_artifact.exs", __DIR__)
+Code.require_file("test_selection.exs", __DIR__)
 
 defmodule PBeamTest do
   def run do
-    # CI checks the Mix projects in a separate job. Its Rust slices prepare only the artifacts.
-    run!("elixir", ["scripts/fixture_checks.exs"])
+    prebuilt? = System.get_env("PBEAM_PREBUILT_TESTS") == "1"
+    build_args = build_args(prebuilt?)
+    excluded = TestSelection.identities()
+    selection_args = ["-E", TestSelection.filter(excluded)]
 
-    partition = System.get_env("PBEAM_TEST_PARTITION", "")
-    frequency_args = frequency_args()
-
-    if frequency_args == [] do
-      IO.puts("CI frequency: full test set")
-    else
-      IO.puts("CI frequency: reduced ERTS-only reference checks")
+    if System.get_env("PBEAM_VERIFY_TEST_INVENTORIES") == "1" do
+      verify_inventories(build_args, prebuilt?, selection_args, excluded)
     end
 
     nextest = [
       "nextest",
       "run",
-      "--locked",
-      "--workspace",
-      "--all-features",
       "--status-level",
       "slow",
       "--final-status-level",
@@ -28,63 +22,55 @@ defmodule PBeamTest do
       "--no-fail-fast"
     ]
 
-    partition_args = if partition == "", do: [], else: ["--partition", partition]
-    run!("cargo", nextest ++ frequency_args ++ partition_args)
-
-    # One CI slice checks the inventories against the compiled list.
-    if String.starts_with?(partition, "slice:1/"), do: verify_inventories()
+    run!("cargo", nextest ++ build_args ++ selection_args)
   end
 
-  defp frequency_args do
-    if System.get_env("PBEAM_CI_EVENT") == "pull_request" do
-      paths =
-        CITask.changed_paths(
-          System.fetch_env!("PBEAM_CI_BASE"),
-          System.fetch_env!("PBEAM_CI_HEAD")
-        )
+  defp build_args(false) do
+    run!("elixir", ["scripts/fixture_checks.exs"])
+    ~w(--locked --workspace --all-features)
+  end
 
-      # Changes to tests, fixtures, and tool pins require the full list.
-      if paths != [] and
-           Enum.all?(paths, &(String.starts_with?(&1, "src/") and String.ends_with?(&1, ".rs"))) do
-        ["-E", CIFrequency.filter(CIFrequency.identities())]
-      else
-        []
-      end
-    else
-      []
+  defp build_args(true) do
+    CIFixtureArtifact.verify!()
+
+    for path <- ~w(target/nextest/cargo-metadata.json target/nextest/binaries-metadata.json) do
+      unless File.regular?(path), do: raise("missing prebuilt test metadata: #{path}")
     end
+
+    [
+      "--workspace-remap",
+      File.cwd!(),
+      "--target-dir-remap",
+      Path.expand("target"),
+      "--cargo-metadata",
+      "target/nextest/cargo-metadata.json",
+      "--binaries-metadata",
+      "target/nextest/binaries-metadata.json"
+    ]
   end
 
-  defp verify_inventories do
+  defp verify_inventories(build_args, prebuilt?, selection_args, excluded) do
     suffix = 12 |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)
     dir = Path.join(System.tmp_dir!(), "pbeam-test-classes.#{suffix}")
     File.mkdir!(dir)
 
     try do
-      metadata = Path.join(dir, "metadata.json")
+      metadata = inventory_metadata(dir, prebuilt?)
       tests = Path.join(dir, "tests.json")
 
-      list = [
-        "nextest",
-        "list",
-        "--locked",
-        "--workspace",
-        "--all-features",
-        "--profile",
-        "ci",
-        "--message-format",
-        "json"
-      ]
+      list =
+        [
+          "nextest",
+          "list",
+          "--profile",
+          "ci",
+          "--message-format",
+          "json"
+        ] ++ build_args
 
-      cases = CIFrequency.identities()
       full = run!("cargo", list, into: "")
-      reduced = run!("cargo", list ++ ["-E", CIFrequency.filter(cases)], into: "")
-      CIFrequency.verify_lists(full, reduced, cases)
-
-      File.write!(
-        metadata,
-        run!("cargo", ["metadata", "--locked", "--no-deps", "--format-version", "1"], into: "")
-      )
+      selected = run!("cargo", list ++ selection_args, into: "")
+      TestSelection.verify_lists(full, selected, excluded)
 
       File.write!(tests, full)
 
@@ -94,6 +80,27 @@ defmodule PBeamTest do
     after
       File.rm_rf!(dir)
     end
+  end
+
+  defp inventory_metadata(dir, true) do
+    metadata = "target/nextest/cargo-metadata.json" |> File.read!() |> JSON.decode!()
+    members = metadata |> Map.fetch!("workspace_members") |> MapSet.new()
+
+    # The inventory uses the same workspace packages as cargo metadata --no-deps.
+    metadata =
+      Map.update!(metadata, "packages", fn packages ->
+        Enum.filter(packages, &MapSet.member?(members, Map.fetch!(&1, "id")))
+      end)
+
+    path = Path.join(dir, "metadata.json")
+    File.write!(path, JSON.encode!(metadata))
+    path
+  end
+
+  defp inventory_metadata(dir, false) do
+    path = Path.join(dir, "metadata.json")
+    File.write!(path, run!("cargo", ~w(metadata --locked --no-deps --format-version 1), into: ""))
+    path
   end
 
   defp run!(executable, args, opts \\ [into: IO.stream(:stdio, :line)]) do

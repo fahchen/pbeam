@@ -4,6 +4,10 @@ defmodule FixtureChecks do
 
     case mode do
       mode when mode in [nil, "", "full"] ->
+        for suite <- ~w(test_selection otp_compat test_classes) do
+          run_command("elixir", ["tests/#{suite}_test.exs"], [])
+        end
+
         test(".")
         test("fixtures/hello")
         plug(:full)
@@ -43,7 +47,13 @@ defmodule FixtureChecks do
   defp test(path), do: mix(path, ~w(test --cover --warnings-as-errors))
 
   defp mix(path, args, env \\ []) do
-    {_, status} = System.cmd("mix", args, cd: path, env: env, into: IO.stream(:stdio, :line))
+    run_command("mix", args, cd: path, env: env)
+  end
+
+  defp run_command(executable, args, options) do
+    {_, status} =
+      System.cmd(executable, args, Keyword.put(options, :into, IO.stream(:stdio, :line)))
+
     if status != 0, do: System.halt(status)
   end
 end

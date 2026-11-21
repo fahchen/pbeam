@@ -386,7 +386,7 @@ defmodule TestClassesReportTest do
     assert status == 0
 
     assert output =~
-             "runs_the_utf16_and_utf32_match_instructions_as_pinned_erts: purpose=runtime_integration; dependencies=network,local_socket"
+             "runs_the_utf16_and_utf32_match_instructions_as_pinned_erts: purpose=runtime_integration,otp_compatibility; dependencies=network,local_socket"
 
     assert output =~
              "runs_bs_match_string_as_pinned_erts: purpose=runtime_integration,erts_comparison; dependencies=erts_process,pipes,filesystem,network,local_socket"
@@ -535,7 +535,7 @@ defmodule TestClassesReportTest do
              "rejects_an_allocation_list_that_erts_rejects: purpose=runtime_integration,erts_comparison; dependencies=erts_process,pipes,filesystem,native_library;"
 
     assert output =~
-             "raises_badarg_with_the_erts_error_info_for_an_append_segment: purpose=runtime_integration; dependencies=network,local_socket,native_library;"
+             "raises_badarg_with_the_erts_error_info_for_an_append_segment: purpose=runtime_integration,otp_compatibility; dependencies=network,local_socket,native_library;"
 
     assert output =~
              "formats_the_erts_error_info_for_an_append_segment_as_the_reference: purpose=erts_only; dependencies=erts_process,pipes,filesystem;"

@@ -71,11 +71,13 @@ See the [evidence table](docs/hello-world-target.md).
 
 Run `mise run bench-compare` to compare the runtime with the pinned ERTS on the five scenarios of [benchmark](benchmark/README.md). That directory records the method, the scenarios, and the measured results.
 
-In CI, the `lint` job runs `mise run lint`. The fixture job checks the Mix projects. Four test jobs run one slice of the Rust tests each. The first slice also runs the upstream OTP compatibility tests. The required `checks` job passes when all these jobs pass. A pull request that changes only Markdown files runs the lint job only. A Markdown file that a test or build step reads counts as code: `scripts/ci_task.exs` lists these files. A push to `main` always runs all jobs.
+In CI, the `lint` job runs `mise run lint`. The Elixir job runs the Mix suites and the Elixir test tools. It publishes the compiled fixtures that the Rust tests read. In parallel, the Rust build job compiles the test binaries once without incremental compilation. One Rust test job restores both artifacts and runs the Rust tests and the upstream OTP compatibility cases. Nextest runs tests in parallel within the Rust job. The required `checks` job verifies the results. A pull request that changes only Markdown files runs lint. A Markdown file that a test or build step reads counts as code. `scripts/ci_task.exs` lists these files. A push to `main` runs all checks.
 
 ### OTP compatibility tests
 
 `mise run otp-check` runs the selected OTP cases in `tests/otp/cases.txt` with PBeam. It uses the BEAM files in `tests/otp/beam/` and skips the cases in `tests/otp/known_failures.txt`. A PR cannot remove a selected case or add a known failure. Remove a known failure only when the case passes.
+
+Regular nextest runs use the test inventory to skip the legacy compatibility probes. Tests of PBeam interfaces, host behavior, and interoperability still run. Use `mise run test-focus` to reproduce an individual legacy case. The initial upstream selection covers five cases. Other compatibility cases will join the upstream gate in follow-up work.
 
 `mise run otp-check -- --update-failures` runs all selected cases and removes the known failures that now pass. A new failure or an incomplete run leaves the file as it was. The initial cases run directly from the upstream modules. They do not need the Common Test suite lifecycle.
 

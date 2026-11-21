@@ -21,7 +21,7 @@ env:
   # The cached target/ holds no incremental state, and with incremental compilation the tests of the `opt-level = 1` test profile ran slower in the measurement of #354. The value is explicit, because the profile default enables it.
   CARGO_INCREMENTAL: "0"
 
-# The lint, fixture, and test jobs run in parallel. The `checks` job is the status that the ruleset of main requires. It passes only when each job passes.
+# Build the Rust archive and check the Elixir fixtures in parallel. The Rust test job uses both artifacts. The ruleset of main requires the final `checks` job.
 jobs:
   lint:
     name: lint
@@ -50,8 +50,8 @@ jobs:
       - name: Run the lint checks
         run: mise run lint
 
-  fixtures:
-    name: fixture checks
+  elixir-tests:
+    name: Elixir tests
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -74,31 +74,35 @@ jobs:
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: mise exec -- elixir scripts/ci_task.exs --github
 
-      - name: Cache cargo
-        if: steps.select.outputs.task == 'check'
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: checks
-          save-if: false
-
-      - name: Run fixture checks
+      - name: Run the Elixir tests
         if: steps.select.outputs.task == 'check'
         run: mise exec -- elixir scripts/fixture_checks.exs
 
-  # Each test job runs one Rust test slice. The first slice also runs the OTP cases.
-  test:
-    name: test (${{ matrix.partition }})
+      - name: Pack the test fixtures
+        if: steps.select.outputs.task == 'check'
+        run: mise exec -- elixir scripts/ci_fixture_artifact.exs pack
+
+      - name: Publish the test fixtures
+        if: steps.select.outputs.task == 'check'
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: pbeam-test-fixtures
+          path: target/ci-fixtures.tar.zst
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true
+          retention-days: 1
+
+  rust-build:
+    name: Build Rust tests
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    strategy:
-      fail-fast: false
-      matrix:
-        partition: [1, 2, 3, 4]
+    outputs:
+      task: ${{ steps.select.outputs.task }}
     steps:
       - name: Check out source
         uses: actions/checkout@v7.0.1
         with:
-          # The next step compares the base and head commits of a pull request, so it needs their history.
           fetch-depth: 0
 
       - name: Set up mise
@@ -116,48 +120,98 @@ jobs:
         run: mise exec -- elixir scripts/ci_task.exs --github
 
       - name: Get upstream OTP test source
-        if: matrix.partition == 1 && steps.select.outputs.task == 'check' && steps.select.outputs.otp_beams == 'true'
+        if: steps.select.outputs.task == 'check' && steps.select.outputs.otp_beams == 'true'
         run: git submodule update --init --depth 1 -- vendor/otp
 
       - name: Verify upstream OTP test BEAM files
-        if: matrix.partition == 1 && steps.select.outputs.task == 'check' && steps.select.outputs.otp_beams == 'true'
+        if: steps.select.outputs.task == 'check' && steps.select.outputs.otp_beams == 'true'
         run: mise run otp-test-beams
 
-      # The test jobs build the same files, so they share one cache, and only the first job saves it.
       - name: Cache cargo
         if: steps.select.outputs.task == 'check'
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: checks
-          save-if: ${{ matrix.partition == 1 }}
           cache-on-failure: true
 
+      - name: Build the Rust test archive
+        if: steps.select.outputs.task == 'check'
+        run: mise exec -- cargo nextest archive --locked --workspace --all-features --archive-file "$RUNNER_TEMP/pbeam-rust.tar.zst"
+
+      - name: Publish the Rust test archive
+        if: steps.select.outputs.task == 'check'
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: pbeam-rust-tests
+          path: ${{ runner.temp }}/pbeam-rust.tar.zst
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true
+          retention-days: 1
+
+  test:
+    name: Rust tests
+    needs: [rust-build, elixir-tests]
+    if: needs.rust-build.outputs.task == 'check'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Set up mise
+        uses: jdx/mise-action@v5.1.1
+        with:
+          version: 2026.10.7
+          install: true
+
+      - name: Get the Rust test archive
+        uses: actions/download-artifact@v8.0.2
+        with:
+          name: pbeam-rust-tests
+          path: ${{ runner.temp }}
+
+      - name: Restore the Rust test archive
+        run: mise exec -- cargo nextest list --archive-file "$RUNNER_TEMP/pbeam-rust.tar.zst" --extract-to "$GITHUB_WORKSPACE" --workspace-remap "$GITHUB_WORKSPACE" --list-type binaries-only
+
+      - name: Get the test fixtures
+        uses: actions/download-artifact@v8.0.2
+        with:
+          name: pbeam-test-fixtures
+          path: target
+
+      - name: Restore the test fixtures
+        run: mise exec -- elixir scripts/ci_fixture_artifact.exs unpack
+
+      - name: Set up Hex for the release build tests
+        run: mise exec -- mix local.hex --force --if-missing
+
+      - name: Set up rebar for the release build tests
+        run: mise exec -- mix local.rebar --force --if-missing
+
       - name: Run the upstream OTP compatibility cases
-        if: matrix.partition == 1 && steps.select.outputs.task == 'check'
         env:
           PBEAM_CI_BASE: ${{ github.event.pull_request.base.sha }}
-        run: mise run otp-check
+        run: mise exec -- elixir scripts/otp_compat.exs check
 
-      - name: Run the tests
-        if: steps.select.outputs.task == 'check'
+      - name: Run the Rust tests
         env:
           NEXTEST_PROFILE: ci
-          PBEAM_TEST_PARTITION: slice:${{ matrix.partition }}/${{ strategy.job-total }}
-          PBEAM_FIXTURE_MODE: prepare
-          PBEAM_CI_EVENT: ${{ github.event_name }}
-          PBEAM_CI_BASE: ${{ github.event.pull_request.base.sha }}
-          PBEAM_CI_HEAD: ${{ github.event.pull_request.head.sha }}
+          PBEAM_VERIFY_TEST_INVENTORIES: "1"
+          PBEAM_PREBUILT_TESTS: "1"
         run: mise exec -- elixir scripts/test.exs
 
       - name: Extract test durations
-        if: ${{ !cancelled() && steps.select.outputs.task == 'check' }}
+        if: ${{ !cancelled() }}
         run: mise exec -- elixir scripts/ci_test_durations.exs target/nextest/ci/junit.xml target/test-durations.json
 
       - name: Keep test durations
-        if: ${{ !cancelled() && steps.select.outputs.task == 'check' }}
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7.0.2
         with:
-          name: test-durations-${{ matrix.partition }}
+          name: test-durations-rust
           path: target/test-durations.json
           if-no-files-found: warn
           overwrite: true
@@ -165,12 +219,18 @@ jobs:
 
   checks:
     name: checks
-    needs: [lint, fixtures, test]
-    # The job runs also when a needed job fails or is cancelled, so that the required status is always reported.
+    needs: [lint, elixir-tests, rust-build, test]
+    # The job runs if a needed job fails or is cancelled, so the required status is always reported.
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Fail if a required job did not pass
-        if: needs.lint.result != 'success' || needs.fixtures.result != 'success' || needs.test.result != 'success'
+        if: >-
+          needs.lint.result != 'success' ||
+          needs.elixir-tests.result != 'success' ||
+          needs.rust-build.result != 'success' ||
+          (needs.rust-build.outputs.task == 'check' && needs.test.result != 'success') ||
+          (needs.rust-build.outputs.task == 'lint' && needs.test.result != 'skipped') ||
+          (needs.rust-build.outputs.task != 'check' && needs.rust-build.outputs.task != 'lint')
         run: "false"
