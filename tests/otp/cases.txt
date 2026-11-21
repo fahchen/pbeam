@@ -1,0 +1,5 @@
+bs_match_int_SUITE:signed_integer
+bs_match_int_SUITE:unit
+lists_SUITE:reverse
+lists_SUITE:member
+binary_SUITE:deep_bitstr_lists
