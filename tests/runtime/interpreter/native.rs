@@ -5,7 +5,7 @@ use crate::runtime::Job;
 use crate::runtime::interpreter::bif::BIFS;
 
 /// The effect inventory of transition 1 of
-/// `docs/capability-security-migration.md`. `scripts/ci_task.sh` lists this
+/// `docs/capability-security-migration.md`. `scripts/ci_task.exs` lists this
 /// file, so that CI runs the full check for a change to it.
 const INVENTORY: &str = include_str!("../../../docs/effect-inventory.md");
 

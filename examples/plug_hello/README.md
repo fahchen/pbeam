@@ -29,12 +29,12 @@ The build fetches the dependencies of `mix.lock` from Hex and compiles them. The
 `mise run check` runs the gates of this example:
 
 - `mise run lint` runs `mix format --check-formatted` in this directory.
-- `scripts/test.sh` installs Hex and rebar3 when they are missing, and runs `mix deps.get --check-locked`. It then runs `MIX_ENV=test mix compile --warnings-as-errors`, which compiles the application code with warnings as errors, because `mix test --warnings-as-errors` does not pass the flag to that compile. Then `mix test --cover --warnings-as-errors` runs the tests with warnings as errors in the test files, and requires 100% line coverage (`test_coverage` in `mix.exs`). One test sends a request over TCP to the Bandit listener that the application starts.
-- `scripts/test.sh` then runs `MIX_ENV=prod mix release --overwrite`. The release of the pinned Elixir and OTP goes to `target/examples/plug_hello/`, which is not committed. A run needs only that directory.
+- `scripts/fixture_checks.exs` installs Hex and rebar3 when they are missing, and runs `mix deps.get --check-locked`. It then runs `MIX_ENV=test mix compile --warnings-as-errors`, which compiles the application code with warnings as errors, because `mix test --warnings-as-errors` does not pass the flag to that compile. Then `mix test --cover --warnings-as-errors` runs the tests with warnings as errors in the test files, and requires 100% line coverage (`test_coverage` in `mix.exs`). One test sends a request over TCP to the Bandit listener that the application starts.
+- `scripts/fixture_checks.exs` then runs `MIX_ENV=prod mix release --overwrite`. The release of the pinned Elixir and OTP goes to `target/examples/plug_hello/`, which is not committed. A run needs only that directory.
 
 ## Run on the pinned ERTS
 
-From the repository root, after `mise run check` or the build steps of `scripts/test.sh`, these commands start the release, send a request, and stop the release:
+From the repository root, after `mise run check` or the build steps of `scripts/fixture_checks.exs`, these commands start the release, send a request, and stop the release:
 
 ```sh
 target/examples/plug_hello/bin/plug_hello daemon
@@ -62,7 +62,7 @@ curl -s --retry 60 --retry-connrefused --retry-delay 1 http://127.0.0.1:4000/
 kill %1
 ```
 
-The `curl` command prints `Hello world from PBeam!`. Use `PORT=<port>` before `mise run` to use another port. The task builds the release with `mix deps.get --check-locked` and `MIX_ENV=prod mix release --overwrite`, and writes the output of `mix` to stderr. Hex and rebar3 must be installed, as `scripts/test.sh` installs them.
+The `curl` command prints `Hello world from PBeam!`. Use `PORT=<port>` before `mise run` to use another port. The task builds the release with `mix deps.get --check-locked` and `MIX_ENV=prod mix release --overwrite`, and writes the output of `mix` to stderr. Hex and rebar3 must be installed, as `scripts/fixture_checks.exs` installs them.
 
 This command boots the same release on the `pbeam` binary, sends a request, and stops the run:
 

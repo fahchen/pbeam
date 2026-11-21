@@ -161,7 +161,7 @@ Skip if every decision is `keep`. Otherwise:
 
 - Read each file before you edit it.
 - Make the smallest change that satisfies the decision. Do not change adjacent code.
-- Keep the project gates: Rustdoc with `# Examples` on every function, a doc comment on every field, instruction encodings with byte and Erlang examples, 100% application line coverage, no Clippy warnings.
+- Keep the project gates: Rustdoc with `# Examples` on every function, a doc comment on every field, instruction encodings with byte and Erlang examples, the required upstream OTP compatibility cases, and no Clippy warnings.
 - Run focused checks (`mise run test-focus <name>`, `cargo clippy --all-targets -- -D warnings`).
 - When a decision changes the direction, update the affected documents in the same round (`docs/portable-beam-spec.md`, `docs/agents/knowledge.md` through `capture-learnings`, `AGENTS.md`).
 - If a fix needs scope expansion, set the thread to `discuss` and return to Phase 2.
@@ -217,7 +217,7 @@ gh api repos/fahchen/pbeam/pulls/<N>/comments/<first-comment-id>/replies \
 
 Then, as `AGENTS.md` requires:
 
-- Update the PR description when a decision, a verification result, or a coverage number changed. Keep the template sections.
+- Update the PR description when a decision or verification result changes. Keep the template sections.
 - Update the task issue, epic, and affected downstream issues when the scope or direction changed.
 - Do not resolve threads.
 

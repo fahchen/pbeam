@@ -32,7 +32,7 @@ const EFFECT_PROBE: &[u8] = include_bytes!("../../fixtures/capability/effect_pro
 const PRIM_TTY: &[u8] = include_bytes!("../../fixtures/prim_tty/nif/prim_tty.beam");
 
 /// The effect inventory, which names the capability of each effect entry.
-/// `scripts/ci_task.sh` lists this file, so that CI runs the full check for
+/// `scripts/ci_task.exs` lists this file, so that CI runs the full check for
 /// a change to it.
 const INVENTORY: &str = include_str!("../../docs/effect-inventory.md");
 

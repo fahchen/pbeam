@@ -7,7 +7,7 @@ defmodule TestClasses do
   pbeam-runtime::at_exit|keeps_a_line_without_a_time|test_helper|none
   pbeam-runtime::at_exit|runs_the_at_exit_callbacks_and_flushes_the_logger_after_the_entry_returns|erts_comparison,runtime_integration,application_end_to_end|erts_process,pbeam_process,pipes,filesystem,build_toolchain,native_library,network,local_socket
   pbeam-runtime::at_exit|runs_the_at_exit_callbacks_with_the_status_of_an_exception_of_the_entry|erts_comparison,runtime_integration,application_end_to_end|erts_process,pbeam_process,pipes,filesystem,build_toolchain,native_library,network,local_socket
-  pbeam-runtime::boot|boots_the_standard_io_servers_before_the_entry_of_the_pbeam_binary|erts_comparison,runtime_integration|erts_process,pbeam_process,filesystem,pipes,build_toolchain,native_library,network,local_socket
+  pbeam-runtime::boot|boots_the_standard_io_servers_before_the_entry_of_the_pbeam_binary|erts_comparison,runtime_integration,application_end_to_end|erts_process,pbeam_process,filesystem,pipes,build_toolchain,native_library,network,local_socket
   pbeam-runtime::boot|gives_the_bindir_flag_of_the_root_as_erlexec_does|erts_comparison,runtime_integration|erts_process,pbeam_process,filesystem,pipes,build_toolchain,native_library,network,local_socket
   pbeam-runtime::boot|gives_the_bindir_flag_when_no_loaded_module_holds_the_atom|erts_comparison,runtime_integration|erts_process,pbeam_process,filesystem,pipes,build_toolchain,native_library,network,local_socket
   pbeam-runtime::boot|halts_at_init_stop_as_pinned_erts|erts_comparison,runtime_integration|erts_process,pbeam_process,filesystem,pipes,build_toolchain,native_library,network,local_socket,test_process
@@ -374,7 +374,7 @@ defmodule TestClasses do
                           do: {"pbeam-runtime", name}
                     )
 
-  @purposes ~w(application_end_to_end cli erts_comparison erts_only erts_reference host_integration interoperability measurement native_extension pure_logic runtime_integration test_helper)
+  @purposes ~w(application_end_to_end cli erts_comparison erts_only erts_reference host_integration interoperability measurement native_extension otp_compatibility pbeam_internal pure_logic runtime_integration test_helper)
   @dependencies ~w(build_toolchain epmd erts_peer erts_process erts_process_may_be_conditional filesystem host_commands host_signals local_socket native_library network none pbeam_process pbeam_tool pipes pty real_time test_process unknown)
 
   def inventory, do: parse_inventory(@inventory)
@@ -596,4 +596,6 @@ defmodule TestClasses do
   end
 end
 
-TestClasses.run(System.argv())
+if Path.expand(List.to_string(List.first(:init.get_plain_arguments(), ~c""))) == __ENV__.file do
+  TestClasses.run(System.argv())
+end

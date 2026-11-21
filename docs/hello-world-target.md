@@ -32,7 +32,7 @@ The reference uses OTP 29.1.1 and Elixir 1.20.4-otp-29 on macOS arm64.
 From a clean checkout, install the pinned tools with `mise install`, then run:
 
 ```sh
-mise run reference
+mise exec -C fixtures/hello -- mix test --cover --warnings-as-errors
 mise run inventory
 ```
 

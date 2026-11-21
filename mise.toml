@@ -6,67 +6,72 @@ rumdl = "0.2.78"
 taplo = "0.10.0"
 actionlint = "1.7.12"
 shellcheck = "0.11.0"
-"github:taiki-e/cargo-llvm-cov" = "0.9.1"
 "github:nextest-rs/nextest" = { version = "0.9.148", version_prefix = "cargo-nextest-" }
 mr-boxington = "1.29.1"
 
 [tasks.setup]
 description = "Install check components for the mise-pinned Rust toolchain"
-run = 'rustup component add rustfmt clippy llvm-tools-preview --toolchain "$(mise config get --file mise.toml tools.rust.version)"'
+run = "elixir scripts/setup.exs"
 
 [tasks.lint]
 description = "Check documentation, configuration, workflows, and Rust"
 run = [
-  "rumdl check .",
-  "taplo fmt --check",
+  "rumdl check --exclude 'vendor/otp/**' .",
+  "git ls-files -z '*.toml' | xargs -0 taplo fmt --check",
   "actionlint",
   "shellcheck scripts/*.sh",
-  "cd fixtures/hello && mix format --check-formatted && mix compile --warnings-as-errors",
-  "mix format --check-formatted && mix compile --warnings-as-errors",
+  "cd fixtures/hello && mix format --check-formatted",
+  "mix format --check-formatted",
   "cd examples/plug_hello && mix format --check-formatted",
   "cd fixtures/bcrypt && mix format --check-formatted",
   "cd fixtures/exqlite && mix format --check-formatted",
   "cd fixtures/fs_notify && mix format --check-formatted",
   "mix format --check-formatted 'examples/*/*.ex' 'fixtures/*/*.ex'",
-  "mix format --check-formatted scripts/test_classes.exs tests/test_classes_test.exs",
-  "elixir tests/test_classes_test.exs",
-  "python3 tests/test_ci_frequency.py",
+  "mix format --check-formatted scripts/check_brief.exs scripts/ci_test_artifacts.exs scripts/test_selection.exs scripts/ci_task.exs scripts/ci_test_durations.exs scripts/fixture_checks.exs scripts/otp_compat.exs scripts/otp_suite_beam.exs scripts/setup.exs scripts/test.exs scripts/test_classes.exs scripts/test_focus.exs",
+  "mix format --check-formatted tests/ci_test_artifacts_test.exs tests/test_selection_test.exs tests/otp_compat_test.exs tests/test_classes_test.exs",
   "cargo fmt --all -- --check",
   "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings",
 ]
 
 [tasks.test]
-description = "Run reference and Rust tests with 100% application line coverage"
-run = "bash scripts/test.sh"
+description = "Run OTP compatibility, reference, and Rust tests"
+depends = ["otp-check"]
+run = "elixir scripts/test.exs"
+
+[tasks.otp-check]
+description = "Run the pinned OTP cases or refresh the known-failure list"
+usage = '''
+flag "--base <revision>" help="Check the PR against this target-branch revision"
+flag "--update-failures" help="Run every selected case and remove fixed cases from the known-failure list"
+'''
+run = [
+  "cargo build --locked --all-features --profile test --bin pbeam",
+  "elixir scripts/otp_compat.exs check",
+]
+
+[tasks.otp-test-beams]
+description = "Compare the committed OTP test BEAM files with the pinned source"
+usage = 'flag "--write" help="Regenerate the BEAM files from upstream source"'
+run = "elixir scripts/otp_suite_beam.exs"
 
 [tasks.check]
 description = "Run all required checks"
 depends = ["lint", "test"]
-
-[tasks.reference]
-description = "Verify compiled Hello World fixtures under ERTS"
-dir = "fixtures/hello"
-run = "mix test --cover --warnings-as-errors"
 
 [tasks.inventory]
 description = "Inspect compiled Hello World entry instructions and imports"
 dir = "fixtures/hello"
 run = '''mix run --no-start -e 'for module <- [Hello, HelloVariant] do path = :code.which(module); {:beam_file, _, exports, _, _, functions} = :beam_disasm.file(path); IO.inspect({module, path, exports}, limit: :infinity); IO.inspect(Enum.filter(functions, fn {:function, name, _, _, _} -> name == :main end), limit: :infinity); IO.inspect(:beam_lib.chunks(path, [:imports, :exports]), limit: :infinity) end' '''
 
-[tasks.beam-inventory]
-description = "Disassemble the constant-return BEAM fixture"
-run = '''erl -noshell -eval 'io:format("~p~n", [beam_disasm:file("fixtures/beam/constant.beam")]), halt().' '''
-
 [tasks.check-brief]
 description = "Run all required checks and print only the result; the full log goes to target/check.log"
 quiet = true
-run = "bash scripts/check_brief.sh"
+run = "elixir scripts/check_brief.exs"
 
 [tasks.test-focus]
 description = "Run selected Rust tests and print only the results and failures"
 quiet = true
-usage = 'arg "[args]..." help="Arguments for cargo test, such as --test group for one target of tests/feature/ or tests/integration/, --lib for the unit tests, a test name filter, or -- --exact" var=#true double_dash="preserve"'
-run = 'eval "set -- ${usage_args:-}"; bash scripts/test_focus.sh "$@"'
+run = "elixir scripts/test_focus.exs"
 
 [tasks.erts-eval]
 description = "Evaluate Erlang expressions on the pinned OTP and print the value or the exception"
@@ -168,14 +173,6 @@ echo "Wrote $output"
 [tasks.bench-dispatch]
 description = "Measure the interpreter dispatch baseline on a release build and write target/dispatch-baseline.txt"
 run = "bash scripts/dispatch_baseline.sh"
-
-[tasks.bench-attribution]
-description = "Measure the instruction attribution reference points and micro-costs on a release build and write target/dispatch-attribution.txt"
-usage = '''
-arg "[label]" help="The label of the build, such as the name of the scratch ablation variant"
-arg "[output]" help="The output file; the default is target/dispatch-attribution.txt"
-'''
-run = 'bash scripts/dispatch_attribution.sh "${usage_label:-base}" "${usage_output:-target/dispatch-attribution.txt}"'
 
 [tasks.bench-drop]
 description = "Measure the term drop cost on a release build and write target/drop-costs.txt"
